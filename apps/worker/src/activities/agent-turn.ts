@@ -2415,6 +2415,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // is the interval, not per-turn). Best-effort and time-capped by the
         // helper's own failure discipline; never delays release on failure.
         if (setupBoxSession && sandboxGroupId) {
+          // Single-flight vs the heartbeat capture: the timer is already cleared
+          // above, but a capture it launched may still be in flight — and that
+          // capture predates the turn's final writes. If it landed AFTER our
+          // fresher turn-end capture started, the atomic DB throttle would
+          // discard the fresher one. Wait the in-flight capture out (bounded —
+          // never holds the release hostage), THEN attempt; the throttle decides.
+          const snapshotWaitDeadline = Date.now() + 30_000;
+          while (snapshotInFlight && Date.now() < snapshotWaitDeadline) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+          }
           const persisted = await maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId },

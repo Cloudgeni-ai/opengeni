@@ -1400,11 +1400,12 @@ describe("runtime event normalization", () => {
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
   });
 
-  test("pins manifest environment on resumed sandbox sessions and reports drift as key names", async () => {
-    // ENV PIN: a live box's manifest env is creation-time truth. A recompute
-    // that drifts is REPORTED (key names only), never applied — the old
-    // refresh-on-resume behavior tripped the SDK's provided-session
-    // validateNoEnvironmentDelta and killed sessions.
+  test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
+    // OWNED-resume refresh is a FEATURE (a workspace-env edit reaching a
+    // long-lived owned local/docker box) — owned applyManifest merges env with
+    // no guard. The drift EVENT is the durable trace; the provided-session
+    // guard fix lives in pinProvidedSessionManifestEnvironment (tested below),
+    // NOT here.
     const current = new Manifest({
       root: "/workspace",
       entries: {
@@ -1432,11 +1433,11 @@ describe("runtime event normalization", () => {
         events.push(event);
       },
     });
-    // No entries were missing and env never rides a refresh -> nothing applied.
-    expect(applied).toHaveLength(0);
-    // The baked env stays authoritative on the tracked state.
+    // Env refresh applied (owned semantics preserved).
+    expect(applied).toHaveLength(1);
+    expect(Object.keys(applied[0]!.entries)).toEqual([]);
     expect(JSON.parse(JSON.stringify((session.state.manifest as Manifest).environment))).toMatchObject({
-      GH_TOKEN: { value: "old-token" },
+      GH_TOKEN: { value: "new-token" },
     });
     // Drift rides a durable event as key names only — values are secrets.
     expect(events).toEqual([{
@@ -1444,44 +1445,6 @@ describe("runtime event normalization", () => {
       payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
     }]);
     expect(JSON.stringify(events)).not.toContain("token");
-  });
-
-  test("entry deltas applied to resumed sandbox sessions never carry environment", async () => {
-    const current = new Manifest({
-      root: "/workspace",
-      entries: {
-        "repos/acme/one": { type: "git_repo", host: "github.com", repo: "acme/one", ref: "main" },
-      },
-      environment: { GH_TOKEN: "old-token" },
-    });
-    const target = new Manifest({
-      root: "/workspace",
-      entries: {
-        "repos/acme/one": { type: "git_repo", host: "github.com", repo: "acme/one", ref: "main" },
-        "repos/acme/two": { type: "git_repo", host: "github.com", repo: "acme/two", ref: "main" },
-      },
-      environment: { GH_TOKEN: "new-token" },
-    });
-    const applied: Manifest[] = [];
-    const session = {
-      state: { manifest: current },
-      applyManifest: async (manifest: Manifest) => {
-        applied.push(manifest);
-      },
-    };
-    await applyMissingManifestEntries(session as any, target);
-    expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
-    // The delta env is EMPTY (entry-only, mirroring the SDK's own
-    // buildProvidedSessionManifestDelta) and the tracked state keeps the baked env.
-    expect(JSON.parse(JSON.stringify(applied[0]!.environment ?? {}))).toEqual({});
-    expect(JSON.parse(JSON.stringify((session.state.manifest as Manifest).environment))).toMatchObject({
-      GH_TOKEN: { value: "old-token" },
-    });
-    expect(Object.keys((session.state.manifest as Manifest).entries)).toEqual([
-      "repos/acme/one",
-      "repos/acme/two",
-    ]);
   });
 
   test("pins provided-session agent manifests to the live box environment", async () => {

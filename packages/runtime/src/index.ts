@@ -2641,21 +2641,16 @@ export function withManifestRefreshOnResume(
   };
 }
 
-// ENV PIN (env-parity doctrine): a live box's manifest environment is
-// CREATION-TIME truth for the box's whole life. The SDK enforces exactly this
-// for provided sessions (validateNoEnvironmentDelta throws a session-fatal
-// UserError on ANY env delta), and its own buildProvidedSessionManifestDelta
-// ships entry-only deltas for the same reason: a running box's processes have
-// the old env baked into their environ, so a "refreshed" manifest env would be
-// a silent lie. So this refresh NEVER carries environment — entries only —
-// and a recompute that drifts from the baked env is REPORTED (key names only,
-// never values) instead of applied. Fresh env lands at the next cold-create
-// (drain->re-warm recycles the box regularly); rotating values ride
-// OFF-manifest (token file + GIT_ASKPASS — see TOKEN-BROKER B1/B2).
-// History: the pre-pin refresh sent the full recomputed env whenever any entry
-// needed applying, and a recompute drift on a live prod box (2026-07-06,
-// manager session with turn inputs byte-identical to the prior success) tripped
-// the SDK guard and killed the session.
+// OWNED-RESUME manifest refresh. This path runs ONLY for SDK-owned sessions
+// (withManifestRefreshOnResume wraps client.resume, which the SDK never calls
+// when handed a live provided session — the ownedSandbox branch bypasses this
+// entirely). Owned applyManifest MERGES env safely with no guard, and this
+// refresh is a FEATURE: it is how a workspace-env edit reaches a long-lived
+// owned local/docker box that rarely recycles. The provided-session env pin
+// (pinProvidedSessionManifestEnvironment below) — NOT this function — is the
+// fix for the SDK's validateNoEnvironmentDelta session-fatal guard. Drift is
+// additionally REPORTED here (key names only, never values) so any env
+// recompute change stays attributable from the DB alone.
 export async function applyMissingManifestEntries(
   session: SandboxSessionLike,
   targetManifest: Manifest,
@@ -2670,9 +2665,9 @@ export async function applyMissingManifestEntries(
     }
     throw new Error("Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable");
   }
-  // Drift detection runs on EVERY resume (even entry-less ones): it is the
-  // durable trace that makes the next env-recompute regression attributable
-  // from the DB alone instead of from rotated worker logs.
+  // Drift detection runs on EVERY resume (even no-op ones): the durable trace
+  // that makes an env-recompute regression attributable from the DB instead of
+  // from rotated worker logs.
   await reportManifestEnvironmentDrift(currentManifest, target, context);
   if (!session.applyManifest && !session.materializeEntry) {
     if (Object.keys(target.entries).length === 0) {
@@ -2697,20 +2692,21 @@ export async function applyMissingManifestEntries(
       throw new Error(`Cannot replace existing sandbox manifest entry: ${path}`);
     }
   }
-  if (Object.keys(entries).length === 0) {
+  const environmentChanged = stableJson(currentManifest.environment) !== stableJson(target.environment);
+  if (environmentChanged && !session.applyManifest) {
+    throw new Error("Resumed sandbox session cannot refresh manifest environment because it does not support applyManifest()");
+  }
+  if (Object.keys(entries).length === 0 && !environmentChanged) {
     return;
   }
   // Carry path grants through manifest rebuilds: since @openai/agents 0.11.0
   // they gate local source materialization, and run states saved before the
   // upgrade have manifests without grants.
   const extraPathGrants = mergePathGrants(currentManifest.extraPathGrants, target.extraPathGrants);
-  // Entry-only delta: environment stays empty (ENV PIN above). An empty env is
-  // inert on every backend — provided sessions see no delta to validate, owned
-  // backends spread-merge nothing.
   const delta = new Manifest({
     root: currentManifest.root,
     entries,
-    environment: {},
+    environment: target.environment,
     ...(extraPathGrants.length ? { extraPathGrants } : {}),
   });
   if (session.applyManifest) {
@@ -2722,7 +2718,7 @@ export async function applyMissingManifestEntries(
   }
   (session as { state?: { manifest?: Manifest } }).state!.manifest = new Manifest({
     root: currentManifest.root,
-    environment: currentManifest.environment,
+    environment: environmentChanged ? target.environment : currentManifest.environment,
     entries: {
       ...currentManifest.entries,
       ...entries,
