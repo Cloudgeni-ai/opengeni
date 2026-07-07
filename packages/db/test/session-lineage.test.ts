@@ -24,6 +24,14 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
+type TestLineageNode = {
+  children: TestLineageNode[];
+};
+
+function countLineageNodes(nodes: TestLineageNode[]): number {
+  return nodes.reduce((total, node) => total + 1 + countLineageNodes(node.children), 0);
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("session-lineage");
   if (!shared) {
@@ -98,11 +106,37 @@ describe("session lineage", () => {
     const lineage = await getSessionLineage(db, workspaceId, child.id);
     expect(lineage?.ancestors.map((s) => s.id)).toEqual([root.id]);
     expect(lineage?.children.map((n) => n.session.id)).toEqual([grandchild.id]);
+    expect(lineage?.truncated).toBe(false);
 
     const rootLineage = await getSessionLineage(db, workspaceId, root.id);
     expect(rootLineage?.ancestors).toEqual([]);
     expect(rootLineage?.children.map((n) => n.session.id).sort()).toEqual([child.id, sibling.id].sort());
     const childNode = rootLineage?.children.find((n) => n.session.id === child.id);
     expect(childNode?.children.map((n) => n.session.id)).toEqual([grandchild.id]);
+    expect(rootLineage?.truncated).toBe(false);
   }, 60_000);
+
+  test("getSessionLineage caps descendants and reports truncation", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const root = await createSession(db, {
+      accountId, workspaceId, initialMessage: "root", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+    });
+    for (let i = 0; i < 201; i += 1) {
+      await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: `child ${i}`,
+        resources: [],
+        metadata: {},
+        model: "gpt",
+        sandboxBackend: "none",
+        parentSessionId: root.id,
+      });
+    }
+
+    const lineage = await getSessionLineage(db, workspaceId, root.id);
+    expect(lineage?.truncated).toBe(true);
+    expect(countLineageNodes(lineage?.children ?? [])).toBeLessThanOrEqual(200);
+  }, 120_000);
 });

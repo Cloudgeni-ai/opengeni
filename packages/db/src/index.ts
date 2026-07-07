@@ -4358,6 +4358,7 @@ export async function listSessions(db: Database, workspaceId: string, limitOrOpt
 export type SessionLineage = {
   ancestors: Session[];
   children: LineageNode[];
+  truncated: boolean;
 };
 
 type LineageIdRow = {
@@ -4371,9 +4372,10 @@ type LineageIdRow = {
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
  * before RLS is considered. Ancestors are capped at 10 and returned root-first.
- * Descendants are capped at depth 5 and returned as a nested tree.
+ * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
  */
 export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
+  const descendantLimit = 200;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -4425,12 +4427,15 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
       select id, parent_session_id as "parentSessionId", depth, path
       from descendants
       order by path
+      limit ${descendantLimit + 1}
     `) as LineageIdRow[];
+    const truncated = childRows.length > descendantLimit;
+    const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
-    const lineageRows = [...ancestorRows, ...childRows];
+    const lineageRows = [...ancestorRows, ...descendantRows];
     const ids = [...new Set(lineageRows.map((row) => row.id))];
     if (ids.length === 0) {
-      return { ancestors: [], children: [] };
+      return { ancestors: [], children: [], truncated: false };
     }
     const rows = await scopedDb.select().from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
@@ -4442,14 +4447,14 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
       .filter((session): session is Session => Boolean(session));
 
     const nodesById = new Map<string, LineageNode>();
-    for (const row of childRows) {
+    for (const row of descendantRows) {
       const session = sessionsById.get(row.id);
       if (session) {
         nodesById.set(row.id, { session, children: [] });
       }
     }
     const children: LineageNode[] = [];
-    for (const row of childRows) {
+    for (const row of descendantRows) {
       const node = nodesById.get(row.id);
       if (!node) continue;
       if (row.parentSessionId === sessionId) {
@@ -4458,7 +4463,7 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
         nodesById.get(row.parentSessionId ?? "")?.children.push(node);
       }
     }
-    return { ancestors, children };
+    return { ancestors, children, truncated };
   });
 }
 

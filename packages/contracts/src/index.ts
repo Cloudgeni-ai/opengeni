@@ -2497,6 +2497,7 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
 export const SessionLineageResponse = z.object({
   ancestors: z.array(Session),
   children: z.array(LineageNode),
+  truncated: z.boolean().default(false),
 });
 export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 

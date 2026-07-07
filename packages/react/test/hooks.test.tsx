@@ -224,6 +224,7 @@ describe("useSessionLineage", () => {
         return {
           ancestors: [],
           children: [{ session: { id: `child-${reads}` }, children: [] }],
+          truncated: false,
         } as never;
       },
     });
@@ -251,6 +252,7 @@ describe("useSessionLineage", () => {
         return {
           ancestors: [],
           children: [{ session: { id: `child-${reads}` }, children: [] }],
+          truncated: false,
         } as never;
       },
     });

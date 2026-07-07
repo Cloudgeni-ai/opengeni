@@ -47,7 +47,7 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const load = useCallback(
-    async () => sessionId ? await client.getSessionLineage(workspaceId, sessionId) : { ancestors: [], children: [] },
+    async () => sessionId ? await client.getSessionLineage(workspaceId, sessionId) : { ancestors: [], children: [], truncated: false },
     [client, workspaceId, sessionId],
   );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });

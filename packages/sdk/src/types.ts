@@ -394,6 +394,7 @@ export type LineageNode = {
 export type SessionLineageResponse = {
   ancestors: SessionSummary[];
   children: LineageNode[];
+  truncated: boolean;
 };
 
 export type SessionTurnStatus =

@@ -150,7 +150,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     const children = sessionId === MANAGER_SESSION_ID
       ? [{ session: this.fabricateSession(WORKER_SESSION_ID, "running", "Worker session"), children: [] }]
       : [];
-    return { ancestors: [], children };
+    return { ancestors: [], children, truncated: false };
   }
 
   async updateSession(_workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
