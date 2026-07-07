@@ -129,15 +129,19 @@ type FileResource = Extract<ResourceRef, { kind: "file" }>;
  * to `null`), so the UI never flickers attachment-by-attachment. Keyed on the
  * concatenated ids so re-renders with the same attachments don't refetch.
  */
-function useFileAssets(workspaceId: string, resources: FileResource[]): Map<string, FileAsset | null> {
+function useFileAssets(workspaceId: string, resources: FileResource[]): { assets: Map<string, FileAsset | null>; ready: boolean } {
   const { client } = useAppContext();
-  const [assets, setAssets] = useState<Map<string, FileAsset | null>>(new Map());
+  // The map remembers WHICH id-key it was fetched for: when the attachments
+  // change, the stale map must not masquerade as this message's metadata while
+  // the new fetch is in flight (previews briefly showed the previous message's
+  // files). `ready` is key-matched, never inferred from map size.
+  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>({ key: "", assets: new Map() });
   const key = resources.map((resource) => resource.fileId).join(",");
   useEffect(() => {
     let mounted = true;
     const ids = key ? key.split(",") : [];
     if (ids.length === 0) {
-      setAssets(new Map());
+      setLoaded({ key, assets: new Map() });
       return;
     }
     void Promise.all(
@@ -150,14 +154,14 @@ function useFileAssets(workspaceId: string, resources: FileResource[]): Map<stri
       }),
     ).then((entries) => {
       if (mounted) {
-        setAssets(new Map(entries));
+        setLoaded({ key, assets: new Map(entries) });
       }
     });
     return () => {
       mounted = false;
     };
   }, [client, workspaceId, key]);
-  return assets;
+  return { assets: loaded.key === key ? loaded.assets : new Map(), ready: loaded.key === key };
 }
 
 function isImageAsset(asset: FileAsset | null | undefined): boolean {
@@ -168,11 +172,12 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
 export function UserMessageBody({ workspaceId, item }: { workspaceId: string; item: UserMessageItem }) {
   const fileResources = item.resources.filter((resource): resource is FileResource => resource.kind === "file");
   const repositoryResources = item.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
-  const assets = useFileAssets(workspaceId, fileResources);
-  // A single all-at-once populate: until it lands every file is "pending" and
-  // renders as a neutral skeleton, so an image never briefly shows as a file
-  // chip before its preview resolves.
-  const filesPending = fileResources.length > 0 && assets.size === 0;
+  const { assets, ready } = useFileAssets(workspaceId, fileResources);
+  // A single all-at-once populate: until THIS message's fetch lands every file
+  // is "pending" and renders as a neutral skeleton, so an image never briefly
+  // shows as a file chip — or as the PREVIOUS message's file — before its
+  // preview resolves.
+  const filesPending = fileResources.length > 0 && !ready;
   const imageResources = filesPending ? [] : fileResources.filter((resource) => isImageAsset(assets.get(resource.fileId)));
   const otherFileResources = filesPending ? [] : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
   const hasChips = otherFileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0;

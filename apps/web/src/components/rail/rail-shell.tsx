@@ -156,8 +156,11 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
   const showSessionActions = Boolean(context.session) && isSessionRoute;
   // One lineage read for the whole header — shared by the "N agents" chip and
-  // the "spawned by" breadcrumb (disabled when there is no session).
-  const lineage = useSessionLineage(context.session?.id ?? null);
+  // the "spawned by" breadcrumb (disabled when there is no session). The header
+  // lives outside the session route's event feed, so spawn events can't trigger
+  // a refresh here (the goal pill's panel gets that via `events`); a modest poll
+  // keeps the agent count honest without threading the stream into the rail.
+  const lineage = useSessionLineage(context.session?.id ?? null, { pollIntervalMs: 30_000 });
   const childNodes = lineage.lineage?.children ?? [];
   const ancestors = lineage.lineage?.ancestors ?? [];
   const parentSession = ancestors.length > 0 ? ancestors[ancestors.length - 1]! : null;
