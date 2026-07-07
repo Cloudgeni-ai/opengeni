@@ -3,7 +3,7 @@ import { CancelledFailure } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, filterUnmaterializedSandboxFileDownloads, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
@@ -544,6 +544,16 @@ describe("worker shutdown preemption", () => {
 });
 
 describe("sandbox file materialization note", () => {
+  test("filters downloads already materialized on the current box", () => {
+    const downloads = [
+      { fileId: "file-1", mountPath: "files/file-1", filename: "one.txt", url: "https://example.com/1" },
+      { fileId: "file-2", mountPath: "files/file-2", filename: "two.txt", url: "https://example.com/2" },
+    ];
+
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"]))).toEqual([downloads[1]]);
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(downloads);
+  });
+
   test("appends unavailable attachment details to model-facing text", () => {
     const text = withUnavailableSandboxFilesNote(
       "Analyze the attachment",

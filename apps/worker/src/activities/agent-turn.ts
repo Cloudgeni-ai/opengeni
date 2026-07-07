@@ -37,6 +37,8 @@ import {
   sumUsageQuantity,
   heartbeatLeaseHolder,
   accrueWarmSeconds,
+  getMaterializedSandboxFileResources,
+  markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
   buildConnectionTokenResolver,
   type AppendEventInput,
@@ -134,6 +136,16 @@ export function selectCodexCredentialForTurn(args: {
     return active;
   }
   return null;
+}
+
+export function filterUnmaterializedSandboxFileDownloads(
+  downloads: SandboxFileDownload[],
+  materializedFileIds: Set<string>,
+): SandboxFileDownload[] {
+  if (downloads.length === 0 || materializedFileIds.size === 0) {
+    return downloads;
+  }
+  return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
 // Resume notice fed to the model when a turn re-enters after a graceful
@@ -1628,14 +1640,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         && activeSandboxBackend !== "selfhosted"
         && fileResourceDownloads.length > 0
       ) {
-        const runAs = sandboxRunAs(runSettings);
-        const materialized = await materializeSandboxFileDownloads(setupBoxSession as any, fileResourceDownloads, {
-          onRuntimeEvent: async (event) => {
-            await publish!([{ type: event.type, payload: event.payload }], true);
-          },
-          ...(runAs ? { runAs } : {}),
+        const boxInstanceId = resolvedSandbox.established.instanceId;
+        const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          expectedEpoch: resolvedSandbox.leaseEpoch,
+          instanceId: boxInstanceId,
         });
-        fileMaterializationFailures = materialized.failures;
+        const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
+          fileResourceDownloads,
+          alreadyMaterialized,
+        );
+        const runAs = sandboxRunAs(runSettings);
+        if (downloadsToMaterialize.length > 0) {
+          const materialized = await materializeSandboxFileDownloads(setupBoxSession as any, downloadsToMaterialize, {
+            onRuntimeEvent: async (event) => {
+              await publish!([{ type: event.type, payload: event.payload }], true);
+            },
+            ...(runAs ? { runAs } : {}),
+          });
+          fileMaterializationFailures = materialized.failures;
+          const failedFileIds = new Set(materialized.failures.map((failure) => failure.fileId));
+          const succeededFileIds = downloadsToMaterialize
+            .map((download) => download.fileId)
+            .filter((fileId) => !failedFileIds.has(fileId));
+          if (succeededFileIds.length > 0) {
+            await markSandboxFileResourcesMaterialized(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              expectedEpoch: resolvedSandbox.leaseEpoch,
+              instanceId: boxInstanceId,
+              fileIds: succeededFileIds,
+            });
+          }
+        }
         fileDownloadsMaterializedForRun = true;
       }
       const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(fileMaterializationFailures);

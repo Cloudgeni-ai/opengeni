@@ -6492,6 +6492,90 @@ export async function persistWarmSnapshot(db: Database, input: {
         livenessGuard: "warm",
       });
       return { wrote: true, throttled: false, priorArchive };
+  });
+}
+
+export async function getMaterializedSandboxFileResources(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+}): Promise<Set<string>> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ file_ids: unknown }>(sql`
+        select coalesce(
+          jsonb_path_query_array(
+            resume_state,
+            '$.opengeniFileMaterialization[*] ? (@.instanceId == $instanceId).fileIds[*]',
+            jsonb_build_object('instanceId', to_jsonb(${input.instanceId}::text))
+          ),
+          '[]'::jsonb
+        ) as file_ids
+        from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.instanceId}
+        limit 1
+      `);
+      const raw = rows[0]?.file_ids;
+      const values = Array.isArray(raw) ? raw : [];
+      return new Set(values.filter((value): value is string => typeof value === "string"));
+    });
+}
+
+export async function markSandboxFileResourcesMaterialized(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+  fileIds: string[];
+}): Promise<{ wrote: boolean }> {
+  const fileIds = [...new Set(input.fileIds.filter((fileId) => fileId.length > 0))];
+  if (fileIds.length === 0) {
+    return { wrote: false };
+  }
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          resume_state = jsonb_set(
+            case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
+            '{opengeniFileMaterialization}',
+            (
+              select jsonb_agg(entry order by entry ->> 'instanceId')
+              from (
+                select jsonb_build_object(
+                  'instanceId', ${input.instanceId}::text,
+                  'fileIds', (
+                    select jsonb_agg(distinct value order by value)
+                    from jsonb_array_elements_text(
+                      coalesce(
+                        (
+                          select existing -> 'fileIds'
+                          from jsonb_array_elements(coalesce(resume_state -> 'opengeniFileMaterialization', '[]'::jsonb)) existing
+                          where existing ->> 'instanceId' = ${input.instanceId}
+                          limit 1
+                        ),
+                        '[]'::jsonb
+                      )
+                      || ${JSON.stringify(fileIds)}::jsonb
+                    ) as merged(value)
+                  )
+                ) as entry
+                union all
+                select existing as entry
+                from jsonb_array_elements(coalesce(resume_state -> 'opengeniFileMaterialization', '[]'::jsonb)) existing
+                where existing ->> 'instanceId' <> ${input.instanceId}
+              ) entries
+            ),
+            true
+          ),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.instanceId}
+        returning id
+      `);
+      return { wrote: rows.length > 0 };
     });
 }
 

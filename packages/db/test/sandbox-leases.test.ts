@@ -6,7 +6,9 @@ import {
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
+  markSandboxFileResourcesMaterialized,
   persistDrainSnapshot,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
@@ -221,6 +223,45 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       kind: "turn", holderId: "turn-1", leaseTtlMs: 45_000, expectedEpoch: s2Epoch,
     });
     expect(freshAccepted).toBe(true);
+  }, 60_000);
+
+  test("(2b) file materialization markers are keyed by warm box instance and epoch", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, {
+      accountId, workspaceId, sandboxGroupId: groupId,
+      kind: "turn", holderId: "turn-files", backend: "modal", leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId, workspaceId, sandboxGroupId: groupId,
+      expectedEpoch: 0, instanceId: "box-files-1", leaseTtlMs: 45_000,
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "box-files-1" } } },
+    });
+    const epoch = committed.lease!.leaseEpoch;
+
+    expect(await getMaterializedSandboxFileResources(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
+    })).toEqual(new Set());
+
+    expect(await markSandboxFileResourcesMaterialized(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
+      fileIds: ["file-a", "file-b", "file-a"],
+    })).toEqual({ wrote: true });
+    expect(await markSandboxFileResourcesMaterialized(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
+      fileIds: ["file-c"],
+    })).toEqual({ wrote: true });
+
+    expect(await getMaterializedSandboxFileResources(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
+    })).toEqual(new Set(["file-a", "file-b", "file-c"]));
+    expect(await markSandboxFileResourcesMaterialized(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch - 1, instanceId: "box-files-1",
+      fileIds: ["stale-epoch"],
+    })).toEqual({ wrote: false });
+    expect(await getMaterializedSandboxFileResources(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-2",
+    })).toEqual(new Set());
   }, 60_000);
 
   test("(3) refcount->0 drives warm->draining (turn_holders=0 guard) then the reaper surfaces it", async () => {
