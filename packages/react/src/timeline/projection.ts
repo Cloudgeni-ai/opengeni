@@ -441,6 +441,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.completed":
       case "goal.paused":
       case "goal.resumed":
+      case "goal.cleared":
       case "goal.continuation": {
         items.push({
           kind: "goal",

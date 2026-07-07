@@ -12,6 +12,7 @@ import {
   PlayIcon,
   RefreshCwIcon,
   TargetIcon,
+  Trash2Icon,
   TriangleAlertIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -781,6 +782,7 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   completed: { label: "Goal completed", pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle", icon: CheckIcon },
   paused: { label: "Goal paused", pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting", icon: PauseIcon },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
 };
 

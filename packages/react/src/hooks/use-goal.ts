@@ -27,7 +27,11 @@ export type UseGoalResult = {
   pause: (rationale?: string) => Promise<SessionGoal | null>;
   /** Resume a paused goal: resets counters and re-arms continuations. */
   resume: () => Promise<SessionGoal | null>;
-  /** True while a pause/resume is in flight. */
+  /** Clear the session goal; goal-less sessions remain a successful no-op. */
+  clearGoal: () => Promise<void>;
+  /** Alias for `clearGoal`. */
+  deleteGoal: () => Promise<void>;
+  /** True while a pause/resume/clear is in flight. */
   updating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
@@ -145,6 +149,14 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     return result;
   }, [client, workspaceId, sessionId, mutation.run]);
 
+  const clearGoal = useCallback(async (): Promise<void> => {
+    if (!sessionId) {
+      return;
+    }
+    await mutation.run(() => client.deleteGoal(workspaceId, sessionId));
+    setGoal(null);
+  }, [client, workspaceId, sessionId, mutation.run]);
+
   return {
     goal,
     isActive: goal?.status === "active",
@@ -155,6 +167,8 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     refresh: load,
     pause,
     resume,
+    clearGoal,
+    deleteGoal: clearGoal,
     updating: mutation.mutating,
     mutationError: mutation.mutationError,
     clearMutationError: mutation.clearMutationError,

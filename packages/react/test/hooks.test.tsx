@@ -357,6 +357,28 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("clearGoal DELETEs the goal and clears local state", async () => {
+    let deletes = 0;
+    const client = fakeClient({
+      getGoal: async () => fakeGoal(),
+      deleteGoal: async () => {
+        deletes += 1;
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => {
+      await hook.result.current.clearGoal();
+    });
+    expect(deletes).toBe(1);
+    expect(hook.result.current.goal).toBeNull();
+    expect(hook.result.current.isActive).toBe(false);
+    await hook.unmount();
+  });
+
   test("goal.* events on a shared log refetch the goal", async () => {
     let reads = 0;
     const client = fakeClient({

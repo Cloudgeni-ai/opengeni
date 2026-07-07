@@ -76,6 +76,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - Public clients talk only to the API.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
+- Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.
 - Core NATS is the realtime bus between producers and API instances.
 - Postgres is the durable event store and replay source.
 - Temporal is orchestration only. Token streams do not go through workflow history.

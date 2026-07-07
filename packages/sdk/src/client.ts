@@ -570,6 +570,10 @@ export class OpenGeniClient {
     return await this.requestJson<SessionGoal>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`, request);
   }
 
+  async deleteGoal(workspaceId: string, sessionId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`);
+  }
+
   /** Pause the goal loop: the session stops self-continuing until resumed. */
   async pauseGoal(workspaceId: string, sessionId: string, options: { rationale?: string } = {}): Promise<SessionGoal> {
     return await this.updateGoal(workspaceId, sessionId, {

@@ -737,6 +737,12 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
   });
 
+  test("goal.cleared is tolerated as a goal landmark", () => {
+    reset();
+    const items = buildTimeline([event("goal.cleared", { goalId: "goal-1" })]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "cleared", text: null });
+  });
+
   test("session.requiresAction becomes a waiting notice", () => {
     reset();
     const items = buildTimeline([event("session.requiresAction", { approvals: [] })]);

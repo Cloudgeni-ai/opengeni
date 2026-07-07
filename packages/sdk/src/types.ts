@@ -463,6 +463,7 @@ export const SESSION_EVENT_TYPES = [
   "goal.completed",
   "goal.paused",
   "goal.resumed",
+  "goal.cleared",
   "goal.continuation",
   // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
   // the contract-parity test asserts sorted equality).

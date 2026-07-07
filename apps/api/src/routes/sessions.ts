@@ -33,6 +33,7 @@ import {
 import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
+  clearSessionGoal,
   clearSessionContext,
   closePtySession,
   getOpenPtySession,
@@ -234,6 +235,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
     }
     return c.json(goal);
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const { event } = await clearSessionGoal(db, workspaceId, sessionId);
+    if (event) {
+      try {
+        await bus.publish(workspaceId, sessionId, [event]);
+      } catch (error) {
+        console.warn(`[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`, error);
+      }
+    }
+    return c.body(null, 204);
   });
 
   // Operator context controls (slash-command palette: /clear, /compact). These

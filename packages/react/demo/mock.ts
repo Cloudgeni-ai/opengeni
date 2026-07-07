@@ -313,6 +313,14 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...goal };
   }
 
+  async deleteGoal(_workspaceId: string, sessionId: string): Promise<void> {
+    const goal = this.goals.get(sessionId);
+    this.goals.delete(sessionId);
+    if (goal) {
+      this.bus(sessionId).append("goal.cleared", { goalId: goal.id });
+    }
+  }
+
   async clearSessionContext(_workspaceId: string, sessionId: string): Promise<void> {
     this.bus(sessionId).append("session.context.cleared", { clearedBy: "api" });
   }

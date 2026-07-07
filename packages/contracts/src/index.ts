@@ -2535,6 +2535,7 @@ export const SessionEventType = z.enum([
   "goal.completed",
   "goal.paused",
   "goal.resumed",
+  "goal.cleared",
   "goal.continuation",
   // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
   // carries opaque RFB and cannot carry a control message the client can act on,

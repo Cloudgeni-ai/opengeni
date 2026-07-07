@@ -8028,6 +8028,45 @@ export async function getSessionGoal(db: Database, workspaceId: string, sessionI
   });
 }
 
+export async function clearSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [existing] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      return { cleared: false, goal: null, event: null };
+    }
+    await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
+    const [session] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const sequence = session.lastSequence + 1;
+    const [event] = await tx.insert(schema.sessionEvents).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId,
+      sequence,
+      type: "goal.cleared",
+      payload: sanitizeEventPayload({
+        goalId: existing.id,
+        text: existing.text,
+        version: existing.version,
+      }),
+    }).returning();
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    if (!event) {
+      throw new Error("Failed to append goal.cleared event");
+    }
+    return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+  }));
+}
+
 /**
  * goal_set semantics: insert, or replace the existing goal in place. A replace
  * re-activates the goal (even when paused or completed), bumps the version,

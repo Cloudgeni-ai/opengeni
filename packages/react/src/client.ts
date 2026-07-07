@@ -28,6 +28,7 @@ export type SessionClientLike = Pick<
   // Goal
   | "getGoal"
   | "updateGoal"
+  | "deleteGoal"
   // Operator context controls (/clear, /compact)
   | "clearSessionContext"
   | "compactSessionContext"
