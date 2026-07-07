@@ -508,6 +508,30 @@ describe("buildTimeline", () => {
     expect(sandbox?.output).toContain("authentication failed");
   });
 
+  test("routine file-resource-download operations never render", () => {
+    // Per-turn plumbing: an idempotent `if [ ! -f ] then curl` re-materializes
+    // an attached file after a box re-warm and emits its operation every turn
+    // even when the file is already present — it must not read as re-downloading.
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
+      event("sandbox.operation.completed", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
+    ]);
+    expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
+  });
+
+  test("failed file-resource-download operations still surface loudly", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1" }),
+      event("sandbox.operation.failed", { name: "file-resource-download", fileId: "f1", error: "signed URL expired" }),
+    ]);
+    const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
+    expect(sandbox?.name).toBe("file-resource-download");
+    expect(sandbox?.status).toBe("failed");
+    expect(sandbox?.output).toContain("signed URL expired");
+  });
+
   test("sandbox durability lifecycle events are ignored by the projection", () => {
     // sandbox.box.* / sandbox.env.drift are observability spine events —
     // tolerant reader: they must never render or disturb the timeline.
