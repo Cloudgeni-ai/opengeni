@@ -2679,6 +2679,10 @@ export type SaveWorkspaceMemoryResult = {
   dedupeReason: "exact" | "near" | null;
   // the record that `replacesId` retired, if any.
   superseded: KnowledgeMemory | null;
+  supersededId: string | null;
+  // true when `replacesId` matched the same row and the row was updated in place
+  // instead of being superseded by a new/existing row.
+  updated: boolean;
   redactionCount: number;
   embedded: boolean;
 };
@@ -2693,8 +2697,8 @@ export type CorrectWorkspaceMemoryInput = {
 };
 
 export type CorrectWorkspaceMemoryResult = {
-  action: "archived" | "superseded";
-  // the record that was archived or superseded.
+  action: "archived" | "superseded" | "updated";
+  // the record that was archived, superseded, or updated in place.
   memory: KnowledgeMemory;
   // the replacement record when replacementText was supplied, else null.
   replacement: KnowledgeMemory | null;
@@ -2783,15 +2787,91 @@ export async function saveWorkspaceMemory(
     // Resolve the supersession target first so an invalid replaces_id fails before
     // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
     let replacesFullId: string | null = null;
+    let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
     if (input.replacesId) {
       replacesFullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.replacesId);
       if (!replacesFullId) {
         throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
       }
+      const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, replacesFullId)))
+        .limit(1);
+      if (!row) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+      replacesRow = row;
     }
 
+    const updateReplacesInPlace = async (): Promise<SaveWorkspaceMemoryResult> => {
+      if (!replacesFullId) {
+        throw new Error("Cannot update a memory in place without replaces_id.");
+      }
+      // A caller can "replace" a row with text that exact/near-dedups only to
+      // that same row. In that case there is no supersession target; keep the
+      // row live and update its text/vector metadata so the call still has an
+      // observable effect.
+      const [updated] = await scopedDb.update(schema.knowledgeMemories).set({
+        text: sanitizedText,
+        textHash,
+        embedding,
+        embeddingModel,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
+      if (!updated) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+      return {
+        memory: mapKnowledgeMemory(updated),
+        deduped: false,
+        dedupeReason: null,
+        superseded: null,
+        supersededId: null,
+        updated: true,
+        redactionCount,
+        embedded: embedding !== null,
+      };
+    };
+
+    const dedupeToExisting = async (
+      row: typeof schema.knowledgeMemories.$inferSelect,
+      dedupeReason: "exact" | "near",
+    ): Promise<SaveWorkspaceMemoryResult> => {
+      if (replacesFullId && row.id === replacesFullId) {
+        return await updateReplacesInPlace();
+      }
+      let superseded: KnowledgeMemory | null = null;
+      if (replacesFullId) {
+        const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+          status: "superseded",
+          supersededById: row.id,
+          validUntil: new Date(),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          eq(schema.knowledgeMemories.id, replacesFullId),
+        )).returning();
+        if (!old) {
+          throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+        }
+        superseded = mapKnowledgeMemory(old);
+      }
+      return {
+        memory: mapKnowledgeMemory(row),
+        deduped: true,
+        dedupeReason,
+        superseded,
+        supersededId: superseded?.id ?? null,
+        updated: false,
+        redactionCount,
+        embedded: embedding !== null,
+      };
+    };
+
     // Exact-dup gate: same normalized text among live (non-terminal) rows → NOOP.
-    const [exact] = await scopedDb.select().from(schema.knowledgeMemories)
+    const exactMatches = await scopedDb.select().from(schema.knowledgeMemories)
       .where(and(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
         eq(schema.knowledgeMemories.textHash, textHash),
@@ -2799,9 +2879,13 @@ export async function saveWorkspaceMemory(
         ne(schema.knowledgeMemories.status, "superseded"),
         ne(schema.knowledgeMemories.status, "rejected"),
       ))
-      .limit(1);
+      .orderBy(replacesFullId
+        ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
+        : schema.knowledgeMemories.updatedAt)
+      .limit(replacesFullId ? 2 : 1);
+    const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
     if (exact) {
-      return { memory: mapKnowledgeMemory(exact), deduped: true, dedupeReason: "exact", superseded: null, redactionCount, embedded: embedding !== null };
+      return await dedupeToExisting(exact, "exact");
     }
 
     // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
@@ -2820,13 +2904,14 @@ export async function saveWorkspaceMemory(
         ))
         .orderBy(distance)
         .limit(MEMORY_NEAR_DUP_NEIGHBORS);
-      const nearest = neighbours.find((row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD);
+      const duplicateNeighbours = neighbours.filter((row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD);
+      const nearest = duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
       if (nearest) {
         const [row] = await scopedDb.select().from(schema.knowledgeMemories)
           .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, nearest.id)))
           .limit(1);
         if (row) {
-          return { memory: mapKnowledgeMemory(row), deduped: true, dedupeReason: "near", superseded: null, redactionCount, embedded: embedding !== null };
+          return await dedupeToExisting(row, "near");
         }
       }
     }
@@ -2839,7 +2924,8 @@ export async function saveWorkspaceMemory(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
         eq(schema.knowledgeMemories.status, "active"),
       ));
-    if (Number(activeCount) >= MEMORY_ACTIVE_RECORD_CAP) {
+    const effectiveActiveCount = Number(activeCount) - (replacesRow?.status === "active" ? 1 : 0);
+    if (effectiveActiveCount >= MEMORY_ACTIVE_RECORD_CAP) {
       throw new Error(`Workspace memory is full (${MEMORY_ACTIVE_RECORD_CAP} active records). Correct or supersede stale memories before adding new ones.`);
     }
 
@@ -2879,7 +2965,16 @@ export async function saveWorkspaceMemory(
       superseded = old ? mapKnowledgeMemory(old) : null;
     }
 
-    return { memory: mapKnowledgeMemory(inserted), deduped: false, dedupeReason: null, superseded, redactionCount, embedded: embedding !== null };
+    return {
+      memory: mapKnowledgeMemory(inserted),
+      deduped: false,
+      dedupeReason: null,
+      superseded,
+      supersededId: superseded?.id ?? null,
+      updated: false,
+      redactionCount,
+      embedded: embedding !== null,
+    };
   });
 }
 
@@ -2913,10 +3008,17 @@ export async function correctWorkspaceMemory(
       sessionId: input.sessionId ?? null,
       origin: "agent",
     }, embedder);
+    if (result.superseded) {
+      return {
+        action: "superseded",
+        memory: result.superseded,
+        replacement: result.memory,
+      };
+    }
     return {
-      action: "superseded",
-      memory: result.superseded ?? mapKnowledgeMemory(old),
-      replacement: result.memory,
+      action: "updated",
+      memory: result.memory,
+      replacement: null,
     };
   }
 

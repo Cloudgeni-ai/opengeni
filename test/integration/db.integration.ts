@@ -12,6 +12,7 @@ import {
   consumeSessionCompactionRequest,
   countSessionHistoryItems,
   createKnowledgeMemory,
+  getKnowledgeMemory,
   saveWorkspaceMemory,
   correctWorkspaceMemory,
   searchWorkspaceMemories,
@@ -1144,6 +1145,102 @@ describe("DB integration", () => {
     expect(corrected.replacement?.kind).toBe("decision");
   });
 
+  test("replacing with text that exact-dedups another live row retires the old row", async () => {
+    const grant = await testGrant(dbClient.db);
+    const existing = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Staging deploys from main only.",
+      kind: "procedural",
+    }, memoryEmbedder);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Staging deploys from develop.",
+      kind: "procedural",
+    }, memoryEmbedder);
+
+    const corrected = await correctWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: old.memory.id,
+      replacementText: "  staging   deploys FROM main only. ",
+    }, memoryEmbedder);
+
+    expect(corrected.action).toBe("superseded");
+    expect(corrected.memory.id).toBe(old.memory.id);
+    expect(corrected.memory.status).toBe("superseded");
+    expect(corrected.memory.supersededById).toBe(existing.memory.id);
+    expect(corrected.replacement?.id).toBe(existing.memory.id);
+    expect(corrected.replacement?.status).toBe("active");
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, old.memory.id)).toMatchObject({
+      status: "superseded",
+      supersededById: existing.memory.id,
+    });
+  });
+
+  test("replacing with text that near-dedups another live row retires the old row", async () => {
+    const grant = await testGrant(dbClient.db);
+    const embedder = collidingEmbedder("near-replacement-model-3072");
+    const existing = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Production database failover uses the west-europe replica.",
+      kind: "semantic",
+    }, embedder);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Production database failover uses the north-europe replica.",
+      kind: "semantic",
+    });
+
+    const corrected = await correctWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: old.memory.id,
+      replacementText: "Different words that collide with the existing vector.",
+    }, embedder);
+
+    expect(corrected.action).toBe("superseded");
+    expect(corrected.memory.id).toBe(old.memory.id);
+    expect(corrected.memory.supersededById).toBe(existing.memory.id);
+    expect(corrected.replacement?.id).toBe(existing.memory.id);
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, old.memory.id)).toMatchObject({
+      status: "superseded",
+      supersededById: existing.memory.id,
+    });
+  });
+
+  test("replacing with text that only dedups the replaces_id row updates that row in place", async () => {
+    const grant = await testGrant(dbClient.db);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Prefer Azure OpenAI for default embeddings.",
+      kind: "preference",
+    }, memoryEmbedder);
+
+    const corrected = await correctWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: old.memory.id,
+      replacementText: "  prefer   AZURE OpenAI for default embeddings. ",
+    }, memoryEmbedder);
+
+    expect(corrected.action).toBe("updated");
+    expect(corrected.memory.id).toBe(old.memory.id);
+    expect(corrected.memory.status).toBe("active");
+    expect(corrected.memory.text).toBe("prefer AZURE OpenAI for default embeddings.");
+    expect(corrected.memory.supersededById).toBeNull();
+    expect(corrected.replacement).toBeNull();
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, old.memory.id)).toMatchObject({
+      status: "active",
+      text: "prefer AZURE OpenAI for default embeddings.",
+      supersededById: null,
+    });
+  });
+
   test("AC-5: keyword fallback works when the embedder throws", async () => {
     const grant = await testGrant(dbClient.db);
     const saved = await saveWorkspaceMemory(dbClient.db, {
@@ -1182,6 +1279,29 @@ describe("DB integration", () => {
     await expect(saveWorkspaceMemory(dbClient.db, {
       accountId: grant.accountId, workspaceId: grant.workspaceId, text: "One over the cap.",
     }, memoryEmbedder)).rejects.toThrow(/full/i);
+
+    const [victim] = await dbClient.db.execute<{ id: string }>(dbSql`
+      select id from knowledge_memories
+      where workspace_id = ${grant.workspaceId}::uuid and status = 'active'
+      order by text
+      limit 1
+    `);
+    expect(victim?.id).toBeTruthy();
+    const replacement = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "At-cap replacement succeeds by retiring one active row.",
+      replacesId: victim!.id,
+    }, memoryEmbedder);
+    expect(replacement.deduped).toBe(false);
+    expect(replacement.superseded?.id).toBe(victim!.id);
+    expect(replacement.memory.status).toBe("active");
+
+    const [{ activeCount } = { activeCount: 0 }] = await dbClient.db.execute<{ activeCount: number }>(dbSql`
+      select count(*)::int as "activeCount" from knowledge_memories
+      where workspace_id = ${grant.workspaceId}::uuid and status = 'active'
+    `);
+    expect(Number(activeCount)).toBe(MEMORY_ACTIVE_RECORD_CAP);
   });
 
   test("AC-7: working-set block reflects the memory setting and record state", async () => {
