@@ -2893,11 +2893,22 @@ export async function saveWorkspaceMemory(
       // that same row. In that case there is no supersession target; keep the
       // row live and update its text/vector metadata so the call still has an
       // observable effect.
+      const normalizedTextChanged = replacesRow ? hashMemoryText(replacesRow.text) !== textHash : true;
       const [updated] = await scopedDb.update(schema.knowledgeMemories).set({
         text: sanitizedText,
         textHash,
-        embedding,
-        embeddingModel,
+        ...(normalizedTextChanged
+          ? {
+            // New text with no fresh vector must clear the old vector. Keeping a
+            // stale vector would make vector search return this row for the old
+            // text's meaning; keyword search still covers the new text.
+            embedding,
+            embeddingModel,
+          }
+          : {}),
+        ...(input.kind !== undefined ? { kind } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
         updatedAt: new Date(),
       }).where(and(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),

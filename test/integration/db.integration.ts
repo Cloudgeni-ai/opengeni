@@ -1354,6 +1354,83 @@ describe("DB integration", () => {
     });
   });
 
+  test("in-place replaces_id update preserves embedding when normalized text is unchanged and applies metadata", async () => {
+    const grant = await testGrant(dbClient.db);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Prefer Azure OpenAI for default embeddings.",
+      kind: "preference",
+    }, memoryEmbedder);
+    const [before] = await dbClient.db.execute<{ embeddingText: string | null; embeddingModel: string | null }>(dbSql`
+      select embedding::text as "embeddingText", embedding_model as "embeddingModel"
+      from knowledge_memories
+      where id = ${old.memory.id}
+    `);
+    expect(before?.embeddingText).toBeTruthy();
+    expect(before?.embeddingModel).toBe("test-deterministic-3072");
+
+    const updated = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "  prefer   AZURE OpenAI for default embeddings. ",
+      replacesId: old.memory.id,
+      kind: "decision",
+      confidence: 0.84,
+      pinned: true,
+    }, throwingEmbedder);
+
+    expect(updated.updated).toBe(true);
+    expect(updated.memory.id).toBe(old.memory.id);
+    expect(updated.memory.kind).toBe("decision");
+    expect(updated.memory.confidence).toBe(0.84);
+    expect(updated.memory.pinned).toBe(true);
+    const [after] = await dbClient.db.execute<{ embeddingText: string | null; embeddingModel: string | null }>(dbSql`
+      select embedding::text as "embeddingText", embedding_model as "embeddingModel"
+      from knowledge_memories
+      where id = ${old.memory.id}
+    `);
+    expect(after?.embeddingText).toBe(before?.embeddingText);
+    expect(after?.embeddingModel).toBe(before?.embeddingModel);
+  });
+
+  test("in-place replaces_id update clears stale embedding when text changes and embedding fails", async () => {
+    const grant = await testGrant(dbClient.db);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "The deployment runbook lives in Confluence.",
+    }, memoryEmbedder);
+    const changedText = "The deployment runbook lives in Notion.";
+    // Force an exact self-match while the stored text still differs, exercising
+    // the in-place branch's stale-vector handling with a failing embedder.
+    await dbClient.db.execute(dbSql`
+      update knowledge_memories
+      set text_hash = ${hashMemoryText(changedText)}
+      where id = ${old.memory.id}
+    `);
+
+    const updated = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: changedText,
+      replacesId: old.memory.id,
+    }, throwingEmbedder);
+
+    expect(updated.updated).toBe(true);
+    expect(updated.memory.id).toBe(old.memory.id);
+    expect(updated.memory.text).toBe(changedText);
+    const [row] = await dbClient.db.execute<{ embeddingText: string | null; embeddingModel: string | null }>(dbSql`
+      select embedding::text as "embeddingText", embedding_model as "embeddingModel"
+      from knowledge_memories
+      where id = ${old.memory.id}
+    `);
+    // The old vector described the Confluence text; after a failed embed for
+    // the Notion text it must be cleared so vector search cannot hit stale meaning.
+    expect(row?.embeddingText).toBeNull();
+    expect(row?.embeddingModel).toBeNull();
+  });
+
   test("AC-5: keyword fallback works when the embedder throws", async () => {
     const grant = await testGrant(dbClient.db);
     const saved = await saveWorkspaceMemory(dbClient.db, {
