@@ -535,10 +535,36 @@ export const Workspace = z.object({
   // non-bypassable CORE (goal-loop ownership + environment block), so an
   // override restyles the persona without dropping that contract.
   agentInstructions: z.string().nullable(),
+  // Growth-ready per-workspace settings bag (migration 0045). Known keys are
+  // validated by WorkspaceSettingsSchema; unknown keys are preserved across
+  // PATCH merges so newer settings survive an older server.
+  settings: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Workspace = z.infer<typeof Workspace>;
+
+// Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
+// (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
+// V1 agent surfaces (turn injection + first-party memory tools); default false.
+export const WorkspaceSettingsSchema = z.object({
+  memoryEnabled: z.boolean().optional(),
+}).passthrough();
+export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+// Resolve the effective memoryEnabled flag from a raw settings bag (default off).
+export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+// PATCH body for workspace settings: a partial patch that deep-merges into the
+// stored bag. memoryEnabled is the only typed key today; passthrough carries
+// forward-compatible unknown keys through validation.
+export const UpdateWorkspaceSettingsRequest = z.object({
+  memoryEnabled: z.boolean().optional(),
+}).passthrough();
+export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
 
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
@@ -1389,7 +1415,19 @@ export const DocumentSearchRequest = z.object({
 });
 export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 
-export const KnowledgeMemoryStatus = z.enum(["proposed", "approved", "rejected"]);
+// proposed/approved/rejected are the legacy curated-knowledge review states
+// (docs-MCP memory_propose lane). active/superseded/archived are Workspace
+// Memory V1: agent-written memories land `active` (usable immediately — human is
+// auditor, not gatekeeper), get `superseded` when replaced, `archived` when
+// retired. Agent-visible set = active ∪ approved.
+export const KnowledgeMemoryStatus = z.enum([
+  "proposed",
+  "approved",
+  "rejected",
+  "active",
+  "superseded",
+  "archived",
+]);
 export type KnowledgeMemoryStatus = z.infer<typeof KnowledgeMemoryStatus>;
 
 export const KnowledgeMemoryKind = z.enum(["semantic", "episodic", "procedural", "decision", "preference"]);
@@ -1417,6 +1455,17 @@ export const KnowledgeMemory = z.object({
   createdBySessionId: z.string().uuid().nullable(),
   reviewedBy: z.string().nullable(),
   reviewedAt: z.string().nullable(),
+  // Workspace Memory V1 fields. usageCount/lastUsedAt feed end-state ranking and
+  // decay; supersedesId/supersededById link correction chains; validFrom/validUntil
+  // are the point-in-time window. embedding/embeddingModel/textHash are internal
+  // and never exposed on the wire.
+  pinned: z.boolean(),
+  usageCount: z.number().int(),
+  lastUsedAt: z.string().nullable(),
+  supersedesId: z.string().uuid().nullable(),
+  supersededById: z.string().uuid().nullable(),
+  validFrom: z.string(),
+  validUntil: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

@@ -60,7 +60,7 @@ import type {
   WorkspaceMember,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
+import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB, resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
@@ -73,6 +73,22 @@ import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import * as schema from "./schema";
+import {
+  AGENT_VISIBLE_MEMORY_STATUSES,
+  hashMemoryText,
+  isMemoryTextTooLong,
+  MEMORY_ACTIVE_RECORD_CAP,
+  MEMORY_BLOCK_RECORD_LIMIT,
+  MEMORY_TEXT_MAX_CHARS,
+  MEMORY_NEAR_DUP_COSINE_THRESHOLD,
+  MEMORY_NEAR_DUP_NEIGHBORS,
+  MEMORY_SEARCH_DEFAULT_LIMIT,
+  MEMORY_SEARCH_MAX_LIMIT,
+  renderWorkspaceMemoryBlock,
+  sanitizeMemoryText,
+  WORKSPACE_MEMORY_BLOCK_EMPTY,
+  type MemoryBlockRecord,
+} from "./memory-domain";
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -86,6 +102,8 @@ export { migrate, runMigrations } from "./migrate";
 // role provisioning over an explicit admin connection + target schema. Importing
 // these does NOT run the modules' `import.meta.main` CLI blocks.
 export { provisionRoles, type ProvisionResult, type ProvisionRolesOptions } from "./provision-roles";
+// Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
+export * from "./memory-domain";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
 // query-layer port: every helper in this file accepts `db: Database` and uses
@@ -2576,6 +2594,475 @@ export async function listKnowledgeMemories(db: Database, workspaceId: string, o
       .limit(limit);
     return rows.map(mapKnowledgeMemory);
   });
+}
+
+// ===========================================================================
+// Workspace Memory V1 — agent-writable, hybrid-searchable memory over
+// knowledge_memories. saveWorkspaceMemory is the single write gate; every write
+// path (first-party tools, REST, future reflector) funnels through it. The
+// embedder is a minimal structural port so packages/db need not depend on
+// packages/documents; callers pass getDocumentServices().embedder.
+// ===========================================================================
+
+export type MemoryEmbedder = {
+  model: string;
+  embedMany: (texts: string[]) => Promise<number[][]>;
+};
+
+export type WorkspaceMemoryOrigin = "agent" | "human";
+
+export type SaveWorkspaceMemoryInput = {
+  accountId: string;
+  workspaceId: string;
+  text: string;
+  kind?: KnowledgeMemoryKind | undefined;
+  confidence?: number | undefined; // 0-1
+  pinned?: boolean | undefined;
+  replacesId?: string | null | undefined; // short or full id of the record this supersedes
+  sessionId?: string | null | undefined; // provenance + event linkage
+  origin?: WorkspaceMemoryOrigin | undefined;
+};
+
+export type SaveWorkspaceMemoryResult = {
+  memory: KnowledgeMemory;
+  // true → a matching record already existed; nothing new was inserted (NOOP).
+  deduped: boolean;
+  dedupeReason: "exact" | "near" | null;
+  // the record that `replacesId` retired, if any.
+  superseded: KnowledgeMemory | null;
+  redactionCount: number;
+  embedded: boolean;
+};
+
+export type CorrectWorkspaceMemoryInput = {
+  accountId: string;
+  workspaceId: string;
+  id: string; // short or full id
+  reason?: string | undefined;
+  replacementText?: string | undefined;
+  sessionId?: string | null | undefined;
+};
+
+export type CorrectWorkspaceMemoryResult = {
+  action: "archived" | "superseded";
+  // the record that was archived or superseded.
+  memory: KnowledgeMemory;
+  // the replacement record when replacementText was supplied, else null.
+  replacement: KnowledgeMemory | null;
+};
+
+export type WorkspaceMemorySearchMode = "hybrid" | "vector" | "keyword";
+
+export type WorkspaceMemorySearchInput = {
+  query: string;
+  kind?: KnowledgeMemoryKind | undefined;
+  limit?: number | undefined;
+  mode?: WorkspaceMemorySearchMode | undefined;
+};
+
+export type WorkspaceMemorySearchResult = {
+  memory: KnowledgeMemory;
+  score: number;
+  matchType: WorkspaceMemorySearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
+};
+
+function memoryVectorLiteral(values: number[]): string {
+  return `[${values.join(",")}]`;
+}
+
+const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
+
+// Resolve a short (8-char prefix) or full uuid to the full id within a workspace.
+// Returns null when nothing matches; throws on an ambiguous prefix.
+async function resolveWorkspaceMemoryId(scopedDb: Database, workspaceId: string, rawId: string): Promise<string | null> {
+  const candidate = rawId.trim().toLowerCase();
+  if (!/^[0-9a-f-]{4,36}$/.test(candidate)) {
+    return null;
+  }
+  const matches = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+    .where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      sql`${schema.knowledgeMemories.id}::text like ${`${candidate}%`}`,
+    ))
+    .limit(2);
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous memory id "${rawId}": it matches multiple records. Use the full id.`);
+  }
+  return matches[0]!.id;
+}
+
+export async function saveWorkspaceMemory(
+  db: Database,
+  input: SaveWorkspaceMemoryInput,
+  embedder?: MemoryEmbedder,
+): Promise<SaveWorkspaceMemoryResult> {
+  const { text: sanitizedText, redactionCount } = sanitizeMemoryText(input.text);
+  if (sanitizedText.length === 0) {
+    throw new Error("Memory text is empty after sanitization; nothing to save.");
+  }
+  if (isMemoryTextTooLong(sanitizedText)) {
+    throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`);
+  }
+  const textHash = hashMemoryText(sanitizedText);
+  const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
+
+  // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
+  // write (the row stays keyword-searchable). Mirrors indexDocumentNow.
+  let embedding: number[] | null = null;
+  let embeddingModel: string | null = null;
+  if (embedder) {
+    try {
+      const [vector] = await embedder.embedMany([sanitizedText]);
+      if (vector && vector.length > 0) {
+        embedding = vector;
+        embeddingModel = embedder.model;
+      }
+    } catch (error) {
+      console.warn("workspace memory save: embedding failed; saving keyword-only", {
+        workspaceId: input.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // Resolve the supersession target first so an invalid replaces_id fails before
+    // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
+    let replacesFullId: string | null = null;
+    if (input.replacesId) {
+      replacesFullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.replacesId);
+      if (!replacesFullId) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+    }
+
+    // Exact-dup gate: same normalized text among live (non-terminal) rows → NOOP.
+    const [exact] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.textHash, textHash),
+        ne(schema.knowledgeMemories.status, "archived"),
+        ne(schema.knowledgeMemories.status, "superseded"),
+        ne(schema.knowledgeMemories.status, "rejected"),
+      ))
+      .limit(1);
+    if (exact) {
+      return { memory: mapKnowledgeMemory(exact), deduped: true, dedupeReason: "exact", superseded: null, redactionCount, embedded: embedding !== null };
+    }
+
+    // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
+    // vector from the SAME model; similarity ≥ threshold → NOOP.
+    if (embedding && embeddingModel) {
+      const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
+      const neighbours = await scopedDb.select({
+        id: schema.knowledgeMemories.id,
+        distance,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
+          sql`${schema.knowledgeMemories.embedding} is not null`,
+        ))
+        .orderBy(distance)
+        .limit(MEMORY_NEAR_DUP_NEIGHBORS);
+      const nearest = neighbours.find((row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD);
+      if (nearest) {
+        const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+          .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, nearest.id)))
+          .limit(1);
+        if (row) {
+          return { memory: mapKnowledgeMemory(row), deduped: true, dedupeReason: "near", superseded: null, redactionCount, embedded: embedding !== null };
+        }
+      }
+    }
+
+    // Per-workspace active-record cap: fail actionably rather than silently drop.
+    const [{ activeCount } = { activeCount: 0 }] = await scopedDb.select({
+      activeCount: sql<number>`count(*)::int`,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.status, "active"),
+      ));
+    if (Number(activeCount) >= MEMORY_ACTIVE_RECORD_CAP) {
+      throw new Error(`Workspace memory is full (${MEMORY_ACTIVE_RECORD_CAP} active records). Correct or supersede stale memories before adding new ones.`);
+    }
+
+    const sourceRefs: KnowledgeSourceRef[] = input.sessionId
+      ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
+      : [];
+    const [inserted] = await scopedDb.insert(schema.knowledgeMemories).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      status: "active",
+      kind,
+      scope: "workspace",
+      text: sanitizedText,
+      textHash,
+      sourceRefs,
+      confidence: confidenceToStorage(input.confidence ?? 0.5),
+      pinned: input.pinned ?? false,
+      createdBySessionId: input.sessionId ?? null,
+      supersedesId: replacesFullId,
+      ...(embedding ? { embedding, embeddingModel } : {}),
+    }).returning();
+    if (!inserted) {
+      throw new Error("Failed to save workspace memory");
+    }
+
+    let superseded: KnowledgeMemory | null = null;
+    if (replacesFullId) {
+      const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+        status: "superseded",
+        supersededById: inserted.id,
+        validUntil: new Date(),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
+      superseded = old ? mapKnowledgeMemory(old) : null;
+    }
+
+    return { memory: mapKnowledgeMemory(inserted), deduped: false, dedupeReason: null, superseded, redactionCount, embedded: embedding !== null };
+  });
+}
+
+export async function correctWorkspaceMemory(
+  db: Database,
+  input: CorrectWorkspaceMemoryInput,
+  embedder?: MemoryEmbedder,
+): Promise<CorrectWorkspaceMemoryResult> {
+  const replacementText = input.replacementText?.trim();
+  if (replacementText) {
+    // Correction WITH a replacement is a full supersede through the one write gate.
+    const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+      const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+      if (!fullId) {
+        return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
+      }
+      return await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
+        .limit(1);
+    });
+    if (!old) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const result = await saveWorkspaceMemory(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      text: replacementText,
+      kind: old.kind as KnowledgeMemoryKind,
+      pinned: old.pinned,
+      replacesId: old.id,
+      sessionId: input.sessionId ?? null,
+      origin: "agent",
+    }, embedder);
+    return {
+      action: "superseded",
+      memory: result.superseded ?? mapKnowledgeMemory(old),
+      replacement: result.memory,
+    };
+  }
+
+  // No replacement → archive the record.
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+    if (!fullId) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const [existing] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
+      .limit(1);
+    if (!existing) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const correctionReason = cleanDbString(input.reason);
+    const [archived] = await scopedDb.update(schema.knowledgeMemories).set({
+      status: "archived",
+      validUntil: new Date(),
+      updatedAt: new Date(),
+      ...(correctionReason ? { metadata: { ...(existing.metadata ?? {}), correctionReason } } : {}),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+      eq(schema.knowledgeMemories.id, fullId),
+    )).returning();
+    if (!archived) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    return { action: "archived", memory: mapKnowledgeMemory(archived), replacement: null };
+  });
+}
+
+export async function searchWorkspaceMemories(
+  db: Database,
+  workspaceId: string,
+  input: WorkspaceMemorySearchInput,
+  embedder?: MemoryEmbedder,
+): Promise<WorkspaceMemorySearchResult[]> {
+  const query = requireDbString(input.query, "memory search query");
+  const mode: WorkspaceMemorySearchMode = input.mode ?? "hybrid";
+  const limit = Math.min(Math.max(input.limit ?? MEMORY_SEARCH_DEFAULT_LIMIT, 1), MEMORY_SEARCH_MAX_LIMIT);
+  const candidateLimit = mode === "hybrid" ? Math.min(limit * 4, 100) : limit;
+
+  const baseConditions: SQL[] = [
+    eq(schema.knowledgeMemories.workspaceId, workspaceId),
+    inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+  ];
+  if (input.kind) {
+    baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
+  }
+
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const scored = new Map<string, { vectorScore: number | null; keywordScore: number | null }>();
+
+    if (mode === "vector" || mode === "hybrid") {
+      try {
+        if (!embedder) {
+          throw new Error("no embedder configured for vector memory search");
+        }
+        const [vector] = await embedder.embedMany([query]);
+        if (!vector || vector.length === 0) {
+          throw new Error("embedder returned no query vector");
+        }
+        const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(vector)}::vector`;
+        const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, distance }).from(schema.knowledgeMemories)
+          .where(and(
+            ...baseConditions,
+            eq(schema.knowledgeMemories.embeddingModel, embedder.model),
+            sql`${schema.knowledgeMemories.embedding} is not null`,
+          ))
+          .orderBy(distance)
+          .limit(candidateLimit);
+        for (const row of rows) {
+          const vectorScore = 1 / (1 + Number(row.distance));
+          scored.set(row.id, { vectorScore, keywordScore: scored.get(row.id)?.keywordScore ?? null });
+        }
+      } catch (error) {
+        if (mode === "vector") {
+          throw error;
+        }
+        console.warn("workspace memory hybrid search vector component failed; falling back to keyword", {
+          workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (mode === "keyword" || mode === "hybrid") {
+      const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.knowledgeMemories.text}), plainto_tsquery('simple', ${query}))`;
+      const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, rank }).from(schema.knowledgeMemories)
+        .where(and(
+          ...baseConditions,
+          sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
+        ))
+        .orderBy(desc(rank))
+        .limit(candidateLimit);
+      for (const row of rows) {
+        const rankValue = Number(row.rank);
+        const keywordScore = Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
+        const prev = scored.get(row.id);
+        scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
+      }
+    }
+
+    const ranked = [...scored.entries()].map(([id, { vectorScore, keywordScore }]) => {
+      const matchType: WorkspaceMemorySearchMode = vectorScore !== null && keywordScore !== null
+        ? "hybrid"
+        : vectorScore !== null
+          ? "vector"
+          : "keyword";
+      const vector = vectorScore ?? 0;
+      const keyword = keywordScore ?? 0;
+      const score = mode === "vector"
+        ? vector
+        : mode === "keyword"
+          ? keyword
+          : Math.min(1, (0.65 * vector) + (0.35 * keyword) + (matchType === "hybrid" ? 0.1 : 0));
+      return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
+    }).sort((left, right) =>
+      right.score - left.score
+      || (right.vectorScore ?? 0) - (left.vectorScore ?? 0)
+      || (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
+    ).slice(0, limit);
+
+    if (ranked.length === 0) {
+      return [];
+    }
+
+    // Bump usage_count/last_used_at for the returned rows (NOT updated_at — search
+    // must not reshuffle the working set's recency order). Returns the fresh rows.
+    const ids = ranked.map((entry) => entry.id);
+    const bumped = await scopedDb.update(schema.knowledgeMemories).set({
+      usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
+      lastUsedAt: new Date(),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      inArray(schema.knowledgeMemories.id, ids),
+    )).returning();
+    const byId = new Map(bumped.map((row) => [row.id, row] as const));
+
+    const results: WorkspaceMemorySearchResult[] = [];
+    for (const entry of ranked) {
+      const row = byId.get(entry.id);
+      if (!row) {
+        continue;
+      }
+      results.push({
+        memory: mapKnowledgeMemory(row),
+        score: entry.score,
+        matchType: entry.matchType,
+        vectorScore: entry.vectorScore,
+        keywordScore: entry.keywordScore,
+      });
+    }
+    return results;
+  });
+}
+
+// Render the per-turn working-set block for a workspace. Returns null when the
+// workspace's memory setting is off (injection no-ops); the empty-state block
+// when memory is on but there are zero visible records; otherwise the populated
+// block. Pure rendering lives in memory-domain.ts.
+export async function resolveWorkspaceMemoryBlock(db: Database, workspaceId: string): Promise<string | null> {
+  const [workspace] = await db.select({ settings: schema.workspaces.settings })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  if (!workspace || !resolveWorkspaceMemoryEnabled(workspace.settings)) {
+    return null;
+  }
+  const records = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      kind: schema.knowledgeMemories.kind,
+      text: schema.knowledgeMemories.text,
+      pinned: schema.knowledgeMemories.pinned,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+        ne(schema.knowledgeMemories.kind, "episodic"),
+      ))
+      .orderBy(desc(schema.knowledgeMemories.pinned), desc(schema.knowledgeMemories.updatedAt))
+      .limit(MEMORY_BLOCK_RECORD_LIMIT),
+  );
+  if (records.length === 0) {
+    return WORKSPACE_MEMORY_BLOCK_EMPTY;
+  }
+  const blockRecords: MemoryBlockRecord[] = records.map((row) => ({
+    id: row.id,
+    kind: row.kind as KnowledgeMemoryKind,
+    text: row.text,
+    pinned: row.pinned,
+  }));
+  return renderWorkspaceMemoryBlock(blockRecords) ?? WORKSPACE_MEMORY_BLOCK_EMPTY;
 }
 
 export async function createSocialConnection(db: Database, input: CreateSocialConnectionInput): Promise<SocialConnection> {
@@ -9094,6 +9581,7 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     externalSource: row.externalSource,
     externalId: row.externalId,
     agentInstructions: row.agentInstructions ?? null,
+    settings: (row.settings ?? {}) as Record<string, unknown>,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -9195,6 +9683,13 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     createdBySessionId: row.createdBySessionId,
     reviewedBy: row.reviewedBy,
     reviewedAt: row.reviewedAt ? row.reviewedAt.toISOString() : null,
+    pinned: row.pinned,
+    usageCount: row.usageCount,
+    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    supersedesId: row.supersedesId,
+    supersededById: row.supersededById,
+    validFrom: row.validFrom.toISOString(),
+    validUntil: row.validUntil ? row.validUntil.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
