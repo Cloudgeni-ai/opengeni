@@ -19,6 +19,7 @@ import {
   failedTurnEvents,
   liveTurnEvents,
   tourEvents,
+  workerCompletionEvents,
   workerGoalEvents,
 } from "./timeline-fixtures";
 import "./styles.css";
@@ -142,6 +143,13 @@ function Harness() {
             </Section>
 
             <Section
+              title="Worker completions — inbound results, not user bubbles"
+              hint="A child's childCompletion payload → a quiet result card (completed / paused / failed) with the report behind a fold and a deep-link into the child."
+            >
+              <RawRail events={workerCompletionEvents()} />
+            </Section>
+
+            <Section
               title="Completed turn — folded to a summary chip"
               hint="Prompt bubble → one turn chip → final answer; expand for narration and nested tool clusters."
             >
@@ -236,7 +244,7 @@ function RawGroup({ group }: { group: TimelineGroup }) {
         </TurnSummary>
       );
     case "item":
-      return <TimelineRow item={group.item} />;
+      return <TimelineRow item={group.item} onOpenSession={(id) => window.alert(`Open session ${id}`)} />;
   }
 }
 

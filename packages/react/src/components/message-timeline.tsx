@@ -2,16 +2,22 @@ import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  BotIcon,
+  CheckCircle2Icon,
   CheckIcon,
+  ChevronRightIcon,
+  PauseCircleIcon,
   PauseIcon,
   PencilLineIcon,
   PlayIcon,
   RefreshCwIcon,
   TargetIcon,
   TriangleAlertIcon,
+  XCircleIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { Collapsible } from "radix-ui";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
@@ -31,6 +37,7 @@ import {
   type TimelineItem,
   type ToolRegistry,
   type UserMessageItem,
+  type WorkerCompletionItem,
   TurnSummary,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
@@ -442,6 +449,7 @@ function TimelineGroupView({
           renderMessageText={renderMessageText}
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
+          onOpenSession={onOpenSession}
         />
       );
   }
@@ -515,17 +523,21 @@ export function TimelineRow({
   renderMessageText,
   onReconnect,
   resolveProviderLogo,
+  onOpenSession,
 }: {
   item: TimelineItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
     case "agent-message":
       return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
+    case "worker-completion":
+      return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
       return <SessionStatusRow item={item} />;
     case "goal":
@@ -586,6 +598,124 @@ function AgentMessageRow({
           {caret}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A worker session reporting back to its manager. The child's completion arrives
+ * as a `user.message` carrying a `childCompletion` payload (the raw message text
+ * used to render as an "ugly" user bubble); it projects to a `worker-completion`
+ * item and draws here as a quietly-confident card — an inbound result, not
+ * something the human said. One glyph + one line carry the outcome; the worker's
+ * full report, evidence, and any paused reason live behind a collapsed
+ * disclosure, and a "View session" affordance deep-links into the child.
+ *
+ * Color follows the timeline's restraint: green only for a completed goal, the
+ * waiting hue only for a paused one, red only for a failed child — everything
+ * else is a neutral inbound card.
+ */
+type WorkerCompletionMeta = {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  iconClass: string;
+  cardClass: string;
+};
+
+function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+  if (item.childStatus === "failed") {
+    return { label: "Worker failed", icon: XCircleIcon, iconClass: "text-og-status-failed", cardClass: "border-og-status-failed/40" };
+  }
+  if (item.goalStatus === "paused") {
+    return { label: "Worker paused", icon: PauseCircleIcon, iconClass: "text-og-status-waiting", cardClass: "border-og-status-waiting/35" };
+  }
+  if (item.goalStatus === "completed") {
+    return { label: "Worker completed", icon: CheckCircle2Icon, iconClass: "text-og-status-idle", cardClass: "border-og-border" };
+  }
+  return { label: "Worker reported back", icon: BotIcon, iconClass: "text-og-accent", cardClass: "border-og-border" };
+}
+
+function WorkerCompletionRow({
+  item,
+  onOpenSession,
+}: {
+  item: WorkerCompletionItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  const [open, setOpen] = useState(false);
+  const meta = workerCompletionMeta(item);
+  const Icon = meta.icon;
+  // The worker's own report is the substance behind the fold; evidence and any
+  // paused reason sit alongside it as quieter, labelled context.
+  const details: { label: string; value: string; muted?: boolean }[] = [
+    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
+    ...(item.evidence?.trim() ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }] : []),
+    ...(item.pausedReason?.trim() ? [{ label: "Paused because", value: item.pausedReason.trim(), muted: true }] : []),
+  ];
+  const hasDetails = details.length > 0;
+  return (
+    <div className={cn(enter && "animate-og-enter", "min-w-0")}>
+      <div className={cn("flex flex-col gap-2 rounded-og-md border bg-og-surface-1 p-3", meta.cardClass)}>
+        <div className="flex items-start gap-2.5">
+          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
+            <Icon className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-og-base leading-5 text-og-fg">
+              <span className="font-medium">{meta.label}</span>
+              {item.goalText ? <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span> : null}
+            </p>
+          </div>
+          {item.childSessionId && onOpenSession ? (
+            <button
+              type="button"
+              onClick={() => onOpenSession(item.childSessionId)}
+              className={cn(
+                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
+                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent",
+              )}
+            >
+              View session
+              <ArrowRightIcon className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+        {hasDetails ? (
+          <Collapsible.Root open={open} onOpenChange={setOpen}>
+            <Collapsible.Trigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
+                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
+                )}
+              >
+                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
+                {open ? "Hide details" : "Show details"}
+              </button>
+            </Collapsible.Trigger>
+            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
+              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
+                {details.map((detail) => (
+                  <div key={detail.label} className="min-w-0">
+                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{detail.label}</p>
+                    <p
+                      className={cn(
+                        "whitespace-pre-wrap break-words text-og-sm leading-6",
+                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
+                      )}
+                    >
+                      {detail.value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        ) : null}
+      </div>
     </div>
   );
 }
