@@ -132,6 +132,39 @@ async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+class SnapshotTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`workspace snapshot timed out after ${timeoutMs}ms`);
+    this.name = "SnapshotTimeoutError";
+  }
+}
+
+export async function waitForWarmSnapshot(snapshot: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      snapshot,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new SnapshotTimeoutError(timeoutMs)), timeoutMs);
+        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+          timeout.unref();
+        }
+      }),
+    ]);
+    return true;
+  } catch (error) {
+    if (error instanceof SnapshotTimeoutError) {
+      console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
+      return false;
+    }
+    return true;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function terminateEstablishedSandbox(established: EstablishedSandboxSession | null): Promise<boolean> {
   if (!established) {
     return true;
@@ -271,7 +304,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (Number.isFinite(priorAtMs) && Date.now() - priorAtMs < intervalMs) {
       return false;
     }
-    const bytes = await persistable.persistWorkspace();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const bytes = await Promise.race([
+      persistable.persistWorkspace(),
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
+        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+          timeout.unref();
+        }
+      }),
+    ]).finally(() => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    });
     if (!bytes || bytes.length === 0) {
       return false;
     }

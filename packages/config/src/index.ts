@@ -554,6 +554,12 @@ const SettingsSchema = z.object({
   // worst-case loss of ANY unclean box death to this window. 0 disables.
   // Knob: OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS. Default 15min.
   sandboxSnapshotIntervalMs: z.coerce.number().int().min(0).default(900_000),
+  // Maximum time a best-effort /workspace snapshot capture may hold turn/reaper
+  // cleanup. A hung provider snapshot must never pin a lease holder, block
+  // graceful shutdown, or become permission to GC an older archive. Timeout is
+  // treated exactly like a failed best-effort snapshot. Knob:
+  // OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Default 60s.
+  sandboxSnapshotTimeoutMs: z.coerce.number().int().positive().default(60_000),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -1058,6 +1064,7 @@ export function getSettings(): Settings {
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
+    sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),

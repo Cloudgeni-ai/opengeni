@@ -102,7 +102,7 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./types";
-import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../sandbox-resume";
+import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorkspaceSnapshot, waitForWarmSnapshot, type ResumedTurnSandbox } from "../sandbox-resume";
 import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
 import { recordCreditMicros, runtimeMetricsHooksForObservability, turnLifecycleMetricsFor, type TurnOutcome } from "../observability-metrics";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
@@ -2671,11 +2671,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (setupBoxSession && sandboxGroupId) {
           // Single-flight vs the heartbeat capture: the timer is already cleared
           // above, but a capture it launched may still be in flight — and that
-          // capture predates the turn's final writes. Await it (it never
-          // rejects; its own failure discipline caps its runtime), THEN
-          // attempt; the atomic throttle decides in capture order.
+          // capture predates the turn's final writes. Wait for it, but only up
+          // to the snapshot timeout: release must never depend on an unbounded
+          // provider capture.
           if (snapshotInFlight) {
-            await snapshotInFlight;
+            await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
           }
           const persisted = await maybePersistWarmWorkspaceSnapshot(
             { db, settings },
