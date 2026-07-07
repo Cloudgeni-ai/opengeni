@@ -11,6 +11,14 @@ const settings = {
 };
 
 describe("observability", () => {
+  test("exposes the generic metrics and debug public methods", () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    expect(typeof obs.setGauge).toBe("function");
+    expect(typeof obs.incrementCounter).toBe("function");
+    expect(typeof obs.observeHistogram).toBe("function");
+    expect(typeof obs.debug).toBe("function");
+  });
+
   test("renders prometheus metrics with resource and request labels", async () => {
     const obs = createObservability(settings, { component: "api", now: () => 1 });
     obs.recordHttpRequest({ method: "GET", route: "/healthz", status: 200, durationSeconds: 0.012 });
