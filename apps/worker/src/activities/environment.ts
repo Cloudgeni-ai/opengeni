@@ -102,10 +102,11 @@ export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
-  // §7.6 P4a — optional host git-credential provider + the run scope it needs
+  // §7.6 P4a - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
-  // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
-  // token mint entirely. `= {}` default so the non-optional reads below are safe.
+  // `skipGitHubToken` (legacy option name): a connected-machine turn skips the
+  // inert platform git token mint entirely. `= {}` default so the non-optional
+  // reads below are safe.
   options: {
     skipGitHubToken?: boolean;
     scope?: ConnectionScope;
@@ -116,24 +117,25 @@ export async function sandboxEnvironmentForRun(
 ): Promise<{ environment: Record<string, string>; gitToken?: string; gitTokens?: GitTokenSeeds; toolspaceToken?: string }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
-  // paths via stableSandboxEnvironmentForRun) < platform run-scoped GitHub auth
+  // paths via stableSandboxEnvironmentForRun) < platform run-scoped git auth
   // (applied below, always last). Reserved name validation at write time prevents
   // workspace values from colliding with the platform-managed entries.
   //
-  // TOKEN-BROKER (B1): the run-scoped GitHub App installation token is NO LONGER
-  // layered into the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_*
-  // extraheader). It is minted ONCE per turn and returned as `gitToken`; the caller
-  // threads it OFF-MANIFEST as a clone-seed exec env (OPENGENI_GIT_TOKEN_SEED) so the
-  // clone hook writes it to a stable FILE ($OPENGENI_GIT_TOKEN_FILE), and git auth
-  // flows through GIT_ASKPASS -> that file. The manifest carries only the stable
-  // pointers (GIT_ASKPASS, GIT_TERMINAL_PROMPT, identity, and — via the shared base —
-  // OPENGENI_GIT_TOKEN_FILE), so the token VALUE never rides the manifest and the
-  // SDK's per-turn provided-session env delta stays empty even though the token
-  // rotates. The agent can refresh the token mid-turn via the `github_token` MCP tool.
+  // TOKEN-BROKER (B1): run-scoped git provider tokens are NO LONGER layered into
+  // the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GITLAB_TOKEN/
+  // AZURE_DEVOPS_EXT_PAT/GIT_CONFIG_* extraheader). They are minted once per turn
+  // and returned separately as provider token seeds; the caller threads them
+  // OFF-MANIFEST as clone-seed exec env vars so the clone hook writes stable token
+  // files. The manifest carries only stable pointers (GIT_ASKPASS,
+  // GIT_TERMINAL_PROMPT, identity, OPENGENI_GIT_CREDENTIALS_DIR, and
+  // OPENGENI_GIT_TOKEN_FILE), so token VALUES never ride the manifest and the SDK's
+  // per-turn provided-session env delta stays empty even though tokens rotate.
+  // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias and can still
+  // refresh mid-turn via the `github_token` MCP tool.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
   // TOOLSPACE (selfhosted parity): the toolspace token is minted for EVERY
-  // backend, including a connected machine. Unlike the platform GitHub token
+  // backend, including a connected machine. Unlike platform git provider tokens
   // (inert on selfhosted → skipped above), the toolspace token is the machine's
   // only path to programmatic tool calling, and it grants no more than the
   // machine owner's own authority (toolspace:call, own-session-bound, turn TTL,
@@ -161,10 +163,10 @@ export async function sandboxEnvironmentForRun(
   }
   const selections = gitCredentialSelections(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
-  // a connected machine (selfhosted), the platform GitHub App installation token is
-  // INERT — exec routes over NATS to the user's machine, which uses ITS OWN git
-  // credentials, and the box that the token would auth is never created. So skip the
-  // (network) token mint entirely and return the STABLE base env (no gitToken). Env-
+  // a connected machine (selfhosted), platform git provider tokens are INERT: exec
+  // routes over NATS to the user's machine, which uses ITS OWN git credentials, and
+  // the box those tokens would auth is never created. So skip the token mint entirely
+  // and return the STABLE base env (no gitToken/gitTokens). Env-
   // parity holds: the SAME base object still feeds buildManifest + the SelfhostedSession
   // manifest, so the SDK's per-turn provided-session env delta stays empty
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the

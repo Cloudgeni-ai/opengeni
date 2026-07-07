@@ -1116,7 +1116,7 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 // FORK-7 CROSS-CHECK (the host-mapping safety guardrail): a credential
 // provider returns the `workspaceId` it scoped the credential to, and the
 // activity ASSERTS it agrees with the run's workspace BEFORE injecting
-// `GH_TOKEN` (or applying the decrypted values). A host mapping bug that
+// any git provider token seed (or applying decrypted environment values). A host mapping bug that
 // returns tenant B's creds while the run is tenant A is thereby caught at the
 // seam, never silently injected into tenant A's sandbox.
 

@@ -107,11 +107,12 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
   });
 });
 
-// TOKEN-BROKER (B1): a repo-attached turn no longer layers the rotating GitHub token
-// (or the extraheader) onto the manifest env — the token is returned as `gitToken`
-// (seeded off-manifest to the box token file). The manifest carries ONLY the stable
-// pointers (GIT_ASKPASS, GIT_TERMINAL_PROMPT, identity, and — from the shared base —
-// OPENGENI_GIT_TOKEN_FILE), so it stays attach-reproducible and the SDK sees no delta.
+// TOKEN-BROKER (B1): a repo-attached turn no longer layers rotating git provider
+// tokens (or extraheaders) onto the manifest env. Tokens are returned separately
+// (`gitToken` is the GitHub alias) and seeded off-manifest to box token files. The
+// manifest carries ONLY stable pointers (GIT_ASKPASS, GIT_TERMINAL_PROMPT,
+// identity, OPENGENI_GIT_CREDENTIALS_DIR, and OPENGENI_GIT_TOKEN_FILE), so it
+// stays attach-reproducible and the SDK sees no delta.
 describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PATH is on it", () => {
   // A repo-attached turn mints a REAL GitHub App token via the network; the clean
   // test env has no app configured, so we exercise the SKIP path (which returns the

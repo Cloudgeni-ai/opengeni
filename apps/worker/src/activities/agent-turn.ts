@@ -998,8 +998,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
-      // D1-lite) and reused for EVERY downstream decision: the env mint (skip the
-      // inert GitHub token for a machine turn), the establish path (no phantom Modal
+      // D1-lite) and reused for EVERY downstream decision: the env mint (skip
+      // inert platform git tokens for a machine turn), the establish path (no phantom Modal
       // home box for a machine-primary turn), buildAgent (skip the repository clone
       // hook so a private repo is never `git clone`d onto the user's real disk), and
       // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
@@ -1045,20 +1045,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
-      // run-scoped GitHub installation token on every call, so a second call would
-      // yield a DIFFERENT token value and re-introduce the manifest-env delta the
+      // run-scoped git provider tokens on every call, so a second call would
+      // yield DIFFERENT token values and re-introduce the manifest-env delta the
       // SDK's provided-session guard throws on — the box and the agent MUST share
       // this same object. A machine-primary turn skips the (inert) token mint entirely
       // (the machine uses its own git creds); the SAME base env still feeds the box +
       // the agent, so env-parity holds.
       // TOKEN-BROKER (B1): sandboxEnvironmentForRun now returns the STABLE manifest
       // env (no rotating GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_* extraheader) PLUS the
-      // run-scoped GitHub token minted ONCE per turn as `gitToken`. The env feeds BOTH
-      // the box manifest AND the agent (env-parity, as before); the token is threaded
-      // OFF-MANIFEST as the clone-seed `gitTokenSeed` to buildAgent (below) so the box
-      // never carries a rotating value on its manifest. When the platform token IS
-      // minted, the host `gitCredentials` provider may supply it; unset → self-mint
-      // from settings. gitToken is undefined on the selfhosted skip path (the machine
+      // run-scoped git tokens minted ONCE per turn as provider seeds, with `gitToken`
+      // retained as the GitHub alias. The env feeds BOTH the box manifest AND the
+      // agent (env-parity, as before); tokens are threaded OFF-MANIFEST as
+      // clone-seeds to buildAgent (below) so the box never carries rotating values
+      // on its manifest. When a platform token IS minted, the host `gitCredentials`
+      // provider may supply it; unset still self-mints GitHub from settings.
+      // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
       const {
         environment: sandboxEnvironment,

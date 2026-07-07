@@ -5,7 +5,7 @@ A workspace owns named **environments**: sets of environment variables whose val
 ## Invariants
 
 1. **Write-only values.** No API response, session event, log, span, or audit record ever contains a variable value. Reads return names and metadata (version, timestamps) only; there is no read-back even at create time. Rotation is `PUT` with a new value.
-2. **No attachment, no injection.** A run whose session has `environmentId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
+2. **No attachment, no injection.** A run whose session has `environmentId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped git auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
 3. **Agents cannot self-attach.** The worker's **default** first-party MCP delegated token never carries `environments:use`, and the MCP scheduled-task tools reject attachment changes (set **or** detach) and instruction edits to environment-attached tasks for grants without it. A session only holds a stronger first-party token when its creator explicitly granted one at creation (`firstPartyMcpPermissions`, capped by the creating grant) — agents can never escalate themselves.
 4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
@@ -73,9 +73,9 @@ Later wins. Reserved-name validation prevents collisions with the platform-manag
 
 ### Env injection is a managed-sandbox concept
 
-This whole layering — the deployment allowlist, git identity, workspace environment, and the run-scoped GitHub-auth block that always applies last — describes a **managed sandbox**: a box OpenGeni provisions and injects environment into. A session that runs on a [Connected Machine](../SECURITY.md#connected-machines) is a different backend and is **not** injected this way:
+This whole layering — the deployment allowlist, git identity, workspace environment, and the run-scoped git-auth block that always applies last — describes a **managed sandbox**: a box OpenGeni provisions and injects environment into. A session that runs on a [Connected Machine](../SECURITY.md#connected-machines) is a different backend and is **not** injected this way:
 
-- **The GitHub-token injection is skipped.** A machine-targeted turn does not mint or distribute a run-scoped GitHub App token; the machine uses its **own** git credentials. The "last, untouched" GitHub block above simply does not exist for a machine turn.
+- **The git-token injection is skipped.** A machine-targeted turn does not mint or distribute a run-scoped git provider token; the machine uses its **own** git credentials. The "last, untouched" git-auth block above simply does not exist for a machine turn.
 - **No env reaches the machine over the wire.** The run's declared environment is still assembled server-side (and threaded into the session manifest so the SDK's per-turn manifest-env delta stays empty — the internal parity guard), but the command RPC to the machine carries an empty environment. Workspace-environment values are therefore not delivered to a machine's commands.
 
 Practically: attaching an environment shapes what a managed sandbox sees; it does not push secrets onto a Connected Machine. If a machine run needs a secret, it must already be present in that machine's own local environment.
