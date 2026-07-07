@@ -189,6 +189,16 @@ export function eventLabel(type: string): string {
     "goal.paused": "Goal paused",
     "goal.resumed": "Goal resumed",
     "goal.continuation": "Goal continuation",
+    "memory.saved": "Memory saved",
+    "memory.corrected": "Memory corrected",
   };
-  return labels[type] ?? type;
+  return labels[type] ?? humanizeEventType(type);
+}
+
+function humanizeEventType(type: string): string {
+  const words = type.split(/[._-]+/).filter(Boolean);
+  if (words.length === 0) {
+    return "Event";
+  }
+  return words.map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`).join(" ");
 }

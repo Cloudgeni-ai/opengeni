@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -10,6 +10,7 @@ import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import {
+  createDocumentServices,
   DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
   searchDocuments,
@@ -3665,6 +3666,160 @@ describe("API component integration", () => {
       const pendingUpload = await pendingUploadResponse.json() as { fileId: string };
       expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: pendingUpload.fileId }))).toContain("file is pending_upload");
       expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: crypto.randomUUID() }))).toContain("File not found");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
+  test("exposes workspace memory tools through first-party MCP only when enabled and session-bound", async () => {
+    const appSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      delegationSecret: "test-delegation-secret",
+    });
+    const documentServices = createDocumentServices(appSettings);
+    const app = createApp({
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices,
+    });
+    const mcpApp = createApp({
+      settings: {
+        ...appSettings,
+        productAccessMode: "configured",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices,
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
+    const settings = {
+      ...appSettings,
+      mcpServers: [{
+        id: "opengeni",
+        name: "OpenGeni",
+        url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+        allowedTools: ["memory_search", "memory_save", "memory_correct"],
+        timeoutMs: undefined,
+        cacheToolsList: false,
+      }],
+    };
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      const access = await defaultAccessContext(app);
+      const workspaceId = access.defaultWorkspaceId!;
+      const accountId = access.defaultAccountId!;
+      const session = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "workspace memory MCP session",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: "test:mcp-memory-disabled",
+      });
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
+      await prepared.close();
+      prepared = null;
+
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: true });
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        subjectId: "test:mcp-memory-sessionless",
+      });
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
+      await prepared.close();
+      prepared = null;
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: "test:mcp-memory-enabled",
+      });
+      const memoryTools = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name).sort();
+      expect(memoryTools).toEqual(["opengeni__memory_correct", "opengeni__memory_save", "opengeni__memory_search"]);
+
+      const saved = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+        text: "Staging deploys from main only, via opengeni-ops.",
+        kind: "procedural",
+        confidence: 0.91,
+      }))) as { memory: { id: string; status: string; kind: string; createdBySessionId: string | null }; deduped: boolean };
+      expect(saved.deduped).toBe(false);
+      expect(saved.memory).toMatchObject({
+        status: "active",
+        kind: "procedural",
+        createdBySessionId: session.id,
+      });
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
+        id: saved.memory.id,
+        status: "active",
+        createdBySessionId: session.id,
+      });
+
+      const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter((event) => event.type === "memory.saved");
+      expect(saveEvents).toHaveLength(1);
+      expect(saveEvents[0]?.payload).toMatchObject({
+        memoryId: saved.memory.id,
+        kind: "procedural",
+        preview: "Staging deploys from main only, via opengeni-ops.",
+      });
+      expect(((saveEvents[0]?.payload as { preview?: string }).preview ?? "").length).toBeLessThanOrEqual(120);
+
+      const search = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_search", {
+        query: "how does staging deploy",
+        limit: 3,
+      }))) as { results: Array<{ memory: { id: string; usageCount: number }; score: number; matchType: string }> };
+      expect(search.results[0]?.memory.id).toBe(saved.memory.id);
+      expect(search.results[0]!.score).toBeGreaterThan(0);
+      expect(search.results[0]!.memory.usageCount).toBe(1);
+
+      const superseded = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
+        id: saved.memory.id.slice(0, 8),
+        reason: "Deployment branch changed",
+        replacement_text: "Staging deploys from release only, via opengeni-ops.",
+      }))) as { action: string; memory: { id: string; status: string }; replacement: { id: string; status: string } | null };
+      expect(superseded.action).toBe("superseded");
+      expect(superseded.memory.id).toBe(saved.memory.id);
+      expect(superseded.replacement?.status).toBe("active");
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
+        status: "superseded",
+        supersededById: superseded.replacement!.id,
+      });
+
+      const archived = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
+        id: superseded.replacement!.id,
+        reason: "Staging deploy process moved into a runbook.",
+      }))) as { action: string; memory: { id: string; status: string }; replacement: null };
+      expect(archived.action).toBe("archived");
+      expect(archived.memory.status).toBe("archived");
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, superseded.replacement!.id)).toMatchObject({ status: "archived" });
+
+      const correctionEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter((event) => event.type === "memory.corrected");
+      expect(correctionEvents).toHaveLength(2);
+      expect(correctionEvents[0]?.payload).toMatchObject({
+        memoryId: saved.memory.id,
+        action: "superseded",
+        reason: "Deployment branch changed",
+        replacementMemoryId: superseded.replacement!.id,
+      });
+      expect(correctionEvents[1]?.payload).toMatchObject({
+        memoryId: superseded.replacement!.id,
+        action: "archived",
+        reason: "Staging deploy process moved into a runbook.",
+      });
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);
