@@ -33,7 +33,7 @@
 import {
   accrueWarmSeconds,
   confirmDrainCold,
-  appendSessionEvents,
+  appendSessionEventToSandboxGroup,
   countQueuedTurns,
   countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
@@ -41,7 +41,6 @@ import {
   listCreditBalancesByAccount,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
-  listSessionIdsInGroup,
   persistDrainSnapshot,
   readLease,
   reapStaleLeaseHoldersGlobal,
@@ -524,13 +523,10 @@ async function terminateDrainableBox(
     // every session sharing the group's box. Best-effort: attribution must
     // never affect the drain outcome.
     try {
-      const sessionIds = await listSessionIdsInGroup(db, row.workspaceId, row.sandboxGroupId);
-      for (const sessionId of sessionIds) {
-        await appendSessionEvents(db, row.workspaceId, sessionId, [{
-          type: "sandbox.box.terminated",
-          payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
-        }]);
-      }
+      await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
+        type: "sandbox.box.terminated",
+        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
+      });
     } catch (eventError) {
       observability.warn("sandbox reaper: box-terminated event write failed (drain outcome unaffected)", {
         sandboxGroupId: row.sandboxGroupId,

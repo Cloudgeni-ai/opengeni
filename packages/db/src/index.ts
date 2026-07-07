@@ -9820,6 +9820,43 @@ export async function appendSessionEvents(db: Database, workspaceId: string, ses
   }));
 }
 
+export async function appendSessionEventToSandboxGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  input: AppendEventInput,
+): Promise<SessionEvent[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
+      .orderBy(asc(schema.sessions.createdAt))
+      .for("update");
+    if (rows.length === 0) {
+      return [];
+    }
+    const occurredAt = input.occurredAt ?? new Date();
+    const values = rows.map((row) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.id,
+      sequence: row.lastSequence + 1,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sql`${schema.sessions.lastSequence} + 1`,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return inserted.map(mapEvent);
+  }));
+}
+
 export async function appendSessionEventsAndUpdateSession(db: Database, workspaceId: string, sessionId: string, inputs: AppendEventInput[], update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
