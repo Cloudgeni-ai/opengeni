@@ -273,6 +273,11 @@ function MessageImagePreview({
 
   useEffect(() => {
     let mounted = true;
+    // Same mounted instance, new file (virtualized/reused rows): the previous
+    // attachment's url/failed/loaded must never bleed into this one.
+    setUrl(null);
+    setFailed(false);
+    setLoaded(false);
     void client.createFileDownloadUrl(workspaceId, resource.fileId)
       .then((signed) => {
         if (mounted) {

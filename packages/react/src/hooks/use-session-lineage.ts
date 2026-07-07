@@ -49,7 +49,11 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
     sessionId,
     isLineageRefreshEvent,
     refreshSoon,
-    { events: options.events, enabled },
+    // SHARED-FEED ONLY: without a caller-provided events log the trigger would
+    // open its OWN streamEvents tail — a second live SSE connection next to the
+    // session route's useSessionEvents. A caller with no feed opts into polling
+    // (pollIntervalMs), never a duplicate stream.
+    { events: options.events, enabled: enabled && options.events !== undefined },
   );
   return { lineage: state.data, loading: state.loading, error: state.error, refresh: state.refresh };
 }

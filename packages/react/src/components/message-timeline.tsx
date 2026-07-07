@@ -648,10 +648,14 @@ function WorkerCompletionRow({
   const Icon = meta.icon;
   // The worker's own report is the substance behind the fold; evidence and any
   // paused reason sit alongside it as quieter, labelled context.
+  // "Paused because" only when the outcome actually IS a pause — completion
+  // payloads can carry a leftover pausedReason/rationale from earlier in the
+  // worker's life, and a "Worker completed" card must not show a pause section.
+  const showPausedReason = item.childStatus !== "failed" && item.goalStatus === "paused" && Boolean(item.pausedReason?.trim());
   const details: { label: string; value: string; muted?: boolean }[] = [
     ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
     ...(item.evidence?.trim() ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }] : []),
-    ...(item.pausedReason?.trim() ? [{ label: "Paused because", value: item.pausedReason.trim(), muted: true }] : []),
+    ...(showPausedReason ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }] : []),
   ];
   const hasDetails = details.length > 0;
   return (
