@@ -236,6 +236,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.failed": {
         const name = typeof payload.name === "string" ? payload.name : "sandbox";
         const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
+        // Routine repository-clone operations are per-turn platform plumbing (an
+        // idempotent clone check + off-manifest token re-seed runs before EVERY
+        // turn on a repo-attached session) — rendering them reads as the agent
+        // redoing work each turn. Only failures surface, and they surface loudly:
+        // the failed event below creates its own item even without a started row.
+        if (name === "repository-clone" && status !== "failed") {
+          break;
+        }
         const existing = findOpenSandbox(items, name);
         if (existing && status !== "running") {
           existing.status = status;

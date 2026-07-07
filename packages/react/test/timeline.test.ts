@@ -444,6 +444,43 @@ describe("buildTimeline", () => {
     expect(sandbox.status).toBe("complete");
   });
 
+  test("routine repository-clone operations never render", () => {
+    // Per-turn platform plumbing (idempotent clone check + token re-seed) —
+    // rendering it every turn reads as the agent redoing work.
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "repository-clone" }),
+      event("sandbox.operation.completed", { name: "repository-clone" }),
+    ]);
+    expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
+  });
+
+  test("failed repository-clone operations still surface loudly", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "repository-clone" }),
+      event("sandbox.operation.failed", { name: "repository-clone", error: "authentication failed" }),
+    ]);
+    const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
+    expect(sandbox?.name).toBe("repository-clone");
+    expect(sandbox?.status).toBe("failed");
+    expect(sandbox?.output).toContain("authentication failed");
+  });
+
+  test("sandbox durability lifecycle events are ignored by the projection", () => {
+    // sandbox.box.* / sandbox.env.drift are observability spine events —
+    // tolerant reader: they must never render or disturb the timeline.
+    reset();
+    const items = buildTimeline([
+      event("sandbox.box.created", { hydrated: "archive" }),
+      event("sandbox.box.lost", { sandboxId: "sb-x" }),
+      event("sandbox.box.terminated", { actor: "reaper", persisted: true }),
+      event("sandbox.box.snapshot", { trigger: "turn-end" }),
+      event("sandbox.env.drift", { added: ["A"], removed: [], changed: [] }),
+    ]);
+    expect(items).toHaveLength(0);
+  });
+
   test("named output deltas route to their own operation among concurrent ones", () => {
     reset();
     const items = buildTimeline([
