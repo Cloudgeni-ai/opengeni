@@ -151,7 +151,10 @@ export function GoalSurface({
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),
-    record?.status === "completed" ? record.updatedAt : null,
+    // Freeze the clock for BOTH terminal-ish states: completed shows its final
+    // duration, paused shows time spent up to the pause (updatedAt is bumped by
+    // the pause write) — never a clock that kept counting through the pause.
+    record?.status === "completed" || record?.status === "paused" ? record.updatedAt : null,
   );
 
   // Hidden entirely when the session has no goal — the pill is a goal surface,

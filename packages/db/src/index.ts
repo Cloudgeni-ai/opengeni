@@ -4375,8 +4375,16 @@ type LineageIdRow = {
  */
 export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const root = await getSession(db, workspaceId, sessionId);
-    if (!root) {
+    // Existence check on the ALREADY-SCOPED connection — never a nested
+    // withWorkspaceRls (getSession opens its own scoped transaction, which
+    // acquires a SECOND pooled connection while this one is held; under load
+    // that is a classic pool-starvation deadlock).
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) {
       return null;
     }
 

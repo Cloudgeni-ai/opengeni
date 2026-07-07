@@ -93,7 +93,9 @@ describe("MessageTimeline — worker completions", () => {
       viewButton!.click();
       await flush();
     });
-    expect(opened).toBe(CHILD_ID);
+    // TS narrows `opened` to null here (it cannot see the callback write);
+    // widen for the matcher without weakening the runtime assertion.
+    expect(opened as string | null).toBe(CHILD_ID);
   });
 
   test("a failed child reads as a failure, a paused goal as paused", async () => {

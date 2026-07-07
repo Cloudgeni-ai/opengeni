@@ -18,7 +18,19 @@ export type UseSessionLineageResult = {
 };
 
 export function isLineageRefreshEvent(event: SessionEvent): boolean {
-  return event.type === "session.status.changed" || event.type === "session.created";
+  if (event.type === "session.status.changed" || event.type === "session.created") {
+    return true;
+  }
+  // A child's creation never appears on the PARENT's stream as session.created —
+  // the parent sees its own spawn as an agent.toolCall.* for session_create. The
+  // output event is when the child exists server-side; refreshing on created too
+  // keeps the "N agents" chip live while the spawn is still running.
+  if (event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output") {
+    const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
+    const name = typeof payload?.name === "string" ? payload.name : typeof payload?.toolName === "string" ? payload.toolName : "";
+    return name === "session_create" || name.endsWith("__session_create");
+  }
+  return false;
 }
 
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
