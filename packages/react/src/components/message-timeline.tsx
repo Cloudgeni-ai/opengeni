@@ -407,38 +407,47 @@ function TimelineGroupView({
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+          <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} bare={insideTurn} />
         </TurnSummary>
       ) : (
-        <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+        // A nested live cluster hangs on the turn's rail (bare); a top-level one
+        // owns its own rail.
+        <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} bare={insideTurn} />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
+      const body = group.groups.map((child) => (
+        <TimelineGroupView
+          key={timelineGroupKey(child)}
+          group={child}
+          renderMessageText={renderMessageText}
+          onOpenSession={onOpenSession}
+          onReconnect={onReconnect}
+          resolveProviderLogo={resolveProviderLogo}
+          toolRegistry={toolRegistry}
+          insideTurn
+        />
+      ));
       return (
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
           failureText={group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          {/* The body wears the timeline's rail language (matching ActivityRail)
-              so nested chips read as contained by the turn, not as siblings. */}
-          <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
-            {group.groups.map((child) => (
-              <TimelineGroupView
-                key={timelineGroupKey(child)}
-                group={child}
-                renderMessageText={renderMessageText}
-                onOpenSession={onOpenSession}
-                onReconnect={onReconnect}
-                resolveProviderLogo={resolveProviderLogo}
-                toolRegistry={toolRegistry}
-                insideTurn
-              />
-            ))}
-          </div>
+          {insideTurn ? (
+            // A nested turn is already on an ancestor rail — its body just stacks
+            // flush (the bare-node body already indents it), so no second rule.
+            <div className="flex flex-col gap-4">{body}</div>
+          ) : (
+            // The top-level turn draws THE rail: one thin continuous rule that
+            // every nested node and step hangs off of.
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+          )}
         </TurnSummary>
       );
     }
@@ -619,20 +628,21 @@ type WorkerCompletionMeta = {
   label: string;
   icon: ComponentType<{ className?: string }>;
   iconClass: string;
-  cardClass: string;
+  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
+  accentClass: string;
 };
 
 function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
-    return { label: "Worker failed", icon: XCircleIcon, iconClass: "text-og-status-failed", cardClass: "border-og-status-failed/40" };
+    return { label: "Worker failed", icon: XCircleIcon, iconClass: "text-og-status-failed", accentClass: "border-og-status-failed/60" };
   }
   if (item.goalStatus === "paused") {
-    return { label: "Worker paused", icon: PauseCircleIcon, iconClass: "text-og-status-waiting", cardClass: "border-og-status-waiting/35" };
+    return { label: "Worker paused", icon: PauseCircleIcon, iconClass: "text-og-status-waiting", accentClass: "border-og-status-waiting/50" };
   }
   if (item.goalStatus === "completed") {
-    return { label: "Worker completed", icon: CheckCircle2Icon, iconClass: "text-og-status-idle", cardClass: "border-og-border" };
+    return { label: "Worker completed", icon: CheckCircle2Icon, iconClass: "text-og-status-idle", accentClass: "border-og-status-idle/45" };
   }
-  return { label: "Worker reported back", icon: BotIcon, iconClass: "text-og-accent", cardClass: "border-og-border" };
+  return { label: "Worker reported back", icon: BotIcon, iconClass: "text-og-accent", accentClass: "border-og-border-strong" };
 }
 
 function WorkerCompletionRow({
@@ -660,7 +670,9 @@ function WorkerCompletionRow({
   const hasDetails = details.length > 0;
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0")}>
-      <div className={cn("flex flex-col gap-2 rounded-og-md border bg-og-surface-1 p-3", meta.cardClass)}>
+      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
+          no full frame, no surface fill. The report unfolds flush beneath. */}
+      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
         <div className="flex items-start gap-2.5">
           <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
             <Icon className="size-4" />

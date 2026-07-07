@@ -67,7 +67,7 @@ export function RawPatch({ diff }: { diff: string }) {
       <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
         raw patch (could not parse hunks)
       </p>
-      <pre className="max-h-72 overflow-auto rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-og-xs leading-5">
+      <pre className="max-h-72 overflow-auto border-l-2 border-og-border pl-3 font-og-mono text-og-xs leading-5">
         {diff.split("\n").map((line, index) => (
           <span
             key={index}

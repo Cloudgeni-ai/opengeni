@@ -80,22 +80,20 @@ describe("MessageTimeline — worker completions", () => {
   });
 
   test("deep-links into the child session on click", async () => {
-    let opened: string | null = null;
+    const opened: string[] = [];
     const events = [
       completionEvent({
         text: "done",
         childCompletion: { childSessionId: CHILD_ID, status: "idle", goal: { status: "completed", text: "ship it" } },
       }),
     ];
-    const r = await renderComponent(<MessageTimeline events={events} onOpenSession={(id) => { opened = id; }} />);
+    const r = await renderComponent(<MessageTimeline events={events} onOpenSession={(id) => { opened.push(id); }} />);
     const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) => /View session/.test(b.textContent ?? ""));
     await act(async () => {
       viewButton!.click();
       await flush();
     });
-    // TS narrows `opened` to null here (it cannot see the callback write);
-    // widen for the matcher without weakening the runtime assertion.
-    expect(opened as string | null).toBe(CHILD_ID);
+    expect(opened).toEqual([CHILD_ID]);
   });
 
   test("a failed child reads as a failure, a paused goal as paused", async () => {
