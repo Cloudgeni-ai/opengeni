@@ -65,6 +65,18 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
     taskQueue: settings.temporalTaskQueue,
     workflowsPath: options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
     activities,
+    // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
+    // after shutdown() stops polling, in-flight activities get this long to
+    // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
+    // which is what triggers agent-turn's graceful preempt (checkpoint run
+    // state -> turn.preempted{worker_shutdown} -> requeue) instead of a
+    // heartbeat-timeout worker_death. Short on purpose: a long grace here
+    // only delays the checkpoint window long turns actually need.
+    shutdownGraceTime: "5s",
+    // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
+    // wedged checkpoint force-stops here, on our terms, rather than riding
+    // into the kubelet's SIGKILL mid-DB-write.
+    shutdownForceTime: "100s",
   });
   return { worker, connection };
 }
@@ -232,6 +244,35 @@ export async function startWorker() {
       temporalTaskQueue: settings.temporalTaskQueue,
       httpPort: settings.workerHttpPort,
     });
+    // GRACEFUL DEPLOY SHUTDOWN — the missing link that made every deploy a
+    // worker_death. The worker is the container's MAIN process (PID 1), and a
+    // PID-1 process with no explicit handler IGNORES SIGTERM: the pod sat
+    // through the entire terminationGracePeriodSeconds doing nothing, then the
+    // kubelet SIGKILLed it — so agent-turn's worker-shutdown checkpoint path
+    // (turn.preempted{worker_shutdown} + run-state save) never once ran in
+    // production (forensics 2026-07-06: every observed preempt was
+    // reason=worker_death). This handler starts the drain the moment k8s asks:
+    // shutdown() stops polling, then (per shutdownGraceTime/ForceTime above)
+    // cancels in-flight activities with WORKER_SHUTDOWN so long turns
+    // checkpoint and requeue INSIDE the grace window. run() resolves once
+    // drained and the finally below closes connections cleanly.
+    let shutdownRequested = false;
+    const requestShutdown = (signal: string) => {
+      if (shutdownRequested) {
+        return;
+      }
+      shutdownRequested = true;
+      observability.info("OpenGeni worker draining (graceful shutdown)", { signal });
+      try {
+        workerBundle!.worker.shutdown();
+      } catch (error) {
+        observability.warn("worker shutdown request failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    process.on("SIGTERM", () => requestShutdown("SIGTERM"));
+    process.on("SIGINT", () => requestShutdown("SIGINT"));
     await workerBundle.worker.run();
   } finally {
     httpServer?.stop(true);
