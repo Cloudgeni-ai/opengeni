@@ -187,7 +187,7 @@ export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]
       const sectionTitle = `### ${MEMORY_KIND_SECTION_TITLES[record.kind]}`;
       cost += estimateMemoryTokens(sectionTitle) + 2; // title + blank line separator
     }
-    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET && selected.length > 0) {
+    if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) {
       break;
     }
     usedTokens += cost;

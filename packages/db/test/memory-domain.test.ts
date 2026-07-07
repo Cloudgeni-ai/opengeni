@@ -150,6 +150,19 @@ describe("renderWorkspaceMemoryBlock", () => {
     }
   });
 
+  test("does not include the first entry when it alone would exceed the token budget", () => {
+    const block = renderWorkspaceMemoryBlock([
+      record({
+        id: "99999999-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "oversized ".repeat(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET * 2),
+      }),
+    ])!;
+    expect(block).toBe(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED);
+    expect(block).not.toContain("### Facts & environment");
+    expect(block).not.toContain("[99999999]");
+  });
+
   test("pinned-first input order is preserved within its section", () => {
     const block = renderWorkspaceMemoryBlock([
       record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "preference", text: "Pinned pref.", pinned: true }),
