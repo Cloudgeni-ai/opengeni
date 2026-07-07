@@ -3678,13 +3678,6 @@ describe("API component integration", () => {
       delegationSecret: "test-delegation-secret",
     });
     const documentServices = createDocumentServices(appSettings);
-    const app = createApp({
-      settings: appSettings,
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-      documentServices,
-    });
     const mcpApp = createApp({
       settings: {
         ...appSettings,
@@ -3709,9 +3702,9 @@ describe("API component integration", () => {
     };
     let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
     try {
-      const access = await defaultAccessContext(app);
-      const workspaceId = access.defaultWorkspaceId!;
-      const accountId = access.defaultAccountId!;
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const workspaceId = grant.workspaceId;
+      const accountId = grant.accountId;
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
