@@ -52,8 +52,11 @@ import {
   summarizeForCompaction,
   ensureModalRegistryImage,
   findCompactionNeededError,
+  materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   type SandboxFileDownload,
+  type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
 } from "@opengeni/runtime";
@@ -1513,6 +1516,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);
         }
       }
+      let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
+      let fileDownloadsMaterializedForRun = false;
+      if (
+        resolvedSandbox
+        && setupBoxSession
+        && activeSandboxBackend !== "selfhosted"
+        && fileResourceDownloads.length > 0
+      ) {
+        const runAs = sandboxRunAs(runSettings);
+        const materialized = await materializeSandboxFileDownloads(setupBoxSession as any, fileResourceDownloads, {
+          onRuntimeEvent: async (event) => {
+            await publish!([{ type: event.type, payload: event.payload }], true);
+          },
+          ...(runAs ? { runAs } : {}),
+        });
+        fileMaterializationFailures = materialized.failures;
+        fileDownloadsMaterializedForRun = true;
+      }
+      const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(fileMaterializationFailures);
       // Cross-account reasoning strip: pass THIS turn's codex account so every
       // history read path (items + run-state replay) drops reasoning produced by
       // a DIFFERENT codex account. effectiveCodexCredentialId is the resolved
@@ -1534,6 +1556,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           trigger,
           runSettings,
           { currentCodexCredentialId: effectiveCodexCredentialId },
+          unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {},
         );
         runInput = prepared.input;
         // Slice index = the length of the model-facing (active) history this turn
@@ -1615,6 +1638,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // established box — never through the routing proxy, which would
                 // re-route those execs onto a machine swapped in mid-turn.
                 ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
+                ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
               },
             }
             : {}),
@@ -2049,6 +2073,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityError = error;
         await flushRuntimeBatcher();
         if (preemptTurnId) {
+          await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
+            turnId: preemptTurnId,
+            type: "turn.cancelled",
+            payload: {
+              triggerEventId: input.triggerEventId,
+              reason: error.message || "activity_cancelled",
+            },
+          }]).catch(() => undefined);
           await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
           turnMetricOutcome = "cancelled";
         }

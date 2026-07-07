@@ -5,6 +5,7 @@ import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import { classifyContextWindowOverflowError, computerToolModeForTurn, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
+import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -477,6 +478,24 @@ describe("worker shutdown preemption", () => {
   test("resume notice tells the agent to verify in-flight side effects", () => {
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("TURN RESUMED AFTER WORKER RESTART");
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("check whether it already happened");
+  });
+});
+
+describe("sandbox file materialization note", () => {
+  test("appends unavailable attachment details to model-facing text", () => {
+    const text = withUnavailableSandboxFilesNote(
+      "Analyze the attachment",
+      [
+        "The following attached files could not be loaded into the sandbox and are unavailable this turn:",
+        "- report.csv (Sandbox file resource download file-1 failed with exit code 2)",
+        "Continue without them or tell the user.",
+      ].join("\n"),
+    );
+
+    expect(text).toContain("Analyze the attachment");
+    expect(text).toContain("report.csv");
+    expect(text).toContain("failed with exit code 2");
+    expect(text).toContain("Continue without them or tell the user.");
   });
 });
 

@@ -978,11 +978,47 @@ describe("runtime event normalization", () => {
     });
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("set -eu");
+    expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("reports signed file download failures without throwing", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const result = await materializeSandboxFileDownloads({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      execCommand: async () => [
+        "Chunk ID: abc123",
+        "Wall time: 0.0000 seconds",
+        "Process exited with code 2",
+        "Output:",
+        "/bin/sh: 1: set: Illegal option -o pipefail",
+      ].join("\n"),
+    } as any, [{
+      fileId: "file-1",
+      mountPath: "files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt?sig=secret",
+      sizeBytes: 5,
+    }], {
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.filename).toBe("input.txt");
+    expect(result.failures[0]?.exitCode).toBe(2);
+    expect(result.failures[0]?.reason).toContain("failed with exit code 2");
+    expect(result.failures[0]?.reason).toContain("Illegal option");
+    expect(events.map((event) => event.type)).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    expect(events[1]?.payload.exitCode).toBe(2);
+    expect(events[1]?.payload.error).toContain("Illegal option");
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
   test("wraps sandbox clients with signed file downloads on create and resume", async () => {

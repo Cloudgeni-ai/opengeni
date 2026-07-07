@@ -287,6 +287,19 @@ export type SandboxFileDownload = {
   sizeBytes?: number;
 };
 
+export type SandboxFileDownloadFailure = {
+  fileId: string;
+  filename: string;
+  path: string;
+  reason: string;
+  exitCode?: number;
+  output?: string;
+};
+
+export type SandboxFileDownloadMaterializationResult = {
+  failures: SandboxFileDownloadFailure[];
+};
+
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
@@ -2199,6 +2212,9 @@ export type RunAgentStreamOptions = {
     // follow a swap onto a connected machine (the user's real computer), so it
     // runs against this pinned handle instead. Absent -> falls back to `session`.
     setupSession?: unknown;
+    // True when the caller already ran file-resource materialization for this
+    // provided session and threaded any failures into the model input.
+    fileDownloadsMaterialized?: boolean;
   };
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
@@ -2434,11 +2450,12 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       // command is idempotent (skips an existing file) and atomic (tmp + rename),
       // so the per-turn re-run is safe; the turn re-signs URLs each run, so a
       // re-warmed box always gets fresh links.
-      if (fileDownloads.length > 0) {
-        await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      if (fileDownloads.length > 0 && !overrides.ownedSandbox.fileDownloadsMaterialized) {
+        const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
         });
+        appendSandboxFileDownloadFailureNote(prepared, materialized.failures);
       }
     } else {
       // SELFHOSTED TOOLSPACE (parity): the platform setup hooks (repository clone,
@@ -2555,6 +2572,23 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     } as SandboxRunConfig;
   }
   return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+}
+
+function appendSandboxFileDownloadFailureNote(input: PreparedAgentInput, failures: SandboxFileDownloadFailure[]): void {
+  const note = sandboxFileDownloadFailureNote(failures);
+  if (!note) {
+    return;
+  }
+  if (typeof input.input === "string") {
+    input.input = [input.input, "", note].join("\n");
+    return;
+  }
+  if (Array.isArray(input.input)) {
+    input.input = [
+      ...input.input,
+      { type: "message", role: "user", content: note } as AgentInputItem,
+    ];
+  }
 }
 
 /**
@@ -2858,14 +2892,12 @@ export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
   context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
-): Promise<void> {
+): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
-    return;
+    return { failures: [] };
   }
-  if (!session.exec && !session.execCommand) {
-    throw new Error("Sandbox file download materialization requires command execution support");
-  }
+  const failures: SandboxFileDownloadFailure[] = [];
   for (const download of normalizedDownloads) {
     const targetPath = sandboxDownloadTargetPath(download);
     const payload = {
@@ -2875,8 +2907,22 @@ export async function materializeSandboxFileDownloads(
       expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
     };
     await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload: { name: "file-resource-download", ...payload } });
+    if (!session.exec && !session.execCommand) {
+      const failure = sandboxFileDownloadFailure(download, targetPath, "Sandbox file download materialization requires command execution support");
+      failures.push(failure);
+      await context.onRuntimeEvent?.({
+        type: "sandbox.operation.failed",
+        payload: {
+          name: "file-resource-download",
+          ...payload,
+          error: failure.reason,
+        },
+      });
+      continue;
+    }
+    let result: unknown;
     try {
-      const result = session.exec
+      result = session.exec
         ? await session.exec({
           cmd: sandboxFileDownloadCommand(download, targetPath),
           workdir: "/workspace",
@@ -2894,17 +2940,50 @@ export async function materializeSandboxFileDownloads(
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
       await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { name: "file-resource-download", ...payload } });
     } catch (error) {
+      const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
+      failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
         payload: {
           name: "file-resource-download",
           ...payload,
-          error: error instanceof Error ? error.message : String(error),
+          error: failure.reason,
+          ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+          ...(failure.output ? { output: failure.output } : {}),
         },
       });
-      throw error;
     }
   }
+  return { failures };
+}
+
+function sandboxFileDownloadFailure(
+  download: SandboxFileDownload,
+  targetPath: string,
+  error: unknown,
+  result?: unknown,
+): SandboxFileDownloadFailure {
+  const exitCode = sandboxCommandExitCode(result);
+  const output = sandboxCommandOutput(result);
+  return {
+    fileId: download.fileId,
+    filename: download.filename,
+    path: targetPath,
+    reason: error instanceof Error ? error.message : String(error),
+    ...(exitCode !== null ? { exitCode } : {}),
+    ...(output ? { output } : {}),
+  };
+}
+
+export function sandboxFileDownloadFailureNote(failures: SandboxFileDownloadFailure[]): string {
+  if (failures.length === 0) {
+    return "";
+  }
+  return [
+    "The following attached files could not be loaded into the sandbox and are unavailable this turn:",
+    ...failures.map((failure) => `- ${failure.filename} (${failure.reason})`),
+    "Continue without them or tell the user.",
+  ].join("\n");
 }
 
 export function sandboxFileDownloadsForAgent(agent: unknown): SandboxFileDownload[] {
@@ -3367,7 +3446,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
   const targetDir = posixPath.dirname(targetPath);
   const tmpPath = `${targetPath}.opengeni-download-$$`;
   return [
-    "set -euo pipefail",
+    "set -eu",
     `mkdir -p -- ${shellQuote(targetDir)}`,
     `if [ ! -f ${shellQuote(targetPath)} ]; then`,
     `  tmp=${shellQuote(tmpPath)}`,
@@ -3885,6 +3964,10 @@ export function sandboxCommandExitCode(result: unknown): number | null {
 }
 
 export function sandboxCommandOutput(result: unknown): string {
+  if (typeof result === "string") {
+    const outputIndex = result.indexOf("Output:");
+    return outputIndex >= 0 ? result.slice(outputIndex + "Output:".length).trim() : result.trim();
+  }
   if (!result || typeof result !== "object") {
     return "";
   }
@@ -3905,7 +3988,7 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(output || `${operation} failed with exit code ${exitCode}`);
+    throw new Error(`${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`);
   }
   if (exitCode === null) {
     throw new Error(output || `${operation} did not return a command exit code`);

@@ -134,6 +134,10 @@ export type PreparedTurnInput = {
   modelHistoryFromItems: boolean;
 };
 
+export type TurnInputOptions = {
+  unavailableSandboxFilesNote?: string;
+};
+
 export async function turnInput(
   db: Database,
   runtime: OpenGeniRuntime,
@@ -141,6 +145,7 @@ export async function turnInput(
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
   settings?: Settings,
   current: TurnCodexAccount = NON_CODEX_TURN,
+  options: TurnInputOptions = {},
 ): Promise<PreparedTurnInput> {
   if (!trigger) {
     throw new Error("Missing trigger event");
@@ -156,7 +161,7 @@ export async function turnInput(
       payload.text,
       Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
     );
-    return await messageInput(db, runtime, agent, trigger, text, settings, current);
+    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(text, options.unavailableSandboxFilesNote), settings, current);
   }
   if (trigger.type === "goal.continuation") {
     const payload = trigger.payload as { text?: unknown };
@@ -165,7 +170,7 @@ export async function turnInput(
     }
     // Threading the stored conversation keeps the agent's full context across
     // continuations — this is what makes "keep working" coherent.
-    return await messageInput(db, runtime, agent, trigger, payload.text, settings, current);
+    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote), settings, current);
   }
   if (trigger.type === "turn.preempted") {
     const payload = trigger.payload as { text?: unknown };
@@ -175,7 +180,7 @@ export async function turnInput(
     // A turn re-entering after a graceful worker shutdown checkpointed it
     // mid-flight: thread the stored conversation (which includes the turn's
     // original input and its progress so far) behind a resume notice.
-    return await messageInput(db, runtime, agent, trigger, payload.text, settings, current);
+    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote), settings, current);
   }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
@@ -208,6 +213,11 @@ export async function turnInput(
     };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
+}
+
+export function withUnavailableSandboxFilesNote(text: string, note?: string): string {
+  const trimmed = note?.trim();
+  return trimmed ? [text, "", trimmed].join("\n") : text;
 }
 
 /**
