@@ -10,7 +10,7 @@
 // into a rendered string.
 import type { UseGoalResult } from "@opengeni/react";
 import { useSessionLineage } from "@opengeni/react";
-import type { LineageNode, SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type { LineageNode, SessionEvent, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import {
   BotIcon,
@@ -432,18 +432,16 @@ function SubagentRow({
 
 export function SessionAgentsChip({
   workspaceId,
-  sessionId,
-  events,
+  nodes,
+  loading = false,
 }: {
   workspaceId: string;
-  sessionId: string;
-  /** Shared event feed when available; the header self-streams lineage without it. */
-  events?: SessionEvent[] | undefined;
+  /** Direct children; presentational — the header owns the single lineage read. */
+  nodes: LineageNode[];
+  loading?: boolean | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const lineage = useSessionLineage(sessionId, events ? { events } : {});
-  const children = lineage.lineage?.children ?? [];
-  const count = children.length;
+  const count = nodes.length;
   if (count === 0) {
     return null;
   }
@@ -472,12 +470,7 @@ export function SessionAgentsChip({
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
           )}
         >
-          <SubagentSection
-            workspaceId={workspaceId}
-            lineage={children}
-            loading={lineage.loading && count === 0}
-            onNavigate={() => setOpen(false)}
-          />
+          <SubagentSection workspaceId={workspaceId} lineage={nodes} loading={loading} onNavigate={() => setOpen(false)} />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -488,17 +481,12 @@ export function SessionAgentsChip({
 
 export function SpawnedByBreadcrumb({
   workspaceId,
-  sessionId,
-  events,
+  parent,
 }: {
   workspaceId: string;
-  sessionId: string;
-  /** Shared event feed when available; the header self-streams lineage without it. */
-  events?: SessionEvent[] | undefined;
+  /** The direct parent (last ancestor), or null when this session has none. */
+  parent: SessionSummary | null;
 }): ReactNode {
-  const lineage = useSessionLineage(sessionId, events ? { events } : {});
-  const ancestors = lineage.lineage?.ancestors ?? [];
-  const parent = ancestors[ancestors.length - 1];
   if (!parent) {
     return null;
   }
