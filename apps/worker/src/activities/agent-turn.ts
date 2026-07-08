@@ -1766,19 +1766,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
             },
           );
-          const runFacing = lazyOwnedSandbox
-            ? {
-              ...provisioned,
-              established: {
-                ...provisioned.established,
-                session: lazyOwnedSandbox.session,
-              },
-            }
-            : provisioned;
-          resolvedSandbox = runFacing;
-          startLeaseHeartbeat(runFacing, activeSandboxBackend ?? groupBoxBackend);
-          await maybeStartOnTurnRecording(runFacing, activeSandboxBackend);
-          return runFacing;
+          // Return the REAL established box (NOT a copy whose session is the routing
+          // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
+          // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
+          // provisioner.get() -> proxy.exec -> ... loops forever (an async infinite
+          // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
+          // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
+          // gets per-op routing; the worker-side handle (resolvedSandbox: release,
+          // heartbeat, on-turn recording) wants the real box, unproxied.
+          resolvedSandbox = provisioned;
+          startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
+          await maybeStartOnTurnRecording(provisioned, activeSandboxBackend);
+          return provisioned;
         }, {
           onStarted: async () => {
             await publish?.([{ type: "sandbox.operation.started", payload: { name: "sandbox.provision" } }], true);

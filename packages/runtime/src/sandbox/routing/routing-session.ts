@@ -257,6 +257,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
     const fromEpoch = this.cachedEpoch ?? pointer.activeEpoch;
     const resolved = await this.deps.resolveActiveBackend(pointer);
+    // Re-entrancy guard: a resolver that returns THIS proxy as the active backend
+    // makes every op (exec/readFile/…) dispatch back into resolve() -> the same
+    // backend -> forever (a silent async infinite recursion that HANGS the turn,
+    // not a stack overflow). Fail loud instead — a wiring bug must surface as a
+    // legible error, never a hung turn.
+    if ((resolved.session as unknown) === this) {
+      throw new Error(
+        "RoutingSandboxSession.resolveActiveBackend returned the proxy itself as the active backend (re-entrancy) — the resolver must return the underlying box session, not the routing proxy.",
+      );
+    }
     this.cachedEpoch = pointer.activeEpoch;
     this.cached = resolved;
     this.lastResolved = resolved;
