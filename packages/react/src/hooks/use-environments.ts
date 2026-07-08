@@ -4,7 +4,7 @@ import type {
   VariableSet,
   VariableSetVariableMetadata,
 } from "@opengeni/sdk";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
@@ -123,17 +123,20 @@ export type UseEnvironmentsOptions = UseVariableSetsOptions;
 export type UseEnvironmentsResult = UseVariableSetsResult & { environments: VariableSet[] };
 /** @deprecated use useVariableSets */
 export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnvironmentsResult {
-  const legacyClient = options.client
-    ? {
-      ...options.client,
-      listVariableSets: options.client.listVariableSets ?? options.client.listEnvironments,
-      createVariableSet: options.client.createVariableSet ?? options.client.createEnvironment,
-      updateVariableSet: options.client.updateVariableSet ?? options.client.updateEnvironment,
-      deleteVariableSet: options.client.deleteVariableSet ?? options.client.deleteEnvironment,
-      setVariableSetVariable: options.client.setVariableSetVariable ?? options.client.setEnvironmentVariable,
-      deleteVariableSetVariable: options.client.deleteVariableSetVariable ?? options.client.deleteEnvironmentVariable,
+  const legacyClient = useMemo(() => {
+    if (!options.client) {
+      return undefined;
     }
-    : undefined;
+    return {
+      ...options.client,
+      listVariableSets: options.client.listEnvironments ?? options.client.listVariableSets,
+      createVariableSet: options.client.createEnvironment ?? options.client.createVariableSet,
+      updateVariableSet: options.client.updateEnvironment ?? options.client.updateVariableSet,
+      deleteVariableSet: options.client.deleteEnvironment ?? options.client.deleteVariableSet,
+      setVariableSetVariable: options.client.setEnvironmentVariable ?? options.client.setVariableSetVariable,
+      deleteVariableSetVariable: options.client.deleteEnvironmentVariable ?? options.client.deleteVariableSetVariable,
+    };
+  }, [options.client]);
   const result = useVariableSets({ ...options, ...(legacyClient ? { client: legacyClient } : {}) });
   return { ...result, environments: result.variableSets };
 }

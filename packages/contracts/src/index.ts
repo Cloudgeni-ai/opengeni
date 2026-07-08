@@ -2001,9 +2001,9 @@ export const ScheduledTask = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
   reusableSessionId: z.string().uuid().nullable(),
-  variableSetId: z.string().uuid().nullable(),
+  variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
-  environmentId: z.string().uuid().nullable(),
+  environmentId: z.string().uuid().nullable().default(null),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -2600,9 +2600,9 @@ export const Session = z.object({
   // stale in-flight op and retry against the new active sandbox.
   activeSandboxId: z.string().uuid().nullable(),
   activeEpoch: z.number().int().nonnegative(),
-  variableSetId: z.string().uuid().nullable(),
+  variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
-  environmentId: z.string().uuid().nullable(),
+  environmentId: z.string().uuid().nullable().default(null),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
