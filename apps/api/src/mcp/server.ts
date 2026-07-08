@@ -911,72 +911,86 @@ function registerVariableSetTools(
   can: (permission: Permission) => boolean,
   json: JsonResult,
 ): void {
-  if (can("variable-sets:use")) {
-    server.registerTool("variableSet_list", {
-      description: "List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
+  const registerListTool = (name: string, description: string): void => {
+    server.registerTool(name, {
+      description,
       inputSchema: {},
     }, async () => json({ variableSets: await listVariableSets(deps.db, grant.workspaceId) }));
-  }
-
-  if (can("variable-sets:manage")) {
-    server.registerTool("variableSet_set_variable", {
-      description: "Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.",
+  };
+  const setVariableHandler = async ({ variableSetId, variableSetName, name, value }: {
+    variableSetId?: string | undefined;
+    variableSetName?: string | undefined;
+    name: string;
+    value: string;
+  }) => {
+    const key = requireVariableSetEncryption(deps.settings);
+    const parsedName = VariableSetVariableName.safeParse(name);
+    if (!parsedName.success) {
+      throw new Error("variable set variable names must match ^[A-Z][A-Z0-9_]*$");
+    }
+    assertAllowedVariableSetVariableName(parsedName.data);
+    if ((variableSetId === undefined) === (variableSetName === undefined)) {
+      throw new Error("provide exactly one of variableSetId or variableSetName");
+    }
+    const trimmedVariableSetName = variableSetName?.trim();
+    if (variableSetName !== undefined && !trimmedVariableSetName) {
+      throw new Error("variable set name is required");
+    }
+    let created = false;
+    let variableSet = variableSetId !== undefined
+      ? await getVariableSet(deps.db, grant.workspaceId, variableSetId)
+      : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+    if (!variableSet && variableSetId !== undefined) {
+      throw new Error("variable set not found");
+    }
+    if (!variableSet) {
+      if (await countVariableSets(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+        throw new Error(`a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`);
+      }
+      variableSet = await createVariableSet(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        name: trimmedVariableSetName!,
+      });
+      created = true;
+      await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.created", variableSetId: variableSet.id });
+    }
+    const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
+    if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
+      throw new Error(`a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
+    }
+    const metadata = await setVariableSetVariable(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      variableSetId: variableSet.id,
+      name: parsedName.data,
+      valueEncrypted: encryptVariableSetValue(key, value),
+    });
+    await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.variable.set", variableSetId: variableSet.id, variableName: parsedName.data });
+    return json({
+      variableSet: { id: variableSet.id, name: variableSet.name, created },
+      variable: metadata,
+    });
+  };
+  const registerSetTool = (name: string, description: string): void => {
+    server.registerTool(name, {
+      description,
       inputSchema: {
         variableSetId: z4.string().uuid().optional(),
         variableSetName: z4.string().min(1).optional(),
         name: z4.string().min(1),
         value: z4.string().min(1).max(32768),
       },
-    }, async ({ variableSetId, variableSetName, name, value }) => {
-      const key = requireVariableSetEncryption(deps.settings);
-      const parsedName = VariableSetVariableName.safeParse(name);
-      if (!parsedName.success) {
-        throw new Error("variable set variable names must match ^[A-Z][A-Z0-9_]*$");
-      }
-      assertAllowedVariableSetVariableName(parsedName.data);
-      if ((variableSetId === undefined) === (variableSetName === undefined)) {
-        throw new Error("provide exactly one of variableSetId or variableSetName");
-      }
-      const trimmedVariableSetName = variableSetName?.trim();
-      if (variableSetName !== undefined && !trimmedVariableSetName) {
-        throw new Error("variable set name is required");
-      }
-      let created = false;
-      let variableSet = variableSetId !== undefined
-        ? await getVariableSet(deps.db, grant.workspaceId, variableSetId)
-        : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
-      if (!variableSet && variableSetId !== undefined) {
-        throw new Error("variableSet not found");
-      }
-      if (!variableSet) {
-        if (await countVariableSets(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
-          throw new Error(`a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`);
-        }
-        variableSet = await createVariableSet(deps.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          name: trimmedVariableSetName!,
-        });
-        created = true;
-        await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.created", variableSetId: variableSet.id });
-      }
-      const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
-      if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-        throw new Error(`an variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
-      }
-      const metadata = await setVariableSetVariable(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        variableSetId: variableSet.id,
-        name: parsedName.data,
-        valueEncrypted: encryptVariableSetValue(key, value),
-      });
-      await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.variable.set", variableSetId: variableSet.id, variableName: parsedName.data });
-      return json({
-        variableSet: { id: variableSet.id, name: variableSet.name, created },
-        variable: metadata,
-      });
-    });
+    }, setVariableHandler);
+  };
+  if (can("variable-sets:use")) {
+    registerListTool("variable_set_list", "List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.");
+    registerListTool("environment_list", "(deprecated alias of variable_set_list) List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.");
+  }
+
+  if (can("variable-sets:manage")) {
+    registerSetTool("variable_set_set_variable", "Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.");
+    registerSetTool("environment_set_variable", "(deprecated alias of variable_set_set_variable) Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.");
   }
 }
 

@@ -32,15 +32,20 @@ import {
 
 export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
+  const prefixes = [
+    "/v1/workspaces/:workspaceId/variable-sets",
+    "/v1/workspaces/:workspaceId/environments",
+  ];
 
-  app.get("/v1/workspaces/:workspaceId/variable-sets", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  for (const prefix of prefixes) {
+  app.get(`${prefix}`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     await requireAccessGrant(c, deps, workspaceId, "variable-sets:use");
     return c.json(await listVariableSets(db, workspaceId));
   });
 
-  app.post("/v1/workspaces/:workspaceId/variable-sets", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.post(`${prefix}`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
     const key = requireVariableSetEncryption(settings);
     const payload = CreateVariableSetRequest.parse(await c.req.json());
@@ -78,16 +83,16 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(created, 201);
   });
 
-  app.get("/v1/workspaces/:workspaceId/variable-sets/:variableSetId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.get(`${prefix}/:variableSetId`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     await requireAccessGrant(c, deps, workspaceId, "variable-sets:use");
-    return c.json(await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")));
+    return c.json(await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!));
   });
 
-  app.patch("/v1/workspaces/:workspaceId/variable-sets/:variableSetId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.patch(`${prefix}/:variableSetId`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
-    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId"));
+    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!);
     const payload = UpdateVariableSetRequest.parse(await c.req.json());
     const name = payload.name !== undefined ? trimmedVariableSetName(payload.name) : undefined;
     if (name !== undefined && name !== variableSet.name) {
@@ -104,10 +109,10 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(updated);
   });
 
-  app.delete("/v1/workspaces/:workspaceId/variable-sets/:variableSetId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.delete(`${prefix}/:variableSetId`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
-    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId"));
+    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!);
     const attachedTasks = await countScheduledTasksUsingVariableSet(db, workspaceId, variableSet.id);
     if (attachedTasks > 0) {
       throw new HTTPException(409, { message: `variable set is attached to ${attachedTasks} scheduled task(s); detach first` });
@@ -121,12 +126,12 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ ok: true });
   });
 
-  app.put("/v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.put(`${prefix}/:variableSetId/variables/:name`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
     const key = requireVariableSetEncryption(settings);
-    const name = parseVariableName(c.req.param("name"));
-    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId"));
+    const name = parseVariableName(c.req.param("name")!);
+    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!);
     const payload = SetVariableSetVariableRequest.parse(await c.req.json());
     const exists = variableSet.variables.some((variable) => variable.name === name);
     if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
@@ -143,11 +148,11 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(metadata);
   });
 
-  app.delete("/v1/workspaces/:workspaceId/variable-sets/:variableSetId/variables/:name", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  app.delete(`${prefix}/:variableSetId/variables/:name`, async (c) => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "variable-sets:manage");
-    const name = parseVariableName(c.req.param("name"));
-    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId"));
+    const name = parseVariableName(c.req.param("name")!);
+    const variableSet = await requireVariableSetForApi(db, workspaceId, c.req.param("variableSetId")!);
     const deleted = await deleteVariableSetVariable(db, workspaceId, variableSet.id, name);
     if (!deleted) {
       throw new HTTPException(404, { message: "variable set variable not found" });
@@ -155,6 +160,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     await recordVariableSetAuditEvent(db, { grant, action: "variable_set.variable.deleted", variableSetId: variableSet.id, variableName: name });
     return c.json({ ok: true });
   });
+  }
 }
 
 /** @deprecated use registerVariableSetRoutes */
