@@ -32,7 +32,7 @@ const aliasAllow = [
   /^packages\/core\/src\/access\/index\.ts$/,
   /^packages\/core\/src\/domain\/environments\.ts$/,
   /^packages\/db\/drizzle\/0004_workspace_environments\.sql$/,
-  /^packages\/db\/drizzle\/0045_variable_sets_rename\.sql$/,
+  /^packages\/db\/drizzle\/0046_variable_sets_rename\.sql$/,
   /^packages\/db\/src\/environment-crypto\.ts$/,
   /^packages\/db\/test\/environment-crypto\.test\.ts$/,
   /^packages\/sdk\/src\/client\.ts$/,
@@ -48,7 +48,7 @@ const rules: Rule[] = [
     pattern: /\b(workspace_environments|workspace_environment_variables|environment_id|sessions_environment_idx|scheduled_tasks_environment_idx)\b/,
     allow: [
       /^packages\/db\/drizzle\/0004_workspace_environments\.sql$/,
-      /^packages\/db\/drizzle\/0045_variable_sets_rename\.sql$/,
+      /^packages\/db\/drizzle\/0046_variable_sets_rename\.sql$/,
       /^packages\/db\/drizzle\/0024_codex_subscription_credentials\.sql$/,
       /^packages\/db\/src\/environment-crypto\.ts$/,
       /^packages\/db\/test\/environment-crypto\.test\.ts$/,
