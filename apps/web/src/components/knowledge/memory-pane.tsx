@@ -126,10 +126,17 @@ export function MemoryPane({
   // status/kind, and align the browse filters so it comes into view. Filter
   // changes ride the effect above (which refetches the list).
   useEffect(() => {
-    if (!focusMemoryId) return;
+    if (!focusMemoryId) {
+      // The deep-link was cleared (or we switched workspace): drop any pending
+      // focus so a stale id can't highlight or inject into the new list.
+      setPendingFocusId(null);
+      setFocusFallback(null);
+      return;
+    }
     let cancelled = false;
     setSearchResults(null);
     setPendingFocusId(focusMemoryId);
+    setFocusFallback(null);
     void (async () => {
       try {
         const record = await client.getKnowledgeMemory(workspaceId, focusMemoryId);
@@ -160,12 +167,14 @@ export function MemoryPane({
       setPendingFocusId(null);
       return;
     }
-    if (focusFallback && focusFallback.id === pendingFocusId) {
+    // Inject the fetched copy only when it belongs to THIS workspace — guard
+    // against a fallback fetched for a workspace we've since navigated away from.
+    if (focusFallback && focusFallback.id === pendingFocusId && focusFallback.workspaceId === workspaceId) {
       setMemories((current) =>
         current.some((item) => item.id === pendingFocusId) ? current : sortMemories([focusFallback, ...current]),
       );
     }
-  }, [pendingFocusId, loading, memories, searchResults, focusFallback]);
+  }, [pendingFocusId, loading, memories, searchResults, focusFallback, workspaceId]);
 
   // The highlight ring is transient — fade it after ~2s.
   useEffect(() => {
