@@ -490,6 +490,9 @@ export async function resumeBoxForTurn(
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
             leaseTtlMs,
+            // Keep the warming budget after create(): display-stack + port +
+            // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
+            warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
           });
           if (!recorded.recorded) {
             throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);

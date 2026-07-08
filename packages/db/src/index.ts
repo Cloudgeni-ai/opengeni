@@ -6696,16 +6696,23 @@ export async function recordWarmingSandboxCreated(db: Database, input: {
   resumeBackendId?: string | null;
   resumeState?: Record<string, unknown> | null;
   leaseTtlMs: number;
+  /** The still-WARMING lease must keep the warming budget after create() returns:
+   *  the spawner has yet to run display-stack setup, port expose, and
+   *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
+   *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
+   *  for legacy callers/tests. */
+  warmingLeaseTtlMs?: number;
 }): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
+      const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
           instance_id       = ${input.instanceId},
           resume_backend_id = ${input.resumeBackendId ?? null},
           resume_state      = ${resumeStateJson}::jsonb,
-          expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
+          expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
           updated_at        = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
@@ -6744,8 +6751,15 @@ export async function failWarmingToCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
@@ -7192,8 +7206,15 @@ export async function confirmDrainCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
