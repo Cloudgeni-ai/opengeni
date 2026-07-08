@@ -281,6 +281,7 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
               onActivate={() => setWarmTerminal(true)}
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
+              liveness={liveness}
               {...(xtermTheme ? { theme: xtermTheme } : {})}
             />
           </div>

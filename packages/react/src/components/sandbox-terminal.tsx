@@ -3,14 +3,38 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
+import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
+import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 
-/** A subset of xterm.js's ITheme — the tokens worth themeing from a host app. */
+/**
+ * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
+ * cell with is present so it never falls back to its stock VGA palette). Built
+ * from the og tokens via `xtermThemeFromTokens`.
+ */
 export type XtermTheme = {
   background?: string;
   foreground?: string;
   cursor?: string;
   cursorAccent?: string;
   selectionBackground?: string;
+  selectionForeground?: string;
+  selectionInactiveBackground?: string;
+  black?: string;
+  red?: string;
+  green?: string;
+  yellow?: string;
+  blue?: string;
+  magenta?: string;
+  cyan?: string;
+  white?: string;
+  brightBlack?: string;
+  brightRed?: string;
+  brightGreen?: string;
+  brightYellow?: string;
+  brightBlue?: string;
+  brightMagenta?: string;
+  brightCyan?: string;
+  brightWhite?: string;
 };
 
 export type SandboxTerminalProps = {
@@ -26,9 +50,21 @@ export type SandboxTerminalProps = {
    * (`result.chunks`). Omit to force the legacy firehose-only behavior.
    */
   terminalCapability?: TerminalCapability | null | undefined;
+  /**
+   * Full xterm theme. When omitted the terminal self-derives it from the `--og-*`
+   * tokens of its own container (correct even inside a nested `data-og-theme`
+   * subtree). Passing it lets the host drive re-theme on a theme flip.
+   */
   theme?: XtermTheme | undefined;
   fontFamily?: string | undefined;
   fontSize?: number | undefined;
+  /**
+   * Lease liveness (`cold` | `warming` | `warm` | `draining`). Drives the
+   * boot-in-terminal status lines: once the user has focused the terminal and
+   * the box is not yet warm, a styled "● waking machine — Ns…" line is rendered
+   * INSIDE xterm (no overlay/spinner) until the live PTY connects.
+   */
+  liveness?: string | undefined;
   /**
    * Force read-only even when the PTY accepts stdin. Default: interactive
    * whenever a live pty-ws stream is connected OR `result.write !== null` (the box
@@ -64,21 +100,66 @@ type XtermLike = {
   dispose: () => void;
   cols: number;
   rows: number;
-  options: { theme?: XtermTheme; disableStdin?: boolean };
+  options: {
+    theme?: XtermTheme;
+    disableStdin?: boolean;
+    cursorBlink?: boolean;
+    fontFamily?: string;
+    fontSize?: number;
+  };
 };
 type FitAddonLike = { fit: () => void };
 
+/** Debug seam (dev/evidence only, never a typed public API): a global hook the
+ *  screenshot harness reads to probe the settled renderer tier + resolved font
+ *  without mounting a real WebGL context in unit tests. */
+type TerminalDebugInfo = {
+  renderer: RendererTier | null;
+  fontFamily: string | undefined;
+  fontSize: number | undefined;
+  hasVarInFont: boolean;
+  theme: XtermTheme | undefined;
+};
+declare global {
+  // eslint-disable-next-line no-var
+  var __OG_TERMINAL_DEBUG__: ((info: TerminalDebugInfo) => void) | undefined;
+  // A space/comma list of renderer tiers to force-fail, so the demo can prove the
+  // WebGL→canvas→DOM fallback ladder without a real GPU context loss.
+  // eslint-disable-next-line no-var
+  var __OG_FORCE_RENDERER_FAIL__: string | undefined;
+}
+
+/** Which renderer tiers are force-failed (demo/evidence only). */
+function forcedRendererFailures(): Set<RendererTier> {
+  const raw = typeof globalThis !== "undefined" ? globalThis.__OG_FORCE_RENDERER_FAIL__ : undefined;
+  const set = new Set<RendererTier>();
+  if (typeof raw === "string") {
+    for (const tier of raw.split(/[\s,]+/)) {
+      if (tier === "webgl" || tier === "canvas") set.add(tier);
+    }
+  }
+  return set;
+}
+
 /**
  * An xterm.js terminal fed by the Channel-A event projection
- * (`useSandboxTerminal`). xterm + the fit + web-links addons are lazy-imported
+ * (`useSandboxTerminal`) or a live ttyd PTY. xterm + its addons are lazy-imported
  * inside an effect, so SSR renders the placeholder and the terminal mounts on
- * hydration. Output chunks are written incrementally (tracking a written-cursor
- * by chunk id so a re-render never re-writes). When `result.write` is non-null
- * and not forced read-only, keystrokes pipe back through the PTY.
+ * hydration.
+ *
+ * Renderer: WebGL (GPU-composited cells) with a canvas → DOM fallback ladder
+ * (`attachRenderer`), so bursty output stays smooth but a lost/blocklisted
+ * context degrades gracefully. Font + theme are resolved to CONCRETE values
+ * from the og tokens BEFORE construction (xterm measures glyphs in a canvas
+ * where `var()` never resolves, and colors every cell from a full ANSI palette).
+ *
+ * The terminal is mounted ONCE and its data source is swapped in place: the
+ * read-only firehose (`result.chunks`) → the live PTY. Stdin is toggled via
+ * `term.options.disableStdin` at runtime (not a remount), so scrollback and the
+ * visible screen survive the projection→PTY handoff.
  *
  * Resizes are tracked with a `ResizeObserver` on the container (not just
- * `window.resize`) so dragging the dock handle refits the grid instead of
- * leaving the terminal mis-sized.
+ * `window.resize`) so dragging the dock handle refits the grid.
  */
 export function SandboxTerminal({
   result,
@@ -86,6 +167,7 @@ export function SandboxTerminal({
   theme,
   fontFamily,
   fontSize,
+  liveness,
   readOnly,
   placeholder,
   showHeader,
@@ -96,16 +178,14 @@ export function SandboxTerminal({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XtermLike | null>(null);
   const fitRef = useRef<FitAddonLike | null>(null);
+  const rendererRef = useRef<RendererTier | null>(null);
   const writtenRef = useRef<Set<string>>(new Set());
+  const wroteFirehoseRef = useRef(false);
+  const bootActiveRef = useRef(false);
   const [ready, setReady] = useState(false);
+  const [activated, setActivated] = useState(false);
 
   // ── Interactive transport switch ─────────────────────────────────────────────
-  // The interactive terminal is a REAL bidirectional PTY (ttyd over the Modal
-  // tunnel) WHENEVER the Terminal cell advertises `transport: "pty-ws"` + a live
-  // `url`; the ttyd socket then OWNS the screen (input + output both ride it). On
-  // a cold box / sse-events cell, `useTerminalStream` stays idle and we fall back
-  // to the read-only Channel-A command-output firehose (`result.chunks`) — with
-  // the legacy `result.write` (ptyWrite-over-HTTP) as the only stdin path there.
   const ptyWs = terminalCapability?.transport === "pty-ws" && Boolean(terminalCapability?.url);
   // Output frames buffer here until xterm has mounted; the write effect drains it.
   const ptyOutputQueueRef = useRef<string[]>([]);
@@ -124,48 +204,49 @@ export function SandboxTerminal({
     },
   });
 
-  // PTY mode = a live ttyd socket drives the screen. In PTY mode the screen is
-  // owned by the websocket (we must NOT replay the SSE firehose into it — that
-  // double-writes the agent's command output on top of the live PTY). Firehose
-  // mode = the read-only projection (or the legacy HTTP-write fallback).
+  // PTY mode = a live ttyd socket drives the screen. Firehose mode = the
+  // read-only projection (or the legacy HTTP-write fallback).
   const ptyMode = ptyWs && ptyStream.status !== "closed";
-  // Interactive (stdin enabled) when a live PTY socket is connected, OR (legacy
-  // fallback) the projection exposed an HTTP write fn. `readOnly` forces off.
   const interactive = !readOnly && (ptyMode || result.write !== null);
 
-  // Mount xterm once (client-only). Re-mounts only when the interactive flag
-  // flips (stdin enable/disable is a construction param on xterm).
+  // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
+  // status lines INSIDE xterm instead of an overlay — but only when there is no
+  // firehose transcript to show yet (otherwise the projected output is shown).
+  const warm = liveness === "warm" || liveness === "draining";
+  const booting = activated && !ptyMode && !warm && liveness != null && result.chunks.length === 0;
+
+  function handleActivate() {
+    if (!activated) setActivated(true);
+    onActivate?.();
+  }
+
+  // Mount xterm once (client-only). Never re-mounts on interactive/theme flips —
+  // stdin + theme are runtime options synced by the effects below, so the visible
+  // screen survives the projection→PTY handoff (E5).
   useEffect(() => {
     if (typeof window === "undefined") return;
     const el = containerRef.current;
     if (!el) return;
     let disposed = false;
 
-    // Wait for the container to have a real measured size before opening xterm.
-    // If `term.open()` runs while the panel is 0-wide (tab still mounting, dock
-    // mid-resize), xterm renders at its 80×24 fallback and the first frame's
-    // grid is rasterized into the canvas; a later fit reflows the text but the
-    // stale first paint lingers as a `]]]bbb` smear on the top row. Gating the
-    // open on a non-zero size removes that first wrong-width render entirely.
-    const waitForSize = (el: HTMLElement) =>
+    // Wait for a real measured size before opening xterm so the first fit is at
+    // the true width (belt-and-braces with the visibility gate below).
+    const waitForSize = (node: HTMLElement) =>
       new Promise<void>((resolve) => {
-        if (el.clientWidth > 0 && el.clientHeight > 0) return resolve();
+        if (node.clientWidth > 0 && node.clientHeight > 0) return resolve();
         const ro = new ResizeObserver(() => {
-          if (el.clientWidth > 0 && el.clientHeight > 0) {
+          if (node.clientWidth > 0 && node.clientHeight > 0) {
             ro.disconnect();
             resolve();
           }
         });
-        ro.observe(el);
-        // Safety: never hang if the observer somehow never fires.
+        ro.observe(node);
         setTimeout(() => {
           ro.disconnect();
           resolve();
         }, 1000);
       });
 
-    // Inject xterm's structural CSS before the first open so the helper-textarea
-    // ghost is clipped from frame one (no top-left input box flash).
     ensureXtermBaseCss();
 
     void (async () => {
@@ -177,32 +258,68 @@ export function SandboxTerminal({
       if (disposed) return;
       await waitForSize(el);
       if (disposed) return;
+
+      // Resolve font + theme to CONCRETE values BEFORE construction. `var()` in a
+      // font family never resolves in xterm's canvas measurement, so we read the
+      // computed `--og-font-mono` here; the theme is a full ANSI palette.
+      const font = resolveTerminalFont(el, { fontFamily, fontSize });
+      const initialTheme = theme ?? xtermThemeFromTokens(el);
+
       const term = new Terminal({
         convertEol: true,
         disableStdin: !interactive,
         cursorBlink: interactive,
-        fontFamily: fontFamily ?? "var(--og-font-mono)",
-        fontSize: fontSize ?? 13,
-        lineHeight: 1.25,
-        // A little breathing room from the panel edge so output isn't flush to
-        // the border (matches a real terminal app's inner gutter).
-        ...({ padding: 8 } as Record<string, unknown>),
-        ...(theme ? { theme } : {}),
+        fontFamily: font.fontFamily,
+        fontSize: font.fontSize,
+        lineHeight: font.lineHeight,
+        ...(initialTheme ? { theme: initialTheme } : {}),
       }) as unknown as XtermLike;
       const fit = new FitAddon() as unknown as FitAddonLike;
       term.loadAddon(fit);
-      // Clickable URLs in agent output (open in a new tab).
       term.loadAddon(
-        new WebLinksAddon((_e: MouseEvent, uri: string) => window.open(uri, "_blank", "noopener,noreferrer")) as unknown,
+        new WebLinksAddon((_e: MouseEvent, uri: string) =>
+          window.open(uri, "_blank", "noopener,noreferrer"),
+        ) as unknown,
       );
       term.open(el);
       termRef.current = term;
       fitRef.current = fit;
-      // Critical: the column count must be settled BEFORE any output is written,
-      // or seeded transcript lines reflow/garble against the default 80×24 grid
-      // (the trailing prompt's escape codes smear into `]]]bbb` artifacts). Fit
-      // once now, then again on the next frame after layout has measured the
-      // real container width, and only then unblock the write effect.
+
+      // Attach the fastest available renderer. For xterm-6 the supported ladder
+      // is WebGL → DOM (the standalone 2D-canvas addon targets xterm-5 internals,
+      // so it is intentionally NOT in the shipped path). Init failure / context
+      // loss steps down to xterm's built-in DOM renderer; the settled tier is
+      // exposed for evidence.
+      const failSet = forcedRendererFailures();
+      const loaders: RendererLoaders = {
+        webgl: async (onLoss) => {
+          if (failSet.has("webgl")) throw new Error("forced webgl failure");
+          const { WebglAddon } = await import("@xterm/addon-webgl");
+          const addon = new WebglAddon() as unknown as {
+            dispose: () => void;
+            onContextLoss?: (cb: () => void) => void;
+          };
+          addon.onContextLoss?.(() => {
+            try {
+              addon.dispose();
+            } catch {
+              // already disposed
+            }
+            onLoss();
+          });
+          term.loadAddon(addon);
+          return addon;
+        },
+      };
+      await attachRenderer("webgl", loaders, (tier) => {
+        rendererRef.current = tier;
+        el.setAttribute("data-og-term-renderer", tier);
+      });
+      if (disposed) return;
+
+      // Fit BEFORE reveal so the first visible frame is already correctly sized
+      // (no 80×24 rasterize-then-reflow flash — the container stays hidden until
+      // now via the `ready` visibility gate).
       const settle = () => {
         try {
           fit.fit();
@@ -214,10 +331,19 @@ export function SandboxTerminal({
       requestAnimationFrame(() => {
         if (disposed) return;
         settle();
-        // Drain any ttyd OUTPUT that arrived before xterm finished mounting.
         if (ptyOutputQueueRef.current.length > 0) {
           for (const data of ptyOutputQueueRef.current) term.write(data);
           ptyOutputQueueRef.current = [];
+        }
+        el.setAttribute("data-og-term-ready", "true");
+        if (typeof globalThis.__OG_TERMINAL_DEBUG__ === "function") {
+          globalThis.__OG_TERMINAL_DEBUG__({
+            renderer: rendererRef.current,
+            fontFamily: term.options.fontFamily,
+            fontSize: term.options.fontSize,
+            hasVarInFont: String(term.options.fontFamily ?? "").includes("var("),
+            theme: term.options.theme,
+          });
         }
         setReady(true);
       });
@@ -228,49 +354,78 @@ export function SandboxTerminal({
       termRef.current?.dispose();
       termRef.current = null;
       fitRef.current = null;
+      rendererRef.current = null;
       writtenRef.current = new Set();
+      wroteFirehoseRef.current = false;
+      bootActiveRef.current = false;
       setReady(false);
     };
+    // Mount ONCE — see the effects below for the runtime option syncs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactive]);
+  }, []);
 
-  // Re-theme live (e.g. dark↔light flip) without re-mounting / losing scrollback.
-  useEffect(() => {
-    const term = termRef.current;
-    if (!ready || !term || !theme) return;
-    term.options.theme = theme;
-  }, [ready, theme]);
-
-  // On the firehose → PTY transition (the box warmed and the ttyd socket came
-  // up), clear the stale read-only transcript so the live shell starts on a clean
-  // screen instead of below the agent's projected command output.
-  const enteredPtyRef = useRef(false);
+  // Sync stdin/cursor at runtime (NOT a remount) when interactivity flips, so the
+  // projection→PTY handoff keeps the single Terminal instance + its scrollback.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term) return;
-    if (ptyMode && !enteredPtyRef.current) {
-      enteredPtyRef.current = true;
-      term.clear();
-    } else if (!ptyMode) {
-      enteredPtyRef.current = false;
-    }
-  }, [ready, ptyMode]);
+    term.options.disableStdin = !interactive;
+    term.options.cursorBlink = interactive;
+  }, [ready, interactive]);
 
-  // Write new firehose chunks incrementally — but ONLY in firehose mode. In PTY
-  // mode the ttyd socket owns the screen; replaying the SSE command-output
-  // projection on top of it would double-render the agent's output.
+  // Re-theme live (dark↔light flip) without re-mounting / losing scrollback. Uses
+  // the passed theme, or self-derives from the container's tokens.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!ready || !term) return;
+    const next = theme ?? xtermThemeFromTokens(containerRef.current);
+    if (next) term.options.theme = next;
+  }, [ready, theme]);
+
+  // Boot-in-terminal status lines. While `booting`, paint a styled "● waking
+  // machine — Ns…" line and tick it. On exit, if those lines were the ONLY
+  // content (no firehose transcript), clear them for the incoming live screen —
+  // never clear a real transcript (E5 preservation).
+  useEffect(() => {
+    const term = termRef.current;
+    if (!ready || !term) return;
+    if (!booting) {
+      if (bootActiveRef.current) {
+        bootActiveRef.current = false;
+        if (!wroteFirehoseRef.current) term.clear();
+      }
+      return;
+    }
+    bootActiveRef.current = true;
+    const start = Date.now();
+    const paint = () => {
+      const s = Math.max(0, Math.round((Date.now() - start) / 1000));
+      // Bright-blue dot (accent) + dim label; `\r` + clear-line keeps it on one
+      // line so the counter updates in place.
+      term.write(`\r\x1b[2K\x1b[94m●\x1b[0m \x1b[2mwaking machine — ${s}s…\x1b[0m`);
+    };
+    term.write("\r\n");
+    paint();
+    const id = setInterval(paint, 1000);
+    return () => clearInterval(id);
+  }, [ready, booting]);
+
+  // Write new firehose chunks incrementally — ONLY in firehose mode. In PTY mode
+  // the ttyd socket owns the screen. Records that a real transcript exists so the
+  // boot cleanup never wipes it.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || ptyMode) return;
     for (const chunk of result.chunks) {
       if (writtenRef.current.has(chunk.id)) continue;
       writtenRef.current.add(chunk.id);
+      wroteFirehoseRef.current = true;
       term.write(chunk.text);
     }
   }, [ready, result.chunks, ptyMode]);
 
   // Wire interactive input when allowed. PTY mode pipes keystrokes to the ttyd
-  // socket (the real PTY); firehose mode uses the legacy ptyWrite-over-HTTP fn.
+  // socket; firehose mode uses the legacy ptyWrite-over-HTTP fn.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || !interactive) return;
@@ -280,9 +435,7 @@ export function SandboxTerminal({
     return () => sub.dispose();
   }, [ready, interactive, ptyMode, ptyStream.write, result.write]);
 
-  // In PTY mode, tell ttyd the window size on the xterm resize event (the fit
-  // addon reflows the grid; ttyd resizes the remote PTY to match), and push the
-  // initial geometry once the socket is open.
+  // In PTY mode, tell ttyd the window size on the xterm resize event.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || !ptyMode) return;
@@ -291,8 +444,7 @@ export function SandboxTerminal({
     return () => sub.dispose();
   }, [ready, ptyMode, ptyStream.connected, ptyStream.resize]);
 
-  // Refit on container resize (dock drag) AND window resize. The fit addon
-  // mutates xterm's cols/rows → the onResize handler above forwards to ttyd.
+  // Refit on container resize (dock drag) AND window resize.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const refit = () => {
@@ -326,9 +478,7 @@ export function SandboxTerminal({
                 result.running ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
-            <span className="truncate font-og-mono">
-              pty: {shell ?? "shell"}
-            </span>
+            <span className="truncate font-og-mono">pty: {shell ?? "shell"}</span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
             {!interactive && (
@@ -341,6 +491,7 @@ export function SandboxTerminal({
               onClick={() => {
                 termRef.current?.clear();
                 writtenRef.current = new Set();
+                wroteFirehoseRef.current = false;
               }}
               className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-10"
             >
@@ -351,14 +502,22 @@ export function SandboxTerminal({
       )}
       {/* `onPointerDownCapture`/`onFocusCapture` fire on the FIRST user engagement
           with the terminal surface (capture so they win even though xterm's own
-          listeners stop propagation). The host warms the box for pty-ws here. */}
+          listeners stop propagation). The host warms the box for pty-ws here. The
+          12px inset + `--og-color-bg` ground match the dock surface. */}
       <div
-        className="relative min-h-0 flex-1 bg-og-bg px-2 py-1.5"
-        onPointerDownCapture={onActivate}
-        onFocusCapture={onActivate}
+        className="relative min-h-0 flex-1 bg-og-bg p-3"
+        onPointerDownCapture={handleActivate}
+        onFocusCapture={handleActivate}
       >
         {!ready && (placeholder ?? <TerminalPlaceholder />)}
-        <div ref={containerRef} className="h-full w-full" data-opengeni-terminal />
+        {/* Kept `visibility:hidden` until the first successful fit so the first
+            VISIBLE frame is already correctly sized (no 80×24 flash — E4). */}
+        <div
+          ref={containerRef}
+          className="h-full w-full"
+          style={{ visibility: ready ? "visible" : "hidden" }}
+          data-opengeni-terminal
+        />
       </div>
     </div>
   );
