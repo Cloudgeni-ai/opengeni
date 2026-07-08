@@ -218,12 +218,12 @@ export function AgentsPanel({
 export function SessionAgentsChip({
   workspaceId,
   nodes,
-  loading = false,
 }: {
   workspaceId: string;
-  /** Direct children; presentational — the header owns the single lineage read. */
+  /** Direct children; presentational — the header owns the single lineage read.
+   *  The chip only renders when there ARE children (count>0), so it has no
+   *  loading/empty state of its own. */
   nodes: LineageNode[];
-  loading?: boolean | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const count = nodes.length;
@@ -262,15 +262,11 @@ export function SessionAgentsChip({
         >
           <div className="p-2.5">
             <SubagentsLabel count={count} />
-            {loading && count === 0 ? (
-              <div className="mt-2">
-                <LineageLoading />
-              </div>
-            ) : (
-              <div className="mt-2">
-                <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={() => setOpen(false)} />
-              </div>
-            )}
+            {/* count > 0 here (the chip/popover only renders with children), so
+                the tree always has rows — no loading/empty branch to guard. */}
+            <div className="mt-2">
+              <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={() => setOpen(false)} />
+            </div>
           </div>
         </Popover.Content>
       </Popover.Portal>

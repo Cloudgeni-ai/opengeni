@@ -296,7 +296,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
           <div className="flex shrink-0 items-center gap-1.5">
             {/* Sessions that spawned workers surface an "N agents" chip opening
                 the shared subagent lineage panel. */}
-            <SessionAgentsChip workspaceId={context.session.workspaceId} nodes={childNodes} loading={lineage.loading} />
+            <SessionAgentsChip workspaceId={context.session.workspaceId} nodes={childNodes} />
             <ConnectionPill state={context.connectionState} />
             <SessionStatusBadge status={context.session.status} />
             {context.keyAuthRequired ? (
