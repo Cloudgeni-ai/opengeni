@@ -631,6 +631,68 @@ export function completedTurnEvents(): SessionEvent[] {
 }
 
 /**
+ * A settled turn in which the agent writes to workspace memory: it saves two new
+ * memories and corrects two existing ones (one superseded with a replacement, one
+ * updated in place). Folds to a chip whose summary carries the memory facets
+ * ("… · 2 memories saved · 2 memories updated"); expanded, each write is a calm
+ * neutral memory row (a supersede shows old → new; an in-place update shows the
+ * live text). `memory.saved` / `memory.corrected` payloads mirror the shapes the
+ * MCP server emits (apps/api/src/mcp/server.ts).
+ */
+export function memoryTurnEvents(): SessionEvent[] {
+  const log = new EventLog();
+  const turn = "turn-memory";
+  log.push("user.message", { text: "Note our deploy conventions for next time, and fix that stale database note — I checked and it's wrong now." });
+  log.push(
+    "agent.reasoning.delta",
+    { text: "I'll record the standing conventions as workspace memory, then correct the two facts that have drifted so future sessions don't repeat them." },
+    turn,
+  );
+  log.tool(
+    {
+      name: "exec_command",
+      id: "mem-0",
+      arguments: { cmd: "cat infra/README.md", workdir: "/workspace" },
+      output: "Chunk ID: 909\nWall time: 0.3\nProcess exited with code 0\nOutput:\nDeploys: staging from main only, via opengeni-ops.\n",
+    },
+    turn,
+  );
+  log.push("memory.saved", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000001",
+    kind: "preference",
+    preview: "Prefer Terraform over Pulumi for all new infrastructure in this workspace.",
+    deduped: false,
+  }, turn);
+  log.push("memory.saved", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000002",
+    kind: "semantic",
+    preview: "Staging deploys run from the main branch only, via the opengeni-ops workflow.",
+    deduped: false,
+  }, turn);
+  log.push("memory.corrected", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000003",
+    kind: "semantic",
+    preview: "The staging database is walrus-primary and lives in the neu region.",
+    action: "superseded",
+    reason: "Verified in-session: the instance was migrated and renamed.",
+    replacementMemoryId: "aa11bb22-0000-4000-8000-000000000004",
+    replacementPreview: "The staging database is walrus-2 (Postgres 16) in the neu region; walrus-primary was retired.",
+  }, turn);
+  log.push("memory.corrected", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000005",
+    kind: "procedural",
+    preview: "Run database migrations with `make db-migrate` before every deploy.",
+    action: "updated",
+    reason: "The command moved under the ops wrapper.",
+  }, turn);
+  log.push("agent.message.completed", {
+    text: "Saved the Terraform preference and the staging-deploy rule, corrected the database note (walrus-primary → walrus-2), and updated the migration command in place. Future sessions will start with the right picture.",
+  }, turn);
+  log.push("turn.completed", {}, turn);
+  return log.events;
+}
+
+/**
  * A turn paused on a lapsed connection: a Linear tool call trips the broker's
  * reauth path (`tool.auth_needed`), and a second provider needs wider scope.
  * Each projects to a clean inline reconnect card — no `turn.completed`, because
