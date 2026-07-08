@@ -103,7 +103,7 @@ export function RigOverview({
               onClick={async () => {
                 const result = await onVerify();
                 if (result) {
-                  toast.success("Verification started", { description: "The checks are re-running in a clean sandbox; the outcome lands in this rig's activity." });
+                  toast.success("Re-verifying the active version", { description: "The checks are running in a clean sandbox. This can take a moment." });
                 }
               }}
             >
@@ -123,9 +123,9 @@ export function RigOverview({
           <div className="grid gap-1">
             <p className="text-xs text-fg-subtle">Not verified yet. The declared checks:</p>
             {active.checks.map((check, index) => (
-              <div key={`${check.name}-${index}`} className="flex items-center gap-2 rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
-                <span className="min-w-0 flex-1 truncate text-xs font-medium">{check.name}</span>
-                <span className="min-w-0 flex-[2] truncate font-mono text-2xs text-fg-subtle">{check.command}</span>
+              <div key={`${check.name}-${index}`} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
+                <div className="truncate text-xs font-medium">{check.name}</div>
+                <div className="truncate font-mono text-2xs text-fg-subtle">{check.command}</div>
               </div>
             ))}
           </div>
