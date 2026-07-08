@@ -51,6 +51,9 @@ export function assertAllowedVariableSetVariableName(name: string): void {
   }
 }
 
+/** @deprecated use assertAllowedVariableSetVariableName */
+export const assertAllowedEnvironmentVariableName = assertAllowedVariableSetVariableName;
+
 export function requireVariableSetEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
