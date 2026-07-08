@@ -11,6 +11,7 @@ import {
   useGoal,
   useSession,
   useSessionEvents,
+  useSessionLineage,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -41,6 +42,7 @@ import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
 import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
+import { AgentsPanel } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -359,6 +361,13 @@ function SessionDock(props: {
     filesActive: !props.dockCollapsed && activeTab === "files",
   });
 
+  // The decoupled home for spawned workers: one live lineage read (shared-feed
+  // via the dock's own event stream, no extra poll) gates the "Agents" tab and
+  // feeds its panel. The tab is present only once the session has children, so a
+  // goal-less session still surfaces its agents here.
+  const lineage = useSessionLineage(props.sessionId, { events: props.events });
+  const childNodes = lineage.lineage?.children ?? [];
+
   const tabs: WorkspaceTab[] = [
     {
       id: "run",
@@ -373,6 +382,26 @@ function SessionDock(props: {
         </ScrollArea>
       ),
     },
+    ...(childNodes.length > 0
+      ? [
+          {
+            id: "agents",
+            label: "Agents",
+            badge: (
+              <span className="rounded-sm bg-og-accent-soft px-1 text-2xs text-og-fg-muted">
+                {childNodes.length}
+              </span>
+            ),
+            content: (
+              <AgentsPanel
+                workspaceId={props.workspaceId}
+                nodes={childNodes}
+                loading={lineage.loading && childNodes.length === 0}
+              />
+            ),
+          } satisfies WorkspaceTab,
+        ]
+      : []),
     ...sandboxTabs,
     {
       id: "debug",
@@ -589,12 +618,7 @@ function SessionChatPane(props: {
       {/* The floating goal pill hovers just above the composer (hidden when the
           session has no goal). */}
       {!terminal ? (
-        <GoalSurface
-          session={props.session}
-          goal={props.goal}
-          events={props.events}
-          onNavigate={() => undefined}
-        />
+        <GoalSurface session={props.session} goal={props.goal} />
       ) : null}
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">

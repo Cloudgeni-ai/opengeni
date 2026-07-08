@@ -17,7 +17,7 @@ import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
-import { SessionAgentsChip, SpawnedByBreadcrumb } from "@/components/session/goal-surface";
+import { SessionAgentsChip, SpawnedByBreadcrumb } from "@/components/session/subagents";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
