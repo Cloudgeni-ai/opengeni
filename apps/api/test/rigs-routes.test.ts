@@ -233,6 +233,48 @@ describe("rig route permission matrix", () => {
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
   });
 
+  test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use", "workspace:read"]) };
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage", "workspace:read"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}`;
+    const created = await app().request(`${base}/rigs`, { method: "POST", headers: manage, body: JSON.stringify({ name: "default-target" }) });
+    const rig = await created.json();
+
+    const denied = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: useOnly,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(denied.status).toBe(403);
+
+    const invalid = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manage,
+      body: JSON.stringify({ rigId: "11111111-1111-4111-8111-111111111111" }),
+    });
+    expect(invalid.status).toBe(422);
+
+    const set = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manage,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(set.status).toBe(200);
+    expect((await set.json()).defaultRigId).toBe(rig.id);
+    const fetched = await app().request(base, { headers: manage });
+    expect((await fetched.json()).defaultRigId).toBe(rig.id);
+
+    const cleared = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manage,
+      body: JSON.stringify({ rigId: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect((await cleared.json()).defaultRigId).toBeNull();
+  });
+
   test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

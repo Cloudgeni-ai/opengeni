@@ -1060,6 +1060,7 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
+  defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -1072,6 +1073,10 @@ export type WorkspaceSettings = {
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   [key: string]: unknown;
+};
+
+export type SetWorkspaceDefaultRigRequest = {
+  rigId: string | null;
 };
 
 export type CreateWorkspaceRequest = {
@@ -1349,6 +1354,11 @@ export type RigVersion = {
   createdAt: string;
 };
 
+export type RigVerificationHealth = {
+  checkHealth: "passing" | "failing" | "unknown";
+  lastVerifiedAt: string | null;
+};
+
 export type Rig = {
   id: string;
   accountId: string;
@@ -1357,6 +1367,7 @@ export type Rig = {
   description: string | null;
   createdBy: string | null;
   activeVersion: RigVersion | null;
+  activeVersionHealth?: RigVerificationHealth | null;
   versionCount: number;
   createdAt: string;
   updatedAt: string;

@@ -311,14 +311,17 @@ describe("OpenGeniClient access + workspaces", () => {
     await client.createWorkspace({ name: "Ops" });
     await client.getWorkspace(WORKSPACE_ID);
     await client.updateWorkspace(WORKSPACE_ID, { name: "Ops 2", slug: null });
+    await client.setWorkspaceDefaultRig(WORKSPACE_ID, { rigId: "22222222-2222-4222-8222-222222222222" });
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
       "GET /v1/access/me",
       "GET /v1/workspaces",
       "POST /v1/workspaces",
       `GET /v1/workspaces/${WORKSPACE_ID}`,
       `PATCH /v1/workspaces/${WORKSPACE_ID}`,
+      `PUT /v1/workspaces/${WORKSPACE_ID}/default-rig`,
     ]);
     expect(JSON.parse(requests[4]!.body!)).toEqual({ name: "Ops 2", slug: null });
+    expect(JSON.parse(requests[5]!.body!)).toEqual({ rigId: "22222222-2222-4222-8222-222222222222" });
   });
 
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {

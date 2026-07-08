@@ -321,6 +321,47 @@ describe("rig change lifecycle", () => {
     expect(stored?.status).toBe("merged");
     expect(stored?.resultVersionId).toBe((results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{ version: { id: string } }>).value.version.id);
   });
+
+  test("list/get expose active version verification health", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const neverVerified = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "health-unknown" });
+    const verifiedRig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "health-passing", initialVersion: { setupScript: "mkdir -p /opt/health" } });
+    const change = await createRigChange(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: verifiedRig.id,
+      baseVersionId: verifiedRig.activeVersion!.id,
+      kind: "setup_append",
+      payload: { command: "touch /opt/health/tool" },
+      proposedBy: "session:s1",
+    });
+    await updateRigChangeStatus(db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: {
+        startedAt: "2026-07-08T00:00:00.000Z",
+        finishedAt: "2026-07-08T00:01:00.000Z",
+        passed: true,
+        checkResults: [],
+      },
+    });
+    const promoted = await createRigVersionForChangePromotion(db, ws.workspaceId, verifiedRig.id, change.id, {
+      expectedActiveVersionId: verifiedRig.activeVersion!.id,
+      setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
+    });
+
+    const listed = await listRigs(db, ws.workspaceId);
+    expect(listed.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth).toEqual({
+      checkHealth: "unknown",
+      lastVerifiedAt: null,
+    });
+    expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id).toBe(promoted.version.id);
+    expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersionHealth).toEqual({
+      checkHealth: "passing",
+      lastVerifiedAt: "2026-07-08T00:01:00.000Z",
+    });
+    expect((await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth).toBe("passing");
+  });
 });
 
 describe("rig delete guard", () => {

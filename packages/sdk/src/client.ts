@@ -131,6 +131,7 @@ import type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  SetWorkspaceDefaultRigRequest,
   UploadFileInput,
   VariableSet,
   VariableSetVariableMetadata,
@@ -1201,6 +1202,10 @@ export class OpenGeniClient {
   /** Deep-merge a settings patch into the workspace (preserves unknown keys). */
   async updateWorkspaceSettings(workspaceId: string, request: UpdateWorkspaceSettingsRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}/settings`, request);
+  }
+
+  async setWorkspaceDefaultRig(workspaceId: string, request: SetWorkspaceDefaultRigRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("PUT", `/v1/workspaces/${workspaceId}/default-rig`, request);
   }
 
   // --- Capability packs ------------------------------------------------------------------

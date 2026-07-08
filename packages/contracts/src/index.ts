@@ -550,6 +550,8 @@ export const Workspace = z.object({
   // validated by WorkspaceSettingsSchema; unknown keys are preserved across
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
+  // Workspace default rig used by session/scheduled-task create fallback.
+  defaultRigId: z.string().uuid().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -576,6 +578,11 @@ export const UpdateWorkspaceSettingsRequest = z.object({
   memoryEnabled: z.boolean().optional(),
 }).passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
+
+export const SetWorkspaceDefaultRigRequest = z.object({
+  rigId: z.string().uuid().nullable(),
+});
+export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRigRequest>;
 
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
@@ -1976,6 +1983,12 @@ export const RigVersion = z.object({
 });
 export type RigVersion = z.infer<typeof RigVersion>;
 
+export const RigVerificationHealth = z.object({
+  checkHealth: z.enum(["passing", "failing", "unknown"]),
+  lastVerifiedAt: z.string().nullable(),
+});
+export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
+
 export const Rig = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -1986,6 +1999,9 @@ export const Rig = z.object({
   // The rig's currently-active version (present after create; nullable so a
   // partial/list read can omit it without a schema change).
   activeVersion: RigVersion.nullable(),
+  // Summary for the currently active version. null only when there is no active
+  // version; otherwise "unknown" means the active version has no verification.
+  activeVersionHealth: RigVerificationHealth.nullable(),
   versionCount: z.number().int().nonnegative(),
   createdAt: z.string(),
   updatedAt: z.string(),

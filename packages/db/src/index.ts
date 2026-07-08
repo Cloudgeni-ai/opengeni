@@ -62,6 +62,7 @@ import type {
   WorkspaceRegisteredPack,
   Rig,
   RigVersion,
+  RigVerificationHealth,
   RigChange,
   RigChangeKind,
   RigChangeStatus,
@@ -680,6 +681,17 @@ export async function updateWorkspace(db: Database, workspaceId: string, input: 
 export async function updateWorkspaceSettings(db: Database, workspaceId: string, patch: Record<string, unknown>): Promise<Workspace> {
   const [row] = await db.update(schema.workspaces).set({
     settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return mapWorkspace(row);
+}
+
+export async function setWorkspaceDefaultRig(db: Database, workspaceId: string, rigId: string | null): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    defaultRigId: rigId,
     updatedAt: new Date(),
   }).where(eq(schema.workspaces.id, workspaceId)).returning();
   if (!row) {
@@ -3928,7 +3940,11 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
   };
 }
 
-function mapRig(row: typeof schema.rigs.$inferSelect, activeVersion: RigVersion | null, versionCount: number): Rig {
+function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHealth | null {
+  return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
+}
+
+function mapRig(row: typeof schema.rigs.$inferSelect, activeVersion: RigVersion | null, versionCount: number, activeVersionHealth: RigVerificationHealth | null = unknownRigHealth(activeVersion)): Rig {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -3937,6 +3953,7 @@ function mapRig(row: typeof schema.rigs.$inferSelect, activeVersion: RigVersion 
     description: row.description,
     createdBy: row.createdBy,
     activeVersion,
+    activeVersionHealth,
     versionCount,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -3972,6 +3989,101 @@ async function loadRigActiveAndCount(scopedDb: Database, workspaceId: string, ri
     .from(schema.rigVersions)
     .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
   return { activeVersion: activeRow ? mapRigVersion(activeRow) : null, versionCount: Number(count) };
+}
+
+type RigHealthCandidate = {
+  versionId: string;
+  checkHealth: "passing" | "failing";
+  verifiedAt: string;
+};
+
+function latestRigHealth(candidates: RigHealthCandidate[]): RigVerificationHealth {
+  let latest: RigHealthCandidate | null = null;
+  for (const candidate of candidates) {
+    if (!latest || Date.parse(candidate.verifiedAt) >= Date.parse(latest.verifiedAt)) {
+      latest = candidate;
+    }
+  }
+  return latest
+    ? { checkHealth: latest.checkHealth, lastVerifiedAt: latest.verifiedAt }
+    : { checkHealth: "unknown", lastVerifiedAt: null };
+}
+
+function verificationTimestamp(verification: Record<string, unknown> | null | undefined, fallback: Date): string {
+  return typeof verification?.finishedAt === "string" ? verification.finishedAt : fallback.toISOString();
+}
+
+async function loadRigHealthByActiveVersion(scopedDb: Database, workspaceId: string, activeVersions: RigVersion[]): Promise<Map<string, RigVerificationHealth>> {
+  const versionIds = activeVersions.map((version) => version.id);
+  const healthByVersion: Map<string, RigVerificationHealth> = new Map(
+    versionIds.map((versionId) => [versionId, { checkHealth: "unknown", lastVerifiedAt: null }]),
+  );
+  if (versionIds.length === 0) {
+    return healthByVersion;
+  }
+  const candidatesByVersion = new Map<string, RigHealthCandidate[]>();
+  const pushCandidate = (candidate: RigHealthCandidate) => {
+    candidatesByVersion.set(candidate.versionId, [...(candidatesByVersion.get(candidate.versionId) ?? []), candidate]);
+  };
+
+  const changes = await scopedDb.select({
+    resultVersionId: schema.rigChanges.resultVersionId,
+    verification: schema.rigChanges.verification,
+    updatedAt: schema.rigChanges.updatedAt,
+  }).from(schema.rigChanges)
+    .where(and(
+      eq(schema.rigChanges.workspaceId, workspaceId),
+      inArray(schema.rigChanges.resultVersionId, versionIds),
+    ));
+  for (const change of changes) {
+    if (!change.resultVersionId) {
+      continue;
+    }
+    const verification = (change.verification ?? null) as Record<string, unknown> | null;
+    if (verification?.passed === true) {
+      pushCandidate({
+        versionId: change.resultVersionId,
+        checkHealth: "passing",
+        verifiedAt: verificationTimestamp(verification, change.updatedAt),
+      });
+    } else if (verification?.passed === false) {
+      pushCandidate({
+        versionId: change.resultVersionId,
+        checkHealth: "failing",
+        verifiedAt: verificationTimestamp(verification, change.updatedAt),
+      });
+    }
+  }
+
+  const auditRows = await scopedDb.select({
+    action: schema.auditEvents.action,
+    metadata: schema.auditEvents.metadata,
+    occurredAt: schema.auditEvents.occurredAt,
+  }).from(schema.auditEvents)
+    .where(and(
+      eq(schema.auditEvents.workspaceId, workspaceId),
+      eq(schema.auditEvents.targetType, "rig"),
+      inArray(schema.auditEvents.action, ["rig.verification.passed", "rig.verification.failed"]),
+      inArray(sql<string>`${schema.auditEvents.metadata}->>'versionId'`, versionIds),
+    ));
+  for (const row of auditRows) {
+    const metadata = row.metadata ?? {};
+    const versionId = typeof metadata.versionId === "string" ? metadata.versionId : null;
+    if (!versionId || !healthByVersion.has(versionId)) {
+      continue;
+    }
+    const passed = typeof metadata.passed === "boolean" ? metadata.passed : row.action === "rig.verification.passed";
+    pushCandidate({
+      versionId,
+      checkHealth: passed ? "passing" : "failing",
+      verifiedAt: typeof metadata.finishedAt === "string" ? metadata.finishedAt : row.occurredAt.toISOString(),
+    });
+  }
+
+  for (const versionId of versionIds) {
+    healthByVersion.set(versionId, latestRigHealth(candidatesByVersion.get(versionId) ?? []));
+  }
+  return healthByVersion;
 }
 
 // Creates the rig row AND its version 1 (active) in one transaction: a failure
@@ -4028,6 +4140,7 @@ export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]
     const activeRows = await scopedDb.select().from(schema.rigVersions)
       .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.active, true)));
     const activeByRig = new Map(activeRows.map((row) => [row.rigId, mapRigVersion(row)]));
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, [...activeByRig.values()]);
     const countRows = await scopedDb.select({
       rigId: schema.rigVersions.rigId,
       count: sql<number>`count(*)::int`,
@@ -4035,7 +4148,10 @@ export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]
       .where(eq(schema.rigVersions.workspaceId, workspaceId))
       .groupBy(schema.rigVersions.rigId);
     const countByRig = new Map(countRows.map((row) => [row.rigId, Number(row.count)]));
-    return rows.map((row) => mapRig(row, activeByRig.get(row.id) ?? null, countByRig.get(row.id) ?? 0));
+    return rows.map((row) => {
+      const activeVersion = activeByRig.get(row.id) ?? null;
+      return mapRig(row, activeVersion, countByRig.get(row.id) ?? 0, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
+    });
   });
 }
 
@@ -4048,7 +4164,8 @@ export async function getRig(db: Database, workspaceId: string, rigId: string): 
       return null;
     }
     const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
-    return mapRig(row, activeVersion, versionCount);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
   });
 }
 
@@ -4061,7 +4178,8 @@ export async function getRigByName(db: Database, workspaceId: string, name: stri
       return null;
     }
     const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, row.id);
-    return mapRig(row, activeVersion, versionCount);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
   });
 }
 
@@ -4080,7 +4198,8 @@ export async function updateRig(db: Database, workspaceId: string, rigId: string
       throw new Error(`Rig not found: ${rigId}`);
     }
     const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
-    return mapRig(row, activeVersion, versionCount);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
   });
 }
 
@@ -10908,6 +11027,7 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     externalId: row.externalId,
     agentInstructions: row.agentInstructions ?? null,
     settings: (row.settings ?? {}) as Record<string, unknown>,
+    defaultRigId: row.defaultRigId ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

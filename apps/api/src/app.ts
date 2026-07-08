@@ -379,6 +379,7 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/, label: "/v1/workspaces/:workspaceId/mcp" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/docs$/, label: "/v1/workspaces/:workspaceId/mcp/docs" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/, label: "/v1/workspaces/:workspaceId/default-rig" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/sessions$/, label: "/v1/workspaces/:workspaceId/sessions" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/, label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/lineage$/, label: "/v1/workspaces/:workspaceId/sessions/:id/lineage" },
