@@ -1290,15 +1290,27 @@ describe("buildTimeline — memory writes", () => {
     expect(memory.replacementMemoryId).toBe("mem-new");
   });
 
-  test("projects an archive (corrected, no replacement) with only the preview", () => {
+  test("projects an archive (corrected, no replacement) carrying the archived action", () => {
     reset();
     const items = buildTimeline([
       event("memory.corrected", { memoryId: "mem-3", kind: "episodic", preview: "Tried the beta once.", action: "archived" }),
     ]);
     const memory = items[0] as MemoryItem;
     expect(memory.variant).toBe("corrected");
+    expect(memory.action).toBe("archived");
     expect(memory.replacementPreview).toBeUndefined();
     expect(memory.replacementMemoryId).toBeUndefined();
+  });
+
+  test("projects an in-place update (corrected, no replacement) carrying the updated action", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", { memoryId: "mem-4", kind: "preference", preview: "Prefers dark mode.", action: "updated" }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("corrected");
+    expect(memory.action).toBe("updated");
+    expect(memory.replacementPreview).toBeUndefined();
   });
 
   test("drops a malformed memory event with no memory id rather than rendering a blank row", () => {

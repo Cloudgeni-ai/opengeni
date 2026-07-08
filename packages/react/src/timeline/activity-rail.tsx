@@ -179,8 +179,15 @@ function MemoryRow({ item, onMemoryClick }: { item: MemoryItem; onMemoryClick?: 
           <p className="whitespace-pre-wrap text-og-sm leading-6 text-og-fg-subtle line-through">{item.preview}</p>
           <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.replacementPreview}</p>
         </div>
+      ) : corrected && item.action === "updated" ? (
+        // Edited in place, no replacement record: the memory is still live, so
+        // show its current text — NOT the archived treatment.
+        <>
+          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.preview}</p>
+          <BodyNote tone="muted">Updated in place.</BodyNote>
+        </>
       ) : corrected ? (
-        // A correction with no replacement archived the record.
+        // A correction with no replacement (and not an in-place update) archived the record.
         <BodyNote tone="muted">Archived.</BodyNote>
       ) : (
         <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.preview}</p>

@@ -940,6 +940,47 @@ describe("MemoryRow", () => {
     expect(clicked).toEqual(["mem-new"]);
     await r.unmount();
   });
+
+  test("an in-place update (corrected, action 'updated', no replacement) shows the live text, not 'Archived'", async () => {
+    const item = memoryItem({
+      variant: "corrected",
+      action: "updated",
+      preview: "Prefers dark mode.",
+      memoryId: "mem-upd",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Prefers dark mode.");
+    expect(text).toContain("Updated in place.");
+    expect(text).not.toContain("Archived");
+    await r.unmount();
+  });
+
+  test("an archive (corrected, action 'archived', no replacement) shows the archived note", async () => {
+    const item = memoryItem({
+      variant: "corrected",
+      action: "archived",
+      preview: "Tried the beta once.",
+      memoryId: "mem-arc",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Archived.");
+    expect(text).not.toContain("Updated in place.");
+    await r.unmount();
+  });
 });
 
 describe("turn fold — memory facet", () => {

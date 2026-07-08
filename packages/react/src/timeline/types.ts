@@ -132,6 +132,13 @@ export type MemoryItem = {
   deduped?: boolean;
   /** The NEW text when a correction superseded the memory with a replacement; absent = updated-in-place or archived. */
   replacementPreview?: string;
+  /**
+   * What a `memory.corrected` did: `"superseded"` (replaced by a new record, see
+   * `replacementPreview`), `"updated"` (edited in place — the record lives on), or
+   * `"archived"` (retired). Distinguishes updated-in-place from archived when there
+   * is no replacement. Corrected variant only; read defensively (may be absent).
+   */
+  action?: string;
   /** The saved / corrected memory's id — the deep-link target for a save. */
   memoryId: string;
   /** The replacement memory's id when a correction produced one — the LIVE record the deep-link targets. */

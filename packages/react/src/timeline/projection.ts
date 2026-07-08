@@ -984,6 +984,7 @@ function memoryItem(
   }
   const replacementPreview = typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
   const replacementMemoryId = typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
+  const action = typeof payload.action === "string" ? payload.action : undefined;
   return {
     kind: "memory",
     id,
@@ -993,6 +994,7 @@ function memoryItem(
     preview: typeof payload.preview === "string" ? payload.preview : "",
     ...(payload.deduped === true ? { deduped: true } : {}),
     ...(replacementPreview ? { replacementPreview } : {}),
+    ...(action ? { action } : {}),
     memoryId,
     ...(replacementMemoryId ? { replacementMemoryId } : {}),
     occurredAt,
