@@ -1,25 +1,37 @@
 // The subagent-lineage surface: everything that renders a session's spawned
 // workers. It is deliberately DECOUPLED from goals — a session's agent tree is
-// orthogonal to whether it carries a goal, so this lives in its own module and
-// backs three homes:
-//   - AgentsPanel     — the first-class "Agents" dock tab (the primary home)
-//   - SessionAgentsChip — the header "N agents" chip + popover
-//   - SubagentSection / SubagentRow — the shared tree the two reuse
-// plus SpawnedByBreadcrumb, the inverse link a child session shows back to the
-// manager that spawned it.
+// orthogonal to whether it carries a goal — and one compact tree component backs
+// two sibling homes:
+//   - SessionAgentsChip — the header "N agents" chip that EXPANDS into a floating
+//     panel, mirroring the goal pill's click-to-expand interaction + elevated
+//     visual family (the glanceable, quick-jump hero).
+//   - AgentsPanel — the persistent, roomy "Agents" right-dock tab (the deep view
+//     a manager watches while orchestrating many workers).
+// Both render {@link SubagentTree}: the compact form in the popover, the
+// full-height form in the dock. SpawnedByBreadcrumb is the inverse link a child
+// session shows back to the manager that spawned it.
+//
+// Design language: one dense line per agent — a single status-tone dot + a
+// truncated title + a quiet relative-time hint — the whole row a hover-lit
+// deep-link. Grandchildren thread off a hairline rail (one level, expandable),
+// never boxes. Calm at rest; the chevron affordance lifts on hover.
 //
 // Copy doctrine: human language only. Internal status slugs (requires_action,
-// active, …) are translated to plain labels at this boundary; no enum leaks
-// into a rendered string.
+// active, …) never leak into a rendered string.
+import { formatRelativeTime } from "@opengeni/react";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
-import { Collapsible, Popover } from "radix-ui";
+import { Popover } from "radix-ui";
 import { useState, type ReactNode } from "react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { cn } from "@/lib/utils";
+
+/** Children (depth 0) plus one level of grandchildren (depth 1) — the tree goes
+    exactly one level deeper, so a depth-1 row never draws its own expander. */
+const MAX_DEPTH = 1;
 
 /** Map a session lifecycle status onto the six-tone status language. */
 export function sessionStatusTone(status: SessionStatus): StatusTone {
@@ -39,42 +51,28 @@ export function sessionStatusTone(status: SessionStatus): StatusTone {
   }
 }
 
-/* --- subagent tree (shared by the dock panel and the header chip) ----------- */
+function isLiveStatus(status: SessionStatus): boolean {
+  return status === "running" || status === "queued" || status === "requires_action";
+}
 
-export function SubagentSection({
+/* --- the shared compact tree ------------------------------------------------ */
+
+/** The lineage tree, shared verbatim by the chip popover and the dock tab. */
+export function SubagentTree({
   workspaceId,
-  lineage,
-  loading,
+  nodes,
   onNavigate,
 }: {
   workspaceId: string;
-  lineage: LineageNode[];
-  loading: boolean;
+  nodes: LineageNode[];
   onNavigate?: (() => void) | undefined;
 }) {
-  const count = lineage.length;
   return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-        <BotIcon className="size-3.5" />
-        Subagents
-        {count > 0 ? <span className="text-fg-subtle/80">· {count}</span> : null}
-      </div>
-      {loading ? (
-        <p className="mt-2 flex items-center gap-2 px-0.5 py-1 text-xs text-fg-subtle">
-          <Loader2Icon className="size-3.5 animate-spin" />
-          Loading lineage
-        </p>
-      ) : count === 0 ? (
-        <p className="mt-2 px-0.5 py-1 text-xs text-fg-subtle">No agents spawned</p>
-      ) : (
-        <ul className="mt-1.5 flex flex-col gap-px">
-          {lineage.map((node) => (
-            <SubagentRow key={node.session.id} node={node} workspaceId={workspaceId} depth={0} onNavigate={onNavigate} />
-          ))}
-        </ul>
-      )}
-    </div>
+    <ul className="flex flex-col gap-px">
+      {nodes.map((node) => (
+        <SubagentRow key={node.session.id} node={node} workspaceId={workspaceId} depth={0} onNavigate={onNavigate} />
+      ))}
+    </ul>
   );
 }
 
@@ -90,74 +88,84 @@ function SubagentRow({
   onNavigate?: (() => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const childCount = node.children.length;
   const title = node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
   const tone = sessionStatusTone(node.session.status);
-  const live = node.session.status === "running" || node.session.status === "queued" || node.session.status === "requires_action";
+  const live = isLiveStatus(node.session.status);
+  const rel = formatRelativeTime(node.session.updatedAt);
+  const canExpand = depth < MAX_DEPTH && node.children.length > 0;
 
-  const row = (
-    <div
-      className="group/agent flex h-8 items-center gap-2 rounded-md pl-1.5 pr-1 text-left text-xs text-fg-muted transition-colors hover:bg-surface-2"
-      style={depth > 0 ? { marginLeft: depth * 12 } : undefined}
-    >
-      {childCount > 0 ? (
-        <Collapsible.Trigger asChild>
+  return (
+    <li>
+      {/* The container owns the hover wash + focus ring so the WHOLE row lights
+          as one target; the Link inside covers dot→title→time (the nav hit
+          area), the chevron toggles without navigating. */}
+      <div className="group/row flex h-7 items-center gap-1.5 rounded-md pr-1.5 transition-colors hover:bg-surface-2 has-[a:focus-visible]:bg-surface-2">
+        {canExpand ? (
           <button
             type="button"
             aria-label={open ? "Collapse" : "Expand"}
-            onClick={(event) => event.stopPropagation()}
-            className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring"
+            onClick={() => setOpen((prev) => !prev)}
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg"
           >
             <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
           </button>
-        </Collapsible.Trigger>
-      ) : (
-        <span className="size-4 shrink-0" />
-      )}
-      <StatusDot tone={tone} pulse={live} className="size-1.5" />
-      <Link
-        to="/workspaces/$workspaceId/sessions/$sessionId"
-        params={{ workspaceId, sessionId: node.session.id }}
-        onClick={() => onNavigate?.()}
-        title={title}
-        className="min-w-0 flex-1 truncate outline-none hover:text-fg focus-visible:text-fg focus-visible:underline"
-      >
-        {title}
-      </Link>
-      {childCount > 0 ? (
-        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">{childCount}</span>
+        ) : (
+          <span className="size-4 shrink-0" aria-hidden />
+        )}
+        <Link
+          to="/workspaces/$workspaceId/sessions/$sessionId"
+          params={{ workspaceId, sessionId: node.session.id }}
+          onClick={() => onNavigate?.()}
+          title={title}
+          className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-muted outline-none group-hover/row:text-fg"
+        >
+          <StatusDot tone={tone} pulse={live} className="size-1.5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{title}</span>
+          {rel ? <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">{rel}</span> : null}
+        </Link>
+      </div>
+      {canExpand && open ? (
+        // Grandchildren thread off a hairline rail aligned under the parent's
+        // chevron column — a descending line, not a box.
+        <ul className="ml-2 mt-px flex flex-col gap-px border-l border-border/60 pl-2.5">
+          {node.children.map((child) => (
+            <SubagentRow key={child.session.id} node={child} workspaceId={workspaceId} depth={depth + 1} onNavigate={onNavigate} />
+          ))}
+        </ul>
       ) : null}
-    </div>
-  );
-
-  if (childCount === 0) {
-    return <li>{row}</li>;
-  }
-  return (
-    <li>
-      <Collapsible.Root open={open} onOpenChange={setOpen}>
-        {row}
-        <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapsible-up data-[state=open]:animate-collapsible-down">
-          <ul className="mt-px flex flex-col gap-px">
-            {node.children.map((child) => (
-              <SubagentRow key={child.session.id} node={child} workspaceId={workspaceId} depth={depth + 1} onNavigate={onNavigate} />
-            ))}
-          </ul>
-        </Collapsible.Content>
-      </Collapsible.Root>
     </li>
   );
 }
 
-/* --- the Agents dock tab (first-class, decoupled home for the lineage) ------- */
+/** The quiet section label both homes wear above the tree. */
+function SubagentsLabel({ count }: { count: number }) {
+  return (
+    <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+      <BotIcon className="size-3.5" />
+      Subagents
+      {count > 0 ? <span className="text-fg-subtle/70">· {count}</span> : null}
+    </div>
+  );
+}
+
+function LineageLoading() {
+  return (
+    <p className="flex items-center gap-2 px-0.5 py-1 text-xs text-fg-subtle">
+      <Loader2Icon className="size-3.5 animate-spin" />
+      Loading lineage
+    </p>
+  );
+}
+
+/* --- the Agents dock tab (persistent, full-height home) --------------------- */
 
 /**
- * The full-height lineage tree for the right dock's "Agents" tab — the primary,
- * goal-independent place to see and deep-link into the workers a session spawned.
- * Presentational: the dock owns the single {@link useSessionLineage} read (so the
- * tab count and this panel stay one source of truth) and feeds children in. The
- * tab is hidden when a session has no children, so the empty state here is a
- * belt-and-suspenders fallback that should not normally be reached.
+ * The full-height lineage tree for the right dock's "Agents" tab — the deep,
+ * goal-independent workspace for a manager actively orchestrating workers, live
+ * as agents spawn and change status. Presentational: the dock owns the single
+ * {@link useSessionLineage} read (so the tab count and this panel stay one
+ * source of truth) and feeds children in. The tab is hidden when a session has
+ * no children, so the empty state here is a belt-and-suspenders fallback.
  */
 export function AgentsPanel({
   workspaceId,
@@ -173,35 +181,25 @@ export function AgentsPanel({
   const count = nodes.length;
   return (
     <ScrollArea className="h-full min-w-0">
-      <div className="min-w-0 p-3">
-        <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
-          <BotIcon className="size-3.5" />
-          Agents spawned
-          {count > 0 ? <span className="text-fg-subtle/80">· {count}</span> : null}
-        </div>
-        <p className="mt-1 text-xs leading-5 text-fg-subtle">
-          Workers this session spawned. Open one to follow its own run.
-        </p>
+      <div className="min-w-0 p-2.5">
+        <SubagentsLabel count={count} />
         {loading && count === 0 ? (
-          <p className="mt-3 flex items-center gap-2 px-0.5 py-1 text-xs text-fg-subtle">
-            <Loader2Icon className="size-3.5 animate-spin" />
-            Loading lineage
-          </p>
+          <div className="mt-2">
+            <LineageLoading />
+          </div>
         ) : count === 0 ? (
-          <p className="mt-3 px-0.5 py-1 text-xs text-fg-subtle">No agents spawned yet.</p>
+          <p className="mt-2 px-0.5 py-1 text-xs text-fg-subtle">No agents spawned yet.</p>
         ) : (
-          <ul className="mt-2.5 flex flex-col gap-px">
-            {nodes.map((node) => (
-              <SubagentRow key={node.session.id} node={node} workspaceId={workspaceId} depth={0} onNavigate={onNavigate} />
-            ))}
-          </ul>
+          <div className="mt-2">
+            <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={onNavigate} />
+          </div>
         )}
       </div>
     </ScrollArea>
   );
 }
 
-/* --- header "N agents" chip (session header, shares the subagent panel) ----- */
+/* --- header "N agents" chip → expands into the goal-pill-family panel -------- */
 
 export function SessionAgentsChip({
   workspaceId,
@@ -225,7 +223,7 @@ export function SessionAgentsChip({
           type="button"
           className={cn(
             "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-0.5 text-2xs font-medium text-fg-muted",
-            "outline-none transition-colors hover:border-border-strong hover:text-fg focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:text-fg",
+            "outline-none transition-colors hover:border-border-strong hover:text-fg focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-border-strong data-[state=open]:text-fg",
           )}
         >
           <BotIcon className="size-3" />
@@ -239,11 +237,27 @@ export function SessionAgentsChip({
           sideOffset={8}
           collisionPadding={12}
           className={cn(
-            "z-50 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-border bg-surface p-3 shadow-lg outline-none",
+            // Same elevated family as the goal-pill panel (rounded-xl / border /
+            // shadow-lg / surface), just opening DOWNWARD from the header; a tall
+            // lineage scrolls inside rather than overflowing the viewport.
+            "z-50 flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[min(22rem,calc(100vw-2rem))] flex-col overflow-y-auto overscroll-contain",
+            "rounded-xl border border-border bg-surface shadow-lg outline-none",
             "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+            "data-[side=bottom]:slide-in-from-top-1",
           )}
         >
-          <SubagentSection workspaceId={workspaceId} lineage={nodes} loading={loading} onNavigate={() => setOpen(false)} />
+          <div className="p-2.5">
+            <SubagentsLabel count={count} />
+            {loading && count === 0 ? (
+              <div className="mt-2">
+                <LineageLoading />
+              </div>
+            ) : (
+              <div className="mt-2">
+                <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={() => setOpen(false)} />
+              </div>
+            )}
+          </div>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
