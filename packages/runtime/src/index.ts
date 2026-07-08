@@ -3623,7 +3623,31 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function gitCredentialHelperCommandLines(): string[] {
+function repositoryCredentialProvider(resource: Extract<ResourceRef, { kind: "repository" }>): GitCredentialProvider {
+  return resource.provider ?? "github";
+}
+
+function gitAskpassHostProviderCaseLines(resources: Extract<ResourceRef, { kind: "repository" }>[]): string[] {
+  const hosts = new Map<string, GitCredentialProvider>();
+  for (const resource of resources) {
+    try {
+      const hostname = new URL(resource.uri).hostname.toLowerCase();
+      if (!hostname) {
+        continue;
+      }
+      hosts.set(hostname, repositoryCredentialProvider(resource));
+    } catch {
+      // Resource validation catches invalid URIs before normal runtime use. Keep
+      // helper generation tolerant so tests for clone failure can still build.
+    }
+  }
+  return [...hosts.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([hostname, provider]) => `    ${shellQuote(hostname)}) printf '%s\\n' ${provider}; return 0 ;;`);
+}
+
+function gitCredentialHelperCommandLines(resources: Extract<ResourceRef, { kind: "repository" }>[] = []): string[] {
+  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
     // provision git/provider-CLI helpers at SETUP (runtime) before any clone runs.
@@ -3662,8 +3686,25 @@ function gitCredentialHelperCommandLines(): string[] {
     "mkdir -p \"$(dirname \"$git_askpass\")\"",
     "cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
     "#!/usr/bin/env sh",
+    "prompt_host() {",
+    "  prompt_lower=\"$(printf '%s\\n' \"$1\" | tr '[:upper:]' '[:lower:]')\"",
+    "  case \"$prompt_lower\" in",
+    "    *://*) ;;",
+    "    *) printf '\\n'; return 0 ;;",
+    "  esac",
+    "  rest=\"${prompt_lower#*://}\"",
+    "  rest=\"${rest#*@}\"",
+    "  host=\"${rest%%/*}\"",
+    "  host=\"${host%%:*}\"",
+    "  host=\"$(printf '%s\\n' \"$host\" | tr -d \"'\")\"",
+    "  printf '%s\\n' \"$host\"",
+    "}",
     "provider_for_prompt() {",
-    "  case \"$1\" in",
+    "  host=\"$(prompt_host \"$1\")\"",
+    "  case \"$host\" in",
+    ...(hostProviderCases.length > 0 ? hostProviderCases : ["    \"\") : ;;"]),
+    "  esac",
+    "  case \"$(printf '%s\\n' \"$1\" | tr '[:upper:]' '[:lower:]')\" in",
     "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
     "    *gitlab*) printf '%s\\n' gitlab ;;",
     "    *dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
@@ -3750,7 +3791,7 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "set -eu",
     "export HOME=\"${HOME:-/workspace}\"",
     "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
-    ...gitCredentialHelperCommandLines(),
+    ...gitCredentialHelperCommandLines(resources),
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
     "    return 0",

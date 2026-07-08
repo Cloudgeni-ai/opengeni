@@ -14,14 +14,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
   /** The generated clone script minus the /workspace-hardcoded invocations, plus a
    *  test-controlled `clone_repository` call. */
-  function cloneScriptWithTarget(target: string, uri: string): string {
-    const generated = repositoryCloneCommand([{
+  function cloneScriptWithTarget(
+    target: string,
+    uri: string,
+    resource: Parameters<typeof repositoryCloneCommand>[0][number] = {
       kind: "repository",
       uri,
       ref: "main",
       githubInstallationId: 123,
       githubRepositoryId: 456,
-    }]);
+    },
+  ): string {
+    const generated = repositoryCloneCommand([resource]);
     const withoutInvocations = generated.split("\n").filter((line) => !line.startsWith("clone_repository '")).join("\n");
     return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
   }
@@ -100,6 +104,35 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(azureOut).toBe("azdo-atomic-789");
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("askpass maps custom GitLab hosts from repository resources before fallback heuristics", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-custom-git-host-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "private");
+      const resource = {
+        kind: "repository" as const,
+        uri: "https://git.company.com/acme/private.git",
+        ref: "main",
+        provider: "gitlab" as const,
+      };
+      const run = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_SEED: "github-fallback-token",
+        OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-custom-domain",
+      });
+      expect(run.status).toBe(0);
+
+      const askpass = join(home, ".opengeni", "askpass");
+      const askEnv = { ...process.env, HOME: home };
+      expect(execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], { env: askEnv, encoding: "utf8" })).toBe("oauth2\n");
+      expect(execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], { env: askEnv, encoding: "utf8" })).toBe("glpat-custom-domain");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
