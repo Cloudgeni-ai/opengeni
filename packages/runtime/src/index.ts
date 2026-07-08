@@ -2967,8 +2967,19 @@ export async function runOwnedSandboxSetup(
     ...(opts.gitTokenSeedsOverride ?? {}),
   } satisfies GitTokenSeeds;
   const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
-    ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+    // M3: rig setup runs FIRST so any tooling it installs is present for the
+    // credential / repository-clone hooks below; the rig's credential hooks are
+    // unioned into the deployment preparation-profile hooks (deduped by id).
+    // This is the LIVE owned-path execution (the provided session skips the
+    // client create/resume decoration), so the rig hooks MUST be here or a
+    // rig-bound turn would start without ever running the frozen setup script.
+    ...sandboxRigSetupHooksForAgent(agent),
+    ...unionCredentialHooks(
+      sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+      rigCredentialHooksForAgent(agent),
+    ),
     ...sandboxToolspaceTokenHooksForAgent(agent),
     ...sandboxRepositoryCloneHooksForAgent(agent),
   ];
@@ -2978,6 +2989,7 @@ export async function runOwnedSandboxSetup(
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+    ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
