@@ -9,6 +9,7 @@ import {
   sessionStatusFromEvents,
   toolDisplayName,
   type AgentMessageItem,
+  type MemoryItem,
   type SandboxItem,
   type TimelineGroup,
   type TurnEndItem,
@@ -126,6 +127,18 @@ describe("buildTimeline", () => {
       event("user.message", {
         text: "Still readable",
         childCompletion: { childSessionId: "22222222-3333-4444-9555-666666666672" },
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message"]);
+    expect((items[0] as UserMessageItem).text).toBe("Still readable");
+  });
+
+  test("leaves invalid childCompletion session ids as plain user messages", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", {
+        text: "Still readable",
+        childCompletion: { childSessionId: "not-a-uuid", status: "idle" },
       }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["user-message"]);
@@ -508,6 +521,30 @@ describe("buildTimeline", () => {
     expect(sandbox?.output).toContain("authentication failed");
   });
 
+  test("routine file-resource-download operations never render", () => {
+    // Per-turn plumbing: an idempotent `if [ ! -f ] then curl` re-materializes
+    // an attached file after a box re-warm and emits its operation every turn
+    // even when the file is already present — it must not read as re-downloading.
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
+      event("sandbox.operation.completed", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
+    ]);
+    expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
+  });
+
+  test("failed file-resource-download operations still surface loudly", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1" }),
+      event("sandbox.operation.failed", { name: "file-resource-download", fileId: "f1", error: "signed URL expired" }),
+    ]);
+    const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
+    expect(sandbox?.name).toBe("file-resource-download");
+    expect(sandbox?.status).toBe("failed");
+    expect(sandbox?.output).toContain("signed URL expired");
+  });
+
   test("sandbox durability lifecycle events are ignored by the projection", () => {
     // sandbox.box.* / sandbox.env.drift are observability spine events —
     // tolerant reader: they must never render or disturb the timeline.
@@ -699,6 +736,12 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline([event("goal.set", { goal: { text: "Keep staging green" } })]);
     expect(items[0]).toMatchObject({ kind: "goal", action: "set", text: "Keep staging green" });
+  });
+
+  test("goal.cleared is tolerated as a goal landmark", () => {
+    reset();
+    const items = buildTimeline([event("goal.cleared", { goalId: "goal-1" })]);
+    expect(items[0]).toMatchObject({ kind: "goal", action: "cleared", text: null });
   });
 
   test("session.requiresAction becomes a waiting notice", () => {
@@ -1196,3 +1239,97 @@ function collectActivityGroups(groups: ReturnType<typeof groupTimeline>) {
   }
   return out;
 }
+
+describe("buildTimeline — memory writes", () => {
+  test("projects memory.saved into a neutral MemoryItem carrying id, kind, preview", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", {
+        memoryId: "mem-1",
+        kind: "preference",
+        preview: "Prefers concise prose over bullet lists.",
+        deduped: false,
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["memory"]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("saved");
+    expect(memory.memoryKind).toBe("preference");
+    expect(memory.preview).toBe("Prefers concise prose over bullet lists.");
+    expect(memory.memoryId).toBe("mem-1");
+    expect(memory.deduped).toBeUndefined();
+    expect(memory.replacementPreview).toBeUndefined();
+  });
+
+  test("carries a deduped flag through only when the save collapsed into an existing memory", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", { memoryId: "mem-2", kind: "semantic", preview: "Ships on Fridays.", deduped: true }),
+    ]);
+    expect((items[0] as MemoryItem).deduped).toBe(true);
+  });
+
+  test("projects memory.corrected supersede into a MemoryItem with old preview, new replacement, and both ids", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", {
+        memoryId: "mem-old",
+        kind: "decision",
+        preview: "Deploy from the release branch.",
+        action: "superseded",
+        replacementMemoryId: "mem-new",
+        replacementPreview: "Deploy from main after a green staging run.",
+      }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.kind).toBe("memory");
+    expect(memory.variant).toBe("corrected");
+    expect(memory.preview).toBe("Deploy from the release branch.");
+    expect(memory.replacementPreview).toBe("Deploy from main after a green staging run.");
+    expect(memory.memoryId).toBe("mem-old");
+    expect(memory.replacementMemoryId).toBe("mem-new");
+  });
+
+  test("projects an archive (corrected, no replacement) carrying the archived action", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", { memoryId: "mem-3", kind: "episodic", preview: "Tried the beta once.", action: "archived" }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("corrected");
+    expect(memory.action).toBe("archived");
+    expect(memory.replacementPreview).toBeUndefined();
+    expect(memory.replacementMemoryId).toBeUndefined();
+  });
+
+  test("projects an in-place update (corrected, no replacement) carrying the updated action", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", { memoryId: "mem-4", kind: "preference", preview: "Prefers dark mode.", action: "updated" }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("corrected");
+    expect(memory.action).toBe("updated");
+    expect(memory.replacementPreview).toBeUndefined();
+  });
+
+  test("drops a malformed memory event with no memory id rather than rendering a blank row", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", { kind: "preference", preview: "no id here" }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("clusters memory writes as activity steps alongside tool calls", () => {
+    reset();
+    const groups = groupTimeline(buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
+    ]));
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
+  });
+});

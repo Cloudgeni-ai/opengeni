@@ -305,6 +305,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(r1.wrote).toBe(true);
     expect(r1.priorArchive).toBeNull();
+    expect(r1.priorArchivePrev).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
     const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
@@ -321,6 +322,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(r2.wrote).toBe(true);
     expect(r2.priorArchive).toBe(archive1);
+    expect(r2.priorArchivePrev).toBeNull();
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
@@ -342,15 +344,18 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true } },
     });
 
+    // Explicit capture clocks so ordering is deterministic (persistWarmSnapshot
+    // orders by capture-initiation, not wall-clock-of-call).
+    const t0 = 1_900_000_000_000;
     // First warm persist: folds archive + workspaceArchiveAt; providerState preserved.
     const archive1 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w1\"}").toString("base64");
     const r1 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 60_000,
+      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 60_000, capturedAtMs: t0,
     });
     expect(r1.wrote).toBe(true);
     expect(r1.throttled).toBe(false);
-    expect(r1.priorArchive).toBeNull();
+    expect(r1.priorArchiveForGc).toBeNull();
     const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss1 = (row1!.resume_state as any).sessionState;
     expect(ss1.workspaceArchive).toBe(archive1);
@@ -361,23 +366,54 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const archive2 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w2\"}").toString("base64");
     const r2 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 60_000,
+      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 60_000, capturedAtMs: t0 + 1_000,
     });
     expect(r2.wrote).toBe(false);
     expect(r2.throttled).toBe(true);
 
-    // Interval 0 = always write: supersedes and returns the PRIOR for GC.
+    // MONOTONIC guard: a capture that STARTED at/before the stored archive's
+    // capture is stale (the bounded-wait race — a slow heartbeat capture landing
+    // after a fresher turn-end one) and is a no-op: no overwrite, no throttle-clock
+    // advance, nothing to GC.
+    const staleArchive = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-stale\"}").toString("base64");
+    const rStale = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: staleArchive, minIntervalMs: 0, capturedAtMs: t0 - 5_000,
+    });
+    expect(rStale.wrote).toBe(false);
+    expect(rStale.superseded).toBe(true);
+    const [rowStale] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect((rowStale!.resume_state as any).sessionState.workspaceArchive).toBe(archive1);
+
+    // Interval 0 = always write: shifts current to previous and returns only the
+    // two-ago archive for GC, retaining a 2-deep restore fallback.
     const r3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 0,
+      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 0, capturedAtMs: t0 + 2_000,
     });
     expect(r3.wrote).toBe(true);
-    expect(r3.priorArchive).toBe(archive1);
+    expect(r3.priorArchiveForGc).toBeNull();
+    const [row3] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss3 = (row3!.resume_state as any).sessionState;
+    expect(ss3.workspaceArchive).toBe(archive2);
+    expect(ss3.workspaceArchivePrev).toBe(archive1);
+
+    const archive3 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w3\"}").toString("base64");
+    const r3b = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive3, minIntervalMs: 0, capturedAtMs: t0 + 3_000,
+    });
+    expect(r3b.wrote).toBe(true);
+    expect(r3b.priorArchiveForGc).toBe(archive1);
+    const [row3b] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss3b = (row3b!.resume_state as any).sessionState;
+    expect(ss3b.workspaceArchive).toBe(archive3);
+    expect(ss3b.workspaceArchivePrev).toBe(archive2);
 
     // Epoch fence: a stale-epoch persist writes ZERO rows.
     const r4 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 999, workspaceArchive: archive1, minIntervalMs: 0,
+      expectedEpoch: 999, workspaceArchive: archive1, minIntervalMs: 0, capturedAtMs: t0 + 4_000,
     });
     expect(r4.wrote).toBe(false);
     expect(r4.throttled).toBe(false);
@@ -387,7 +423,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     await admin`update sandbox_leases set liveness = 'draining', refcount = 0, turn_holders = 0 where sandbox_group_id = ${ids.groupId}`;
     const r5 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 0,
+      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 0, capturedAtMs: t0 + 5_000,
     });
     expect(r5.wrote).toBe(false);
   }, 60_000);

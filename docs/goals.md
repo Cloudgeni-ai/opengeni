@@ -29,7 +29,8 @@ A goal is `active`, `paused`, or `completed`.
   replaced.
 
 Every transition lands on the session timeline as `goal.set`, `goal.updated`,
-`goal.completed`, `goal.paused`, `goal.resumed`, or `goal.continuation` events.
+`goal.completed`, `goal.paused`, `goal.resumed`, `goal.cleared`, or
+`goal.continuation` events.
 
 ## The continuation loop
 
@@ -97,6 +98,9 @@ previous-continuation pointers are cleared together.
   and wakes the session workflow — resume works even on a fully idle session
   because `signalWithStart` restarts a completed workflow. Invalid transitions
   (e.g. resuming a completed goal) return 409.
+- `DELETE /v1/workspaces/:id/sessions/:sessionId/goal` clears the session's
+  active goal (`sessions:control`). It deletes the goal row, emits
+  `goal.cleared` when a goal existed, and is idempotent when no goal exists.
 
 ## Scheduled tasks
 

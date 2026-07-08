@@ -34,6 +34,8 @@ import type {
   FsMkdirResponse,
   FsTreeNode,
   GitDiffResponse,
+  GetWorkspaceCaptureResponse,
+  GetWorkspaceCaptureFileResponse,
   GitStatusResponse,
   ListPacksResponse,
   PackInstallation,
@@ -67,6 +69,7 @@ import type {
   WorkspaceRegisteredPack,
 } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/index";
+import type { MachinesResponse } from "../src/machines";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
@@ -160,7 +163,7 @@ export class MockOpenGeniClient implements SessionClientLike {
     const children = sessionId === MANAGER_SESSION_ID
       ? [{ session: this.fabricateSession(WORKER_SESSION_ID, "running", "Worker session"), children: [] }]
       : [];
-    return { ancestors: [], children };
+    return { ancestors: [], children, truncated: false };
   }
 
   async updateSession(_workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
@@ -321,6 +324,14 @@ export class MockOpenGeniClient implements SessionClientLike {
     this.goals.set(sessionId, goal);
     this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", { goalId: goal.id });
     return { ...goal };
+  }
+
+  async deleteGoal(_workspaceId: string, sessionId: string): Promise<void> {
+    const goal = this.goals.get(sessionId);
+    this.goals.delete(sessionId);
+    if (goal) {
+      this.bus(sessionId).append("goal.cleared", { goalId: goal.id });
+    }
   }
 
   async clearSessionContext(_workspaceId: string, sessionId: string): Promise<void> {
@@ -892,6 +903,43 @@ export class MockOpenGeniClient implements SessionClientLike {
         },
       ],
       revision: 1,
+    };
+  }
+
+  // The demo mock serves a live warm workspace (fsList/gitDiff above), so there
+  // is no cold capture to read — the workbench falls back to the live path. M3/M4
+  // add a fixture-capture mock for the cold-paint demo state.
+  async getWorkspaceCapture(): Promise<GetWorkspaceCaptureResponse> {
+    return { available: false };
+  }
+
+  async getWorkspaceCaptureFile(_workspaceId: string, _sessionId: string, _path: string): Promise<GetWorkspaceCaptureFileResponse> {
+    throw new Error("no capture in the demo mock");
+  }
+
+  // The machine fleet backing the dock-header chip: one live session-group box.
+  async listMachines(): Promise<MachinesResponse> {
+    return {
+      activeSandboxId: "demo-sandbox",
+      activeEpoch: 1,
+      machines: [
+        {
+          sandboxId: "demo-sandbox",
+          enrollmentId: null,
+          name: "Cloud sandbox",
+          kind: "modal",
+          state: "online",
+          active: true,
+          isSessionGroup: true,
+          os: "linux",
+          arch: "x86_64",
+          hasDisplay: true,
+          allowScreenControl: false,
+          sharedSessionCount: 1,
+          lastSeenAt: new Date().toISOString(),
+          metrics: null,
+        },
+      ],
     };
   }
 

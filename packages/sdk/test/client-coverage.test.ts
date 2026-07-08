@@ -296,6 +296,13 @@ describe("OpenGeniClient goals", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({ status: "paused", rationale: "manual review" });
     expect(JSON.parse(requests[1]!.body!)).toEqual({ status: "active" });
   });
+
+  test("deleteGoal DELETEs the session goal route", async () => {
+    const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
+    await client.deleteGoal(WORKSPACE_ID, SESSION_ID);
+    expect(requests[0]!.method).toBe("DELETE");
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`);
+  });
 });
 
 describe("OpenGeniClient access + workspaces", () => {

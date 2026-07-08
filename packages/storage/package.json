@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {

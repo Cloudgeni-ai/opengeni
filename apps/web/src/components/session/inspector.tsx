@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { eventLabel, isTerminalSessionStatus, sanitizeEventForDisplay } from "@/lib/events";
+import { eventDisplayLabel, isTerminalSessionStatus, sanitizeEventForDisplay } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import type { Session, SessionEvent } from "@/types";
@@ -128,7 +128,7 @@ export function SessionInspector(props: {
               {lifecycleEvents.map((event) => (
                 <div key={event.id} className="rounded-md border border-border bg-bg/35 p-2">
                   <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="truncate font-medium">{eventLabel(event.type)}</span>
+                    <span className="truncate font-medium">{eventDisplayLabel(event)}</span>
                     <span className="shrink-0 font-mono text-2xs text-fg-subtle">#{event.sequence}</span>
                   </div>
                   <div className="mt-1 text-2xs text-fg-subtle">{formatTimestamp(event.occurredAt)}</div>
@@ -153,7 +153,7 @@ function EventDebugRow({ event }: { event: SessionEvent }) {
       <CollapsibleTrigger asChild>
         <button type="button" className="flex w-full min-w-0 items-center justify-between gap-2 p-2 text-left">
           <div className="min-w-0">
-            <div className="truncate text-xs font-medium">{eventLabel(event.type)}</div>
+            <div className="truncate text-xs font-medium">{eventDisplayLabel(event)}</div>
             <div className="mt-1 truncate font-mono text-2xs text-fg-subtle">{event.turnId ?? event.id}</div>
           </div>
           <div className="shrink-0 text-right">

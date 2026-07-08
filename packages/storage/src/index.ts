@@ -10,6 +10,7 @@ import {
   type BlobGetPropertiesResponse,
 } from "@azure/storage-blob";
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -49,6 +50,15 @@ export type ObjectStorage = {
    * Browser uploads keep using `createPutUrl`; this is the trusted-server twin.
    */
   putObject: (args: { key: string; contentType: string; body: Uint8Array; sha256?: string | null }) => Promise<void>;
+  /**
+   * SERVER-SIDE authenticated delete of a single object by raw storage key.
+   * Idempotent: a missing key is a no-op (S3/GCS/Azure delete-by-key does not
+   * 404 on absent objects, or the 404 is swallowed). Used by the Workbench v2
+   * capture GC (dossier §10.1 keep-latest-10) to reap after-image blobs that no
+   * surviving revision references. Best-effort at the call site — a failed
+   * delete leaves an orphan blob, never corrupts a live capture.
+   */
+  deleteObject: (key: string) => Promise<void>;
 };
 
 export function createObjectStorage(settings: Settings): ObjectStorage | null {
@@ -153,6 +163,13 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         throw error;
       }
     },
+    async deleteObject(key) {
+      // S3 DeleteObject is idempotent — deleting an absent key returns 204.
+      await client.send(new DeleteObjectCommand({
+        Bucket: settings.objectStorageBucket,
+        Key: key,
+      }));
+    },
   };
 }
 
@@ -252,6 +269,10 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         throw error;
       }
     },
+    async deleteObject(key) {
+      // ignoreNotFound keeps the delete idempotent (a missing blob is a no-op).
+      await bucket.file(key).delete({ ignoreNotFound: true });
+    },
   };
 }
 
@@ -332,6 +353,10 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
         }
         throw error;
       }
+    },
+    async deleteObject(key) {
+      // deleteIfExists keeps the delete idempotent (a missing blob is a no-op).
+      await containerClient.getBlockBlobClient(key).deleteIfExists();
     },
   };
 }

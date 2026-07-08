@@ -59,46 +59,39 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
     <Collapsible.Root open={open} onOpenChange={setOpen} className={enter && !bare ? "animate-og-enter" : undefined}>
       <Collapsible.Trigger
         className={cn(
-          "group flex w-full items-center text-left text-og-base transition-colors",
+          // Both the top-level turn fold and a nested cluster fold render as a
+          // FLAT rail row — chevron + glyph + facets on the page background, no
+          // border, no fill. Only a hover tint hints the row is expandable, so a
+          // collapsed turn never reads as a boxed card. The top-level row is a
+          // touch larger (base text, size-5 glyph, wider gap) so it still reads
+          // as a turn landmark above the nested cluster rows it groups.
+          "group flex w-full items-center rounded-og-sm text-left transition-colors",
+          // A folded turn is a touch target on coarse pointers: grow the row so it
+          // clears the 40px minimum without disturbing the calm desktop rhythm.
+          "pointer-coarse:py-2.5",
           bare
-            ? // A nested node: no border, no fill — a plain rail row. It sits at the
-              // same weight as the tool rows it groups (hover tint only), so the turn
-              // body reads as one continuous thread instead of nested cards.
-              "gap-2 rounded-og-sm px-1.5 py-1.5 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:py-2.5"
-            : cn(
-                "gap-2.5 rounded-og-md border px-3 py-2",
-                // A folded turn is a touch target on coarse pointers: grow the row so
-                // it clears the 40px minimum without disturbing the calm desktop rhythm.
-                "pointer-coarse:py-2.5",
-                // Only a failed turn earns the one filled/tinted card in the timeline;
-                // complete and cancelled stay flat and calm.
-                outcome === "failed"
-                  ? "border-og-status-failed/30 bg-og-status-failed/[0.06] hover:border-og-status-failed/50"
-                  : "border-og-border bg-og-surface-1/50 hover:border-og-border-strong",
-              ),
+            ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
+            : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
+          // A failed fold keeps its red accent (glyph + inline reason below) and a
+          // faint red hover wash so attention still lands there; every other
+          // outcome gets the neutral surface hover.
+          outcome === "failed"
+            ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
+            : "hover:bg-og-surface-1 hover:text-og-fg",
         )}
       >
         {/* Disclosure grammar matches the rows: chevron leads (far left), then the
             outcome glyph, then the facets — one expand affordance side everywhere. */}
         <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
-        {/* Only the exceptional outcomes earn a filled tinted circle. A clean
-            (complete) run draws a bare muted check — zero colored fills, so the
-            eye is pulled only to a turn that needs attention. A nested node keeps
-            the glyph unfilled (it is a rail node, not a card) — the hue alone
-            carries an exceptional outcome. */}
+        {/* The outcome glyph carries the state by hue alone — no filled circle, no
+            card. A clean (complete) run draws a bare muted check; a failed one a
+            red triangle; a cancelled one a muted slash; a still-running cluster a
+            quiet pulse dot in the glyph's place so alignment holds. */}
         <span
           className={cn(
-            "inline-flex shrink-0 items-center justify-center rounded-full",
+            "inline-flex shrink-0 items-center justify-center",
             bare ? "size-3.5" : "size-5",
-            outcome === "failed"
-              ? bare
-                ? "text-og-status-failed"
-                : "bg-og-status-failed/15 text-og-status-failed"
-              : outcome === "cancelled"
-                ? bare
-                  ? "text-og-fg-subtle"
-                  : "bg-og-fg-subtle/15 text-og-fg-subtle"
-                : "text-og-fg-subtle",
+            outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
           )}
         >
           {outcome === "failed" ? (
@@ -148,7 +141,19 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   let files = 0;
   let commands = 0;
   let screenshots = 0;
+  let memoriesSaved = 0;
+  let memoriesUpdated = 0;
   for (const item of items) {
+    if (item.kind === "memory") {
+      // A memory write is a first-class facet — the "wrote 1 memory" signal the
+      // fold should make prominent — counted saved vs updated separately.
+      if (item.variant === "corrected") {
+        memoriesUpdated += 1;
+      } else {
+        memoriesSaved += 1;
+      }
+      continue;
+    }
     if (item.kind !== "tool-call") {
       continue;
     }
@@ -172,6 +177,12 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   }
   if (screenshots) {
     parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
+  }
+  if (memoriesSaved) {
+    parts.push(`${memoriesSaved} ${memoriesSaved === 1 ? "memory" : "memories"} saved`);
+  }
+  if (memoriesUpdated) {
+    parts.push(`${memoriesUpdated} ${memoriesUpdated === 1 ? "memory" : "memories"} updated`);
   }
   const duration = formatDurationFacet(durationMs);
   if (duration) {

@@ -149,13 +149,19 @@ body {
   background: transparent;
 }
 
-/* Focus ring. The composer textarea is excluded: its wrapper already shows a
-   whole-composer focus affordance (focus-within border + soft glow), and a
-   per-textarea outline here painted a second highlight bounded to the textarea
-   box (the top half, stopping above the toolbar). Scoping it out of `.og-root`
-   leaves every other control's focus ring intact. */
-:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible:not(.og-root textarea) {
-  outline: 2px solid var(--color-brand);
+/* Focus ring. One calm, intentional treatment: a soft brand-tinted ring set off
+   from the control by a 2px gap (never a harsh full-chroma hairline hugging the
+   edge). Kept clearly visible for keyboard users while reading as designed, not
+   as a default browser outline.
+
+   Two exclusions:
+   - the composer textarea (`.og-root textarea`) already shows a whole-composer
+     focus affordance (focus-within border + soft glow), so a second outline
+     bounded to the textarea box would double it;
+   - shadcn buttons (`[data-slot="button"]`) carry their own offset ring in
+     button.tsx — excluding them here avoids stacking two rings on one control. */
+:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible:not(.og-root textarea):not([data-slot="button"]) {
+  outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }

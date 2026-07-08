@@ -165,6 +165,11 @@ const workspaceSchedulesRoute = createRoute({
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
+  // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
+  // Documents page reveals + highlights that memory even when the filters would
+  // otherwise hide it. Unknown values are ignored.
+  validateSearch: (search: Record<string, unknown>): { memory?: string } =>
+    typeof search.memory === "string" ? { memory: search.memory } : {},
   component: Documents,
 });
 const workspaceSettingsRoute = createRoute({
@@ -309,7 +314,8 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  return <DocumentsRoute workspaceId={workspaceId} />;
+  const { memory } = workspaceDocumentsRoute.useSearch();
+  return <DocumentsRoute workspaceId={workspaceId} focusMemoryId={memory} />;
 }
 
 function WorkspaceSettings() {

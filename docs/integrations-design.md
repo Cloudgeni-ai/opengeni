@@ -55,7 +55,7 @@ Decisions baked in:
 
 ## 3. Credential encryption
 
-Reuse the existing AES-256-GCM envelope as-is: `encryptVariable setValue`/`decryptVariable setValue` in `packages/db/src/variable set-crypto.ts` (format `v1:<base64 iv>:<base64 ciphertext||tag>`), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `variable-setsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:
+Reuse the existing AES-256-GCM envelope as-is: `encryptEnvironmentValue`/`decryptEnvironmentValue` in `packages/db/src/environment-crypto.ts` (format `v1:<base64 iv>:<base64 ciphertext||tag>`), keyed by `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` via `environmentsEncryptionKeyBytes` in `packages/config/src/index.ts`. No new key. Unlike capability headers (per-header ciphertext map), `connections.credential_encrypted` stores **one JSON bundle**:
 
 ```json
 { "access_token": "…", "refresh_token": "…", "token_type": "Bearer",

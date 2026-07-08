@@ -12,6 +12,7 @@ import {
   PlayIcon,
   RefreshCwIcon,
   TargetIcon,
+  Trash2Icon,
   TriangleAlertIcon,
   XCircleIcon,
 } from "lucide-react";
@@ -54,6 +55,15 @@ export type MessageTimelineProps = {
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * Deep-link a memory row (a `memory.saved` / `memory.corrected` step) to its
+   * record in the host's memory pane. Opt-in, exactly like `onReconnect`: the
+   * library draws no "View in memory" affordance without a handler — the memory
+   * row is then non-interactive rich content. This is the switch that makes the
+   * deep-link a first-party OpenGeni capability without other SDK consumers
+   * opting into it. The app supplies it (it owns routing to the memory pane).
+   */
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
   /**
    * Start the reconnect flow when a tool needs its connection reauthorized. The
    * app supplies this (it owns the SDK client + workspace): it typically kicks
@@ -100,6 +110,7 @@ export function MessageTimeline({
   status,
   renderMessageText,
   onOpenSession,
+  onMemoryClick,
   onReconnect,
   resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
@@ -312,6 +323,7 @@ export function MessageTimeline({
               group={group}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
               onReconnect={onReconnect}
               resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
@@ -378,6 +390,7 @@ function TimelineGroupView({
   group,
   renderMessageText,
   onOpenSession,
+  onMemoryClick,
   onReconnect,
   resolveProviderLogo,
   toolRegistry,
@@ -387,6 +400,7 @@ function TimelineGroupView({
   group: TimelineGroup;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
@@ -409,12 +423,12 @@ function TimelineGroupView({
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} bare={insideTurn} />
+          <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
         </TurnSummary>
       ) : (
         // A nested live cluster hangs on the turn's rail (bare); a top-level one
         // owns its own rail.
-        <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} bare={insideTurn} />
+        <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
@@ -424,6 +438,7 @@ function TimelineGroupView({
           group={child}
           renderMessageText={renderMessageText}
           onOpenSession={onOpenSession}
+          onMemoryClick={onMemoryClick}
           onReconnect={onReconnect}
           resolveProviderLogo={resolveProviderLogo}
           toolRegistry={toolRegistry}
@@ -497,6 +512,10 @@ function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): 
   return group.items.every((item) => {
     if (item.kind === "reasoning") {
       return !item.streaming;
+    }
+    // A memory write is a discrete, already-settled event — it has no running state.
+    if (item.kind === "memory") {
+      return true;
     }
     return item.status !== "running";
   });
@@ -781,6 +800,7 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   completed: { label: "Goal completed", pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle", icon: CheckIcon },
   paused: { label: "Goal paused", pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting", icon: PauseIcon },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
 };
 

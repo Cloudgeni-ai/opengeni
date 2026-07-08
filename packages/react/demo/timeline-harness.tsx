@@ -18,6 +18,7 @@ import {
   completedTurnEvents,
   failedTurnEvents,
   liveTurnEvents,
+  memoryTurnEvents,
   tourEvents,
   workerCompletionEvents,
   workerGoalEvents,
@@ -158,6 +159,16 @@ function Harness() {
 
             <Section title="Failed turn — folds, but the error is never hidden" hint="Failed turns start open so the error and folded context stay visible.">
               <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
+            </Section>
+
+            <Section
+              title="Memory writes — a first-class step, saved & corrected"
+              hint="memory.saved / memory.corrected fold into the chip summary ('… · 2 memories saved · 2 memories updated'); expanded, each is a calm neutral row (supersede = old → new, in-place = live text). With a host onMemoryClick, expanding reveals a 'View in memory' deep-link.">
+              <MessageTimeline
+                events={memoryTurnEvents()}
+                onMemoryClick={(id) => window.alert(`Open memory ${id}`)}
+                className="max-h-none"
+              />
             </Section>
 
             <Section

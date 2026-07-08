@@ -2,9 +2,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  clearSessionGoal,
   countConsecutiveReactiveRotations,
   createDb,
   evaluateGoalContinuation,
+  getSessionGoal,
+  listSessionEvents,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -147,6 +150,28 @@ describe("Finding 1b — countConsecutiveReactiveRotations", () => {
     await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
     await appendEvent(ws, sessionId, "turn.completed", { output: "done" });
     expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(0);
+  });
+});
+
+describe("session goal clearing", () => {
+  test("deletes the goal row, appends goal.cleared once, and is idempotent", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const sessionId = await seedSession(ws);
+    await admin`
+      insert into session_goals (account_id, workspace_id, session_id, status, text)
+      values (${ws.accountId}, ${ws.workspaceId}, ${sessionId}, 'active', 'ship it')`;
+
+    const first = await clearSessionGoal(db, ws.workspaceId, sessionId);
+    expect(first.cleared).toBe(true);
+    expect(first.goal?.text).toBe("ship it");
+    expect(first.event?.type).toBe("goal.cleared");
+    expect(await getSessionGoal(db, ws.workspaceId, sessionId)).toBeNull();
+
+    const second = await clearSessionGoal(db, ws.workspaceId, sessionId);
+    expect(second).toEqual({ cleared: false, goal: null, event: null });
+    const events = await listSessionEvents(db, ws.workspaceId, sessionId);
+    expect(events.map((event) => event.type)).toEqual(["goal.cleared"]);
   });
 });
 

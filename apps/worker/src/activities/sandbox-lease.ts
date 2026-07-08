@@ -33,7 +33,7 @@
 import {
   accrueWarmSeconds,
   confirmDrainCold,
-  appendSessionEvents,
+  appendSessionEventToSandboxGroup,
   countQueuedTurns,
   countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
@@ -41,7 +41,6 @@ import {
   listCreditBalancesByAccount,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
-  listSessionIdsInGroup,
   persistDrainSnapshot,
   readLease,
   reapStaleLeaseHoldersGlobal,
@@ -122,16 +121,16 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  * db/accountId/row and delegates to persistDrainSnapshot. Returns:
  *   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished). The box
  *                     is wanted again; the seam MUST NOT terminate it.
- *   - priorArchive -> the superseded archive (if any) to GC the prior snapshot.
+ *   - priorArchive / priorArchivePrev -> superseded archives to GC at drain.
  *
  * Pass null for archiveBase64 to CAS-check WITHOUT writing (re-arm guard for
  * backends with no persistWorkspace — ensures a re-arm during the snapshot window
- * aborts the terminate before client.delete()). priorArchive is always null in
- * this case.
+ * aborts the terminate before client.delete()). priorArchive values are always
+ * null in this case.
  */
 export type PersistArchiveFn = (
   archiveBase64: string | null,
-) => Promise<{ wrote: boolean; priorArchive: string | null }>;
+) => Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }>;
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
@@ -524,13 +523,10 @@ async function terminateDrainableBox(
     // every session sharing the group's box. Best-effort: attribution must
     // never affect the drain outcome.
     try {
-      const sessionIds = await listSessionIdsInGroup(db, row.workspaceId, row.sandboxGroupId);
-      for (const sessionId of sessionIds) {
-        await appendSessionEvents(db, row.workspaceId, sessionId, [{
-          type: "sandbox.box.terminated",
-          payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
-        }]);
-      }
+      await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
+        type: "sandbox.box.terminated",
+        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
+      });
     } catch (eventError) {
       observability.warn("sandbox reaper: box-terminated event write failed (drain outcome unaffected)", {
         sandboxGroupId: row.sandboxGroupId,
@@ -727,7 +723,7 @@ export async function terminateProviderBox(
   // refcount/epoch guard, no write. wrote:false → abort the terminate.
   if (archiveBytes && archiveBytes.length > 0) {
     const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
-    const { wrote, priorArchive } = await persistArchive(archiveBase64);
+    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(archiveBase64);
     if (!wrote) {
       observability.info("sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)", {
         sandboxGroupId: lease.sandboxGroupId,
@@ -743,6 +739,14 @@ export async function terminateProviderBox(
         sandboxGroupId: lease.sandboxGroupId,
         backend,
         snapshotId: deleted,
+      });
+    }
+    const deletedPrev = await deletePriorPersistedSnapshot(session, priorArchivePrev);
+    if (deletedPrev) {
+      observability.info("sandbox reaper: GC'd superseded previous workspace snapshot", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+        snapshotId: deletedPrev,
       });
     }
   } else {

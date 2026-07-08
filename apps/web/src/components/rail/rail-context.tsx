@@ -7,8 +7,20 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { useAppContext } from "@/context";
 
 const RAIL_COLLAPSED_KEY = "opengeni.rail.collapsed";
+const RAIL_WIDTH_KEY = "opengeni.rail.width";
 /** Below this viewport width the rail is an overlay drawer, not a fixed column. */
 export const RAIL_DRAWER_BREAKPOINT = 1024;
+/** Resize bounds for the expanded desktop rail (px). */
+export const RAIL_MIN_WIDTH = 220;
+export const RAIL_MAX_WIDTH = 480;
+export const RAIL_DEFAULT_WIDTH = 260;
+
+function clampRailWidth(width: number): number {
+  if (!Number.isFinite(width)) {
+    return RAIL_DEFAULT_WIDTH;
+  }
+  return Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(width)));
+}
 
 export type RailContextValue = {
   workspaceId: string;
@@ -16,6 +28,10 @@ export type RailContextValue = {
   collapsed: boolean;
   setCollapsed: (collapsed: boolean) => void;
   toggleCollapsed: () => void;
+  /** User-chosen expanded-rail width (px), clamped to [RAIL_MIN, RAIL_MAX]. */
+  width: number;
+  /** Set the expanded-rail width; persisted to localStorage (clamped). */
+  setWidth: (width: number) => void;
   /** Whether the viewport is narrow enough to use the overlay drawer. */
   isMobile: boolean;
   /** Mobile overlay-drawer open state. */
@@ -52,10 +68,23 @@ function readStoredCollapsed(): boolean {
   }
 }
 
+function readStoredWidth(): number {
+  if (typeof window === "undefined") {
+    return RAIL_DEFAULT_WIDTH;
+  }
+  try {
+    const raw = window.localStorage.getItem(RAIL_WIDTH_KEY);
+    return raw ? clampRailWidth(Number.parseInt(raw, 10)) : RAIL_DEFAULT_WIDTH;
+  } catch {
+    return RAIL_DEFAULT_WIDTH;
+  }
+}
+
 export function RailProvider({ workspaceId, children }: { workspaceId: string; children: ReactNode }) {
   const navigate = useNavigate();
   const appContext = useAppContext();
   const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
+  const [width, setWidthState] = useState<number>(() => readStoredWidth());
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isMobile, setIsMobile] = useState<boolean>(() =>
     typeof window !== "undefined" ? window.innerWidth < RAIL_DRAWER_BREAKPOINT : false,
@@ -82,6 +111,16 @@ export function RailProvider({ workspaceId, children }: { workspaceId: string; c
   }, []);
 
   const toggleCollapsed = useCallback(() => setCollapsed(!collapsed), [collapsed, setCollapsed]);
+
+  const setWidth = useCallback((next: number) => {
+    const clamped = clampRailWidth(next);
+    setWidthState(clamped);
+    try {
+      window.localStorage.setItem(RAIL_WIDTH_KEY, String(clamped));
+    } catch {
+      // localStorage may be unavailable (private mode); keep the in-memory value.
+    }
+  }, []);
 
   const openWorkspace = useCallback((nextWorkspaceId: string) => {
     appContext.resetSessionView();
@@ -117,6 +156,8 @@ export function RailProvider({ workspaceId, children }: { workspaceId: string; c
     collapsed: isMobile ? false : collapsed,
     setCollapsed,
     toggleCollapsed,
+    width,
+    setWidth,
     isMobile,
     drawerOpen,
     setDrawerOpen,
@@ -124,7 +165,7 @@ export function RailProvider({ workspaceId, children }: { workspaceId: string; c
     openOrg,
     openSession,
     startNewSession,
-  }), [workspaceId, collapsed, isMobile, drawerOpen, setCollapsed, toggleCollapsed, openWorkspace, openOrg, openSession, startNewSession]);
+  }), [workspaceId, collapsed, width, setWidth, isMobile, drawerOpen, setCollapsed, toggleCollapsed, openWorkspace, openOrg, openSession, startNewSession]);
 
   return <RailContext.Provider value={value}>{children}</RailContext.Provider>;
 }

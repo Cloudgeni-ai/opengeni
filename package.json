@@ -28,7 +28,7 @@
     "db:generate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run generate",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
-    "typecheck": "cd packages/contracts && bun run typecheck && cd ../agent-proto && bun run typecheck && cd ../config && bun run typecheck && cd ../deployment && bun run typecheck && cd ../db && bun run typecheck && cd ../events && bun run typecheck && cd ../github && bun run typecheck && cd ../storage && bun run typecheck && cd ../documents && bun run typecheck && cd ../observability && bun run typecheck && cd ../runtime && bun run typecheck && cd ../core && bun run typecheck && cd ../sdk && bun run typecheck && cd ../react && bun run typecheck && cd ../testing && bun run typecheck && cd ../../apps/api && bun run typecheck && cd ../worker && bun run typecheck && cd ../web && bun run typecheck",
+    "typecheck": "bun scripts/typecheck.ts",
     "test": "bun test",
     "test:unit": "bun test",
     "test:integration": "bun test --timeout 30000 ./test/integration/api.integration.ts && bun test --timeout 30000 ./test/integration/db.integration.ts && bun test --timeout 30000 ./test/integration/nats.integration.ts && bun test --timeout 30000 ./test/integration/selfhosted-control-transport.integration.ts && bun test --timeout 120000 ./test/integration/selfhosted-auth-callout.integration.ts && bun test --timeout 30000 ./test/integration/workspace-isolation.integration.ts && bun test --timeout 30000 ./test/integration/temporal-workflow.integration.ts && bun test --timeout 30000 ./test/integration/worker-activity.integration.ts && bun test --timeout 30000 ./test/integration/worker-restart.integration.ts",
@@ -77,6 +77,7 @@
     "@temporalio/client": "^1.17.0",
     "@temporalio/worker": "^1.17.0",
     "@types/bun": "^1.3.4",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "playwright": "^1.57.0",
     "typescript": "^6.0.3"
   },

@@ -5,6 +5,7 @@ import type {
   ActivityItem,
   AuthNeededItem,
   GoalItem,
+  MemoryItem,
   SandboxItem,
   SessionStatusItem,
   TimelineGroup,
@@ -254,12 +255,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.failed": {
         const name = typeof payload.name === "string" ? payload.name : "sandbox";
         const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
-        // Routine repository-clone operations are per-turn platform plumbing (an
-        // idempotent clone check + off-manifest token re-seed runs before EVERY
-        // turn on a repo-attached session) — rendering them reads as the agent
-        // redoing work each turn. Only failures surface, and they surface loudly:
-        // the failed event below creates its own item even without a started row.
-        if (name === "repository-clone" && status !== "failed") {
+        // Routine per-turn platform plumbing that runs before EVERY turn to
+        // guarantee box contents survive a re-warm — NOT the agent redoing work:
+        //   - repository-clone: idempotent clone check + off-manifest token re-seed;
+        //   - file-resource-download: idempotent `if [ ! -f ] then curl` (skips
+        //     when the attached file is already on the box — see
+        //     sandboxFileDownloadCommand), so an uploaded image is not re-fetched;
+        //     the operation still emits every turn even when it does nothing.
+        // Rendering either every turn reads as churn. Only FAILURES surface, and
+        // they surface loudly — the failed event below creates its own item even
+        // without a started row.
+        if ((name === "repository-clone" || name === "file-resource-download") && status !== "failed") {
           break;
         }
         const existing = findOpenSandbox(items, name);
@@ -431,11 +437,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "memory.saved":
+      case "memory.corrected": {
+        // A first-party memory write is a discrete step, not streamed text, so it
+        // ends whatever was streaming (mirrors tool/sandbox pushes). A payload
+        // missing the memory id is malformed and dropped rather than shown blank.
+        const memory = memoryItem(event.id, event.type, turnId, payload, event.occurredAt);
+        if (memory) {
+          closeStreamingTail();
+          items.push(memory);
+        }
+        break;
+      }
+
       case "goal.set":
       case "goal.updated":
       case "goal.completed":
       case "goal.paused":
       case "goal.resumed":
+      case "goal.cleared":
       case "goal.continuation": {
         items.push({
           kind: "goal",
@@ -514,6 +534,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "tool-call":
     case "worker":
     case "sandbox":
+    case "memory":
       return true;
     default:
       return false;
@@ -865,7 +886,13 @@ function workerCompletionPayload(value: unknown): {
   pausedReason: string | null;
 } | null {
   const payload = asRecord(value);
-  if (typeof payload.childSessionId !== "string" || typeof payload.status !== "string") {
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (
+    typeof payload.childSessionId !== "string"
+    || !uuidPattern.test(payload.childSessionId)
+    || typeof payload.status !== "string"
+    || payload.status.trim() === ""
+  ) {
     return null;
   }
   const goal = asRecord(payload.goal);
@@ -937,6 +964,41 @@ function goalText(payload: Record<string, unknown>): string | null {
     return payload.prompt;
   }
   return null;
+}
+
+/**
+ * Fold a `memory.saved` / `memory.corrected` event into a {@link MemoryItem}.
+ * Reads DEFENSIVELY (the payload is untyped `unknown`, no Zod schema): a missing
+ * memory id means a malformed event, so we return null and the case drops it.
+ */
+function memoryItem(
+  id: string,
+  type: string,
+  turnId: string | null,
+  payload: Record<string, unknown>,
+  occurredAt: string,
+): MemoryItem | null {
+  const memoryId = typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
+  if (!memoryId) {
+    return null;
+  }
+  const replacementPreview = typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
+  const replacementMemoryId = typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
+  const action = typeof payload.action === "string" ? payload.action : undefined;
+  return {
+    kind: "memory",
+    id,
+    turnId,
+    variant: type === "memory.corrected" ? "corrected" : "saved",
+    memoryKind: typeof payload.kind === "string" ? payload.kind : "",
+    preview: typeof payload.preview === "string" ? payload.preview : "",
+    ...(payload.deduped === true ? { deduped: true } : {}),
+    ...(replacementPreview ? { replacementPreview } : {}),
+    ...(action ? { action } : {}),
+    memoryId,
+    ...(replacementMemoryId ? { replacementMemoryId } : {}),
+    occurredAt,
+  };
 }
 
 const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]);

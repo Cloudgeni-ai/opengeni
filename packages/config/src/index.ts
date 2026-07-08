@@ -81,10 +81,10 @@ export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
  * baked into this overridable string.
  *
  * INVARIANT: with no per-workspace override and an empty environment, the
- * runtime's composed instructions are BYTE-IDENTICAL to the historical
- * hardcoded preamble. The template below is exactly the historical lines 1–11
- * joined by " ", followed by " " + the placeholder. Changing a single
- * character here changes that default; a runtime test pins it.
+ * runtime's composed instructions are byte-for-byte pinned by a runtime test.
+ * The template below is joined by " ", followed by " " + the placeholder.
+ * Changing a single character here changes that default; update the pin
+ * intentionally.
  */
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
@@ -94,9 +94,9 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
   "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
-  "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
+  "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
-  "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
+  "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
   "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
 ].join(" ");
@@ -302,7 +302,7 @@ const SettingsSchema = z.object({
   // the non-bypassable CORE at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER (or appends
   // it when the template omits the marker), and uses the result as the agent's
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
-  // default byte-identical to the historical hardcoded preamble.
+  // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
@@ -409,6 +409,13 @@ const SettingsSchema = z.object({
   // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
   recordingEnabled: EnvBoolean.default(true),
   recordingDefaultCodec: z.enum(["h264-mp4", "vp9-webm"]).default("h264-mp4"),
+  // Workbench v2 turn-end workspace capture (dossier §10.1). When on, the turn
+  // activity probes the box's changed files off the live box at turn end and
+  // persists a capture revision (blobs in @opengeni/storage) so the workbench
+  // paints cold/offline sessions with zero machine round-trips. Best-effort and
+  // fully behind this flag: off ⇒ capture is skipped and reads fall back to the
+  // live/wake path (status-quo behavior). Default on; explicit per environment.
+  workspaceCaptureEnabled: EnvBoolean.default(true),
   recordingFramerate: z.coerce.number().int().positive().default(15),
   recordingMaxSeconds: z.coerce.number().int().positive().default(600),
   recordingMaxBytes: z.coerce.number().int().positive().default(268_435_456), // 256 MB
@@ -462,6 +469,19 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
+  // --- lazy sandbox provisioning rollout flag, default OFF ---
+  // Only effective when sandboxOwnershipEnabled is ALSO on (lazy provisioning is a
+  // property of the owned path — the SDK never creates/resumes an injected session,
+  // so we control when the box is established). When TRUE, a turn does NOT provision
+  // its box at turn start: the lease acquire + resume-by-id + hooks + downloads +
+  // heartbeat + recording are deferred to an in-process single-flight provisioner
+  // that runs the FIRST time a sandbox op is dispatched (via the routing proxy's
+  // resolveActiveBackend). A turn whose model never calls a sandbox-backed tool ends
+  // with NO lease row and ZERO warm-seconds. When FALSE (or ownership off) the turn
+  // provisions eagerly exactly as today — byte-for-byte. EnvBoolean (NOT
+  // z.coerce.boolean(), which coerces "false" -> true and would turn the flag ON the
+  // moment anyone set the env var to disable it).
+  sandboxLazyProvisionEnabled: EnvBoolean.default(false),
   // --- bring-your-own-compute (selfhosted 11th backend) rollout flag, default OFF ---
   // The keystone flag for the whole selfhosted feature (the enrollment device-flow,
   // the NATS control plane, the relay stream tier). When FALSE the enrollment routes
@@ -554,6 +574,12 @@ const SettingsSchema = z.object({
   // worst-case loss of ANY unclean box death to this window. 0 disables.
   // Knob: OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS. Default 15min.
   sandboxSnapshotIntervalMs: z.coerce.number().int().min(0).default(900_000),
+  // Maximum time a best-effort /workspace snapshot capture may hold turn/reaper
+  // cleanup. A hung provider snapshot must never pin a lease holder, block
+  // graceful shutdown, or become permission to GC an older archive. Timeout is
+  // treated exactly like a failed best-effort snapshot. Knob:
+  // OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS. Default 60s.
+  sandboxSnapshotTimeoutMs: z.coerce.number().int().positive().default(60_000),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -1008,6 +1034,7 @@ export function getSettings(): Settings {
     computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),
     computerUseReadOnly: optional("OPENGENI_COMPUTER_USE_READONLY"),
     recordingEnabled: optional("OPENGENI_RECORDING_ENABLED"),
+    workspaceCaptureEnabled: optional("OPENGENI_WORKSPACE_CAPTURE"),
     recordingDefaultCodec: optional("OPENGENI_RECORDING_DEFAULT_CODEC"),
     recordingFramerate: optional("OPENGENI_RECORDING_FRAMERATE"),
     recordingMaxSeconds: optional("OPENGENI_RECORDING_MAX_SECONDS"),
@@ -1047,6 +1074,7 @@ export function getSettings(): Settings {
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
+    sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
@@ -1063,6 +1091,7 @@ export function getSettings(): Settings {
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
+    sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
@@ -1478,6 +1507,13 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0));
 }
 
+const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+function prependPathEntry(pathValue: string | undefined, entry: string): string {
+  const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
+  return [entry, ...parts.filter((part) => part !== entry)].join(":");
+}
+
 /**
  * The STABLE run-scoped sandbox environment: the subset of a run's box-manifest
  * environment that is IDENTICAL whether the box is first warmed by the worker
@@ -1493,20 +1529,22 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
  * workspace environment < the backend-aware HOME default. Reserved-name validation
  * at write time keeps workspace values from colliding with platform entries.
  *
- * DELIBERATELY EXCLUDES the per-run, ROTATING GitHub App installation token
- * VALUE that `sandboxEnvironmentForRun` mints when a repository resource is
+ * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
+ * `sandboxEnvironmentForRun` mints when a repository resource is
  * attached: that token is minted FRESH per call, so it is not a stable, attach-
  * reproducible value and must not be part of the shared base. Under the token-
- * broker (B1) the token VALUE never rides the manifest at all — it is seeded to a
- * FILE inside the box (agent-managed, refreshable mid-turn via the `github_token`
- * MCP tool) and git auth flows through GIT_ASKPASS -> that file. What IS stable and
- * lives here is the token FILE PATH (`OPENGENI_GIT_TOKEN_FILE`): a constant derived
- * from HOME, so it appears IDENTICALLY on BOTH the turn AND every attach manifest
- * (the SDK's per-turn provided-session env delta stays empty even as the token
- * rotates). The attach surfaces have only the `Session` (no repo resources) and so
- * never seed a token, but the file-path pointer is harmless (an unwritten file
- * simply yields no auth); the BLOCKING attach-vs-turn error this helper fixes is
- * for the common (no-repo) and workspace-environment-attached cases.
+ * broker (B1) token VALUES never ride the manifest at all — they are seeded to
+ * FILES inside the box and git/provider CLI auth reads those files. What IS stable
+ * and lives here for provisioned boxes are the token directory / GitHub alias
+ * FILE PATH and wrapper PATH entries: constants derived from HOME, so they
+ * appear IDENTICALLY on BOTH the turn AND every attach manifest (the SDK's
+ * per-turn provided-session env delta stays empty even as tokens rotate). These
+ * helper pointers are deliberately not added for selfhosted/local/none because
+ * the platform never mints or seeds git provider tokens there. The attach
+ * surfaces have only the `Session` (no repo resources) and so never seed a token,
+ * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
+ * this helper fixes is for the common (no-repo) and workspace-environment-attached
+ * provisioned-box cases.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
@@ -1525,14 +1563,22 @@ export function stableSandboxEnvironmentForRun(
   if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
     environment.HOME ??= descriptor.workspaceRoot;
   }
-  // TOKEN-BROKER (B1): the STABLE token FILE PATH. A constant derived from the
-  // resolved HOME (falling back to the descriptor workspaceRoot), so it is
-  // parity-safe — it joins the shared base and therefore appears IDENTICALLY on
-  // BOTH the worker-turn manifest AND every API-direct attach manifest, keeping
-  // the SDK's provided-session env delta empty. Only the PATH is stable; the token
-  // VALUE lives exclusively in the file (agent-managed, refreshable mid-turn), never
-  // the manifest env.
-  environment.OPENGENI_GIT_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/git-token`;
+  // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH for
+  // provisioned boxes only. Constants derived from the resolved HOME (falling
+  // back to the descriptor workspaceRoot), so they are parity-safe — they join
+  // the shared base and therefore appear IDENTICALLY on BOTH the worker-turn
+  // manifest AND every API-direct attach manifest. Only PATHS are stable; token
+  // VALUES live exclusively in files that runtime seeds off-manifest.
+  const provisionedGitHelperBackend = settings.sandboxBackend !== "none"
+    && settings.sandboxBackend !== "local"
+    && settings.sandboxBackend !== "selfhosted";
+  if (provisionedGitHelperBackend) {
+    const home = environment.HOME ?? descriptor.workspaceRoot;
+    environment.OPENGENI_GIT_CREDENTIALS_DIR ??= `${home}/.opengeni/git-credentials`;
+    environment.OPENGENI_GIT_TOKEN_FILE ??= `${home}/.opengeni/git-token`;
+    environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
+    environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
+  }
   if (settings.toolspaceEnabled) {
     environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (options.workspaceId) {
@@ -1549,11 +1595,40 @@ export function stableSandboxEnvironmentForRun(
  * an attach-warmed cold box carries the IDENTICAL manifest env a later repo turn
  * declares (env parity — see applyGitAuthPointerEnvironment).
  */
-export function hasGitHubRepositorySelection(resources: ReadonlyArray<{ kind: string; githubInstallationId?: unknown; githubRepositoryId?: unknown }>): boolean {
+export function hasGitHubRepositorySelection(
+  resources: ReadonlyArray<{
+    kind: string;
+    provider?: unknown;
+    installationId?: unknown;
+    repositoryId?: unknown;
+    githubInstallationId?: unknown;
+    githubRepositoryId?: unknown;
+  }>,
+): boolean {
   const positive = (value: unknown): boolean =>
     (typeof value === "number" && Number.isInteger(value) && value > 0)
     || (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0);
-  return resources.some((resource) => resource.kind === "repository" && positive(resource.githubInstallationId) && positive(resource.githubRepositoryId));
+  return resources.some((resource) =>
+    resource.kind === "repository"
+    && (
+      (positive(resource.githubInstallationId) && positive(resource.githubRepositoryId))
+      || (resource.provider === "github" && positive(resource.installationId) && positive(resource.repositoryId))
+    )
+  );
+}
+
+export function hasGitCredentialRepositorySelection(
+  resources: ReadonlyArray<{ kind: string; provider?: unknown; githubInstallationId?: unknown; githubRepositoryId?: unknown }>,
+): boolean {
+  return resources.some((resource) =>
+    resource.kind === "repository"
+    && (
+      resource.provider === "github"
+      || resource.provider === "gitlab"
+      || resource.provider === "azure_devops"
+      || hasGitHubRepositorySelection([resource])
+    )
+  );
 }
 
 /**

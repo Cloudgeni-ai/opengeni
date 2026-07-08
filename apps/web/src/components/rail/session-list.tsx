@@ -342,7 +342,9 @@ function SessionRow(props: {
   const rename = useInlineRename(props.session, props.onRename);
   const hasChildren = props.childCount > 0;
   // Indent nested rows; the leading affordance is a chevron for parents, else a
-  // spacer that keeps every dot in the same column as its parent's chevron.
+  // spacer of the same width — reserved at every depth (root included) so every
+  // status dot sits in one column and the left edge is even whether a row is a
+  // leaf or a parent.
   const indentStyle = props.depth > 0 ? { paddingLeft: props.depth * 14 } : undefined;
 
   const rowClassName = cn(
@@ -369,9 +371,9 @@ function SessionRow(props: {
         >
           <ChevronRightIcon className={cn("size-3 transition-transform", props.expanded && "rotate-90")} />
         </button>
-      ) : props.depth > 0 ? (
+      ) : (
         <span className="size-4" />
-      ) : null}
+      )}
     </span>
   );
 

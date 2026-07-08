@@ -1123,14 +1123,30 @@ export type EntitlementsPort = {
   admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
 };
 
+export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
+export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
+
+const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
+
+export const GitCredentialRepositoryRef = z.object({
+  provider: GitCredentialProvider.optional(),
+  uri: z.string().min(1),
+  ref: z.string().min(1),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
+});
+export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
+
 // ============ P4a — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
 // run-scoped credential sites in the worker:
-//   - GIT credentials: the GitHub App installation token minted in
-//     `sandboxEnvironmentForRun` (today `createGitHubAppInstallationToken`
-//     from `settings`) and injected as `GH_TOKEN`/`GITHUB_TOKEN`/the git
-//     extraheader.
+//   - GIT credentials: run-scoped provider tokens minted in
+//     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
+//     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
+//     and seeded off-manifest into sandbox token files for git + provider CLIs.
 //   - SANDBOX secrets: the decrypted variable set values loaded in
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
@@ -1144,25 +1160,34 @@ export type EntitlementsPort = {
 // FORK-7 CROSS-CHECK (the host-mapping safety guardrail): a credential
 // provider returns the `workspaceId` it scoped the credential to, and the
 // activity ASSERTS it agrees with the run's workspace BEFORE injecting
-// `GH_TOKEN` (or applying the decrypted values). A host mapping bug that
+// any git provider token seed (or applying decrypted environment values). A host mapping bug that
 // returns tenant B's creds while the run is tenant A is thereby caught at the
 // seam, never silently injected into tenant A's sandbox.
 
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
-  // The GitHub App installation the run's repository resources resolved to,
-  // and the specific repositories the token must be scoped to. Mirrors the
-  // shape `createGitHubAppInstallationToken` consumes today.
+  // Provider defaults to "github" for the legacy request shape. GitHub-only
+  // hosts can keep reading installationId/repositoryIds exactly as before;
+  // provider-aware hosts should branch on this and repositoryRefs.
+  provider?: GitCredentialProvider;
+  // Token requests are the existing behavior. Identity requests let lazy
+  // sandbox provisioning resolve stable git author/committer identity before
+  // the box exists while deferring the rotating token value to first provision.
+  purpose?: "token" | "identity";
+  // Provider-neutral repository refs for hosts that broker non-GitHub tokens.
+  // For GitHub requests these are additive to the legacy fields below.
+  repositoryRefs?: GitCredentialRepositoryRef[];
+  // Legacy GitHub App installation shape retained for 0.x compatibility.
   installationId: number;
   repositoryIds: number[];
 };
 
 export type GitCredentials = {
-  // The minted installation token the activity injects as GH_TOKEN/GITHUB_TOKEN
-  // and into the git http extraheader (identical downstream handling to the
-  // self-mint path).
-  token: string;
+  // The minted provider token. Required for purpose="token"; optional for
+  // purpose="identity" so hosts can return only stable git identity before lazy
+  // sandbox provision. The value never enters the manifest.
+  token?: string;
   // FORK-7 echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
@@ -1198,8 +1223,8 @@ export type ConnectionCredentialsPort = {
   // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
   // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
   // unset leg falls through to today's self-mint for THAT leg only.
-  gitCredentials?: (input: GitCredentialsRequest) => Promise<GitCredentials>;
-  sandboxSecrets?: (input: SandboxSecretsRequest) => Promise<SandboxSecrets>;
+  gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 
 // ============ P4a — GitHub App API port (BYO-App, §7.6 / SPIKE-2 remainder) ===
@@ -1267,6 +1292,11 @@ export const RepositoryResourceRef = z.object({
   ref: z.string().min(1),
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
+  provider: GitCredentialProvider.optional(),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
 });
@@ -2820,6 +2850,7 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
 export const SessionLineageResponse = z.object({
   ancestors: z.array(Session),
   children: z.array(LineageNode),
+  truncated: z.boolean().default(false),
 });
 export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
@@ -2861,6 +2892,7 @@ export const SessionEventType = z.enum([
   "goal.completed",
   "goal.paused",
   "goal.resumed",
+  "goal.cleared",
   "goal.continuation",
   "memory.saved",
   "memory.corrected",
@@ -2907,6 +2939,13 @@ export const SessionEventType = z.enum([
   "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
   "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
   "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
+  // Workbench v2 turn-end workspace capture (dossier §10.1). ANNOUNCE-ONLY: a new
+  // capture revision was persisted at turn end; the client refetches the latest
+  // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
+  // never file content. Hits the timeline projection default case (ignored) — it
+  // must NEVER gain a rendered timeline item without regenerating the golden
+  // snapshots (dossier §7.3 golden-grammar gate).
+  "workspace.revision.captured",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
@@ -3283,6 +3322,156 @@ export const GitDiffResponse = z.object({
   revision: z.number().int().nonnegative(),
 });
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
+
+// ─── Workbench v2 turn-end workspace capture (dossier §10.1/§10.2) ────────────
+// A capture is a point-in-time snapshot of the session workspace's CHANGES,
+// probed live off the box at turn end (detectRepos → gitStatus/gitDiff → fsRead
+// after-images → fsList tree index). It is the cold/offline read source that
+// lets the workbench paint instantly with zero machine round-trips. Live always
+// wins when the box is warm; a capture is a labelled cache, never a replacement.
+// This is the shape the M1 worker writes and the M2 API serves inline.
+
+// One touched file in the capture. `contentRef` is the content-addressed storage
+// key of its after-image blob (shared across revisions → the GC set-difference
+// key). Deleted / binary / >5MB (tooLarge) files carry no contentRef; the UI
+// renders "too large — open live" for tooLarge, and the diff hunks for the rest.
+export const WorkspaceCaptureFile = z.object({
+  path: z.string(),
+  status: GitFileStatusCode,
+  // sha256 of the captured after-image bytes; null when deleted / tooLarge.
+  hash: z.string().nullable(),
+  // git blob sha of the HEAD version — the wake-on-edit flush guard (dossier
+  // §10.1). null when the path is new/untracked (no HEAD blob).
+  baseHash: z.string().nullable(),
+  // Content-addressed storage key of the after-image; null when deleted /
+  // tooLarge / binary (no inline content captured).
+  contentRef: z.string().nullable(),
+  sizeBytes: z.number().int().nonnegative(),
+  isBinary: z.boolean().default(false),
+  // >5MB per-file content guard tripped: content NOT captured, render "open live".
+  tooLarge: z.boolean().default(false),
+  deleted: z.boolean().default(false),
+});
+export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
+
+// One repo discovered in the workspace. `diff` is `git diff HEAD` (combined
+// staged+unstaged tracked changes vs HEAD — the review diff); `status` is the
+// full porcelain file list (drives the rail glyphs incl. untracked, which the
+// HEAD diff omits). root "" = the workspace root repo.
+export const WorkspaceCaptureRepo = z.object({
+  root: z.string(),
+  head: z.string().nullable(),
+  detached: z.boolean().default(false),
+  upstream: z.string().nullable(),
+  ahead: z.number().int().nonnegative().default(0),
+  behind: z.number().int().nonnegative().default(0),
+  status: z.array(GitFileStatus),
+  diff: z.array(GitFileDiff),
+});
+export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
+
+// Rollup counters — carried on the row (jsonb) and the announce event so the UI
+// can reserve layout (dossier §12 no-layout-shift) before fetching the manifest.
+export const WorkspaceCaptureStats = z.object({
+  repoCount: z.number().int().nonnegative(),
+  fileCount: z.number().int().nonnegative(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  tooLargeCount: z.number().int().nonnegative(),
+  binaryCount: z.number().int().nonnegative(),
+  treeEntryCount: z.number().int().nonnegative(),
+  treeTruncated: z.boolean().default(false),
+  durationMs: z.number().int().nonnegative(),
+  // sha256 over the change surface (per-file path/hash/status + per-repo diff
+  // summary, tree/mtime excluded). The empty-turn gate skips a capture whose
+  // fingerprint equals the previous revision's — "no new revision when nothing
+  // changed" holds even when the tree stays dirty across read-only turns.
+  fingerprint: z.string().optional(),
+});
+export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
+
+// The single manifest blob (one per revision). Holds everything the workbench
+// needs for a cold paint: the tree index, per-repo status+diff, and the file
+// index (after-image refs). The M2 API serves this inline when small (≤2MB).
+export const WorkspaceCaptureManifest = z.object({
+  version: z.literal(1),
+  revision: z.number().int().nonnegative(),
+  capturedAt: z.string(),
+  turnId: z.string().nullable(),
+  leaseEpoch: z.number().int().nonnegative(),
+  treeIndex: FsTreeNode,
+  treeTruncated: z.boolean().default(false),
+  repos: z.array(WorkspaceCaptureRepo),
+  files: z.array(WorkspaceCaptureFile),
+  stats: WorkspaceCaptureStats,
+});
+export type WorkspaceCaptureManifest = z.infer<typeof WorkspaceCaptureManifest>;
+
+// Announce-only event payload (dossier §10.1). Metadata only — never content.
+export const WorkspaceRevisionCapturedPayload = z.object({
+  revision: z.number().int().nonnegative(),
+  turnId: z.string().nullable(),
+  capturedAt: z.string(),
+  leaseEpoch: z.number().int().nonnegative(),
+  stats: WorkspaceCaptureStats,
+});
+export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
+
+// --- M2 capture READ API (dossier §10.3) -------------------------------------
+// A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
+// served inline for the ≤2MB common case (the <200ms one-round-trip paint); a
+// >2MB manifest and a >256KB single-file after-image fall back to one of these.
+export const WorkspaceCaptureSignedUrl = z.object({
+  url: z.string().url(),
+  expiresAt: z.string(),
+});
+export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl>;
+
+// GET …/sessions/:sid/workspace/capture. `{available:false}` when no capture row
+// exists yet (or its manifest blob was GC'd) — the client falls back to the
+// live/wake path (status-quo behavior, NEVER an error → served 200). When
+// available: the row metadata (revision/turn/epoch/stats/size) is always inline;
+// the manifest is inline (`manifest`) for the ≤2MB common case and a signed GET
+// URL (`manifestUrl`) above that. Exactly one of manifest/manifestUrl is non-null.
+export const GetWorkspaceCaptureResponse = z.discriminatedUnion("available", [
+  z.object({ available: z.literal(false) }),
+  z.object({
+    available: z.literal(true),
+    revision: z.number().int().nonnegative(),
+    capturedAt: z.string(),
+    turnId: z.string().nullable(),
+    leaseEpoch: z.number().int().nonnegative(),
+    sizeBytes: z.number().int().nonnegative(),
+    stats: WorkspaceCaptureStats,
+    manifest: WorkspaceCaptureManifest.nullable().default(null),
+    manifestUrl: WorkspaceCaptureSignedUrl.nullable().default(null),
+  }),
+]);
+export type GetWorkspaceCaptureResponse = z.infer<typeof GetWorkspaceCaptureResponse>;
+
+// GET …/sessions/:sid/workspace/capture/file?path=…&revision=…. A single
+// after-image resolved from the (revision|latest) manifest. The file metadata
+// (from the manifest entry) is always present; `content` is inline for ≤256KB
+// (base64 for binary, utf8 otherwise), else a signed GET URL (`contentUrl`) to
+// the raw content-addressed blob. A tooLarge marker (or a captured file with no
+// content blob — e.g. the after-image was GC'd) returns metadata only, no
+// content and no URL. Path-not-in-manifest / deleted → 404 at the route (not
+// represented here).
+export const GetWorkspaceCaptureFileResponse = z.object({
+  path: z.string(),
+  revision: z.number().int().nonnegative(),
+  status: GitFileStatusCode,
+  hash: z.string().nullable(),
+  baseHash: z.string().nullable(),
+  sizeBytes: z.number().int().nonnegative(),
+  isBinary: z.boolean(),
+  tooLarge: z.boolean(),
+  encoding: FsEncoding.nullable().default(null), // set iff content is inline
+  content: z.string().nullable().default(null),  // inline ≤256KB (per encoding)
+  contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
+});
+export type GetWorkspaceCaptureFileResponse = z.infer<typeof GetWorkspaceCaptureFileResponse>;
 
 export const GitLogRequest = z.object({
   path: z.string().default(""),

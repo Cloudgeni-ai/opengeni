@@ -47,7 +47,7 @@
     "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
     "provision-roles": "bun src/provision-roles.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "build": "tsup",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },

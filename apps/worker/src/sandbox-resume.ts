@@ -46,7 +46,6 @@ import {
   DisplayStackUnsupportedError,
   buildStreamUrl,
   StreamPortUnavailableError,
-  modalSandboxAttributionEnvironment,
   tagModalSandbox,
   type EstablishedSandboxSession,
   type ExposedPortEndpoint,
@@ -138,6 +137,39 @@ const WARMING_POLL_INTERVAL_MS = 250;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+class SnapshotTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`workspace snapshot timed out after ${timeoutMs}ms`);
+    this.name = "SnapshotTimeoutError";
+  }
+}
+
+export async function waitForWarmSnapshot(snapshot: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      snapshot,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new SnapshotTimeoutError(timeoutMs)), timeoutMs);
+        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+          timeout.unref();
+        }
+      }),
+    ]);
+    return true;
+  } catch (error) {
+    if (error instanceof SnapshotTimeoutError) {
+      console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
+      return false;
+    }
+    return true;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function terminateEstablishedSandbox(established: EstablishedSandboxSession | null): Promise<boolean> {
@@ -279,24 +311,50 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (Number.isFinite(priorAtMs) && Date.now() - priorAtMs < intervalMs) {
       return false;
     }
-    const bytes = await persistable.persistWorkspace();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
+    // by capture-initiation, not land time, so a slower heartbeat capture that
+    // started earlier can never overwrite a fresher turn-end capture that landed
+    // first (the bounded-wait race Bugbot flagged).
+    const capturedAtMs = Date.now();
+    // On timeout the race settles on `undefined` while persistWorkspace() keeps
+    // running orphaned. Swallow its LATE settlement: an un-awaited rejection
+    // after the race resolved would surface as an unhandledRejection and can
+    // take down the whole worker process — which would defeat the very hang-
+    // guard this timeout exists to provide.
+    const capture = persistable.persistWorkspace();
+    capture.catch(() => undefined);
+    const bytes = await Promise.race([
+      capture,
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
+        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+          timeout.unref();
+        }
+      }),
+    ]).finally(() => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+    });
     if (!bytes || bytes.length === 0) {
       return false;
     }
-    const { wrote, priorArchive } = await persistWarmSnapshot(db, {
+    const { wrote, priorArchiveForGc } = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: leaseEpoch,
       workspaceArchive: Buffer.from(bytes).toString("base64"),
       minIntervalMs: intervalMs,
+      capturedAtMs,
     });
     if (!wrote) {
       return false;
     }
-    // Keep-latest-per-lease GC, same as the drain seam: best-effort delete of
-    // the superseded snapshot image while the session's client is live.
-    await deletePriorPersistedSnapshot(persistable, priorArchive);
+    // Warm snapshots retain a 2-deep restore window. Only the two-ago archive
+    // returned by persistWarmSnapshot is GC-eligible.
+    await deletePriorPersistedSnapshot(persistable, priorArchiveForGc);
     return true;
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow
@@ -365,6 +423,7 @@ export async function resumeBoxForTurn(
     // propagates to the turn activity (actionable); a solo rig change recreates cold.
     ...(ids.rigVersionId ? { rigVersionId: ids.rigVersionId } : {}),
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
@@ -403,13 +462,6 @@ export async function resumeBoxForTurn(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
-    if (ids.environment && ids.backend === "modal") {
-      Object.assign(ids.environment, modalSandboxAttributionEnvironment({
-        leaseId: acquired.lease.id,
-        workspaceId: ids.workspaceId,
-        sandboxGroupId: ids.sandboxGroupId,
-      }));
-    }
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
@@ -442,6 +494,9 @@ export async function resumeBoxForTurn(
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
             leaseTtlMs,
+            // Keep the warming budget after create(): display-stack + port +
+            // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
+            warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
           });
           if (!recorded.recorded) {
             throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
@@ -608,6 +663,7 @@ export async function acquireSelfhostedLeaseForTurn(
     backend: "selfhosted",
     os: "linux",
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   // FENCED: a newer epoch re-established the group concurrently. Release our

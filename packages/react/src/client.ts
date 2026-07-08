@@ -28,6 +28,7 @@ export type SessionClientLike = Pick<
   // Goal
   | "getGoal"
   | "updateGoal"
+  | "deleteGoal"
   // Operator context controls (/clear, /compact)
   | "clearSessionContext"
   | "compactSessionContext"
@@ -90,6 +91,9 @@ export type SessionClientLike = Pick<
   | "fsMkdir"
   | "gitStatus"
   | "gitDiff"
+  // Workbench v2 turn-end capture reads (the cold-paint source; M3 consumes these)
+  | "getWorkspaceCapture"
+  | "getWorkspaceCaptureFile"
   | "terminalExec"
   | "terminalPtyOpen"
   | "terminalPtyWrite"

@@ -20,7 +20,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Session MCP headers | Arbitrary headers, encrypted at rest | Embedding host per session (`mcpServers` on create; rotatable per user turn) | Never read back — write-only, decrypted only in the worker | Host-defined; version-bumped on rotation | Host's own MCP server called from a session |
 | Capability MCP headers | Arbitrary headers, encrypted at rest | Workspace admin when configuring a capability | Write-only, worker-side decrypt | Until reconfigured | Third-party MCP servers enabled workspace-wide |
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
-| GitHub installation token | GitHub App token | GitHub, minted per run | GitHub | ~1 hour, re-minted on demand | Sandbox git operations (delivered via token file + askpass, never baked into manifests) |
+| Git provider token | GitHub App / GitLab / Azure DevOps token | OpenGeni or embedding host per provider | Git provider | Provider-defined, re-minted on demand | Sandbox git operations and provider CLIs (delivered via token files + askpass/CLI wrappers, never baked into manifests) |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
@@ -28,9 +28,15 @@ Rules that hold across the table:
 - **Secrets are write-only.** Anything a caller supplies (MCP headers, Codex
   tokens) is encrypted at rest and never echoed by any read endpoint — responses
   expose header *names* and credential *versions* only.
-- **Rotation over longevity.** Rotating credentials (GitHub tokens, session MCP
+- **Rotation over longevity.** Rotating credentials (git provider tokens, session MCP
   bearers) are re-delivered per turn/run and never stored in long-lived
   artifacts such as sandbox manifests.
+- **Sandbox git auth is pointer-based.** The manifest carries stable paths such
+  as `OPENGENI_GIT_CREDENTIALS_DIR` and `OPENGENI_GIT_TOKEN_FILE`, while the
+  worker/runtime seed current token values into files inside the sandbox.
+  `GIT_ASKPASS` reads those files for git, and the `gh`, `glab`, and `az`
+  wrappers read them at invocation time before setting child-process-only token
+  env vars. Missing token files are clean passthroughs.
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come
   from one of the identity-bearing credentials above it.

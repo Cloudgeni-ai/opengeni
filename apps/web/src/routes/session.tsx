@@ -11,6 +11,7 @@ import {
   useGoal,
   useSession,
   useSessionEvents,
+  useSessionLineage,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -37,20 +38,23 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
+import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
-import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
+import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import { AgentsPanel } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
+import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { normalizeProviderDomain } from "@/lib/capabilities";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
+import type { LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
@@ -260,6 +264,15 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
     [capabilityNames],
   );
+  // One lineage read for the whole session view: it gates the dock's "Agents"
+  // tab AND feeds the composer-anchored agents pill, so both stay a single
+  // source of truth. Events refresh it instantly on spawn/worker-completion, and
+  // a 30s poll (matching the old header chip) is the fallback so the pill's
+  // "running" count doesn't go stale on CHILD-side status changes that emit no
+  // event on this parent's feed. Must sit above the loading/error early-returns
+  // — it's a hook, so it has to run unconditionally on every render.
+  const lineage = useSessionLineage(sessionId, { events, pollIntervalMs: 30_000 });
+  const agentNodes = lineage.lineage?.children ?? [];
 
   if (loading || !session) {
     if (loadError) {
@@ -290,11 +303,13 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       failure={failure}
       creditExhausted={creditExhausted}
       goal={goal}
+      agentNodes={agentNodes}
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
       onClearView={clearView}
       onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
+      onMemoryClick={(memoryId) => void navigate({ to: "/workspaces/$workspaceId/documents", params: { workspaceId }, search: { memory: memoryId } })}
       onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -314,6 +329,8 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
         queue={queue}
         goal={goal}
         connectionState={connectionState}
+        agentNodes={agentNodes}
+        agentsLoading={lineage.loading}
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
@@ -344,50 +361,72 @@ function SessionDock(props: {
   queue: ReturnType<typeof useTurnQueue>;
   goal: ReturnType<typeof useGoal>;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
+  /** Spawned-worker lineage — read once by SessionRoute, shared here + the pill. */
+  agentNodes: LineageNode[];
+  agentsLoading: boolean;
   primary: React.ReactNode;
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
 }) {
-  // Track the dock's active tab so the Files surface can hold the box WARM only
-  // while it's actually on screen (fast ~100ms Channel-A ops instead of a cold
-  // ~5s resume per list/write). Default to the dock's first tab ("run").
-  const [activeTab, setActiveTab] = useState<string>("run");
-  const { tabs: sandboxTabs } = useSandboxWorkspaceTabs({
-    workspaceId: props.workspaceId,
-    sessionId: props.sessionId,
-    events: props.events,
-    filesActive: !props.dockCollapsed && activeTab === "files",
-  });
+  // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
+  // the package now; the app injects its Run + Debug tabs around it. The Files
+  // warm-hold + active-tab tracking are handled inside <SandboxWorkspace>.
+  const runTab: WorkspaceTab = {
+    id: "run",
+    label: "Run",
+    content: (
+      <ScrollArea className="h-full min-w-0">
+        <div className="min-w-0 space-y-5 p-3">
+          {/* The goal moved to the floating GoalSurface above the composer; the
+              Run tab is the turn queue only. */}
+          <QueueRail queue={props.queue} sessionStatus={props.session.status} />
+        </div>
+      </ScrollArea>
+    ),
+  };
+  const debugTab: WorkspaceTab = {
+    id: "debug",
+    label: "Debug",
+    content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
+  };
 
-  const tabs: WorkspaceTab[] = [
-    {
-      id: "run",
-      label: "Run",
-      content: (
-        <ScrollArea className="h-full min-w-0">
-          <div className="min-w-0 space-y-5 p-3">
-            {/* The goal moved to the floating GoalSurface above the composer; the
-                Run tab is the turn queue only. */}
-            <QueueRail queue={props.queue} sessionStatus={props.session.status} />
-          </div>
-        </ScrollArea>
-      ),
-    },
-    ...sandboxTabs,
-    {
-      id: "debug",
-      label: "Debug",
-      content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
-    },
-  ];
+  // The decoupled home for spawned workers (#318): SessionRoute owns the single
+  // lineage read and passes the children in (props.agentNodes), so the "Agents"
+  // tab AND the composer-anchored pill stay one source of truth. The tab is
+  // present only once the session has children, so a goal-less session still
+  // surfaces its agents here. Injected right after Run (before the package's
+  // sandbox tabs) to preserve #318's dock order.
+  const childNodes = props.agentNodes;
+  const agentsTab: WorkspaceTab | null =
+    childNodes.length > 0
+      ? {
+          id: "agents",
+          label: "Agents",
+          badge: (
+            <span className="rounded-sm bg-og-accent-soft px-1 text-2xs text-og-fg-muted">
+              {childNodes.length}
+            </span>
+          ),
+          content: (
+            <AgentsPanel
+              workspaceId={props.workspaceId}
+              nodes={childNodes}
+              loading={props.agentsLoading && childNodes.length === 0}
+            />
+          ),
+        }
+      : null;
+  const leadingTabs: WorkspaceTab[] = agentsTab ? [runTab, agentsTab] : [runTab];
 
   return (
-    <WorkspaceDock
+    <SessionWorkspace
+      workspaceId={props.workspaceId}
+      sessionId={props.sessionId}
+      events={props.events}
       primary={props.primary}
-      tabs={tabs}
-      autoSaveId="og.session.dock"
-      activeTab={activeTab}
-      onActiveTabChange={setActiveTab}
+      leadingTabs={leadingTabs}
+      trailingTabs={[debugTab]}
+      initialTab="run"
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
     />
@@ -404,12 +443,16 @@ function SessionChatPane(props: {
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
   goal: ReturnType<typeof useGoal>;
+  /** Spawned-worker lineage children — feeds the composer-anchored agents pill. */
+  agentNodes: LineageNode[];
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: () => Promise<boolean>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
+  /** Deep-link a timeline memory step to its record in the Documents memory pane. */
+  onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
@@ -529,6 +572,7 @@ function SessionChatPane(props: {
               status={props.session.status}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
+              onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
               hasOlder={props.hasOlder}
@@ -586,15 +630,15 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {/* The floating goal pill hovers just above the composer (hidden when the
-          session has no goal). */}
+      {/* Front-and-center floating pills above the composer: the agents pill
+          (spawned workers, with a live running indicator) stacks over the goal
+          pill. Each hides when it has nothing to show, so they degrade to
+          whichever one is present — or neither. */}
       {!terminal ? (
-        <GoalSurface
-          session={props.session}
-          goal={props.goal}
-          events={props.events}
-          onNavigate={() => undefined}
-        />
+        <>
+          <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+          <GoalSurface session={props.session} goal={props.goal} />
+        </>
       ) : null}
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">

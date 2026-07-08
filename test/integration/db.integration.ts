@@ -57,6 +57,8 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   getSessionTurn,
+  cancelTurnFromDyingDispatch,
+  incrementTurnWorkerDeathRedispatches,
   listSessionEvents,
   requeuePreemptedTurn,
   saveRunState,
@@ -423,6 +425,68 @@ describe("DB integration", () => {
     // Terminal turns cannot be preempt-requeued.
     await finishTurn(dbClient.db, grant.workspaceId, turn.id, "idle");
     await expect(requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id)).rejects.toThrow("Preemptible session turn not found");
+  });
+
+  test("dying-attempt cancel is fenced against worker-death recovery", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "long task",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "long task" } },
+    ]);
+    const enqueue = () => enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: "wf-fence-db",
+      source: "user",
+      prompt: "long task",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "low",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+
+    // Ordering A — zombie cancels a live turn BEFORE recovery runs: the fence
+    // (counter unchanged since this dispatch claimed) lets it settle.
+    const turnA = await enqueue();
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db");
+    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnA.id, 0)).toBe(true);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnA.id))?.status).toBe("cancelled");
+    // requeuing that death-artifact cancel (the recovery side) resurrects it.
+    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turnA.id, trigger!.id, ["running", "requires_action", "cancelled"]);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnA.id))?.status).toBe("queued");
+    // Retire turnA so it does not shadow turnB in the per-session claim queue.
+    await finishTurn(dbClient.db, grant.workspaceId, turnA.id, "idle");
+
+    // Orderings B & C — recovery has ALREADY advanced (counter bumped, then the
+    // turn is either queued or re-claimed to running): a stale zombie that
+    // captured the pre-death counter must NOT clobber it.
+    const turnB = await enqueue();
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db");
+    const bumped = await incrementTurnWorkerDeathRedispatches(dbClient.db, grant.workspaceId, turnB.id); // recovery bumps BEFORE requeue
+    expect(bumped).toBe(1);
+    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turnB.id, trigger!.id, ["running", "requires_action", "cancelled"]);
+    // (B) turn is `queued`; stale zombie captured 0.
+    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 0)).toBe(false);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe("queued");
+    // (C) a successor re-claims -> running again, but the counter is still 1.
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db-2");
+    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 0)).toBe(false);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe("running");
+    // The successor's OWN dispatch (captured counter 1) can still settle its turn.
+    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 1)).toBe(true);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe("cancelled");
   });
 
   test("persists scheduled tasks and run history", async () => {

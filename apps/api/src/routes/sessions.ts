@@ -33,6 +33,7 @@ import {
 import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
+  clearSessionGoal,
   clearSessionContext,
   closePtySession,
   getOpenPtySession,
@@ -54,6 +55,8 @@ import {
   setSessionGoalStatus,
   updatePtySessionActivity,
   updateQueuedSessionTurn,
+  latestWorkspaceCapture,
+  workspaceCaptureAtRevision,
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
@@ -83,6 +86,7 @@ import {
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
+import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
 
 export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -234,6 +238,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
     }
     return c.json(goal);
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const { event } = await clearSessionGoal(db, workspaceId, sessionId);
+    if (event) {
+      try {
+        await bus.publish(workspaceId, sessionId, [event]);
+      } catch (error) {
+        console.warn(`[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`, error);
+      }
+    }
+    return c.body(null, 204);
   });
 
   // Operator context controls (slash-command palette: /clear, /compact). These
@@ -1014,6 +1034,58 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const req = await parseChannelABody(c, GitShowRequest);
     const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitShow(req));
     return c.json(out);
+  });
+
+  // ── Workspace capture (read-only; served from DB + object storage, NO box) ──
+  // Grant-first (files:read) then a pure DB/storage read — deliberately NOT the
+  // channelAPreamble path: a capture is the durable turn-end snapshot, served
+  // without warming a machine (the <200ms cold paint). No ownership-flag gate:
+  // absent captures return {available:false} (200) so the client falls back to
+  // the live/wake path — the feature degrades to today's behavior, never worse.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture", async (c) => {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const sessionId = c.req.param("sessionId") ?? "";
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (!objectStorage) {
+      // No storage configured → no captures can exist. Cold-fallback, not an error.
+      return c.json({ available: false });
+    }
+    const row = await latestWorkspaceCapture(db, workspaceId, sessionId);
+    return c.json(await serveWorkspaceCapture(row, objectStorage));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/capture/file", async (c) => {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    await requireAccessGrant(c, deps, workspaceId, "files:read");
+    const sessionId = c.req.param("sessionId") ?? "";
+    const path = c.req.query("path");
+    if (!path) {
+      throw new HTTPException(400, { message: "path query parameter is required" });
+    }
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (!objectStorage) {
+      throw new HTTPException(404, { message: "capture not found" });
+    }
+    // Explicit ?revision pins a specific capture; omitted → latest.
+    const revisionParam = c.req.query("revision");
+    let row;
+    if (revisionParam !== undefined && revisionParam !== "") {
+      const revision = Number(revisionParam);
+      if (!Number.isInteger(revision) || revision < 0) {
+        throw new HTTPException(400, { message: "revision must be a non-negative integer" });
+      }
+      row = await workspaceCaptureAtRevision(db, workspaceId, sessionId, revision);
+    } else {
+      row = await latestWorkspaceCapture(db, workspaceId, sessionId);
+    }
+    return c.json(await serveWorkspaceCaptureFile(row, path, objectStorage));
   });
 
   // ── Terminal: synchronous exec ────────────────────────────────────────────

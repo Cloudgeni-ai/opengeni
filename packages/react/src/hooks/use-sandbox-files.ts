@@ -6,6 +6,7 @@ import type {
   GitChangedPayload,
   GitFileStatusCode,
   SessionEvent,
+  WorkspaceCaptureManifest,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
@@ -22,6 +23,10 @@ export type FileTreeNode = {
   children?: FileTreeNode[] | undefined;
   size?: number | null | undefined;
   status?: FileTreeStatus | undefined;
+  /** A residue dir the capture COLLAPSED (node_modules, .git, dist, …): its
+   *  contents were never indexed. Cold, expanding it can't list children — the
+   *  UI shows an inline "contents on machine" row until the box is warm. */
+  truncated?: boolean | undefined;
 };
 
 export type UseSandboxFilesOptions = ClientOverride & {
@@ -38,6 +43,12 @@ export type UseSandboxFilesOptions = ClientOverride & {
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
   liveness?: string | undefined;
+  /** The latest turn-end workspace capture (from `useWorkspaceCapture`). When the
+   *  box is NOT warm, the tree paints INSTANTLY from this capture's tree index (the
+   *  <200ms cold first paint) instead of blocking on a Channel-A list. A warm box
+   *  always wins (live path unchanged). On the cold→warm transition the live list
+   *  is merged in place — no remount, no flash (dossier §10.4 / §12-A1/D1). */
+  capture?: WorkspaceCaptureManifest | null | undefined;
   /** Called when an OPTIMISTIC mutation is reverted because its background
    *  Channel-A op failed (e.g. a 409 rename collision). The host wires this to a
    *  toast — the tree silently rolls the node back, the user sees why. */
@@ -68,6 +79,11 @@ export type UseSandboxFilesResult = {
   moveEntry: (path: string, newPath: string, opts?: { overwrite?: boolean }) => Promise<void>;
   /** Re-list the whole tree from the root. */
   refresh: () => Promise<void>;
+  /** Which source the tree is currently served from: the live box, the turn-end
+   *  capture (cold/offline), or neither yet. M5's source badge reads this. */
+  source: "live" | "capture" | null;
+  /** When the served capture was taken (ISO), when `source === "capture"`. */
+  capturedAt: string | null;
   loading: boolean;
   error: Error | null;
 };
@@ -118,6 +134,9 @@ function fsNodeToTree(node: FsTreeNode): FileTreeNode {
     kind,
     size: node.sizeBytes,
     ...(kind === "dir" ? { children: mappedChildren } : {}),
+    // A collapsed residue dir from the capture index — carried through so the
+    // tree can show an inline "contents on machine" row cold instead of nothing.
+    ...(kind === "dir" && node.truncated ? { truncated: true } : {}),
   };
 }
 
@@ -223,14 +242,33 @@ function removeNode(nodes: FileTreeNode[], path: string): FileTreeNode[] {
  *  and entries the server no longer returns are dropped. This is the in-place
  *  merge a root ("") reconcile needs — a blind replace would collapse every
  *  expanded top-level dir back to the unexpanded marker (the reported bug). */
+/** Shallow node equality for identity preservation across a reconcile — same
+ *  path/kind/name/size/status (children handled separately by the caller). */
+function sameNodeShallow(a: FileTreeNode, b: FileTreeNode): boolean {
+  return (
+    a.path === b.path &&
+    a.kind === b.kind &&
+    a.name === b.name &&
+    (a.size ?? null) === (b.size ?? null) &&
+    (a.status ?? undefined) === (b.status ?? undefined)
+  );
+}
+
 function mergeChildren(current: FileTreeNode[], listed: FileTreeNode[]): FileTreeNode[] {
   const byPath = new Map(current.map((n) => [n.path, n] as const));
   const merged = listed.map((next) => {
     const existing = byPath.get(next.path);
+    if (!existing) return next; // brand-new entry
     // Keep an already-expanded dir's loaded children; otherwise take the listing's
     // marker (undefined = unexpanded). Carry forward size/status from the listing.
-    if (existing && existing.kind === "dir" && next.kind === "dir" && existing.children !== undefined) {
-      return { ...next, children: existing.children };
+    if (existing.kind === "dir" && next.kind === "dir" && existing.children !== undefined) {
+      const candidate: FileTreeNode = { ...next, children: existing.children };
+      // Preserve identity when nothing observable changed — no remount (§12-D1).
+      return sameNodeShallow(existing, candidate) ? existing : candidate;
+    }
+    // A file or an unexpanded dir: preserve identity when the node is unchanged.
+    if (existing.children === next.children && sameNodeShallow(existing, next)) {
+      return existing;
     }
     return next;
   });
@@ -276,6 +314,8 @@ export function useSandboxFiles(
   const [loading, setLoading] = useState(false);
   const [expandingPaths, setExpandingPaths] = useState<Set<string>>(new Set());
   const [error, setError] = useState<Error | null>(null);
+  // Which source the tree currently reflects — "capture" (cold paint) or "live".
+  const [source, setSource] = useState<"live" | "capture" | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
 
   // ── Self-emitted fs.changed de-dupe ───────────────────────────────────────
@@ -292,17 +332,31 @@ export function useSandboxFiles(
   // Keep the ref mirror current for the optimistic snapshot path.
   treeRef.current = tree;
 
+  // Overlay the git-status tint onto the tree. IDENTITY-PRESERVING: a node whose
+  // tint and children are unchanged is returned by reference (not rebuilt), so a
+  // re-tint or a cold→warm reconcile does NOT remount unchanged rows — the
+  // no-flicker constraint (dossier §3 #6 / §12-D1). The `overlay.size === 0`
+  // short-circuit keeps the pre-existing "empty overlay leaves tints as-is"
+  // behavior (an empty status set does not strip prior tints).
   const applyStatus = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
     const overlay = statusRef.current;
     if (overlay.size === 0) return nodes;
-    const walk = (list: FileTreeNode[]): FileTreeNode[] =>
-      list.map((node) => {
-        const status = overlay.get(node.path);
-        const next = node.children ? { ...node, children: walk(node.children) } : { ...node };
-        if (status && node.kind === "file") next.status = status;
+    const walk = (list: FileTreeNode[]): FileTreeNode[] => {
+      let changed = false;
+      const out = list.map((node) => {
+        const nextChildren = node.children ? walk(node.children) : node.children;
+        const wantStatus = node.kind === "file" ? overlay.get(node.path) : undefined;
+        const childrenChanged = nextChildren !== node.children;
+        const statusChanged = (node.status ?? undefined) !== (wantStatus ?? undefined);
+        if (!childrenChanged && !statusChanged) return node;
+        changed = true;
+        const next: FileTreeNode = { ...node, ...(node.children ? { children: nextChildren } : {}) };
+        if (wantStatus) next.status = wantStatus;
         else delete next.status;
         return next;
       });
+      return changed ? out : list;
+    };
     return walk(nodes);
   }, []);
 
@@ -328,15 +382,40 @@ export function useSandboxFiles(
       const listed = await client.fsList(workspaceId, sessionId, { path: rootPath, depth: 1 });
       const children = (listed.root.children ?? []).map(fsNodeToTree);
       // Merge rather than replace so an explicit refresh / cold→warm re-list folds
-      // in new entries WITHOUT collapsing the dirs the user already expanded. On a
-      // first (empty) load this is a plain set.
+      // in new entries WITHOUT collapsing the dirs the user already expanded (and,
+      // via the identity-preserving merge, WITHOUT remounting unchanged rows — the
+      // no-flicker cold→warm reconcile). On a first (empty) load this is a plain set.
       setTree((prev) => applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)));
+      // Live data is now serving — flip the source off the capture snapshot.
+      setSource("live");
     } catch (cause) {
       setError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
       setLoading(false);
     }
   }, [client, workspaceId, sessionId, rootPath, applyStatus]);
+
+  // Seed (or re-seed) the tree from a turn-end capture — the COLD/offline paint,
+  // zero Channel-A calls. The tree index is workspace-relative (`treeIndex`); the
+  // tint overlay comes from the capture's changed `files`. Uses the SAME merge as
+  // the live reconcile so a re-seed (a newer capture arriving cold) patches deltas
+  // in place instead of remounting the tree (§12-D1). Never runs while warm.
+  const seedFromCapture = useCallback(
+    (manifest: WorkspaceCaptureManifest) => {
+      const overlay = new Map<string, FileTreeStatus>();
+      for (const file of manifest.files) {
+        if (file.deleted) continue;
+        const mapped = GIT_STATUS_TO_TREE[file.status];
+        if (mapped) overlay.set(file.path, mapped);
+      }
+      statusRef.current = overlay;
+      const children = (manifest.treeIndex.children ?? []).map(fsNodeToTree);
+      setTree((prev) => applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)));
+      setSource("capture");
+      setError(null);
+    },
+    [applyStatus],
+  );
 
   const expand = useCallback(
     async (path: string) => {
@@ -537,14 +616,36 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId, runOptimistic],
   );
 
-  // Initial load + reset on identity change.
+  // Initial paint + reset on identity change. Source selection (dossier §10.4):
+  //   • warm/draining box → the LIVE list (unchanged behavior).
+  //   • cold/offline box WITH a capture → paint instantly from the capture index
+  //     (no Channel-A; the box warms in the background and the warm effect below
+  //     reconciles live in place).
+  //   • cold box with NO capture → best-effort live list (status quo — never worse).
+  const capture = options.capture ?? null;
+  const isLive = options.liveness === "warm" || options.liveness === "draining";
+  // Key the seed on the capture's REVISION (a primitive), not the manifest object
+  // — a consumer passing a fresh object each render (or a new revision) must not
+  // spin the effect. The latest manifest is read from a ref at run time.
+  const captureRef = useRef<WorkspaceCaptureManifest | null>(capture);
+  captureRef.current = capture;
+  const captureRevision = capture?.revision ?? null;
   useEffect(() => {
     if (!enabled) {
       setTree([]);
+      setSource(null);
+      return;
+    }
+    if (isLive) {
+      void refresh();
+      return;
+    }
+    if (captureRevision !== null && captureRef.current) {
+      seedFromCapture(captureRef.current);
       return;
     }
     void refresh();
-  }, [enabled, refresh]);
+  }, [enabled, isLive, captureRevision, refresh, seedFromCapture]);
 
   // Re-pull JUST the git-status overlay and re-tint the existing tree in place —
   // no fs re-list, no collapse. This is all a `git.changed` (commit/stage/checkout)
@@ -664,6 +765,8 @@ export function useSandboxFiles(
     deleteEntry,
     moveEntry,
     refresh,
+    source,
+    capturedAt: source === "capture" ? (capture?.capturedAt ?? null) : null,
     loading,
     error,
   };

@@ -48,7 +48,7 @@ openssl rand -base64 32   # generate OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
 
 Attachment points:
 
-- `POST /v1/workspaces/:id/sessions` accepts `variableSetId`. The attachment is fixed at creation; follow-up `user.message` events cannot add or switch one. The `session.created` event carries `variableSetId`/`variable setName` (names only).
+- `POST /v1/workspaces/:id/sessions` accepts `variableSetId`. The attachment is fixed at creation; follow-up `user.message` events cannot add or switch one. The `session.created` event carries `variableSetId`/`variableSetName` (names only).
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Changing the attachment of a task with a live reusable session returns 409 — the session keeps its creation-time attachment, so recreate the task instead.
 - `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares an `variable set` block; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking `variable-sets:use` on the caller — it was authorized at enable time.
 
@@ -58,7 +58,7 @@ An unknown or cross-workspace `variableSetId` in any attachment payload returns 
 
 Names must match `^[A-Z][A-Z0-9_]*$` (max 128 chars). Names the platform manages or that act as loader-injection vectors are rejected with 422:
 
-- exact: `HOME`, `PATH`, `SHELL`, `USER`, `LOGNAME`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`, `PERL5LIB`, `GH_TOKEN`, `GITHUB_TOKEN`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`
+- exact: `HOME`, `PATH`, `SHELL`, `USER`, `LOGNAME`, `TMPDIR`, `IFS`, `ENV`, `BASH_ENV`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`, `PERL5LIB`, `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `AZURE_DEVOPS_EXT_PAT`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`
 - prefixes: `OPENGENI_`, `GIT_CONFIG_`, `GIT_AUTHOR_`, `GIT_COMMITTER_`, `LD_`, `DYLD_`
 
 ## Composition with the deployment allowlist
@@ -84,7 +84,7 @@ Practically: attaching an variable set shapes what a managed sandbox sees; it do
 
 - An variable set attached to scheduled tasks cannot be deleted (409 from the API; `ON DELETE RESTRICT` as the database backstop). Detach the tasks first.
 - An variable set attached to sessions in a non-terminal state (`queued`, `running`, `requires_action`) cannot be deleted (409). Wait for them to finish or cancel them.
-- Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `variable set_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. An idle **reusable** session cannot be silently detached this way: its scheduled task holds its own RESTRICT-backed attachment (and the API refuses to change a live reusable task's attachment), so deletion stays blocked until the task is detached or deleted — and a deleted task never re-dispatches. Be aware of the consequence: sending a new message to a formerly-attached idle session after its variable set was deleted runs **without** workspace variable set injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
+- Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `variable_set_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. An idle **reusable** session cannot be silently detached this way: its scheduled task holds its own RESTRICT-backed attachment (and the API refuses to change a live reusable task's attachment), so deletion stays blocked until the task is detached or deleted — and a deleted task never re-dispatches. Be aware of the consequence: sending a new message to a formerly-attached idle session after its variable set was deleted runs **without** workspace variable set injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
 
 ## Rotation
 
@@ -96,14 +96,14 @@ Values never enter the events pipeline by construction — injection is server-s
 
 - `agent_run_states.serialized_run_state` may contain echoed values inside tool transcripts. It is RLS-protected and never returned by any API route, and it must stay intact for session resume, so it is not redacted.
 - A sandboxed agent with network access can exfiltrate any secret it is given. Attaching an variable set **is** granting those secrets to that run. Attach the smallest variable set that does the job.
-- Worker telemetry carries ids only (`opengeni.variable set_id` on the run span); heartbeats and logs never carry the value map.
+- Worker telemetry carries ids only (`opengeni.variable_set_id` on the run span); heartbeats and logs never carry the value map.
 
 ## MCP surface
 
 The first-party MCP server exposes variable set tools, gated by the same permissions as the REST routes and **registered only for grants that hold them**:
 
-- `variable set_list` (`variable-sets:use`) — variable-sets with variable names and metadata, never values.
-- `variable set_set_variable` (`variable-sets:manage`) — set or rotate one variable, targeted by `variableSetId` or by `variable setName` (created on first use). The value arrives in plain tool arguments by design: the calling agent (e.g. an orchestrating "manager" holding a grant with `variable-sets:manage`) is trusted with the secrets it persists. Responses stay write-only — metadata, never values.
+- `variable_set_list` (`variable-sets:use`) — variable-sets with variable names and metadata, never values.
+- `variable_set_set_variable` (`variable-sets:manage`) — set or rotate one variable, targeted by `variableSetId` or by `variableSetName` (created on first use). The value arrives in plain tool arguments by design: the calling agent (e.g. an orchestrating "manager" holding a grant with `variable-sets:manage`) is trusted with the secrets it persists. Responses stay write-only — metadata, never values.
 - `session_create` (`sessions:create`) accepts `variableSetId`; attachment requires `variable-sets:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 
 The invariant that sandboxed agents cannot reach workspace secrets is unchanged: the worker's **default** first-party delegated token carries neither `variable-sets:use` nor `variable-sets:manage`, so none of these tools are registered for it. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `variableSetId` but reject any attachment change — set or detach — unless the calling grant holds `variable-sets:use`, which the sandboxed agent's default first-party token never does.

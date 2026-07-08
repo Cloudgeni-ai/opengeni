@@ -27,7 +27,11 @@ export type UseGoalResult = {
   pause: (rationale?: string) => Promise<SessionGoal | null>;
   /** Resume a paused goal: resets counters and re-arms continuations. */
   resume: () => Promise<SessionGoal | null>;
-  /** True while a pause/resume is in flight. */
+  /** Clear the session goal; goal-less sessions remain a successful no-op. */
+  clearGoal: () => Promise<void>;
+  /** Alias for `clearGoal`. */
+  deleteGoal: () => Promise<void>;
+  /** True while a pause/resume/clear is in flight. */
   updating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
@@ -145,6 +149,26 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     return result;
   }, [client, workspaceId, sessionId, mutation.run]);
 
+  const clearGoal = useCallback(async (): Promise<void> => {
+    if (!sessionId) {
+      return;
+    }
+    // deleteGoal resolves void, so distinguish success (a truthy sentinel) from
+    // mutation.run's null-on-failure. Only a SUCCESSFUL delete hides the goal:
+    // a failed one leaves the pill up so its mutationError renders. And invalidate
+    // any in-flight load first so a slower getGoal started before the delete can't
+    // commit and repopulate the just-cleared goal.
+    const ok = await mutation.run(async () => {
+      await client.deleteGoal(workspaceId, sessionId);
+      return true as const;
+    });
+    if (ok) {
+      generation.current += 1;
+      setGoal(null);
+      setError(null);
+    }
+  }, [client, workspaceId, sessionId, mutation.run]);
+
   return {
     goal,
     isActive: goal?.status === "active",
@@ -155,6 +179,8 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     refresh: load,
     pause,
     resume,
+    clearGoal,
+    deleteGoal: clearGoal,
     updating: mutation.mutating,
     mutationError: mutation.mutationError,
     clearMutationError: mutation.clearMutationError,

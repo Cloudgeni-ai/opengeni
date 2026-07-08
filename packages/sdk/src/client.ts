@@ -112,6 +112,9 @@ import type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
+  // Workbench v2 turn-end capture reads (M2, dossier §10.3).
+  GetWorkspaceCaptureResponse,
+  GetWorkspaceCaptureFileResponse,
   TerminalExecRequest,
   TerminalExecResponse,
   PtyOpenRequest,
@@ -580,6 +583,10 @@ export class OpenGeniClient {
     return await this.requestJson<SessionGoal>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`, request);
   }
 
+  async deleteGoal(workspaceId: string, sessionId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`);
+  }
+
   /** Pause the goal loop: the session stops self-continuing until resumed. */
   async pauseGoal(workspaceId: string, sessionId: string, options: { rationale?: string } = {}): Promise<SessionGoal> {
     return await this.updateGoal(workspaceId, sessionId, {
@@ -669,6 +676,23 @@ export class OpenGeniClient {
   /** Git: show a commit (diff vs first parent) or fetch a raw blob at a ref. */
   async gitShow(workspaceId: string, sessionId: string, request: GitShowRequest): Promise<GitShowResponse> {
     return await this.requestJson<GitShowResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/show`, request);
+  }
+
+  /** Workspace capture: the latest turn-end snapshot of the session's workspace
+   *  (tree + per-repo diff + file after-image refs), served from durable storage
+   *  WITHOUT warming a machine — the workbench cold-paint source. Returns
+   *  `{available:false}` when no capture exists yet (fall back to the live path). */
+  async getWorkspaceCapture(workspaceId: string, sessionId: string): Promise<GetWorkspaceCaptureResponse> {
+    return await this.requestJson<GetWorkspaceCaptureResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`);
+  }
+
+  /** Workspace capture: a single file's after-image from the capture (revision
+   *  pins a specific one; omitted → latest). Content is inline for small files,
+   *  else a short-TTL signed URL; a tooLarge file returns metadata only. */
+  async getWorkspaceCaptureFile(workspaceId: string, sessionId: string, path: string, revision?: number): Promise<GetWorkspaceCaptureFileResponse> {
+    const query: Record<string, string> = { path };
+    if (revision !== undefined) query.revision = String(revision);
+    return await this.requestJson<GetWorkspaceCaptureFileResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`, undefined, query);
   }
 
   /** Terminal: run a bounded command, returning buffered stdout/stderr inline. */

@@ -6024,6 +6024,7 @@ export async function listSessions(db: Database, workspaceId: string, limitOrOpt
 export type SessionLineage = {
   ancestors: Session[];
   children: LineageNode[];
+  truncated: boolean;
 };
 
 type LineageIdRow = {
@@ -6037,9 +6038,10 @@ type LineageIdRow = {
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
  * before RLS is considered. Ancestors are capped at 10 and returned root-first.
- * Descendants are capped at depth 5 and returned as a nested tree.
+ * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
  */
 export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
+  const descendantLimit = 200;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -6091,12 +6093,15 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
       select id, parent_session_id as "parentSessionId", depth, path
       from descendants
       order by path
+      limit ${descendantLimit + 1}
     `) as LineageIdRow[];
+    const truncated = childRows.length > descendantLimit;
+    const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
-    const lineageRows = [...ancestorRows, ...childRows];
+    const lineageRows = [...ancestorRows, ...descendantRows];
     const ids = [...new Set(lineageRows.map((row) => row.id))];
     if (ids.length === 0) {
-      return { ancestors: [], children: [] };
+      return { ancestors: [], children: [], truncated: false };
     }
     const rows = await scopedDb.select().from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
@@ -6108,14 +6113,14 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
       .filter((session): session is Session => Boolean(session));
 
     const nodesById = new Map<string, LineageNode>();
-    for (const row of childRows) {
+    for (const row of descendantRows) {
       const session = sessionsById.get(row.id);
       if (session) {
         nodesById.set(row.id, { session, children: [] });
       }
     }
     const children: LineageNode[] = [];
-    for (const row of childRows) {
+    for (const row of descendantRows) {
       const node = nodesById.get(row.id);
       if (!node) continue;
       if (row.parentSessionId === sessionId) {
@@ -6124,7 +6129,7 @@ export async function getSessionLineage(db: Database, workspaceId: string, sessi
         nodesById.get(row.parentSessionId ?? "")?.children.push(node);
       }
     }
-    return { ancestors, children };
+    return { ancestors, children, truncated };
   });
 }
 
@@ -7218,6 +7223,10 @@ export interface AcquireLeaseInput {
   // sessions never stamp or conflict; legacy/cold rows read null = compatible).
   rigVersionId?: string | null;
   leaseTtlMs: number;          // refresh window for expires_at (turn-heartbeat cadence)
+  // Expiry stamped only while a cold->warming spawner is allowed to create the
+  // provider box before any instance_id exists. Warm/draining/attached refreshes
+  // must continue using leaseTtlMs.
+  warmingLeaseTtlMs?: number;
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
@@ -7360,6 +7369,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
+  const warmingLeaseTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) =>
     await scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
@@ -7466,7 +7476,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
           returning id
         `);
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-        const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+        const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
         // casRows.length === 0 cannot happen under the held row lock (defensive):
         // a lost CAS means a sibling flipped it first, so we attach.
         const role = casRows.length === 0 ? "attached" as const : "spawner" as const;
@@ -7484,8 +7494,14 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
 
       // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
       // liveness. The spawner exclusively owns warming->warm.
+      // TTL: a WARMING attach must keep the warming budget — re-stamping the
+      // plain (90s) TTL while a spawner's create() is still in flight would
+      // collapse expires_at and let the warming-death reaper reset/drain the
+      // lease before instance_id is recorded (F1). A WARM attach uses the plain
+      // TTL as before.
       await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-      const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+      const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
+      const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
       return { role: "attached" as const, lease: mapLeaseRow(updated) };
     }),
   );
@@ -7550,16 +7566,23 @@ export async function recordWarmingSandboxCreated(db: Database, input: {
   resumeBackendId?: string | null;
   resumeState?: Record<string, unknown> | null;
   leaseTtlMs: number;
+  /** The still-WARMING lease must keep the warming budget after create() returns:
+   *  the spawner has yet to run display-stack setup, port expose, and
+   *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
+   *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
+   *  for legacy callers/tests. */
+  warmingLeaseTtlMs?: number;
 }): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
+      const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
           instance_id       = ${input.instanceId},
           resume_backend_id = ${input.resumeBackendId ?? null},
           resume_state      = ${resumeStateJson}::jsonb,
-          expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
+          expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
           updated_at        = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
@@ -7598,8 +7621,15 @@ export async function failWarmingToCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
@@ -7738,6 +7768,8 @@ export interface ReapDrainable {
   leaseEpoch: number;
 }
 
+let loggedLegacyReapFunctionFallback = false;
+
 export async function reapStaleLeaseHolders(db: Database, input: {
   workspaceId: string;
   viewerHolderTtlMs: number;   // delete viewer rows older than this
@@ -7869,10 +7901,29 @@ export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   turnHolderTtlMs?: number;
   idleGraceMs: number;
 }): Promise<ReapDrainable[]> {
-  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
-    select workspace_id, sandbox_group_id, instance_id, lease_epoch
-    from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
-  `);
+  let rows: Array<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>;
+  try {
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
+    `);
+  } catch (error) {
+    // Deploy normally runs migrations before rollout, but a newly-started worker
+    // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
+    // function. Fall back for that sweep only: viewer/warming/drain reaping stays
+    // active, dead-turn-holder reaping is skipped until migration 0044 lands.
+    if ((error as { code?: unknown })?.code !== "42883") {
+      throw error;
+    }
+    if (!loggedLegacyReapFunctionFallback) {
+      loggedLegacyReapFunctionFallback = true;
+      console.warn("sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep");
+    }
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
+    `);
+  }
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
@@ -8025,8 +8076,15 @@ export async function confirmDrainCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
@@ -8074,7 +8132,7 @@ export async function persistDrainSnapshot(db: Database, input: {
   /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
    *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
   workspaceArchive: string | null;
-}): Promise<{ wrote: boolean; priorArchive: string | null }> {
+}): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -8084,21 +8142,24 @@ export async function persistDrainSnapshot(db: Database, input: {
       // (1) Lock + read the PRIOR archive under the CAS guard (draining AND
       // refcount=0 AND lease_epoch=expected). A miss (re-armed / newer epoch /
       // vanished) returns no row → wrote:false, the caller must NOT terminate.
-      const guard = await scopedDb.execute<{ prior_archive: string | null }>(sql`
-        select resume_state #>> '{sessionState,workspaceArchive}' as prior_archive
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null }>(sql`
+        select
+          resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, priorArchive: null };
+        return { wrote: false, priorArchive: null, priorArchivePrev: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
-        return { wrote: true, priorArchive: null };
+        return { wrote: true, priorArchive: null, priorArchivePrev: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -8106,8 +8167,9 @@ export async function persistDrainSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "draining",
+        clearPreviousArchive: true,
       });
-      return { wrote: true, priorArchive };
+      return { wrote: true, priorArchive, priorArchivePrev };
     });
 }
 
@@ -8131,10 +8193,18 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
   workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
   workspaceArchive: string;
   livenessGuard: "draining" | "warm";
+  priorCurrentArchive?: string | null;
+  clearPreviousArchive?: boolean;
+  /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
+   *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
+   *  land time — a late, older capture is superseded (persistWarmSnapshot's
+   *  monotonic guard). Absent (drain) → now(). */
+  archiveAtIso?: string;
 }): Promise<void> {
   const livenessGuard = input.livenessGuard === "draining"
     ? sql`liveness = 'draining' and refcount = 0`
     : sql`liveness = 'warm'`;
+  const archiveAt = input.archiveAtIso ? sql`to_jsonb(${input.archiveAtIso}::text)` : sql`to_jsonb(now()::timestamptz::text)`;
   await scopedDb.execute(sql`
     update sandbox_leases set
       resume_state = jsonb_set(
@@ -8143,12 +8213,19 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
         -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
         case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
         '{sessionState}',
-        (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-              then resume_state -> 'sessionState' else '{}'::jsonb end)
-          || jsonb_build_object(
-            'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-            'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
-          ),
+        jsonb_strip_nulls(
+          (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
+                then resume_state -> 'sessionState' else '{}'::jsonb end)
+            || jsonb_build_object(
+              'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
+              'workspaceArchiveAt', ${archiveAt},
+              'workspaceArchivePrev', case
+                when ${input.clearPreviousArchive ? "yes" : "no"}::text = 'yes' then null::jsonb
+                when ${input.priorCurrentArchive ?? null}::text is null then null::jsonb
+                else to_jsonb(${input.priorCurrentArchive ?? null}::text)
+              end
+            )
+        ),
         true
       ),
       updated_at = now()
@@ -8175,12 +8252,20 @@ export async function persistWarmSnapshot(db: Database, input: {
   workspaceArchive: string;
   /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
   minIntervalMs: number;
-}): Promise<{ wrote: boolean; throttled: boolean; priorArchive: string | null }> {
+  /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
+   *  NOT land time: a capture that started at or before the archive already on
+   *  the lease is SUPERSEDED (a stale heartbeat capture that timed out its wait
+   *  and landed late must never overwrite a fresher turn-end snapshot or refresh
+   *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
+  capturedAtMs?: number;
+}): Promise<{ wrote: boolean; throttled: boolean; superseded: boolean; priorArchiveForGc: string | null }> {
+  const capturedAtMs = input.capturedAtMs ?? Date.now();
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_at: string | null }>(sql`
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null; prior_archive_at: string | null }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -8188,16 +8273,24 @@ export async function persistWarmSnapshot(db: Database, input: {
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, priorArchive: null };
+        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
+      // MONOTONIC guard: a capture whose start is at/before the stored archive's
+      // capture is stale (a slower-but-earlier heartbeat capture landing after a
+      // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
+      // throttle clock. This is what makes the bounded snapshot wait safe.
+      if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
+        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+      }
       if (
         input.minIntervalMs > 0
         && Number.isFinite(priorAtMs)
-        && Date.now() - priorAtMs < input.minIntervalMs
+        && capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, priorArchive: null };
+        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -8205,8 +8298,10 @@ export async function persistWarmSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "warm",
+        priorCurrentArchive: priorArchive,
+        archiveAtIso: new Date(capturedAtMs).toISOString(),
       });
-      return { wrote: true, throttled: false, priorArchive };
+      return { wrote: true, throttled: false, superseded: false, priorArchiveForGc: priorArchivePrev };
   });
 }
 
@@ -8292,6 +8387,208 @@ export async function markSandboxFileResourcesMaterialized(db: Database, input: 
       `);
       return { wrote: rows.length > 0 };
     });
+}
+
+// ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
+// The durable index for turn-end workspace captures. `insertWorkspaceCapture`
+// mirrors persistWarmSnapshot's epoch-CAS discipline: the write is fenced on the
+// live lease's epoch so a capture whose lease was superseded (a newer turn
+// re-armed the box under a fresh epoch) writes ZERO rows. `revision` is assigned
+// monotonically per session inside the same statement (max+1), unique on
+// (session_id, revision).
+
+export type WorkspaceCaptureRow = {
+  id: string;
+  sessionId: string;
+  turnId: string | null;
+  revision: number;
+  leaseEpoch: number;
+  state: string;
+  manifestKey: string | null;
+  treeIndexKey: string | null;
+  blobKeys: string[];
+  sizeBytes: number | null;
+  stats: Record<string, unknown>;
+  capturedAt: string;
+};
+
+const WORKSPACE_CAPTURE_COLUMNS = sql`
+  id, session_id, turn_id, revision, lease_epoch, state,
+  manifest_key, tree_index_key, blob_keys, size_bytes, stats, captured_at
+`;
+
+function mapWorkspaceCaptureRow(row: {
+  id: string; session_id: string; turn_id: string | null; revision: number | string;
+  lease_epoch: number | string; state: string; manifest_key: string | null;
+  tree_index_key: string | null; blob_keys: unknown; size_bytes: number | string | null;
+  stats: unknown; captured_at: string;
+}): WorkspaceCaptureRow {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    revision: Number(row.revision),
+    leaseEpoch: Number(row.lease_epoch),
+    state: row.state,
+    manifestKey: row.manifest_key,
+    treeIndexKey: row.tree_index_key,
+    blobKeys: Array.isArray(row.blob_keys) ? row.blob_keys as string[] : [],
+    sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
+    stats: (row.stats && typeof row.stats === "object" ? row.stats : {}) as Record<string, unknown>,
+    capturedAt: row.captured_at,
+  };
+}
+
+/**
+ * Fenced insert of a capture revision at an EXPLICIT revision (the caller
+ * assigns it as prevRevision+1 so the manifest blob — written before this insert
+ * — can embed the same number). Writes ONLY when a warm lease with the expected
+ * epoch still exists for the sandbox group (the same supersession guard
+ * persistWarmSnapshot uses, expressed as an EXISTS on sandbox_leases). Returns
+ * the assigned revision, or null when the fence rejected the write (superseded /
+ * released lease). Captures for one session are serialized (one turn at a time),
+ * so the explicit revision never races the unique (session_id, revision) index.
+ */
+export async function insertWorkspaceCapture(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  revision: number;
+  manifestKey: string;
+  treeIndexKey: string;
+  blobKeys: string[];
+  sizeBytes: number;
+  stats: Record<string, unknown>;
+}): Promise<{ revision: number } | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ revision: number | string }>(sql`
+        insert into workspace_captures
+          (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
+           manifest_key, tree_index_key, blob_keys, size_bytes, stats)
+        select
+          ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
+          ${input.revision}, ${input.expectedEpoch}, 'available',
+          ${input.manifestKey}, ${input.treeIndexKey},
+          ${JSON.stringify(input.blobKeys)}::jsonb, ${input.sizeBytes}, ${JSON.stringify(input.stats)}::jsonb
+        where exists (
+          select 1 from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+        )
+        returning revision
+      `);
+      if (rows.length === 0) return null;
+      return { revision: Number(rows[0]!.revision) };
+    });
+}
+
+/** The newest capture for a session (highest revision), or null if none. */
+export async function latestWorkspaceCapture(db: Database, workspaceId: string, sessionId: string): Promise<WorkspaceCaptureRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
+      select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
+      where session_id = ${sessionId}
+      order by revision desc
+      limit 1
+    `);
+    return rows.length ? mapWorkspaceCaptureRow(rows[0]!) : null;
+  });
+}
+
+/** A specific capture revision for a session (the M2 file route with an explicit
+ *  `?revision=`), or null if that revision was never captured / already GC'd. */
+export async function workspaceCaptureAtRevision(db: Database, workspaceId: string, sessionId: string, revision: number): Promise<WorkspaceCaptureRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
+      select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
+      where session_id = ${sessionId} and revision = ${revision}
+      limit 1
+    `);
+    return rows.length ? mapWorkspaceCaptureRow(rows[0]!) : null;
+  });
+}
+
+/**
+ * Plan the keep-latest-N GC for a session. Pure read + set-difference (no
+ * mutation): returns the evicted rows' ids, the per-revision manifest/tree blob
+ * keys (unshared — always deletable), and the after-image blob keys owned ONLY
+ * by evicted revisions (union(evicted) minus union(surviving) — a content-
+ * addressed blob shared with a surviving revision is NEVER deleted). The caller
+ * deletes storage first (idempotent), then deletes the rows (F9 ordering — the
+ * new revision is already committed by the time GC runs).
+ */
+export type WorkspaceCaptureGcRow = {
+  id: string;
+  manifestKey: string | null;
+  treeIndexKey: string | null;
+  blobKeys: string[];
+};
+export type WorkspaceCaptureGcPlan = {
+  evictedRowIds: string[];
+  deleteBlobKeys: string[];
+  deletePerRevisionKeys: string[];
+};
+
+/**
+ * Pure keep-latest-N set-difference (extracted for direct unit testing). `rows`
+ * MUST be ordered newest-revision-first. The first keepN survive; the rest are
+ * evicted. A content-addressed after-image blob key owned by an evicted revision
+ * is deleted ONLY when NO surviving revision also references it (shared blobs are
+ * never deleted); per-revision manifest/tree keys are unshared → always deleted.
+ */
+export function computeWorkspaceCaptureGcPlan(rows: WorkspaceCaptureGcRow[], keepN: number): WorkspaceCaptureGcPlan {
+  const survivors = rows.slice(0, Math.max(0, keepN));
+  const evicted = rows.slice(Math.max(0, keepN));
+  const survivingBlobKeys = new Set<string>();
+  for (const r of survivors) for (const k of r.blobKeys) survivingBlobKeys.add(k);
+  const deleteBlobKeys = new Set<string>();
+  const deletePerRevisionKeys: string[] = [];
+  const evictedRowIds: string[] = [];
+  for (const r of evicted) {
+    evictedRowIds.push(r.id);
+    if (r.manifestKey) deletePerRevisionKeys.push(r.manifestKey);
+    if (r.treeIndexKey) deletePerRevisionKeys.push(r.treeIndexKey);
+    for (const k of r.blobKeys) if (!survivingBlobKeys.has(k)) deleteBlobKeys.add(k);
+  }
+  return { evictedRowIds, deleteBlobKeys: [...deleteBlobKeys], deletePerRevisionKeys };
+}
+
+export async function planWorkspaceCaptureGc(db: Database, input: { workspaceId: string; sessionId: string; keepN: number }): Promise<WorkspaceCaptureGcPlan> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string; revision: number | string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }>(sql`
+      select id, revision, manifest_key, tree_index_key, blob_keys
+      from workspace_captures
+      where session_id = ${input.sessionId}
+      order by revision desc
+    `);
+    return computeWorkspaceCaptureGcPlan(
+      rows.map((r: { id: string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }) => ({
+        id: r.id,
+        manifestKey: r.manifest_key,
+        treeIndexKey: r.tree_index_key,
+        blobKeys: Array.isArray(r.blob_keys) ? r.blob_keys as string[] : [],
+      })),
+      input.keepN,
+    );
+  });
+}
+
+/** Delete evicted capture rows by id (call AFTER their storage blobs are gone). */
+export async function deleteWorkspaceCaptureRows(db: Database, input: { workspaceId: string; rowIds: string[] }): Promise<number> {
+  if (input.rowIds.length === 0) return 0;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const result = await scopedDb.execute<{ id: string }>(sql`
+      delete from workspace_captures
+      where id in (${sql.join(input.rowIds.map((id) => sql`${id}`), sql`, `)})
+      returning id
+    `);
+    return result.length;
+  });
 }
 
 // §4.9 — non-locking snapshot for the API handshake & health.
@@ -9822,6 +10119,45 @@ export async function getSessionGoal(db: Database, workspaceId: string, sessionI
   });
 }
 
+export async function clearSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [existing] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      return { cleared: false, goal: null, event: null };
+    }
+    await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
+    const [session] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const sequence = session.lastSequence + 1;
+    const [event] = await tx.insert(schema.sessionEvents).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId,
+      sequence,
+      type: "goal.cleared",
+      payload: sanitizeEventPayload({
+        goalId: existing.id,
+        text: existing.text,
+        version: existing.version,
+      }),
+    }).returning();
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    if (!event) {
+      throw new Error("Failed to append goal.cleared event");
+    }
+    return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+  }));
+}
+
 /**
  * goal_set semantics: insert, or replace the existing goal in place. A replace
  * re-activates the goal (even when paused or completed), bumps the version,
@@ -10456,7 +10792,16 @@ export async function finishTurn(db: Database, workspaceId: string, turnId: stri
  * without a fresh claim, so the row still carries the approval-wait status
  * while the rerun activity executes.
  */
-export async function requeuePreemptedTurn(db: Database, workspaceId: string, turnId: string, triggerEventId: string): Promise<void> {
+export async function requeuePreemptedTurn(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  triggerEventId: string,
+  // Prior statuses the reset is allowed to match. Defaults to the live-turn
+  // set; the worker-death redispatch also passes "cancelled" so it can reset a
+  // turn the dying attempt stamped `cancelled` in its CancelledFailure cleanup.
+  fromStatuses: string[] = ["running", "requires_action"],
+): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.update(schema.sessionTurns).set({
       status: "queued",
@@ -10464,7 +10809,7 @@ export async function requeuePreemptedTurn(db: Database, workspaceId: string, tu
       startedAt: null,
       finishedAt: null,
       updatedAt: new Date(),
-    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, ["running", "requires_action"]))).returning({ id: schema.sessionTurns.id });
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, fromStatuses))).returning({ id: schema.sessionTurns.id });
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
@@ -10497,6 +10842,37 @@ export async function incrementTurnWorkerDeathRedispatches(db: Database, workspa
       throw new Error(`Session turn not found: ${turnId}`);
     }
     return Number(count);
+  });
+}
+
+/**
+ * Settle a turn `cancelled` from a DYING attempt (the generic CancelledFailure
+ * cleanup of a worker that lost its heartbeat), fenced so a zombie can never
+ * clobber a turn that worker-death recovery has already moved on. It only
+ * writes when BOTH hold:
+ *   • the turn is still live (running / requires_action) — not a turn recovery
+ *     already reset to `queued`; and
+ *   • the redispatch counter is unchanged since this dispatch started —
+ *     requeueTurnAfterWorkerDeath bumps it BEFORE re-queuing, so a mismatch
+ *     means a successor dispatch owns the turn now (do not touch it).
+ * Returns true when it actually settled (caller emits turn.cancelled only then).
+ */
+export async function cancelTurnFromDyingDispatch(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  expectedRedispatches: number,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute(sql`
+      update session_turns
+      set status = 'cancelled', finished_at = now(), updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${turnId}
+        and status in ('running', 'requires_action')
+        and coalesce((metadata->>'workerDeathRedispatches')::int, 0) = ${expectedRedispatches}
+      returning id
+    `);
+    return rows.length > 0;
   });
 }
 
@@ -10600,6 +10976,43 @@ export async function appendSessionEvents(db: Database, workspaceId: string, ses
     }));
     const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
     await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return inserted.map(mapEvent);
+  }));
+}
+
+export async function appendSessionEventToSandboxGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  input: AppendEventInput,
+): Promise<SessionEvent[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
+      .orderBy(asc(schema.sessions.createdAt))
+      .for("update");
+    if (rows.length === 0) {
+      return [];
+    }
+    const occurredAt = input.occurredAt ?? new Date();
+    const values = rows.map((row) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.id,
+      sequence: row.lastSequence + 1,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sql`${schema.sessions.lastSequence} + 1`,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
     return inserted.map(mapEvent);
   }));
 }

@@ -103,6 +103,21 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         action: item.action,
         text: item.text,
       };
+    case "memory":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        variant: item.variant,
+        memoryKind: item.memoryKind,
+        preview: item.preview,
+        deduped: item.deduped === true,
+        replacementPreview: item.replacementPreview ?? null,
+        action: item.action ?? null,
+        memoryId: item.memoryId,
+        replacementMemoryId: item.replacementMemoryId ?? null,
+      };
     case "notice":
       return {
         kind: item.kind,

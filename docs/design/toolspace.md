@@ -51,7 +51,7 @@ MCP server attachment, credential decryption, pack expansion, approval policy,
 budget checks, and audit events stay in the API/worker control plane. The
 sandbox receives only a file path containing a short-lived delegated bearer plus
 the workspace MCP URL. It sends MCP JSON-RPC over HTTP; it does not receive MCP
-server credentials, connection tokens, platform GitHub tokens, or direct
+server credentials, connection tokens, platform git provider tokens, or direct
 database/object-store access.
 
 Capability attenuation happens in the signed `ogd_` payload. A sandbox script
@@ -114,7 +114,7 @@ short-lived `ogd_` token during environment preparation:
 }
 ```
 
-The TTL follows the turn-appropriate token policy used for the platform GitHub
+The TTL follows the turn-appropriate token policy used for the platform git
 token path. Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
 written into a sandbox file and the environment exposes only
 `OPENGENI_TOOLSPACE_TOKEN_FILE` plus `OPENGENI_TOOLSPACE_URL`. The token value
@@ -124,8 +124,8 @@ logs.
 ### Every backend, including selfhosted
 
 The token is minted and delivered on **every** compute backend, including a
-connected machine (selfhosted). This is a deliberate departure from the platform
-GitHub token, which is skipped on selfhosted because it is inert there — the
+connected machine (selfhosted). This is a deliberate departure from platform git
+provider tokens, which are skipped on selfhosted because they are inert there — the
 machine uses its own git credentials. That reasoning does not transfer to the
 toolspace token: it is the machine's *only* path to programmatic tool calling,
 and refusing to deliver it would silently downgrade selfhosted agents.
@@ -197,9 +197,9 @@ cannot re-enter `/mcp` as a toolspace principal.
   The toolspace token satisfies this — it carries `toolspace:call` only, is bound
   to its own session, expires at turn TTL, is per-turn budgeted, and cannot invoke
   approval-required tools — so it is safe to deliver to the machine, whereas the
-  platform GitHub installation token (which would grant repo access beyond the
-  owner) is not, and stays off it. This invariant, not the git-token precedent, is
-  what decides which per-turn credentials may reach a selfhosted box.
+  platform git provider token (which could grant repo access beyond the owner)
+  is not, and stays off it. This invariant, not the git-token precedent, is what
+  decides which per-turn credentials may reach a selfhosted box.
 - SSRF posture: proxy targets come only from validated persisted rows and
   enabled pack/capability refs, not from sandbox-supplied URLs.
 - Human approval is not bypassed: approval-required tools are excluded or return

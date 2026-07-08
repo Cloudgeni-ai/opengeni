@@ -1,12 +1,23 @@
 # OpenGeni
 
-OpenGeni is a self-hostable managed agent service for long-running workspace and infrastructure work.
+**An open, self-hostable agentic runtime for organizations.**
 
-It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs. The included React app is one client for that API; other products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
+OpenGeni is the platform layer that makes long-running AI agents safe to trust with real work: durable, replayable sessions; human approvals; governed credentials and memory; and a choice of where every session runs — a managed sandbox or your own hardware. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai), where the recurring lesson was that safe agent adoption at scale is a platform problem, not an agent problem. OpenGeni is that platform, extracted into an Apache-2.0 runtime you operate yourself — the control plane, the sessions API, the event history, and the audit trail all live in your deployment, not on a vendor's servers.
 
-Every session picks where it runs. A **managed sandbox** (a fresh cloud box OpenGeni provisions and tears down) and a **Connected Machine** (a computer you enroll — your laptop, a build server, a GPU box) are co-equal, first-class compute targets. A machine-targeted session runs directly on your hardware, under your own files and your own git credentials, with no cloud box in the loop.
+OpenGeni is the runtime, not the agent. It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs, agnostic to what the agent does. The included React app is one client for that API; your own products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
+
+Every session picks where it runs. A **managed sandbox** (a fresh cloud box OpenGeni provisions and tears down) and a **Connected Machine** (a computer you enroll — your laptop, a build server, a GPU box) are co-equal, first-class compute targets. A machine-targeted session runs directly on your hardware, under your own files and your own git credentials, with no cloud box in the loop and no inbound network exposure — the enrolled agent only dials out.
 
 If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
+
+## Why OpenGeni
+
+Most agent products give you some of these; OpenGeni's premise is that organizations need all four in one runtime:
+
+- **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
+- **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
+- **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
+- **Governance built in, not bolted on.** Human approvals gate tool use, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
 
 ## What It Does
 
@@ -15,9 +26,10 @@ If you want to try the managed version, go to [app.opengeni.ai](https://app.open
 - Coordinates long-running work with Temporal signals for follow-ups, approvals, and interrupts.
 - Runs each session on a chosen compute target: a managed sandbox (Docker, Modal, local, cloud provider, or none) or a **Connected Machine** you enroll — with a per-session working folder on that machine.
 - Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no OpenGeni-minted token is pushed to it.
+- Keeps sessions working until the job is actually done: a session can carry a **goal** with success criteria, and stopping becomes an explicit act (`goal_complete` with evidence, `goal_pause` with a rationale, or a human interrupt) with no-progress and budget guards. See [docs/goals.md](docs/goals.md).
 - Attaches repositories, uploaded files, and document-search tools to sessions.
+- Provides a workspace knowledge layer: document upload, indexing, hybrid/vector/keyword search with pgvector, and **reviewed agent memories** with a human/API approval gate.
 - Uses a GitHub App integration for scoped repository access.
-- Supports document upload, indexing, retry, and semantic search with pgvector.
 
 ## Project Status
 
@@ -256,7 +268,7 @@ A Connected Machine is a first-class, co-equal alternative to the managed sandbo
 How a machine session differs from a managed sandbox:
 
 - **Runs directly on your machine.** A machine-targeted turn establishes the session on the enrolled machine directly — no cloud box is created or billed for that turn.
-- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni injects a short-lived, run-scoped GitHub App token; for a machine that injection is skipped.)
+- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni injects a short-lived, run-scoped git provider token when a GitHub, GitLab, or Azure DevOps broker is available; for a machine that injection is skipped.)
 - **Your files, not a clone.** OpenGeni does not clone selected repositories onto the machine's real disk; the machine already owns its filesystem. The agent works in the per-session working folder you chose.
 - **Per-session working folder.** Each session names a working directory on the machine (the machine root, or a subdirectory); it is the cwd base for the agent's exec, terminal, and file dock.
 
