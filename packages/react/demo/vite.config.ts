@@ -15,6 +15,7 @@ export default defineConfig({
         timeline: resolve(__dirname, "timeline.html"),
         machines: resolve(__dirname, "machines.html"),
         workbench: resolve(__dirname, "workbench.html"),
+        terminal: resolve(__dirname, "terminal.html"),
       },
     },
   },

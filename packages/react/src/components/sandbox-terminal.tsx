@@ -119,6 +119,9 @@ type TerminalDebugInfo = {
   fontSize: number | undefined;
   hasVarInFont: boolean;
   theme: XtermTheme | undefined;
+  /** The live xterm instance (opaque) — the evidence harness reads its buffer to
+   *  prove screen preservation (E5) and drive the burst-responsiveness probe. */
+  term: unknown;
 };
 declare global {
   // eslint-disable-next-line no-var
@@ -343,6 +346,7 @@ export function SandboxTerminal({
             fontSize: term.options.fontSize,
             hasVarInFont: String(term.options.fontFamily ?? "").includes("var("),
             theme: term.options.theme,
+            term,
           });
         }
         setReady(true);
