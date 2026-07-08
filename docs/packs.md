@@ -35,6 +35,8 @@ A registered pack manifest may declare the runtime its sessions compose into:
 
 Built-in packs never declare `sandboxImage` or `skills`; only registered (manifest-backed) packs participate in pack-scoped runtime composition.
 
+`sandboxImage` predates [rigs](rigs.md) and is superseded by them for new configuration: a rig's own `image`, when its version sets one, is the top of image precedence (**rig > pack > deployment default**) and overrides a pack's `sandboxImage` outright — a workspace with both a rig image and a pack image runs the rig's. `sandboxImage` still works unchanged for a workspace with no bound rig or a rig version with no image set.
+
 ## Marketing Social Pack
 
 The pack exposes:

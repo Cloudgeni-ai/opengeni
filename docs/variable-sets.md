@@ -69,7 +69,7 @@ Names must match `^[A-Z][A-Z0-9_]*$` (max 128 chars). Names the platform manages
 deployment allowlist < git identity < workspace variable set < run-scoped GitHub auth
 ```
 
-Later wins. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
+Later wins. A session bound to a [rig](rigs.md) with `defaultVariableSetIds` gets one more layer, inserted **below** the session's own attached variable set: `deployment allowlist < git identity < rig default variable sets < workspace variable set < run-scoped GitHub auth`. A rig default is pure convenience for tooling every session on that rig should have; the session's own attachment still wins any name collision. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
 
 ### Env injection is a managed-sandbox concept
 

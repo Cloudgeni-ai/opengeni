@@ -438,6 +438,8 @@ The current map:
 
 **Capability packs.** An enabled capability pack can scope the runtime per workspace: a pack manifest may declare `skills` (delivered into the `.agents/` skill index alongside bundled skills) and a `sandboxImage` that replaces the global image for that workspace. **At most one enabled pack per workspace may declare an image — no image composition in v1** (second enable → 409). Built-in packs never declare images or skills. See [`packs.md`](packs.md).
 
+**Rigs.** A workspace can also own named **rigs**: versioned sandbox machine definitions (image + setup script + self-declared health checks + credential-hook refs + default variable-set refs). A session freezes its bound rig's active version at creation; a rig version's image is the **top** of image precedence — rig > pack > deployment default — overriding both. Agents propose changes (`setup_append` auto-merges on a green clean-replay verification run; `definition_edit` needs an explicit `rigs:manage` promote); the rig-setup hook runs once per box, marker-guarded, and is skipped entirely on `selfhosted` (Connected Machine) turns. See [`rigs.md`](rigs.md).
+
 **Bundled skills.** Eight skill directories ship in `packages/runtime/src/bundled_hashicorp_terraform_skills/` (vendored HashiCorp Terraform skills + repo-local `checkov` and `social-media-marketing`), mounted under `.agents/`. They are staged into a `.opengeni/` copy under cwd when packaged outside cwd. Refresh procedure: that directory's `README.md` + `UPSTREAM_GIT_SHA`.
 
 > Canonical: `packages/contracts/src/index.ts` (the enum + `CAPABILITY_DESCRIPTORS`), `packages/runtime/src/sandbox/providers/index.ts` (the registry), `apps/worker/src/activities/agent-turn.ts` (the `machinePrimary` establish branch), `packages/runtime/src/sandbox/selfhosted/session.ts` (`toMachinePath`), [`../AGENTS.md`](../AGENTS.md) (Sandbox Notes).
@@ -525,6 +527,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The agent loop / model routing / instructions | `packages/runtime/src/index.ts` | [`model-providers.md`](model-providers.md) |
 | Context compaction | `packages/runtime/src/context-compaction.ts` | [`context-compaction.md`](context-compaction.md) |
 | Secret variable-sets | `apps/api/src/routes` + `packages/db` env-crypto | [`variable-sets.md`](variable-sets.md) |
+| Rigs (versioned sandbox machine definitions, change verification/promotion) | `packages/core/src/rigs/index.ts`, `apps/api/src/routes/rigs.ts`, `apps/worker/src/activities/rig-verification.ts` | [`rigs.md`](rigs.md) |
 | Integrations / connections / token broker | `apps/api/src/routes/connections.ts`, `apps/api/src/integrations/oauth-client.ts`, `packages/db/src/connection-token-resolver.ts`, `packages/runtime/src/index.ts` (`connectionRef`), `scripts/import-integrations-catalog.ts` (reviewed catalog snapshots) | [`integrations-design.md`](integrations-design.md) |
 | Per-session MCP servers / credential rotation | `packages/contracts/src/index.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Toolspace (`toolspace:call`) programmatic sandbox tool access | `packages/contracts/src/index.ts`, `apps/api/src/mcp/toolspace.ts`, `apps/worker/src/activities/variable set.ts`, `packages/runtime/src/index.ts` | [`mcp-surfaces.md`](mcp-surfaces.md), [`design/toolspace.md`](design/toolspace.md) |
@@ -554,6 +557,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`capabilities.md`](capabilities.md) | The workspace/global capability catalog; registry snapshot imports; probe-on-enable; encrypted credential headers; default tool attachment. |
 | [`packs.md`](packs.md) | Capability packs: role bundles, `credentialRef` vs Postgres secrets, pack-scoped `sandboxImage` + skills (no composition). |
 | [`variable-sets.md`](variable-sets.md) | Workspace secret variable-sets: write-only values, no-self-attach invariant, RLS, AES-256-GCM, layering order, `firstPartyMcpPermissions`. |
+| [`rigs.md`](rigs.md) | Rigs: versioned sandbox machine definitions, frozen per-session binding, image precedence, `setup_append` vs `definition_edit` change verification/auto-merge, `rigs:use`/`rigs:manage`, MCP surface. |
 | [`session-mcp-servers.md`](session-mcp-servers.md) | Per-session third-party MCP servers: create contract, `mcp_servers:attach`, encrypted headers, rotation semantics, and never-return-values invariant. |
 | [`design/toolspace.md`](design/toolspace.md) | Point-in-time Toolspace design: rationale, security invariants, v1 approval exclusion, and follow-ups. |
 | [`command-palette.md`](command-palette.md) | The web slash-command palette; slash commands act on session/UI and are never delivered to the model. |
