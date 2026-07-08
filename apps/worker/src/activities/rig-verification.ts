@@ -89,6 +89,29 @@ function setupAppendCommand(change: RigChange): string | null {
   return typeof command === "string" ? command : null;
 }
 
+function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): RigVersion {
+  if (change.kind !== "definition_edit") {
+    return baseVersion;
+  }
+  const payload = change.payload as {
+    image?: unknown;
+    setupScript?: unknown;
+    checks?: unknown;
+    credentialHooks?: unknown;
+    defaultVariableSetIds?: unknown;
+    changelog?: unknown;
+  };
+  return {
+    ...baseVersion,
+    image: payload.image === undefined ? baseVersion.image : (payload.image as string | null),
+    setupScript: payload.setupScript === undefined ? baseVersion.setupScript : (payload.setupScript as string | null),
+    checks: Array.isArray(payload.checks) ? payload.checks as RigVersion["checks"] : baseVersion.checks,
+    credentialHooks: Array.isArray(payload.credentialHooks) ? payload.credentialHooks as string[] : baseVersion.credentialHooks,
+    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds) ? payload.defaultVariableSetIds as string[] : baseVersion.defaultVariableSetIds,
+    changelog: typeof payload.changelog === "string" ? payload.changelog : baseVersion.changelog,
+  };
+}
+
 async function loadChangeTarget(db: Database, workspaceId: string, changeId: string): Promise<{ rig: Rig; baseVersion: RigVersion; change: RigChange }> {
   const change = await getRigChange(db, workspaceId, changeId);
   if (!change) {
@@ -136,19 +159,20 @@ export function createRigVerificationActivities(services: () => Promise<Activity
       let established: EstablishedSandboxSession | null = null;
       const verification: Record<string, unknown> = { startedAt, checkResults: [] };
       try {
-        const runSettings = settingsWithRigImage(settings, baseVersion.image);
+        const candidateVersion = candidateVersionForChange(baseVersion, change);
+        const runSettings = settingsWithRigImage(settings, candidateVersion.image);
         established = await establishSandboxSessionFromEnvelope(runSettings, null, {
           sessionId: `rig-verification-${change.id}`,
           environment: {},
         });
-        if ((baseVersion.setupScript ?? "").trim()) {
+        if ((candidateVersion.setupScript ?? "").trim()) {
           await runRigSetupHook(established.session as never, {
             environment: {},
             rigSetup: {
               rigId: rig.id,
               rigName: rig.name,
-              versionId: baseVersion.id,
-              script: baseVersion.setupScript ?? "",
+              versionId: candidateVersion.id,
+              script: candidateVersion.setupScript ?? "",
               timeoutMs: settings.rigSetupTimeoutMs,
             },
           });
@@ -171,7 +195,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           }
         }
         const checkResults = [];
-        for (const check of baseVersion.checks) {
+        for (const check of candidateVersion.checks) {
           const result = await runCommand(established.session as CommandSession, check.command, settings.rigSetupTimeoutMs);
           checkResults.push({ name: check.name, command: check.command, ...result });
         }
