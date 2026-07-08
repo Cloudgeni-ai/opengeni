@@ -290,6 +290,19 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           metadata: scrubVerificationPayload({ versionId: version.id, startedAt, finishedAt: new Date().toISOString(), passed, checkResults }),
         });
         return { versionId: version.id, passed, checkResults };
+      } catch (error) {
+        // Infra failure (sandbox establish / setup / check exec threw) — record
+        // rig.verification.failed so activeVersionHealth reflects the failed
+        // re-run instead of staying stale, symmetric to verifyRigChange. Then
+        // rethrow so the Temporal activity still surfaces the failure.
+        const detail = tail(scrubVerificationOutput(error instanceof Error ? error.message : String(error)), 4096);
+        await recordRigAuditEvent(db, {
+          grant,
+          action: "rig.verification.failed",
+          rigId: rig.id,
+          metadata: scrubVerificationPayload({ versionId: version.id, startedAt, finishedAt: new Date().toISOString(), passed: false, error: detail }),
+        });
+        throw error;
       } finally {
         await terminateThrowaway(established);
       }
