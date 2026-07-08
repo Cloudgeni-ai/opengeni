@@ -48,12 +48,7 @@ import {
   sumUsageQuantity,
   updateScheduledTask,
 } from "@opengeni/db";
-import type {
-  AccessGrant,
-  ResourceRef,
-  SandboxBackend,
-  ScheduledTaskAgentConfig,
-} from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import {

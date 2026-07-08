@@ -1,13 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import {
-  bootstrapWorkspace,
-  createDb,
-  createRig,
-  getRigChange,
-  listRigChanges,
-  type DbClient,
-} from "@opengeni/db";
+import { bootstrapWorkspace, createDb, createRig, getRigChange, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,

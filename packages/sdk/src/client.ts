@@ -69,7 +69,6 @@ import type {
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
-  MachineView,
   MetricSample,
   MachineMetricsSeriesResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).

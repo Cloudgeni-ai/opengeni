@@ -11,7 +11,6 @@ import {
   contextInputBudgetTokens,
   contextServerCompactThreshold,
   firstPartyMcpBaseUrl,
-  parseExposedPorts,
   resolveContextCompactionMode,
   resolveModelProvider,
   sandboxLifecycleHookIds,
@@ -5449,10 +5448,6 @@ function unquoteFrontmatterValue(value: string): string {
     return value.slice(1, -1);
   }
   return value;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function isAsyncIterable<T>(source: Iterable<T> | AsyncIterable<T>): source is AsyncIterable<T> {

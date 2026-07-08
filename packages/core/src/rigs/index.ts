@@ -32,7 +32,6 @@ import {
   recordAuditEvent,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
-  updateRigChangeStatus,
   updateRig,
   type Database,
 } from "@opengeni/db";

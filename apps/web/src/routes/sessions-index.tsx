@@ -26,7 +26,6 @@ import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  ArrowRightIcon,
   BoxIcon,
   CheckIcon,
   ChevronDownIcon,
