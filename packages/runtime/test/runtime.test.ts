@@ -733,8 +733,10 @@ describe("runtime event normalization", () => {
   // THE GATE. The exact default preamble buildOpenGeniAgent produces with no
   // workspace environment, joined by " ". Captured verbatim; the composed
   // default MUST equal it byte-for-byte so instruction-template changes are
-  // intentional.
-  const CURRENT_DEFAULT_INSTRUCTIONS = [
+  // intentional. When the product intentionally changes the default substrate
+  // guidance, update this pin as the new canonical default rather than
+  // weakening the absent-memory/per-session no-op assertions below.
+  const HISTORICAL_DEFAULT_INSTRUCTIONS = [
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
@@ -751,10 +753,10 @@ describe("runtime event normalization", () => {
 
   test("default template composes byte-identically to the pinned default preamble (no override, no environment)", () => {
     // Direct composition: default template + empty CORE-with-no-env.
-    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
     // End-to-end through the agent builder with the default settings template.
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(agent.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
   test("default template with an attached environment appends the env block exactly as before", () => {
@@ -764,7 +766,7 @@ describe("runtime event normalization", () => {
       variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
     };
     const expected = [
-      CURRENT_DEFAULT_INSTRUCTIONS,
+      HISTORICAL_DEFAULT_INSTRUCTIONS,
       'A workspace environment named "azure-prod" is attached to this session; its variables are exported in the sandbox shell environment.',
       "Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.",
       "Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
@@ -816,7 +818,7 @@ describe("runtime event normalization", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Be terse.",
     });
-    expect(agent.instructions).toBe(`${CURRENT_DEFAULT_INSTRUCTIONS} Be terse.`);
+    expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
@@ -826,7 +828,7 @@ describe("runtime event normalization", () => {
     const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { sessionInstructions: "   " });
     expect(withUndefined.instructions).toBe(base.instructions);
     expect(withBlank.instructions).toBe(base.instructions);
-    expect(base.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
   test("absent workspace memory is byte-identical to today's composition", () => {
@@ -878,7 +880,7 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(off.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(off.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
     expect(off.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
   });
 
@@ -887,7 +889,7 @@ describe("runtime event normalization", () => {
       toolspaceTokenSeed: "ogd_seed",
     });
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
-    expect(agent.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
   test("NEGATIVE: feature on but no token minted for the turn omits the directive", () => {
@@ -898,7 +900,7 @@ describe("runtime event normalization", () => {
     // backend distinction.
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), []);
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
-    expect(agent.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
   test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
