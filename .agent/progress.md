@@ -54,3 +54,4 @@ Rules for all implementers: commit incrementally after each verified step; NEVER
   - `bun test apps/api/test/rigs-routes.test.ts` → `5 pass / 0 fail / 35 expect() calls / Ran 5 tests across 1 file. [3.45s]`.
   - `bun test apps/api/test/rigs-mcp.test.ts` → `3 pass / 0 fail / 13 expect() calls / Ran 3 tests across 1 file. [2.58s]`.
   - First isolated Docker e2e redaction run caught an unsanitized `command` field carrying `rig-secret-token-123456`; fixed before commit. Final rerun `bun test ./test/e2e/rig-verification.e2e.ts` → `3 pass / 0 fail / 19 expect() calls / Ran 3 tests across 1 file. [55.70s]`.
+- M4 hardening commit SHA: `af422e9` (`fix(rig-ci): harden verification promotion races`). Evidence-record commit follows separately because the final SHA cannot be known until after the code commit exists.
