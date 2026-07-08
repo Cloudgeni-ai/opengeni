@@ -79,6 +79,8 @@ export type TurnSubmission = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sandboxBackend?: SandboxBackend;
+  variableSetId?: string;
+  /**  use variableSetId */
   environmentId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];

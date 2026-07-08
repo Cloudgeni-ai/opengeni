@@ -116,3 +116,24 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
     clearMutationError: mutation.clearMutationError,
   };
 }
+
+/** @deprecated use UseVariableSetsOptions */
+export type UseEnvironmentsOptions = UseVariableSetsOptions;
+/** @deprecated use UseVariableSetsResult */
+export type UseEnvironmentsResult = UseVariableSetsResult & { environments: VariableSet[] };
+/** @deprecated use useVariableSets */
+export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnvironmentsResult {
+  const legacyClient = options.client
+    ? {
+      ...options.client,
+      listVariableSets: options.client.listVariableSets ?? options.client.listEnvironments,
+      createVariableSet: options.client.createVariableSet ?? options.client.createEnvironment,
+      updateVariableSet: options.client.updateVariableSet ?? options.client.updateEnvironment,
+      deleteVariableSet: options.client.deleteVariableSet ?? options.client.deleteEnvironment,
+      setVariableSetVariable: options.client.setVariableSetVariable ?? options.client.setEnvironmentVariable,
+      deleteVariableSetVariable: options.client.deleteVariableSetVariable ?? options.client.deleteEnvironmentVariable,
+    }
+    : undefined;
+  const result = useVariableSets({ ...options, ...(legacyClient ? { client: legacyClient } : {}) });
+  return { ...result, environments: result.variableSets };
+}

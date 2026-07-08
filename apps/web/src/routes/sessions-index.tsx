@@ -15,7 +15,7 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { FILE_ONLY_MESSAGE_TEXT, useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
+import { FILE_ONLY_MESSAGE_TEXT, useVariableSets, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -488,7 +488,7 @@ function ManagedSandboxFields(props: {
   disabled: boolean;
 }) {
   const { draft, compute, onChange } = props;
-  const environments = useEnvironments();
+  const variableSets = useVariableSets();
   const selectedBackend = BACKEND_OPTIONS.find((option) => option.value === compute.backend) ?? BACKEND_OPTIONS[0];
   const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])].filter(Boolean).join(" · ");
 
@@ -506,24 +506,24 @@ function ManagedSandboxFields(props: {
         </div>
       </div>
 
-      {/* Offer environments only when some exist — configuration UI for
+      {/* Offer variableSets only when some exist — configuration UI for
           resources you don't have is clutter (same rule as machines). */}
-      {environments.environments.length > 0 ? (
+      {variableSets.variableSets.length > 0 ? (
         <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
-            Environment
+            Variable set
           </Label>
           <Select
-            value={draft.environmentId}
+            value={draft.variableSetId}
             disabled={props.disabled}
-            onChange={(event) => onChange({ ...draft, environmentId: event.target.value })}
+            onChange={(event) => onChange({ ...draft, variableSetId: event.target.value })}
             className="h-8 w-auto max-w-56 text-xs"
           >
-            <option value="">No environment</option>
-            {environments.environments.map((environment) => (
-              <option key={environment.id} value={environment.id}>
-                {environment.name} ({environment.variables.length} vars)
+            <option value="">No variable set</option>
+            {variableSets.variableSets.map((variableSet) => (
+              <option key={variableSet.id} value={variableSet.id}>
+                {variableSet.name} ({variableSet.variables.length} vars)
               </option>
             ))}
           </Select>
@@ -686,14 +686,14 @@ function ConnectedMachineFields(props: {
         </p>
       </div>
 
-      {/* Environment injection — hidden on a connected machine (D2). */}
+      {/* Variable set injection — hidden on a connected machine (D2). */}
       <div className="grid gap-1 border-t border-border pt-4">
         <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
           <BoxIcon className="size-3 shrink-0" />
-          No environment is injected here.
+          No variable set is injected here.
         </p>
         <p className="text-2xs text-fg-subtle">
-          The machine&apos;s own environment &amp; git credentials apply.
+          The machine&apos;s own variable set &amp; git credentials apply.
         </p>
       </div>
     </div>

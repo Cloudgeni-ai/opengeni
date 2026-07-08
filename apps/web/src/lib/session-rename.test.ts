@@ -36,6 +36,7 @@ function session(patch: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     parentSessionId: null,
+    variableSetId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
     mcpServers: [],

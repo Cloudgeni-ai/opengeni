@@ -369,6 +369,8 @@ export type Session = {
   activeSandboxId: string | null;
   activeEpoch: number;
   variableSetId: string | null;
+  /** @deprecated use variableSetId */
+  environmentId: string | null;
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
@@ -733,6 +735,8 @@ export type ScheduledTask = {
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
   variableSetId: string | null;
+  /** @deprecated use variableSetId */
+  environmentId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -758,6 +762,8 @@ export type CreateSessionRequest = {
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
   variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
+  environmentId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
@@ -1206,6 +1212,8 @@ export type CreateScheduledTaskRequest = {
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
+  /** @deprecated use variableSetId */
+  environmentId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1217,6 +1225,8 @@ export type UpdateScheduledTaskRequest = {
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
+  /** @deprecated use variableSetId */
+  environmentId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1679,6 +1689,8 @@ export type PackInstallation = {
 
 export type EnablePackRequest = {
   variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
+  environmentId?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1795,8 +1807,10 @@ export type EnableCapabilityRequest = {
    * Initial variableSet attachment for kind=pack capabilities — mirrors the
    * dedicated POST /packs/:id/enable body. Required to enable an
    * variableSet.required pack through this unified path; ignored otherwise.
-   */
+  */
   variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
+  environmentId?: string | undefined;
 };
 
 export type DiscoverMcpCapabilitiesResponse = {

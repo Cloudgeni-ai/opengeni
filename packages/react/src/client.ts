@@ -44,6 +44,12 @@ export type SessionClientLike = Pick<
   | "deleteVariableSet"
   | "setVariableSetVariable"
   | "deleteVariableSetVariable"
+  | "listEnvironments"
+  | "createEnvironment"
+  | "updateEnvironment"
+  | "deleteEnvironment"
+  | "setEnvironmentVariable"
+  | "deleteEnvironmentVariable"
   // Packs
   | "listPacks"
   | "registerPack"

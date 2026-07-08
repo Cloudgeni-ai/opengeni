@@ -1169,7 +1169,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // from settings. gitToken is undefined on the selfhosted skip path (the machine
       // uses its own git creds).
       const {
-        variableSet: sandboxEnvironment,
+        environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
         toolspaceToken: sandboxToolspaceToken,
       } = await sandboxEnvironmentForRun(
@@ -1225,7 +1225,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               agentId: activeSandboxRecord!.enrollmentId!,
               epoch: activeSandboxPointer!.activeEpoch,
-              variableSet: sandboxEnvironment,
+              environment: sandboxEnvironment,
               workingDir: activeSandboxPointer!.workingDir,
             },
           );
@@ -1252,7 +1252,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                variableSet: sandboxEnvironment,
+                environment: sandboxEnvironment,
                 pinnedSelfhosted: {
                   sandboxId: activeSandboxPointer!.activeSandboxId!,
                   epoch: activeSandboxPointer!.activeEpoch,
@@ -1277,7 +1277,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // for lack of a bound agentId).
               backend: groupBoxBackend,
               os: session.sandboxOs,
-              variableSet: sandboxEnvironment,
+              environment: sandboxEnvironment,
               // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
               // this run resolves. The lease stamps it + conflicts on a live shared box
               // running a DIFFERENT image (solo → recreate on the new image; N-holders →
@@ -1328,11 +1328,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ...resolvedSandbox,
               established: wrapTurnBoxWithRouting(
                 { db, settings, bus },
-                // Thread the SAME declared variableSet the group box was created with
+                // Thread the SAME declared environment the group box was created with
                 // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
                 // carries it too — the SDK's per-turn manifest-env delta stays empty
                 // (no "cannot change manifest environment variables" throw).
-                { workspaceId: input.workspaceId, sessionId: input.sessionId, variableSet: sandboxEnvironment },
+                { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
                 resolvedSandbox.established,
               ),
             };

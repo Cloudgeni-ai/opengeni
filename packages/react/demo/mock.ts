@@ -15,6 +15,7 @@ import type {
   CapabilityPack,
   ClientConfig,
   CreateWorkspaceEnvironmentRequest,
+  CreateVariableSetRequest,
   CreateWorkspaceRequest,
   EnablePackRequest,
   FileAsset,
@@ -50,10 +51,13 @@ import type {
   UpdateSessionRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
+  UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceRegisteredPack,
 } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/index";
@@ -338,10 +342,18 @@ export class MockOpenGeniClient implements SessionClientLike {
     return [...this.environments];
   }
 
+  async listVariableSets(): Promise<VariableSet[]> {
+    return await this.listEnvironments();
+  }
+
   async createEnvironment(_workspaceId: string, request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment> {
     const environment = fabricateEnvironment(request.name, request.variables?.map((variable) => variable.name) ?? []);
     this.environments.push(environment);
     return { ...environment };
+  }
+
+  async createVariableSet(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+    return await this.createEnvironment(workspaceId, request);
   }
 
   async updateEnvironment(
@@ -362,8 +374,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...environment };
   }
 
+  async updateVariableSet(workspaceId: string, variableSetId: string, request: UpdateVariableSetRequest): Promise<VariableSet> {
+    return await this.updateEnvironment(workspaceId, variableSetId, request);
+  }
+
   async deleteEnvironment(_workspaceId: string, environmentId: string): Promise<void> {
     this.environments = this.environments.filter((candidate) => candidate.id !== environmentId);
+  }
+
+  async deleteVariableSet(workspaceId: string, variableSetId: string): Promise<void> {
+    await this.deleteEnvironment(workspaceId, variableSetId);
   }
 
   async setEnvironmentVariable(
@@ -388,11 +408,19 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...created };
   }
 
+  async setVariableSetVariable(workspaceId: string, variableSetId: string, name: string, value: string): Promise<VariableSetVariableMetadata> {
+    return await this.setEnvironmentVariable(workspaceId, variableSetId, name, value);
+  }
+
   async deleteEnvironmentVariable(_workspaceId: string, environmentId: string, name: string): Promise<void> {
     const environment = this.environments.find((candidate) => candidate.id === environmentId);
     if (environment) {
       environment.variables = environment.variables.filter((variable) => variable.name !== name);
     }
+  }
+
+  async deleteVariableSetVariable(workspaceId: string, variableSetId: string, name: string): Promise<void> {
+    await this.deleteEnvironmentVariable(workspaceId, variableSetId, name);
   }
 
   private registeredPacks: WorkspaceRegisteredPack[] = [];
@@ -761,6 +789,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxGroupId: sessionId,
       activeSandboxId: null,
       activeEpoch: 0,
+      variableSetId: null,
       environmentId: null,
       firstPartyMcpPermissions: null,
       mcpServers: [],
@@ -1115,6 +1144,7 @@ function scheduledTask(name: string, schedule: ScheduledTask["schedule"], prompt
     overlapPolicy: "skip",
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     reusableSessionId: null,
+    variableSetId: null,
     environmentId: null,
     metadata: {},
     createdAt: now,

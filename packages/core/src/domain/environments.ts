@@ -59,6 +59,9 @@ export function requireVariableSetEncryption(settings: Settings): Uint8Array {
   return key;
 }
 
+/** @deprecated use requireVariableSetEncryption */
+export const requireEnvironmentEncryption = requireVariableSetEncryption;
+
 export async function requireVariableSetForApi(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSet> {
   const variableSet = await getVariableSet(db, workspaceId, variableSetId);
   if (!variableSet) {

@@ -1863,7 +1863,7 @@ export type ReorderSessionTurnsRequest = z.infer<typeof ReorderSessionTurnsReque
 export const VariableSetVariableName = z.string().regex(/^[A-Z][A-Z0-9_]*$/).max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
-function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T): z.ZodEffects<z.ZodObject<T>> {
+function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
   return z.preprocess((input) => {
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       return input;
@@ -2002,6 +2002,8 @@ export const ScheduledTask = z.object({
   agentConfig: ScheduledTaskAgentConfig,
   reusableSessionId: z.string().uuid().nullable(),
   variableSetId: z.string().uuid().nullable(),
+  /** @deprecated use variableSetId */
+  environmentId: z.string().uuid().nullable(),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -2573,6 +2575,8 @@ export const Session = z.object({
   activeSandboxId: z.string().uuid().nullable(),
   activeEpoch: z.number().int().nonnegative(),
   variableSetId: z.string().uuid().nullable(),
+  /** @deprecated use variableSetId */
+  environmentId: z.string().uuid().nullable(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),

@@ -5,7 +5,7 @@
 // spine (OAuth redirect or an API-key form) in a right-hand detail sheet, never
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
-import { useEnvironments, usePacks } from "@opengeni/react";
+import { usePacks, useVariableSets } from "@opengeni/react";
 import { GlobeIcon, Loader2Icon, PlugIcon, PlusIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -82,7 +82,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const environments = useEnvironments({ workspaceId });
+  const variableSets = useVariableSets({ workspaceId });
 
   const counts = useMemo(() => capabilityCounts(items), [items]);
   const catalogView = listViewState({ loading, error: loadError, count: items.length });
@@ -538,10 +538,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     }
   }
 
-  async function enablePack(pack: CapabilityPack, environmentId: string | undefined) {
+  async function enablePack(pack: CapabilityPack, variableSetId: string | undefined) {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.enableCapability(workspaceId, `pack:${pack.id}`, environmentId ? { environmentId } : {});
+      await client.enableCapability(workspaceId, `pack:${pack.id}`, variableSetId ? { variableSetId } : {});
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
       toast.success(`Enabled ${pack.name}`);
@@ -669,10 +669,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         {showPacks ? (
           <PacksSection
             packs={packs}
-            environments={environments.environments.map((environment) => ({ id: environment.id, name: environment.name }))}
+            variableSets={variableSets.variableSets.map((variableSet) => ({ id: variableSet.id, name: variableSet.name }))}
             busyPackId={packBusyId}
             onRegister={registerPackManifest}
-            onEnable={(pack, environmentId) => void enablePack(pack, environmentId)}
+            onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
             onDisable={(pack) => void disablePack(pack)}
             onUnregister={unregisterPack}
           />

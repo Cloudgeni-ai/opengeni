@@ -157,6 +157,9 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
+/** @deprecated use registerVariableSetRoutes */
+export const registerEnvironmentRoutes = registerVariableSetRoutes;
+
 function parseVariableName(raw: string): string {
   const parsed = VariableSetVariableName.safeParse(raw);
   if (!parsed.success) {

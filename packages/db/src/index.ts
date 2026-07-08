@@ -3942,6 +3942,11 @@ export async function loadVariableSetForRun(
   };
 }
 
+/** @deprecated use loadVariableSetForRun */
+export const loadWorkspaceEnvironmentForRun = loadVariableSetForRun;
+/** @deprecated use VariableSetForRun */
+export type WorkspaceEnvironmentForRun = VariableSetForRun;
+
 // ---------------------------------------------------------------------------
 // Codex (ChatGPT) subscription credentials
 //
@@ -9878,6 +9883,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: Sessio
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
     variableSetId: row.variableSetId,
+    environmentId: row.variableSetId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -10011,6 +10017,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
     reusableSessionId: row.reusableSessionId,
     variableSetId: row.variableSetId,
+    environmentId: row.variableSetId,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

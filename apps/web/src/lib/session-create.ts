@@ -47,7 +47,7 @@ export type SessionDraft = {
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
   // (a connected machine uses its own environment & git credentials — D2).
-  environmentId: string;
+  variableSetId: string;
   goalText: string;
   goalSuccessCriteria: string;
   goalMaxAutoContinuations: string;
@@ -58,7 +58,7 @@ export type SessionDraft = {
 export function emptySessionDraft(): SessionDraft {
   return {
     compute: { kind: "sandbox", backend: "" },
-    environmentId: "",
+    variableSetId: "",
     goalText: "",
     goalSuccessCriteria: "",
     goalMaxAutoContinuations: "",
@@ -110,7 +110,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
   return {
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-      ...(draft.environmentId ? { environmentId: draft.environmentId } : {}),
+      ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
     },

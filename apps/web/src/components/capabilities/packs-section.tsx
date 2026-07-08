@@ -1,7 +1,7 @@
 // Packs are the heaviest, workspace-runtime-altering capability (a sandbox
 // image + skills + tools + connectors + knowledge + schedule templates that
 // enable as one unit), so they keep a first-class surface with
-// register/enable-with-environment/disable/unregister. Restyled flat for the
+// register/enable-with-variable-set/disable/unregister. Restyled flat for the
 // I3 redesign: one card border per pack, dividers and whitespace instead of
 // nested bordered boxes.
 import type { usePacks } from "@opengeni/react";
@@ -30,10 +30,10 @@ import type { CapabilityPack, PackInstallation } from "@/types";
 
 export function PacksSection(props: {
   packs: ReturnType<typeof usePacks>;
-  environments: Array<{ id: string; name: string }>;
+  variableSets: Array<{ id: string; name: string }>;
   busyPackId: string | null;
   onRegister: (manifestDraft: string) => Promise<boolean>;
-  onEnable: (pack: CapabilityPack, environmentId: string | undefined) => void;
+  onEnable: (pack: CapabilityPack, variableSetId: string | undefined) => void;
   onDisable: (pack: CapabilityPack) => void;
   onUnregister: (pack: CapabilityPack) => Promise<boolean>;
 }) {
@@ -122,9 +122,9 @@ export function PacksSection(props: {
               key={pack.id}
               pack={pack}
               installation={packs.installationFor(pack.id)}
-              environments={props.environments}
+              variableSets={props.variableSets}
               busy={props.busyPackId === pack.id}
-              onEnable={(environmentId) => props.onEnable(pack, environmentId)}
+              onEnable={(variableSetId) => props.onEnable(pack, variableSetId)}
               onDisable={() => props.onDisable(pack)}
               onUnregister={() => props.onUnregister(pack)}
             />
@@ -138,18 +138,18 @@ export function PacksSection(props: {
 function PackCard(props: {
   pack: CapabilityPack;
   installation: PackInstallation | null;
-  environments: Array<{ id: string; name: string }>;
+  variableSets: Array<{ id: string; name: string }>;
   busy: boolean;
-  onEnable: (environmentId: string | undefined) => void;
+  onEnable: (variableSetId: string | undefined) => void;
   onDisable: () => void;
   onUnregister: () => Promise<boolean>;
 }) {
   const { pack, installation } = props;
   const enabled = installation?.status === "active";
   const [expanded, setExpanded] = useState(false);
-  const [environmentId, setEnvironmentId] = useState("");
+  const [variableSetId, setVariableSetId] = useState("");
   const [confirmUnregister, setConfirmUnregister] = useState(false);
-  const needsEnvironment = pack.environment?.required === true;
+  const needsVariableSet = pack.variableSet?.required === true;
 
   return (
     <article className="rounded-xl border border-border bg-surface/50 p-4">
@@ -206,9 +206,9 @@ function PackCard(props: {
                 type="button"
                 size="sm"
                 className="min-w-24"
-                disabled={props.busy || (needsEnvironment && !environmentId)}
-                title={needsEnvironment && !environmentId ? "This pack needs an environment attached first" : undefined}
-                onClick={() => props.onEnable(environmentId || undefined)}
+                disabled={props.busy || (needsVariableSet && !variableSetId)}
+                title={needsVariableSet && !variableSetId ? "This pack needs a variableSet attached first" : undefined}
+                onClick={() => props.onEnable(variableSetId || undefined)}
               >
                 {props.busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
                 Enable
@@ -227,16 +227,16 @@ function PackCard(props: {
               <Trash2Icon className="size-3.5" />
             </Button>
           </div>
-          {pack.environment ? (
+          {pack.variableSet ? (
             <Select
-              value={environmentId}
-              onChange={(event) => setEnvironmentId(event.target.value)}
-              aria-label={`Environment for ${pack.name}`}
+              value={variableSetId}
+              onChange={(event) => setVariableSetId(event.target.value)}
+              aria-label={`Variable set for ${pack.name}`}
               className="h-8 text-xs"
             >
-              <option value="">{needsEnvironment ? "Choose environment (required)" : "No environment"}</option>
-              {props.environments.map((environment) => (
-                <option key={environment.id} value={environment.id}>{environment.name}</option>
+              <option value="">{needsVariableSet ? "Choose variableSet (required)" : "No variableSet"}</option>
+              {props.variableSets.map((variableSet) => (
+                <option key={variableSet.id} value={variableSet.id}>{variableSet.name}</option>
               ))}
             </Select>
           ) : null}
@@ -314,12 +314,12 @@ function PackCard(props: {
             ) : <PackNone />}
           </PackSection>
 
-          {pack.environment ? (
-            <PackSection title="Environment">
-              <div className="text-2xs text-fg-subtle">{pack.environment.description}</div>
-              {pack.environment.requiredVariables.length > 0 ? (
+          {pack.variableSet ? (
+            <PackSection title="Variable set">
+              <div className="text-2xs text-fg-subtle">{pack.variableSet.description}</div>
+              {pack.variableSet.requiredVariables.length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {pack.environment.requiredVariables.map((name) => (
+                  {pack.variableSet.requiredVariables.map((name) => (
                     <MetaChip key={name} className="font-mono">{name}</MetaChip>
                   ))}
                 </div>
