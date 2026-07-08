@@ -123,7 +123,7 @@ export function App() {
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
   fleet/manager views (optional polling).
-- `useEnvironments()` — workspace environments with create/update/remove and
+- `useVariable sets()` — workspace variable sets with create/update/remove and
   write-only `setVariable`/`deleteVariable` (values never come back on reads).
 - `usePacks()` — capability packs + installations with
   register/enable/remove and `installationFor(packId)`.

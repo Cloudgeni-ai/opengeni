@@ -19,7 +19,7 @@ Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` pl
 
 ### Agent persona: two levers
 
-A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + environment block) always substituted in.
+A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + variable set block) always substituted in.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for *every* session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-*session* refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
@@ -69,7 +69,7 @@ When bound on the worker through `ActivityDependencies.entitlements`, `admitRun`
 
 ### Connection Credentials
 
-Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`, consumers in `apps/worker/src/activities/environment.ts`.
+Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`, consumers in `apps/worker/src/activities/variable set.ts`.
 
 The port can bind either or both legs:
 
@@ -80,7 +80,7 @@ type ConnectionCredentialsPort = {
 };
 ```
 
-`gitCredentials` receives `{ accountId, workspaceId, installationId, repositoryIds }` and returns a token plus the `workspaceId` it scoped. `sandboxSecrets` receives `{ accountId, workspaceId, environmentId }` and returns plaintext environment values plus the scoped `workspaceId`. Each result is checked by the FORK-7 workspace-echo assert before the worker injects anything. A mismatch hard-fails before tenant B's credential can land in tenant A's run.
+`gitCredentials` receives `{ accountId, workspaceId, installationId, repositoryIds }` and returns a token plus the `workspaceId` it scoped. `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns plaintext variable set values plus the scoped `workspaceId`. Each result is checked by the FORK-7 workspace-echo assert before the worker injects anything. A mismatch hard-fails before tenant B's credential can land in tenant A's run.
 
 Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
 

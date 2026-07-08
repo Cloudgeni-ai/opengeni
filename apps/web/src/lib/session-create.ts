@@ -8,7 +8,7 @@
 // the compute target and everything it gates live in one consistent state.
 //
 // Wire fields are unchanged (PR-1, no contract change): a managed sandbox still
-// sends `sandboxBackend`/`environmentId`; a connected machine still sends the
+// sends `sandboxBackend`/`variableSetId`; a connected machine still sends the
 // top-level `targetSandboxId` (+ Stage A's `workingDir`). Only the form shape and
 // the gating change.
 import { CAPABILITY_DESCRIPTORS, type CapabilityDescriptor, type MachineView } from "@opengeni/contracts";
@@ -46,7 +46,7 @@ export type SessionDraft = {
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
-  // (a connected machine uses its own environment & git credentials — D2).
+  // (a connected machine uses its own variable set & git credentials — D2).
   variableSetId: string;
   goalText: string;
   goalSuccessCriteria: string;
@@ -93,7 +93,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
 
   if (draft.compute.kind === "machine") {
     return {
-      // No sandboxBackend (forced `selfhosted` server-side) and no environment
+      // No sandboxBackend (forced `selfhosted` server-side) and no variable set
       // injection — the machine's own env & git auth apply (D2).
       extras: {
         ...(goal ? { goal } : {}),

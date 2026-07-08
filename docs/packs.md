@@ -24,7 +24,7 @@ Connectors are durable account records, not secret records. `social_connections.
 
 CloudGeni used a similar split: a general integration record, provider-specific detail, and credential services that fetch/refresh secrets behind a provider abstraction. OpenGeni keeps the MVP simpler but preserves the same boundary through `credentialRef`.
 
-Packs may also declare an `environment` block (`description`, `requiredVariables`, `required`). Enabling such a pack accepts an `environmentId` pointing at a workspace environment (see `docs/environments.md`); the required variable **names** are validated at enable time and scheduled tasks created from the pack's templates inherit the attachment. Environments store encrypted `NAME=value` material in Postgres under an operator key — a deliberate, documented contrast with the `credentialRef` rule above.
+Packs may also declare an `variable set` block (`description`, `requiredVariables`, `required`). Enabling such a pack accepts an `variableSetId` pointing at a workspace variable set (see `docs/variable-sets.md`); the required variable **names** are validated at enable time and scheduled tasks created from the pack's templates inherit the attachment. Variable sets store encrypted `NAME=value` material in Postgres under an operator key — a deliberate, documented contrast with the `credentialRef` rule above.
 
 ## Pack-Scoped Runtime
 

@@ -21,7 +21,7 @@ bun run deployment:stack -- --profile aws-existing-services --json
 ```
 
 After Terraform apply, generate private deployment artifacts from Terraform
-outputs and the current shell environment. The generated Helm values file
+outputs and the current shell variable set. The generated Helm values file
 contains non-secret provider wiring; `runtime.env` is intended for a private
 Kubernetes Secret and must not be committed:
 
@@ -46,13 +46,13 @@ sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
 another ignored private path.
 
-Inspect required modes, environment variables, and checks:
+Inspect required modes, variable set variables, and checks:
 
 ```bash
 bun run deployment:preflight -- --profile azure-existing-services
 ```
 
-Run live connectivity probes against the current shell environment and Kubernetes context:
+Run live connectivity probes against the current shell variable set and Kubernetes context:
 
 ```bash
 KUBECONFIG=/path/to/kubeconfig bun run deployment:preflight -- --profile azure-managed --live
@@ -128,8 +128,8 @@ Current profiles:
 - `aws-existing-services`: EKS workloads connected to existing Postgres, Temporal, and object storage.
 - `gcp-managed`: GKE plus GCP-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
 - `gcp-existing-services`: GKE workloads connected to existing Postgres, Temporal, and object storage.
-- `preview-pr`: operator-managed pull-request preview environment shape.
-- `preview-branch`: operator-managed branch preview environment shape.
+- `preview-pr`: operator-managed pull-request preview variable set shape.
+- `preview-branch`: operator-managed branch preview variable set shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
 ## Local Docker Compose
@@ -355,7 +355,7 @@ The secret must provide runtime values such as:
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
-- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace environments; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (environment routes return 503 until it is set). See `docs/environments.md`.
+- `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
 - sandbox backend credentials when required
 
@@ -589,8 +589,8 @@ helm upgrade --install opengeni deploy/helm/opengeni \
 
 Minimum production dashboards should cover:
 
-- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `environment`, and `component`.
-- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `environment`, and `component`.
+- API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `variable set`, and `component`.
+- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `variable set`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
 - Model and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_leases{liveness}`, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
 - Queue and billing: `opengeni_turns_queued`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
@@ -600,35 +600,35 @@ Minimum production dashboards should cover:
 Prometheus-style examples:
 
 ```promql
-sum by (route, method) (rate(opengeni_http_requests_total{environment="production"}[5m]))
+sum by (route, method) (rate(opengeni_http_requests_total{variable set="production"}[5m]))
 ```
 
 ```promql
-sum by (route) (rate(opengeni_http_requests_total{environment="production",status=~"5.."}[5m]))
+sum by (route) (rate(opengeni_http_requests_total{variable set="production",status=~"5.."}[5m]))
 /
-sum by (route) (rate(opengeni_http_requests_total{environment="production"}[5m]))
+sum by (route) (rate(opengeni_http_requests_total{variable set="production"}[5m]))
 ```
 
 ```promql
 histogram_quantile(
   0.95,
-  sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{environment="production"}[5m]))
+  sum by (le, route) (rate(opengeni_http_request_duration_seconds_bucket{variable set="production"}[5m]))
 )
 ```
 
 ```promql
-sum by (activity, status) (rate(opengeni_worker_activity_runs_total{environment="production"}[5m]))
+sum by (activity, status) (rate(opengeni_worker_activity_runs_total{variable set="production"}[5m]))
 ```
 
 ```promql
 histogram_quantile(
   0.95,
-  sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{environment="production"}[5m]))
+  sum by (le, activity) (rate(opengeni_worker_activity_duration_seconds_bucket{variable set="production"}[5m]))
 )
 ```
 
 ```promql
-max(opengeni_turn_oldest_inflight_age_seconds{environment="production"})
+max(opengeni_turn_oldest_inflight_age_seconds{variable set="production"})
 ```
 
 Minimum production alerts:
@@ -645,7 +645,7 @@ Minimum production alerts:
 - Storage health: object-storage conformance cannot create, complete, presign, and read a file.
 - Streaming health: SSE replay conformance does not return persisted events after reconnect.
 - Collector health: collector pod is not ready or its configured OTLP exporter reports failures.
-- Secret/sandbox hygiene: conformance detects unintended sandbox environment variables or sandbox backend startup failures.
+- Secret/sandbox hygiene: conformance detects unintended sandbox variable set variables or sandbox backend startup failures.
 
 ## Azure Reference
 
@@ -731,7 +731,7 @@ The public repository does not include a pull-request workflow that deploys to
 maintainer-owned infrastructure. The `preview-pr` and `preview-branch` profiles
 are reusable stack-contract shapes for operator-owned automation. If an operator
 wants preview deployments, they should run `bun run deployment:stack` in their
-own CI/CD environment with their own cluster, registry, secrets, and teardown
+own CI/CD variable set with their own cluster, registry, secrets, and teardown
 policy.
 
 Preview profiles are managed-product previews, not fake demos. They use

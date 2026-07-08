@@ -88,7 +88,7 @@ export function SessionInspector(props: {
                 <InfoRow label="Model" value={props.session.model} />
                 <InfoRow label="Effort" value={String(props.session.metadata.reasoningEffort ?? "low")} />
                 <InfoRow label={computeLabel} value={computeValue} />
-                <InfoRow label="Environment" value={props.session.environmentId ? <CopyableMono value={props.session.environmentId} /> : "none"} />
+                <InfoRow label="Variable set" value={props.session.variableSetId ? <CopyableMono value={props.session.variableSetId} /> : "none"} />
                 <InfoRow label="Stream" value={props.connectionState} />
               </InspectorSection>
 

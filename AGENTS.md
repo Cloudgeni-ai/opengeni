@@ -65,7 +65,7 @@ Default URLs:
 - NATS monitor: `http://127.0.0.1:8222`
 - Temporal gRPC: `127.0.0.1:7233`
 
-`bun run dev` may auto-select alternate Docker Compose host ports when defaults are already in use; it wires those selected ports into the API and worker environment for that run.
+`bun run dev` may auto-select alternate Docker Compose host ports when defaults are already in use; it wires those selected ports into the API and worker variable set for that run.
 
 MinIO is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. Production deployments should use provider-native storage instead of deploying MinIO manually: `azure-blob` for Azure Blob, `aws-s3` for AWS S3, and `gcs` for Google Cloud Storage.
 
@@ -114,7 +114,7 @@ The Docker sandbox image includes Terraform, Checkov, Azure CLI, GitHub CLI, git
 A **Connected Machine** (the `selfhosted` backend) is a user's own always-on machine — a **first-class, co-equal PRIMARY compute target**, not merely a swappable sandbox. When a turn's *effective* backend is a machine, the agent runs on it **directly**; there is no provisioned box behind it. Use "Connected Machine" in product-facing prose and reserve "selfhosted" for the enum value / internal plumbing. Key invariants — do not break them:
 
 - **Machine-primary, not a phantom box.** A machine-targeted turn establishes the `SelfhostedSession` **directly** (`establishSelfhostedTurnSession` in `apps/worker/src/activities/agent-turn.ts`, the `machinePrimary` branch) and leases the group as `selfhosted` — it does **not** call `resumeBoxForTurn`, so **no Modal/cloud box is created, leased, or billed** for that turn. Warm-seconds meter off the effective backend (`selfhosted` = 0 rate), never the session's home backend.
-- **No OpenGeni credential crosses to the machine; it uses its own git auth.** The env mint skips the GitHub-App installation token for a `selfhosted`-effective turn (`sandboxEnvironmentForRun({ skipGitHubToken })` in `apps/worker/src/activities/environment.ts`), and selfhosted `exec` puts `env: {}` on the wire — structurally the platform token never reaches the machine. The machine authenticates git with its **own** credentials.
+- **No OpenGeni credential crosses to the machine; it uses its own git auth.** The env mint skips the GitHub-App installation token for a `selfhosted`-effective turn (`sandboxVariable setForRun({ skipGitHubToken })` in `apps/worker/src/activities/variable set.ts`), and selfhosted `exec` puts `env: {}` on the wire — structurally the platform token never reaches the machine. The machine authenticates git with its **own** credentials.
 - **Repos are never cloned onto a machine.** `repositoryUsesSandboxClone` (`packages/runtime/src/index.ts`) returns `false` for a `selfhosted` effective backend (the clone-guard) — the machine already owns its filesystem, so a platform `git clone` must never land on the user's real disk.
 - **Per-session working directory, not a fixed `/workspace`.** A machine runs under `sessions.working_dir` (migration 0027); `toMachinePath` (`packages/runtime/src/sandbox/selfhosted/session.ts`) re-anchors the virtual `/workspace` frame onto the chosen host path (default = the agent's launch `workspace_root`). The "`/workspace` for every run" assumption holds only for provisioned boxes.
 - **Targeting a machine at create time.** `CreateSessionRequest.targetSandboxId` (+ optional `workingDir`) selects the machine for a new session; the active-sandbox pointer is seeded at creation so the **first** turn routes there (race-free). `workingDir` without `targetSandboxId` is a **422**, and an invalid/unowned/offline target **422s** rather than silently falling back to the default box (`packages/core/src/domain/sessions.ts`).
@@ -152,7 +152,7 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 ## Deployment Work Notes
 
-When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview environments, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
+When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
 
 Keep provider resource inventories, cleanup notes, cloud account identifiers, private endpoints, generated credentials, kubeconfigs, Terraform state, plans, local tfvars, service-account keys, and access keys in private operator-controlled storage outside the repository.
 

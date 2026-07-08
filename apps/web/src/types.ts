@@ -62,14 +62,19 @@ export type {
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceMemorySearchMode,
   WorkspaceMemorySearchResponse,
   WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
+
+export type WorkspaceVariableSet = VariableSet;
+export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
-import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";
+import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef, VariableSet, VariableSetVariableMetadata } from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";
 
 export type TurnSubmission = {

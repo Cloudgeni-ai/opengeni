@@ -42,7 +42,7 @@ credentialed server to itself.
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with
-the same AES-GCM helper used by workspace environments. The deployment must set
+the same AES-GCM helper used by workspace variable sets. The deployment must set
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` before accepting session MCP credentials;
 otherwise create/rotation requests fail with 503.
 
