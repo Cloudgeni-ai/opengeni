@@ -4058,29 +4058,53 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
  * The rig-setup command (M3). One idempotent bash program:
  *   1. `mkdir -p /var/opengeni` and, if the per-version marker already exists,
  *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
- *   2. otherwise write the rig's setup script to a temp file and `bash` it
- *      (NOT `bash -e` — the script opts into `set -e` itself if it wants), then
- *      capture the exit code, and `touch` the marker ONLY on success (exit 0) so
- *      a failed/timed-out setup re-runs next turn.
+ *   2. otherwise atomically claim a per-version lock directory. A loser waits
+ *      for the winner's marker, then skips; if the winner fails and releases the
+ *      lock, the loser retries the claim.
+ *   3. the winner writes the rig's setup script to a temp file and runs it under
+ *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
+ *      itself if it wants), then captures the exit code and `touch`es the marker
+ *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
  * The heredoc delimiter is quoted, so the script content is executed verbatim
  * with no host-side expansion.
  */
-export function rigSetupScriptCommand(script: string, versionId: string): string {
-  const marker = `/var/opengeni/rig-setup-${versionId}.done`;
+export function rigSetupScriptCommand(script: string, versionId: string, timeoutMs = 600_000, markerRoot = "/var/opengeni"): string {
+  const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const lockWaitSecs = timeoutSecs + 6;
+  const marker = `${markerRoot.replace(/\/+$/, "")}/rig-setup-${versionId}.done`;
   return [
     "set -u",
-    "mkdir -p /var/opengeni",
+    `mkdir -p ${shellQuote(markerRoot)}`,
     `__OG_RIG_MARKER=${shellQuote(marker)}`,
+    '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
+    `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
+    `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,
     `if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    "while :; do",
+    '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
+    '    trap \'rm -rf "$__OG_RIG_LOCK"\' EXIT',
+    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '__OG_RIG_SCRIPT="$(mktemp)"',
     "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
     script,
     "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    'bash "$__OG_RIG_SCRIPT"',
+    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
     "__OG_RIG_RC=$?",
-    'rm -f "$__OG_RIG_SCRIPT"',
-    'if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
-    'exit "$__OG_RIG_RC"',
+    '    rm -f "$__OG_RIG_SCRIPT"',
+    '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
+    '    exit "$__OG_RIG_RC"',
+    "  fi",
+    "  __OG_RIG_WAITED=0",
+    '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
+    `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '    if [ ! -d "$__OG_RIG_LOCK" ]; then break; fi',
+    "    sleep 1",
+    '    __OG_RIG_WAITED=$((__OG_RIG_WAITED + 1))',
+    "  done",
+    `  if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
+    '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
+    '  rmdir "$__OG_RIG_LOCK" 2>/dev/null || true',
+    "done",
   ].join("\n");
 }
 
@@ -4088,10 +4112,10 @@ export function rigSetupScriptCommand(script: string, versionId: string): string
  * The rig-setup beforeAgentStart hook (M3). Runs the frozen rig version's setup
  * script exactly once per box (marker-guarded), under the RIG's own timeout
  * (context.rigSetup.timeoutMs, NOT the 120s lifecycle default). Emits
- * sandbox.operation.started, then one terminal event:
- *   - completed { name:"rig-setup", skipped:true }  — marker already present,
- *   - completed { name:"rig-setup", skipped:false } — script ran and exited 0,
- *   - failed    { name:"rig-setup", error }          — nonzero exit / timeout,
+ * rig.setup.started, then one terminal event:
+ *   - rig.setup.skipped   — marker already present,
+ *   - rig.setup.completed — script ran and exited 0,
+ *   - rig.setup.failed    — nonzero exit / timeout,
  * and on failure THROWS (fail the turn closed) with a message naming the
  * rig/version and a bounded tail of the setup output.
  */
@@ -4104,21 +4128,20 @@ export async function runRigSetupHook(
     return;
   }
   const payload = {
-    name: "rig-setup",
     rigId: rigSetup.rigId,
-    rigVersionId: rigSetup.versionId,
-    rig: rigSetup.rigName,
+    versionId: rigSetup.versionId,
+    rigName: rigSetup.rigName,
   };
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
-  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId);
+  await context.onRuntimeEvent?.({ type: "rig.setup.started", payload });
+  const command = rigSetupScriptCommand(rigSetup.script, rigSetup.versionId, rigSetup.timeoutMs);
   const execArgs = {
     cmd: command,
     workdir: "/workspace",
     ...(context.runAs ? { runAs: context.runAs } : {}),
-    // The RIG timeout, not SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS: a rig may build
-    // heavy tooling on first cold create. When the script outlives this budget
-    // the box yields "still running", which the checks below treat as a failure.
-    yieldTimeMs: rigSetup.timeoutMs,
+    // The in-box coreutils timeout is the hard deadline; the SDK yield waits a
+    // little longer so it observes timeout's non-zero exit instead of a live
+    // still-running process.
+    yieldTimeMs: rigSetup.timeoutMs + 7_000,
     maxOutputTokens: 20_000,
   };
   let result: unknown;
@@ -4132,13 +4155,13 @@ export async function runRigSetupHook(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.failed", payload: { ...payload, error: message } });
+    await context.onRuntimeEvent?.({ type: "rig.setup.failed", payload: { ...payload, error: message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) } });
     throw new Error(`Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`);
   }
   const output = sandboxCommandOutput(result);
   // Marker present → the guard skipped the script. Distinct terminal signal.
   if (output.includes(RIG_SETUP_SKIPPED_SENTINEL)) {
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { ...payload, skipped: true } });
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
     return;
   }
   // Ran → classify. A "still running" result means the script outlived the rig
@@ -4155,10 +4178,10 @@ export async function runRigSetupHook(
     const failure = new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.failed", payload: { ...payload, error: failure.message } });
+    await context.onRuntimeEvent?.({ type: "rig.setup.failed", payload: { ...payload, error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) } });
     throw failure;
   }
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { ...payload, skipped: false } });
+  await context.onRuntimeEvent?.({ type: "rig.setup.completed", payload: { ...payload, skipped: false } });
 }
 
 export async function runRepositoryCloneHook(
