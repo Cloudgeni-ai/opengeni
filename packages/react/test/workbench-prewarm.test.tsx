@@ -152,7 +152,10 @@ function coldClient(overrides: Partial<Parameters<typeof fakeClient>[0]> = {}) {
     heartbeatViewer: async () => ({ alive: true }),
     detachViewer: async () => {},
     ...overrides,
-  });
+    // `listMachines` is served by the machines poll at runtime (the proxy needs
+    // it present) but isn't a member of the narrow SessionClientLike — assert past
+    // the excess-property check on this test mock.
+  } as Partial<SessionClientLike>);
   return { client, spy };
 }
 
@@ -179,7 +182,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(spy.attachCalls).toBe(0);
     // Reach the Files tab's onEditIntent (the editor's first-keystroke signal).
     const filesTab = hook.result.current.tabs.find((t) => t.id === WORKBENCH_TAB_FILES);
-    const onEditIntent = (filesTab?.content as ReactElement).props.onEditIntent as () => void;
+    const onEditIntent = (filesTab?.content as ReactElement<{ onEditIntent: () => void }>).props.onEditIntent;
     expect(typeof onEditIntent).toBe("function");
     await act(async () => {
       onEditIntent();
@@ -198,8 +201,8 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     const terminalTab = hook.result.current.tabs.find((t) => t.id === "terminal");
     expect(terminalTab).toBeDefined();
     // content = <div><SandboxTerminal onActivate=… /></div>
-    const inner = (terminalTab!.content as ReactElement).props.children as ReactElement;
-    const onActivate = inner.props.onActivate as () => void;
+    const inner = (terminalTab!.content as ReactElement<{ children: ReactElement<{ onActivate: () => void }> }>).props.children;
+    const onActivate = inner.props.onActivate;
     await act(async () => {
       onActivate();
     });

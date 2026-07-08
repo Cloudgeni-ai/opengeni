@@ -254,7 +254,7 @@ describe("useSessionCapabilities", () => {
     await flush();
     expect(attachCalls).toBe(1);
     expect(attachOpts).not.toBeNull();
-    expect((attachOpts as { desktop?: boolean }).desktop).toBe(false);
+    expect((attachOpts as unknown as { desktop?: boolean }).desktop).toBe(false);
     // A holder was minted → the box is live, not resting on the benign on-demand state.
     expect(hook.result.current.state).toBe("ready");
     await hook.unmount();
