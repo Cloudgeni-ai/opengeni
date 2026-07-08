@@ -19,9 +19,16 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const routesSrc = readFileSync(resolve(here, "..", "src", "routes", "enrollments.ts"), "utf8");
 
+function routeRegex(method: string, path: string): RegExp {
+  // Wrap-tolerant: the formatter may break a long registration across lines, so
+  // allow whitespace between `app.<method>(` and the "<path>" literal. The
+  // trailing quote anchors the path so a prefix can't match a longer sibling.
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`app\\.${method}\\(\\s*"${escaped}"`);
+}
+
 function handlerBody(source: string, method: string, path: string): string {
-  const needle = `app.${method}("${path}"`;
-  const start = source.indexOf(needle);
+  const start = source.search(routeRegex(method, path));
   expect(start, `route not found: ${method.toUpperCase()} ${path}`).toBeGreaterThanOrEqual(0);
   const open = source.indexOf("{", start);
   let depth = 0;

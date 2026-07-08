@@ -54,9 +54,16 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
   },
 ];
 
+function routeRegex(method: string, path: string): RegExp {
+  // Wrap-tolerant: the formatter may break a long registration across lines, so
+  // allow whitespace between `app.<method>(` and the "<path>" literal. The
+  // trailing quote anchors the path so a prefix can't match a longer sibling.
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`app\\.${method}\\(\\s*"${escaped}"`);
+}
+
 function handlerBody(source: string, method: string, path: string): string {
-  const needle = `app.${method}("${path}"`;
-  const start = source.indexOf(needle);
+  const start = source.search(routeRegex(method, path));
   expect(start, `route not found: ${method.toUpperCase()} ${path}`).toBeGreaterThanOrEqual(0);
   const open = source.indexOf("{", start);
   let depth = 0;
@@ -73,10 +80,9 @@ function handlerBody(source: string, method: string, path: string): string {
 describe("P4.4 Channel-A route discipline", () => {
   test("all 13 routes are registered", () => {
     for (const route of CHANNEL_A_ROUTES) {
-      expect(
-        sessionsRoute.includes(`app.post("${route.path}"`),
-        `missing route ${route.path}`,
-      ).toBe(true);
+      expect(routeRegex("post", route.path).test(sessionsRoute), `missing route ${route.path}`).toBe(
+        true,
+      );
     }
   });
 
@@ -128,9 +134,11 @@ describe("P4.4 Channel-A route discipline", () => {
     // backend:none -> 409 before touching the box; ChannelA*Error -> 400/404/409.
     expect(channelASeam).toContain('session.sandboxBackend === "none"');
     expect(channelASeam).toContain("HTTPException(409");
-    expect(channelASeam).toContain("ChannelAValidationError) return new HTTPException(400");
-    expect(channelASeam).toContain("ChannelANotFoundError) return new HTTPException(404");
-    expect(channelASeam).toContain("ChannelAConflictError) return new HTTPException(409");
+    // Wrap-tolerant: the formatter may break the guard onto its own line, so
+    // allow whitespace between the `instanceof …)` and the mapped `return`.
+    expect(channelASeam).toMatch(/ChannelAValidationError\)\s+return new HTTPException\(400/);
+    expect(channelASeam).toMatch(/ChannelANotFoundError\)\s+return new HTTPException\(404/);
+    expect(channelASeam).toMatch(/ChannelAConflictError\)\s+return new HTTPException\(409/);
   });
 
   test("the seam never signals Temporal / routes through a worker (API-direct only)", () => {

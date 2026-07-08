@@ -34,9 +34,17 @@ const NEW_ROUTES = [
 
 // Extract the body of an app.<method>("<path>", async (c) => { … }) handler by
 // brace-matching from the registration site to its matching close.
+function routeRegex(method: string, path: string): RegExp {
+  // Wrap-tolerant: the formatter may break a long registration across lines, so
+  // allow whitespace between `app.<method>(` and the "<path>" literal. The
+  // trailing quote anchors the path so a prefix (e.g. /viewers) can't match a
+  // longer sibling (/viewers/:viewerId).
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`app\\.${method}\\(\\s*"${escaped}"`);
+}
+
 function handlerBody(source: string, method: string, path: string): string {
-  const needle = `app.${method}("${path}"`;
-  const start = source.indexOf(needle);
+  const start = source.search(routeRegex(method, path));
   expect(start, `route not found: ${method.toUpperCase()} ${path}`).toBeGreaterThanOrEqual(0);
   const open = source.indexOf("{", start);
   let depth = 0;

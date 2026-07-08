@@ -27,9 +27,16 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "sessions.ts"), "utf8");
 
+function routeRegex(method: string, path: string): RegExp {
+  // Wrap-tolerant: the formatter may break a long registration across lines, so
+  // allow whitespace between `app.<method>(` and the "<path>" literal. The
+  // trailing quote anchors the path so a prefix can't match a longer sibling.
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`app\\.${method}\\(\\s*"${escaped}"`);
+}
+
 function handlerBody(source: string, method: string, path: string): string {
-  const needle = `app.${method}("${path}"`;
-  const start = source.indexOf(needle);
+  const start = source.search(routeRegex(method, path));
   expect(start, `route not found: ${method.toUpperCase()} ${path}`).toBeGreaterThanOrEqual(0);
   const open = source.indexOf("{", start);
   let depth = 0;
@@ -48,8 +55,8 @@ const FILE_ROUTE = "/v1/workspaces/:workspaceId/sessions/:sessionId/workspace/ca
 
 describe("M2 capture-read route discipline (static)", () => {
   test("both routes are registered as GET", () => {
-    expect(sessionsRoute.includes(`app.get("${CAPTURE_ROUTE}"`)).toBe(true);
-    expect(sessionsRoute.includes(`app.get("${FILE_ROUTE}"`)).toBe(true);
+    expect(routeRegex("get", CAPTURE_ROUTE).test(sessionsRoute)).toBe(true);
+    expect(routeRegex("get", FILE_ROUTE).test(sessionsRoute)).toBe(true);
   });
 
   for (const path of [CAPTURE_ROUTE, FILE_ROUTE]) {
