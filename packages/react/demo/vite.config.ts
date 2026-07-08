@@ -16,6 +16,7 @@ export default defineConfig({
         machines: resolve(__dirname, "machines.html"),
         workbench: resolve(__dirname, "workbench.html"),
         workbenchDock: resolve(__dirname, "workbench-dock.html"),
+        workbenchEmbed: resolve(__dirname, "workbench-embed.html"),
         terminal: resolve(__dirname, "terminal.html"),
       },
     },
