@@ -19,7 +19,7 @@ const CHROMIUM = "/nix/store/7xr3qnq93srn4dgak7qw74dw836wpp1y-chromium-138.0.720
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" };
 
 const args = process.argv.slice(2);
-const pass = args.find((a) => /^[1-4]$/.test(a)) ?? "1";
+const pass = args.find((a) => /^[1-5]$/.test(a)) ?? "1";
 const stateFilter = (() => {
   const i = args.indexOf("--states");
   return i >= 0 && args[i + 1] ? args[i + 1].split(",") : null;
@@ -112,7 +112,28 @@ async function shotChip(state, theme) {
   await page.close();
 }
 
-if (pass === "4") {
+// Pass 5 (final polish) proves the two targeted fixes + regresses the states
+// most likely to be affected. FIX 1 (diff soft-wrap) reads clearest on the
+// Changes pane at a narrow-ish dock width (`medium`) where a long line used to
+// clip; FIX 2 (Files declutter — the replicated CHANGES list removed) reads
+// clearest on the Files tab at `wide` where the left column is fully shown.
+const PASS5 = [
+  { state: "warm-live", shots: [["changes", "medium"], ["files", "wide"]] },
+  { state: "dense", shots: [["changes", "medium"], ["files", "wide"]] },
+  { state: "cold-instant", shots: [["files", "wide"]] },
+  { state: "selfhosted-offline", shots: [["files", "wide"]] },
+  { state: "empty", shots: [["changes", "medium"], ["files", "wide"]] },
+  { state: "guard", shots: [["changes", "medium"]] },
+];
+
+if (pass === "5") {
+  for (const row of PASS5) {
+    if (stateFilter && !stateFilter.includes(row.state)) continue;
+    for (const theme of ["dark", "light"]) {
+      for (const [tab, width] of row.shots) await shot(row.state, tab, theme, width);
+    }
+  }
+} else if (pass === "4") {
   // Responsive/density sweep: curated states × widths, both themes.
   for (const row of RESPONSIVE) {
     if (stateFilter && !stateFilter.includes(row.state)) continue;

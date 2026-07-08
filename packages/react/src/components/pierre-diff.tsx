@@ -40,6 +40,11 @@ export type PierreDiffProps = {
   /** Skip the Shiki renderer entirely and show the plain-text degrade (the old
    *  `usePierre={false}` path — one renderer, opted out of highlighting). */
   plain?: boolean | undefined;
+  /** Long-line handling: `"wrap"` soft-wraps (the default — a diff in a narrow
+   *  dock pane should be readable without a horizontal-scroll tax), `"scroll"`
+   *  keeps lines on one row behind a horizontal scrollbar (better for a wide
+   *  viewport or pathological minified lines). */
+  overflow?: "wrap" | "scroll" | undefined;
   className?: string | undefined;
 };
 
@@ -69,6 +74,7 @@ export function PierreDiff({
   loading,
   fallback,
   plain,
+  overflow = "wrap",
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
@@ -98,7 +104,7 @@ export function PierreDiff({
   // inside a dark dock). Callers pass `themeType="light"` to opt into light.
   const options = {
     diffStyle: layout,
-    overflow: "scroll" as const,
+    overflow,
     stickyHeader: true,
     ...(theme ? { theme } : { theme: { dark: "github-dark", light: "github-light" } }),
     themeType: themeType ?? "dark",
