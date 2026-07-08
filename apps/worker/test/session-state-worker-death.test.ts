@@ -13,6 +13,7 @@ const fakeDb = {};
 const fakeBus = { publish: async () => undefined };
 
 let currentTurn: { id: string; status: string } | null = null;
+let requeueOverride: (() => void) | null = null;
 const appendedEvents: Array<{ type: string; turnId?: string | null; payload: any }> = [];
 const requeueCalls: Array<{ turnId: string; triggerEventId: string; fromStatuses?: string[] }> = [];
 const statuses: string[] = [];
@@ -30,6 +31,10 @@ mock.module("@opengeni/db", () => ({
   countTurnSessionHistoryItems: mock(async () => 0),
   countQueuedTurns: mock(async () => 0),
   requeuePreemptedTurn: mock(async (_db: unknown, _ws: string, turnId: string, triggerEventId: string, fromStatuses?: string[]) => {
+    if (requeueOverride) {
+      requeueOverride();
+      return;
+    }
     // Mirror the DB guard: the reset only matches a turn whose status is in
     // fromStatuses (defaults to the live-turn set). If a caller tries to
     // requeue a `cancelled` turn without opting it in, that is the bug.
@@ -92,6 +97,7 @@ describe("requeueTurnAfterWorkerDeath: death-artifact cancel", () => {
     requeueCalls.length = 0;
     statuses.length = 0;
     currentTurn = null;
+    requeueOverride = null;
   });
 
   test("re-dispatches a turn the dying attempt stamped `cancelled`", async () => {
@@ -145,5 +151,28 @@ describe("requeueTurnAfterWorkerDeath: death-artifact cancel", () => {
 
     expect(result).toEqual({ action: "stale" });
     expect(requeueCalls).toHaveLength(0);
+  });
+
+  test("rethrows (does NOT go stale) on a real persistence error while the turn is still cancelled", async () => {
+    // The turn stays `cancelled` (still re-dispatchable), and the reset fails
+    // for a real reason — this must retry, not silently drop the turn.
+    currentTurn = { id: "turn-1", status: "cancelled" };
+    requeueOverride = () => { throw new Error("db connection reset"); };
+
+    await expect(runRequeue()).rejects.toThrow("db connection reset");
+  });
+
+  test("reports stale when a racing actor genuinely settled the turn during requeue", async () => {
+    // Turn was re-dispatchable at the guard, but a racing zombie completed it
+    // before the reset landed → its recorded outcome is the truth.
+    currentTurn = { id: "turn-1", status: "cancelled" };
+    requeueOverride = () => {
+      currentTurn = { id: "turn-1", status: "completed" };
+      throw new Error("Preemptible session turn not found: turn-1");
+    };
+
+    const result = await runRequeue();
+
+    expect(result).toEqual({ action: "stale" });
   });
 });

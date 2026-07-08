@@ -180,12 +180,18 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       );
     } catch (requeueError) {
       // The zombie attempt can settle the turn between the status check above
-      // and this requeue (it keeps executing until it notices the timeout).
-      // A settled turn means its recorded outcome is the truth: report stale
-      // so the workflow continues instead of failing the session over a lost
-      // race. Anything else is a real persistence failure — rethrow.
+      // and this requeue (it keeps executing until it notices the timeout). If
+      // the turn is now GENUINELY settled (completed/failed/idle) or already
+      // re-queued by a concurrent actor, that outcome is the truth: report
+      // stale so the workflow continues. But if the turn is STILL in a
+      // requeue-able state — running/requires_action, or a death-artifact
+      // `cancelled` (which this path re-dispatches) — then the requeue hit a
+      // REAL persistence error, so rethrow to retry rather than silently drop
+      // the turn as stale (the exact idle-stall this change fixes).
       const current = await getSessionTurn(db, input.workspaceId, input.turnId);
-      if (current && current.status !== "running" && current.status !== "requires_action") {
+      const stillRequeueable = current
+        && (current.status === "running" || current.status === "requires_action" || current.status === "cancelled");
+      if (!stillRequeueable) {
         return { action: "stale" };
       }
       throw requeueError;
