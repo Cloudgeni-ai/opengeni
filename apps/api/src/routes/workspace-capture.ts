@@ -39,8 +39,11 @@ function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; exp
 }
 
 // Fetch + validate the manifest blob for a row. Returns null when the row has no
-// manifest key or the blob is gone (GC'd) — the caller treats that as "no
-// capture available" for the list route and a 404 for the file route.
+// manifest key, the blob is gone (GC'd), or the bytes fail to parse/validate — a
+// malformed capture is treated as "no capture available" (the list route degrades
+// to {available:false}, the file route to 404). Capture reads must NEVER be worse
+// than the status-quo live/wake fallback (dossier §10.10), so a poison row can
+// never 500 the workbench; it degrades and logs.
 async function loadManifest(
   row: WorkspaceCaptureRow,
   storage: CaptureStoragePort,
@@ -48,8 +51,19 @@ async function loadManifest(
   if (!row.manifestKey) return null;
   const blob = await storage.getObjectBytes(row.manifestKey);
   if (!blob) return null;
-  const json = JSON.parse(new TextDecoder().decode(blob.bytes));
-  return { manifest: WorkspaceCaptureManifest.parse(json), byteLength: blob.bytes.byteLength };
+  let json: unknown;
+  try {
+    json = JSON.parse(new TextDecoder().decode(blob.bytes));
+  } catch {
+    console.warn(`workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`);
+    return null;
+  }
+  const parsed = WorkspaceCaptureManifest.safeParse(json);
+  if (!parsed.success) {
+    console.warn(`workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+    return null;
+  }
+  return { manifest: parsed.data, byteLength: blob.bytes.byteLength };
 }
 
 /**
@@ -65,7 +79,13 @@ export async function serveWorkspaceCapture(
   if (!row || row.state !== "available" || !row.manifestKey) {
     return { available: false };
   }
-  const stats = WorkspaceCaptureStats.parse(row.stats);
+  const stats = WorkspaceCaptureStats.safeParse(row.stats);
+  if (!stats.success) {
+    // A row with malformed stats (or a synthetic/partial row) degrades to the
+    // cold-fallback state rather than 500.
+    console.warn(`workspace capture read — row stats failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+    return { available: false };
+  }
   const meta = {
     available: true as const,
     revision: row.revision,
@@ -73,7 +93,7 @@ export async function serveWorkspaceCapture(
     turnId: row.turnId,
     leaseEpoch: row.leaseEpoch,
     sizeBytes: row.sizeBytes ?? 0,
-    stats,
+    stats: stats.data,
   };
   const blob = await storage.getObjectBytes(row.manifestKey);
   if (!blob) {
@@ -82,8 +102,19 @@ export async function serveWorkspaceCapture(
     return { available: false };
   }
   if (blob.bytes.byteLength <= CAPTURE_INLINE_MANIFEST_MAX_BYTES) {
-    const manifest = WorkspaceCaptureManifest.parse(JSON.parse(new TextDecoder().decode(blob.bytes)));
-    return GetWorkspaceCaptureResponse.parse({ ...meta, manifest, manifestUrl: null });
+    let json: unknown;
+    try {
+      json = JSON.parse(new TextDecoder().decode(blob.bytes));
+    } catch {
+      console.warn(`workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`);
+      return { available: false };
+    }
+    const manifest = WorkspaceCaptureManifest.safeParse(json);
+    if (!manifest.success) {
+      console.warn(`workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+      return { available: false };
+    }
+    return GetWorkspaceCaptureResponse.parse({ ...meta, manifest: manifest.data, manifestUrl: null });
   }
   const signed = await storage.createGetUrl({ key: row.manifestKey, expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS });
   return GetWorkspaceCaptureResponse.parse({ ...meta, manifest: null, manifestUrl: signedUrl(signed) });

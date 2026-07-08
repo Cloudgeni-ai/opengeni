@@ -179,6 +179,19 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res).toEqual({ available: false });
   });
 
+  test("row with malformed stats (poison/synthetic row) → {available:false}, never 500", async () => {
+    // Mirrors a real dev-DB artifact: a synthetic row with stats={} + a stub
+    // manifest key. Must degrade, not throw a ZodError up as a 500.
+    const res = await serveWorkspaceCapture(makeRow({ stats: {}, manifestKey: "m" }), fakeStorage({ m: new TextEncoder().encode("not json") }));
+    expect(res).toEqual({ available: false });
+  });
+
+  test("manifest blob that fails schema validation → {available:false}", async () => {
+    const storage = fakeStorage({ [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify({ version: 1, bogus: true })) });
+    const res = await serveWorkspaceCapture(makeRow(), storage);
+    expect(res).toEqual({ available: false });
+  });
+
   test("small manifest → inline (metadata + manifest, no signed URL)", async () => {
     const manifest = makeManifest([fileEntry({})]);
     const storage = fakeStorage({ [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)) });
