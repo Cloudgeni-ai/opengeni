@@ -10,10 +10,7 @@ import { registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
 import { MachineMetrics } from "../src/components/machine-metrics";
-import {
-  ConnectionStatusPill,
-  MachineStatusPill,
-} from "../src/components/machine-status-pill";
+import { ConnectionStatusPill, MachineStatusPill } from "../src/components/machine-status-pill";
 import { MachineDockBar, SharedMachineDisclosure } from "../src/components/machine-dock-bar";
 import { EnrollmentConsent } from "../src/components/enrollment-consent";
 import { EnrollmentDeviceFlow } from "../src/components/enrollment-device-flow";
@@ -51,7 +48,9 @@ const contended: MetricSample = {
   runQueue: 5,
 };
 
-function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId" | "state">): MachineView {
+function machine(
+  overrides: Partial<MachineView> & Pick<MachineView, "sandboxId" | "state">,
+): MachineView {
   return {
     enrollmentId: "enr-" + overrides.sandboxId,
     name: "test-machine",
@@ -259,7 +258,9 @@ describe("MachinesDashboard", () => {
 
 describe("MachineDockBar + SharedMachineDisclosure (dock parity)", () => {
   test("the dock bar surfaces the active machine + connection pill", async () => {
-    const r = await renderComponent(<MachineDockBar name="jorgen-desktop" kind="selfhosted" state="online" />);
+    const r = await renderComponent(
+      <MachineDockBar name="jorgen-desktop" kind="selfhosted" state="online" />,
+    );
     await flush();
     expect(r.container.querySelector("[data-machine-dock-bar]")).not.toBeNull();
     expect(r.container.textContent).toContain("jorgen-desktop");
@@ -277,11 +278,30 @@ describe("MachineDockBar + SharedMachineDisclosure (dock parity)", () => {
 });
 
 describe("EnrollmentConsent — loud whole-machine consent", () => {
-  const display = { machineName: "jorgen-desktop", os: "linux", arch: "x86_64", canOfferDisplay: true, requestsScreenControl: true };
-  const headless = { machineName: "ci-runner", os: "linux", arch: "x86_64", canOfferDisplay: false, requestsScreenControl: false };
+  const display = {
+    machineName: "jorgen-desktop",
+    os: "linux",
+    arch: "x86_64",
+    canOfferDisplay: true,
+    requestsScreenControl: true,
+  };
+  const headless = {
+    machineName: "ci-runner",
+    os: "linux",
+    arch: "x86_64",
+    canOfferDisplay: false,
+    requestsScreenControl: false,
+  };
 
   test("review phase renders the consent + the screen-control toggle (display machine)", async () => {
-    const r = await renderComponent(<EnrollmentConsent userCode="WXYZ-4821" machine={display} onApprove={() => {}} onDeny={() => {}} />);
+    const r = await renderComponent(
+      <EnrollmentConsent
+        userCode="WXYZ-4821"
+        machine={display}
+        onApprove={() => {}}
+        onDeny={() => {}}
+      />,
+    );
     await flush();
     expect(r.container.querySelector("[data-enrollment-consent]")).not.toBeNull();
     expect(r.container.textContent).toContain("whole machine");
@@ -292,7 +312,9 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
   });
 
   test("a headless machine hides the screen-control toggle", async () => {
-    const r = await renderComponent(<EnrollmentConsent userCode="A" machine={headless} onApprove={() => {}} onDeny={() => {}} />);
+    const r = await renderComponent(
+      <EnrollmentConsent userCode="A" machine={headless} onApprove={() => {}} onDeny={() => {}} />,
+    );
     await flush();
     expect(r.container.querySelector("[data-screen-control-toggle]")).toBeNull();
     await r.unmount();
@@ -300,7 +322,14 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
 
   test("approve passes the screen-control consent through", async () => {
     const got: boolean[] = [];
-    const r = await renderComponent(<EnrollmentConsent userCode="A" machine={display} onApprove={(v) => got.push(v)} onDeny={() => {}} />);
+    const r = await renderComponent(
+      <EnrollmentConsent
+        userCode="A"
+        machine={display}
+        onApprove={(v) => got.push(v)}
+        onDeny={() => {}}
+      />,
+    );
     await flush();
     (r.container.querySelector("[data-approve]") as HTMLButtonElement).click();
     await flush();
@@ -315,7 +344,9 @@ describe("EnrollmentConsent — loud whole-machine consent", () => {
       ["denied", "muted"],
       ["error", "danger"],
     ] as const) {
-      const r = await renderComponent(<EnrollmentConsent userCode="A" machine={display} phase={phase} />);
+      const r = await renderComponent(
+        <EnrollmentConsent userCode="A" machine={display} phase={phase} />,
+      );
       await flush();
       expect(r.container.querySelector(`[data-enrollment-result="${marker}"]`)).not.toBeNull();
       await r.unmount();

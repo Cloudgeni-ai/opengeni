@@ -7,26 +7,62 @@ describe("selectCodexCredentialForTurn", () => {
   const connected = new Set(["a", "b", "c"]);
 
   test("a valid pin wins over the workspace active", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: "b", activeCredentialId: "a", connectedIds: connected })).toBe("b");
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: "b",
+        activeCredentialId: "a",
+        connectedIds: connected,
+      }),
+    ).toBe("b");
   });
 
   test("no pin → falls back to the workspace active", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: null, activeCredentialId: "a", connectedIds: connected })).toBe("a");
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: null,
+        activeCredentialId: "a",
+        connectedIds: connected,
+      }),
+    ).toBe("a");
   });
 
   test("a pin that is no longer connected is ignored; active is used", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: "gone", activeCredentialId: "c", connectedIds: connected })).toBe("c");
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: "gone",
+        activeCredentialId: "c",
+        connectedIds: connected,
+      }),
+    ).toBe("c");
   });
 
   test("a pin not connected AND active not connected → null", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: "gone", activeCredentialId: "also-gone", connectedIds: connected })).toBeNull();
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: "gone",
+        activeCredentialId: "also-gone",
+        connectedIds: connected,
+      }),
+    ).toBeNull();
   });
 
   test("no pin and no active → null (turn fails with the relogin path)", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: null, activeCredentialId: null, connectedIds: connected })).toBeNull();
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: null,
+        activeCredentialId: null,
+        connectedIds: connected,
+      }),
+    ).toBeNull();
   });
 
   test("empty connected set → null even with ids set", () => {
-    expect(selectCodexCredentialForTurn({ sessionPinnedCredentialId: "a", activeCredentialId: "b", connectedIds: new Set() })).toBeNull();
+    expect(
+      selectCodexCredentialForTurn({
+        sessionPinnedCredentialId: "a",
+        activeCredentialId: "b",
+        connectedIds: new Set(),
+      }),
+    ).toBeNull();
   });
 });

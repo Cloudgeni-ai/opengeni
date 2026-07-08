@@ -29,11 +29,17 @@ function Meter({
   tone: "ok" | "warn" | "hot";
 }) {
   const fillClass =
-    tone === "hot" ? "bg-og-status-failed" : tone === "warn" ? "bg-og-status-waiting" : "bg-og-status-running";
+    tone === "hot"
+      ? "bg-og-status-failed"
+      : tone === "warn"
+        ? "bg-og-status-waiting"
+        : "bg-og-status-running";
   return (
     <div className="flex min-w-0 flex-col gap-1" data-metric={label.toLowerCase()}>
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">{label}</span>
+        <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          {label}
+        </span>
         <span className="font-og-mono text-[11px] tabular-nums text-og-fg-muted">{value}</span>
       </div>
       <div className="h-1 w-full overflow-hidden rounded-full bg-og-surface-2">
@@ -55,7 +61,11 @@ function toneFor(p: number): "ok" | "warn" | "hot" {
 
 /** The token text color for a tone (matches the `Meter` fill ramp). */
 function toneTextClass(tone: "ok" | "warn" | "hot"): string {
-  return tone === "hot" ? "text-og-status-failed" : tone === "warn" ? "text-og-status-waiting" : "text-og-status-running";
+  return tone === "hot"
+    ? "text-og-status-failed"
+    : tone === "warn"
+      ? "text-og-status-waiting"
+      : "text-og-status-running";
 }
 
 /**
@@ -86,11 +96,18 @@ function StatTriple({
   return (
     <div className="flex items-center justify-between gap-3" data-metric="load">
       <div className="flex min-w-0 flex-col gap-1">
-        <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">Load</span>
+        <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          Load
+        </span>
         <div className="flex items-baseline gap-3">
           {stats.map((s) => (
             <div key={s.label} className="flex items-baseline gap-1">
-              <span className={cn("text-[10px] font-medium uppercase tracking-wide", toneTextClass(tone))}>
+              <span
+                className={cn(
+                  "text-[10px] font-medium uppercase tracking-wide",
+                  toneTextClass(tone),
+                )}
+              >
                 {s.label}
               </span>
               <span className={cn("font-og-mono text-[12px] tabular-nums", toneTextClass(tone))}>
@@ -128,8 +145,10 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
     );
   }
 
-  const memPct = metrics.memTotalBytes > 0 ? (metrics.memUsedBytes / metrics.memTotalBytes) * 100 : 0;
-  const diskPct = metrics.diskTotalBytes > 0 ? (metrics.diskUsedBytes / metrics.diskTotalBytes) * 100 : 0;
+  const memPct =
+    metrics.memTotalBytes > 0 ? (metrics.memUsedBytes / metrics.memTotalBytes) * 100 : 0;
+  const diskPct =
+    metrics.diskTotalBytes > 0 ? (metrics.diskUsedBytes / metrics.diskTotalBytes) * 100 : 0;
   const hasGpu = metrics.gpuUtilPct !== null;
   const gpuMemLabel = metrics.gpuMemBytes !== null ? formatBytes(metrics.gpuMemBytes) : null;
   // Memory & disk are honest used/total ratios → full-width meters; stack them in
@@ -165,7 +184,11 @@ export function MachineMetrics({ metrics, density = "compact", className }: Mach
         {hasGpu ? (
           <Meter
             label="GPU"
-            value={gpuMemLabel ? `${metrics.gpuUtilPct!.toFixed(0)}% · ${gpuMemLabel}` : `${metrics.gpuUtilPct!.toFixed(0)}%`}
+            value={
+              gpuMemLabel
+                ? `${metrics.gpuUtilPct!.toFixed(0)}% · ${gpuMemLabel}`
+                : `${metrics.gpuUtilPct!.toFixed(0)}%`
+            }
             fillPct={metrics.gpuUtilPct!}
             tone={toneFor(metrics.gpuUtilPct!)}
           />

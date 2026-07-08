@@ -34,7 +34,10 @@ import type {
 } from "@opengeni/core";
 
 export class SandboxResumeError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
     super(message);
     this.name = "SandboxResumeError";
   }
@@ -57,7 +60,9 @@ export function createApiSandboxClient(settings: Settings): ApiSandboxClient | u
  * a live session for one in-process op. The caller drives exec/readFile and then
  * drops the handle (resume → use → drop); it does NOT own the box.
  */
-export function makeResumeBoxById(client: ApiSandboxClient | undefined): (input: ResumeBoxByIdInput) => Promise<ResumedSandboxSession> {
+export function makeResumeBoxById(
+  client: ApiSandboxClient | undefined,
+): (input: ResumeBoxByIdInput) => Promise<ResumedSandboxSession> {
   return async ({ backend, resumeState }: ResumeBoxByIdInput): Promise<ResumedSandboxSession> => {
     if (!client) {
       throw new SandboxResumeError(

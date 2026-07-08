@@ -30,21 +30,29 @@ mock.module("@opengeni/db", () => ({
   getSessionEvent: mock(async () => ({ id: "trigger-1", type: "goal.continuation", payload: {} })),
   countTurnSessionHistoryItems: mock(async () => 0),
   countQueuedTurns: mock(async () => 0),
-  requeuePreemptedTurn: mock(async (_db: unknown, _ws: string, turnId: string, triggerEventId: string, fromStatuses?: string[]) => {
-    if (requeueOverride) {
-      requeueOverride();
-      return;
-    }
-    // Mirror the DB guard: the reset only matches a turn whose status is in
-    // fromStatuses (defaults to the live-turn set). If a caller tries to
-    // requeue a `cancelled` turn without opting it in, that is the bug.
-    const allowed = fromStatuses ?? ["running", "requires_action"];
-    if (!currentTurn || !allowed.includes(currentTurn.status)) {
-      throw new Error(`Preemptible session turn not found: ${turnId}`);
-    }
-    requeueCalls.push({ turnId, triggerEventId, fromStatuses });
-    currentTurn = { ...currentTurn, status: "queued" };
-  }),
+  requeuePreemptedTurn: mock(
+    async (
+      _db: unknown,
+      _ws: string,
+      turnId: string,
+      triggerEventId: string,
+      fromStatuses?: string[],
+    ) => {
+      if (requeueOverride) {
+        requeueOverride();
+        return;
+      }
+      // Mirror the DB guard: the reset only matches a turn whose status is in
+      // fromStatuses (defaults to the live-turn set). If a caller tries to
+      // requeue a `cancelled` turn without opting it in, that is the bug.
+      const allowed = fromStatuses ?? ["running", "requires_action"];
+      if (!currentTurn || !allowed.includes(currentTurn.status)) {
+        throw new Error(`Preemptible session turn not found: ${turnId}`);
+      }
+      requeueCalls.push({ turnId, triggerEventId, fromStatuses });
+      currentTurn = { ...currentTurn, status: "queued" };
+    },
+  ),
   setSessionStatus: mock(async (_db: unknown, _ws: string, _sid: string, status: string) => {
     statuses.push(status);
   }),
@@ -52,10 +60,16 @@ mock.module("@opengeni/db", () => ({
 
 mock.module("@opengeni/events", () => ({
   ...realEvents,
-  appendAndPublishEvents: mock(async (_db: unknown, _bus: any, _ws: string, _sid: string, events: any[]) => {
-    appendedEvents.push(...events);
-    return events.map((event, index) => ({ id: `event-${index + 1}`, sequence: index + 1, ...event }));
-  }),
+  appendAndPublishEvents: mock(
+    async (_db: unknown, _bus: any, _ws: string, _sid: string, events: any[]) => {
+      appendedEvents.push(...events);
+      return events.map((event, index) => ({
+        id: `event-${index + 1}`,
+        sequence: index + 1,
+        ...event,
+      }));
+    },
+  ),
 }));
 
 mock.module("../src/activities/parent-wake", () => ({
@@ -74,13 +88,16 @@ afterAll(() => {
 
 async function runRequeue() {
   const { createSessionStateActivities } = await import("../src/activities/session-state");
-  const activities = createSessionStateActivities(async () => ({
-    db: fakeDb,
-    bus: fakeBus,
-    settings: { sessionHistorySource: "items", openaiReasoningEffort: "medium" },
-    observability: {},
-    wakeSessionWorkflow: mock(async () => undefined),
-  } as any));
+  const activities = createSessionStateActivities(
+    async () =>
+      ({
+        db: fakeDb,
+        bus: fakeBus,
+        settings: { sessionHistorySource: "items", openaiReasoningEffort: "medium" },
+        observability: {},
+        wakeSessionWorkflow: mock(async () => undefined),
+      }) as any,
+  );
   return activities.requeueTurnAfterWorkerDeath({
     accountId: "account-1",
     workspaceId: "workspace-1",
@@ -157,7 +174,9 @@ describe("requeueTurnAfterWorkerDeath: death-artifact cancel", () => {
     // The turn stays `cancelled` (still re-dispatchable), and the reset fails
     // for a real reason — this must retry, not silently drop the turn.
     currentTurn = { id: "turn-1", status: "cancelled" };
-    requeueOverride = () => { throw new Error("db connection reset"); };
+    requeueOverride = () => {
+      throw new Error("db connection reset");
+    };
 
     await expect(runRequeue()).rejects.toThrow("db connection reset");
   });

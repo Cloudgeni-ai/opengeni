@@ -98,15 +98,28 @@ function VersionRow({
 }) {
   const [open, setOpen] = useState(false);
   return (
-    <li className={cn("rounded-lg border bg-surface/45", isActive ? "border-brand/40" : "border-border")}>
+    <li
+      className={cn(
+        "rounded-lg border bg-surface/45",
+        isActive ? "border-brand/40" : "border-border",
+      )}
+    >
       <div className="flex items-start gap-3 px-3.5 py-3">
         <span className="mt-1 shrink-0">
           <StatusDot tone={isActive ? "idle" : "cancelled"} />
         </span>
-        <button type="button" onClick={() => setOpen((current) => !current)} className="min-w-0 flex-1 text-left">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          className="min-w-0 flex-1 text-left"
+        >
           <span className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">Version {version.version}</span>
-            {isActive ? <MetaChip dot="idle" title="Materialized by new sessions">Active</MetaChip> : null}
+            {isActive ? (
+              <MetaChip dot="idle" title="Materialized by new sessions">
+                Active
+              </MetaChip>
+            ) : null}
           </span>
           <span className="mt-0.5 block truncate text-xs text-fg-muted">
             {version.changelog ?? "No changelog"}
@@ -117,7 +130,14 @@ function VersionRow({
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
           {!isActive && canManage ? (
-            <Button type="button" variant="secondary" size="sm" className="h-8" disabled={mutating} onClick={onRequestActivate}>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-8"
+              disabled={mutating}
+              onClick={onRequestActivate}
+            >
               Activate
             </Button>
           ) : null}
@@ -127,7 +147,9 @@ function VersionRow({
             onClick={() => setOpen((current) => !current)}
             className="grid size-8 place-items-center rounded-md text-fg-subtle transition-colors hover:bg-surface-2 hover:text-fg"
           >
-            <ChevronDownIcon className={cn("size-4 transition-transform", open ? "rotate-180" : "")} />
+            <ChevronDownIcon
+              className={cn("size-4 transition-transform", open ? "rotate-180" : "")}
+            />
           </button>
         </div>
       </div>
@@ -139,7 +161,9 @@ function VersionRow({
           </DetailRow>
           <DetailRow label="Setup script">
             {version.setupScript ? (
-              <pre className="max-h-56 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">{version.setupScript}</pre>
+              <pre className="max-h-56 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">
+                {version.setupScript}
+              </pre>
             ) : (
               <span className="text-xs text-fg-subtle">None</span>
             )}
@@ -150,9 +174,14 @@ function VersionRow({
             ) : (
               <div className="grid gap-1">
                 {version.checks.map((check, index) => (
-                  <div key={`${check.name}-${index}`} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
+                  <div
+                    key={`${check.name}-${index}`}
+                    className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
+                  >
                     <div className="truncate text-xs font-medium">{check.name}</div>
-                    <div className="truncate font-mono text-2xs text-fg-subtle">{check.command}</div>
+                    <div className="truncate font-mono text-2xs text-fg-subtle">
+                      {check.command}
+                    </div>
                   </div>
                 ))}
               </div>

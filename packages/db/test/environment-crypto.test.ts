@@ -27,23 +27,35 @@ describe("workspace environment value encryption", () => {
   });
 
   test("rejects unknown version prefixes without echoing the payload", () => {
-    expect(() => decryptEnvironmentValue(key, "v2:abc:def")).toThrow("unsupported environment value format");
-    expect(() => decryptEnvironmentValue(key, "not-encrypted")).toThrow("unsupported environment value format");
-    expect(() => decryptEnvironmentValue(key, "v1:short")).toThrow("unsupported environment value format");
+    expect(() => decryptEnvironmentValue(key, "v2:abc:def")).toThrow(
+      "unsupported environment value format",
+    );
+    expect(() => decryptEnvironmentValue(key, "not-encrypted")).toThrow(
+      "unsupported environment value format",
+    );
+    expect(() => decryptEnvironmentValue(key, "v1:short")).toThrow(
+      "unsupported environment value format",
+    );
   });
 
   test("fails closed on auth-tag mismatch with a generic error", () => {
     const stored = encryptEnvironmentValue(key, "tamper-target-value");
-    expect(() => decryptEnvironmentValue(otherKey, stored)).toThrow("environment value decryption failed");
+    expect(() => decryptEnvironmentValue(otherKey, stored)).toThrow(
+      "environment value decryption failed",
+    );
     const parts = stored.split(":");
     const payload = Buffer.from(parts[2]!, "base64");
     payload[0] = payload[0]! ^ 0xff;
     const tampered = `${parts[0]}:${parts[1]}:${payload.toString("base64")}`;
-    expect(() => decryptEnvironmentValue(key, tampered)).toThrow("environment value decryption failed");
+    expect(() => decryptEnvironmentValue(key, tampered)).toThrow(
+      "environment value decryption failed",
+    );
   });
 
   test("rejects keys that are not exactly 32 bytes", () => {
     expect(() => encryptEnvironmentValue(new Uint8Array(16), "value")).toThrow("exactly 32 bytes");
-    expect(() => decryptEnvironmentValue(new Uint8Array(31), "v1:abc:def")).toThrow("exactly 32 bytes");
+    expect(() => decryptEnvironmentValue(new Uint8Array(31), "v1:abc:def")).toThrow(
+      "exactly 32 bytes",
+    );
   });
 });

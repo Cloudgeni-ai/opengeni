@@ -10,7 +10,10 @@ export function RigStatusChip({ view, className }: { view: RigStatusView; classN
     <MetaChip
       dot={view.tone}
       title={view.description}
-      className={cn(view.pulse ? "[&>span:first-child]:motion-safe:animate-pulse" : undefined, className)}
+      className={cn(
+        view.pulse ? "[&>span:first-child]:motion-safe:animate-pulse" : undefined,
+        className,
+      )}
     >
       {view.label}
     </MetaChip>

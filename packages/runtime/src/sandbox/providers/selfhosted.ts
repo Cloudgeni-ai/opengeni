@@ -20,10 +20,7 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
 } from "../selfhosted/control-rpc";
-import {
-  SelfhostedSandboxClient,
-  type SelfhostedRelayConfig,
-} from "../selfhosted/session";
+import { SelfhostedSandboxClient, type SelfhostedRelayConfig } from "../selfhosted/session";
 import type { ProviderRegistration } from "./types";
 
 /**

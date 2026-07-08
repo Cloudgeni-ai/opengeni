@@ -22,16 +22,18 @@ export function renderTemporalValues(env: Record<string, string | undefined>): s
   const secretName = env.TEMPORAL_POSTGRES_SECRET_NAME?.trim() || "opengeni-temporal-postgres";
   const secretKey = env.TEMPORAL_POSTGRES_SECRET_KEY?.trim() || "password";
   const defaultDatabase = env.TEMPORAL_POSTGRES_DEFAULT_DATABASE?.trim() || "temporal";
-  const visibilityDatabase = env.TEMPORAL_POSTGRES_VISIBILITY_DATABASE?.trim() || "temporal_visibility";
+  const visibilityDatabase =
+    env.TEMPORAL_POSTGRES_VISIBILITY_DATABASE?.trim() || "temporal_visibility";
   const createDatabase = booleanEnv(env, "TEMPORAL_POSTGRES_CREATE_DATABASE", true);
   const shards = positiveIntegerEnv(env, "TEMPORAL_NUM_HISTORY_SHARDS", "128");
   const tlsEnabled = booleanEnv(env, "TEMPORAL_POSTGRES_TLS_ENABLED", false);
   const tlsCaFile = env.TEMPORAL_POSTGRES_TLS_CA_FILE?.trim();
   const tlsCaConfigMapName = env.TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME?.trim();
   const tlsCaConfigMapKey = env.TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_KEY?.trim() || "ca.pem";
-  const tlsCaMount = tlsCaFile && tlsCaConfigMapName
-    ? renderCaMount("temporal-postgres-ca", tlsCaConfigMapName, tlsCaConfigMapKey, tlsCaFile)
-    : "";
+  const tlsCaMount =
+    tlsCaFile && tlsCaConfigMapName
+      ? renderCaMount("temporal-postgres-ca", tlsCaConfigMapName, tlsCaConfigMapKey, tlsCaFile)
+      : "";
   const tlsYaml = tlsEnabled
     ? `\n            tls:\n              enabled: true${tlsCaFile ? `\n              caFile: ${yamlScalar(tlsCaFile)}` : ""}`
     : "";
@@ -112,7 +114,11 @@ function parseArgs(values: string[]): Args {
   return out;
 }
 
-function positiveIntegerEnv(env: Record<string, string | undefined>, name: string, fallback: string): string {
+function positiveIntegerEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: string,
+): string {
   const value = env[name]?.trim() || fallback;
   if (!/^[1-9][0-9]*$/.test(value)) {
     throw new Error(`${name} must be a positive integer`);
@@ -120,7 +126,11 @@ function positiveIntegerEnv(env: Record<string, string | undefined>, name: strin
   return value;
 }
 
-function booleanEnv(env: Record<string, string | undefined>, name: string, fallback: boolean): boolean {
+function booleanEnv(
+  env: Record<string, string | undefined>,
+  name: string,
+  fallback: boolean,
+): boolean {
   const raw = env[name]?.trim();
   if (!raw) return fallback;
   if (/^(1|true|yes)$/i.test(raw)) return true;
@@ -128,7 +138,12 @@ function booleanEnv(env: Record<string, string | undefined>, name: string, fallb
   throw new Error(`${name} must be true or false`);
 }
 
-function renderCaMount(volumeName: string, configMapName: string, configMapKey: string, mountPath: string): string {
+function renderCaMount(
+  volumeName: string,
+  configMapName: string,
+  configMapKey: string,
+  mountPath: string,
+): string {
   return `  additionalVolumes:
     - name: ${yamlScalar(volumeName)}
       configMap:

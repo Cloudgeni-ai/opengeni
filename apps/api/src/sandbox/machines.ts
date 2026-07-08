@@ -31,11 +31,7 @@ import {
   type MachineMetricsRow,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
-import {
-  MachineView,
-  MetricSample,
-  type MachinesResponse,
-} from "@opengeni/contracts";
+import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
 import {
   NatsControlRpc,
   selfhostedLiveness,
@@ -95,7 +91,11 @@ async function probeEnrollment(
   services: MachinesServices,
   workspaceId: string,
   enrollment: EnrollmentRecord,
-): Promise<{ state: "online" | "reconnecting" | "offline"; consented: boolean; hasDisplay: boolean }> {
+): Promise<{
+  state: "online" | "reconnecting" | "offline";
+  consented: boolean;
+  hasDisplay: boolean;
+}> {
   const { settings, bus } = services;
   let probeResponded = false;
   if (enrollment.status === "active") {
@@ -186,25 +186,27 @@ export async function listMachines(
   // null active pointer routes to. Only present in an in-session view.
   if (session) {
     const groupActive = activeSandboxId === null;
-    machines.push(MachineView.parse({
-      sandboxId: session.sandboxGroupId,
-      enrollmentId: null,
-      name: "session sandbox",
-      kind: session.sandboxBackend === "selfhosted" ? "selfhosted" : "modal",
-      state: "online",
-      active: groupActive,
-      isSessionGroup: true,
-      // The Modal group box is a cloud Linux box; its precise OS/arch is not
-      // surfaced as a metric, so the dashboard shows the canonical linux/x86_64.
-      os: "linux",
-      arch: "x86_64",
-      hasDisplay: false,
-      desktopUnavailableReason: null,
-      allowScreenControl: false,
-      sharedSessionCount: 1,
-      lastSeenAt: null,
-      metrics: null,
-    }));
+    machines.push(
+      MachineView.parse({
+        sandboxId: session.sandboxGroupId,
+        enrollmentId: null,
+        name: "session sandbox",
+        kind: session.sandboxBackend === "selfhosted" ? "selfhosted" : "modal",
+        state: "online",
+        active: groupActive,
+        isSessionGroup: true,
+        // The Modal group box is a cloud Linux box; its precise OS/arch is not
+        // surfaced as a metric, so the dashboard shows the canonical linux/x86_64.
+        os: "linux",
+        arch: "x86_64",
+        hasDisplay: false,
+        desktopUnavailableReason: null,
+        allowScreenControl: false,
+        sharedSessionCount: 1,
+        lastSeenAt: null,
+        metrics: null,
+      }),
+    );
   }
 
   // The workspace's enrolled selfhosted machines. One bulk metrics read joined
@@ -234,23 +236,25 @@ export async function listMachines(
     const sharedSessionCount = lease?.refcount ?? 0;
 
     const metricsRow = metricsByEnrollment.get(enrollment.id) ?? null;
-    machines.push(MachineView.parse({
-      sandboxId: sandbox.id,
-      enrollmentId: enrollment.id,
-      name: sandbox.name,
-      kind: "selfhosted",
-      state,
-      active: activeSandboxId === sandbox.id,
-      isSessionGroup: false,
-      os: enrollment.os,
-      arch: enrollment.arch,
-      hasDisplay: enrollment.hasDisplay,
-      desktopUnavailableReason: enrollment.desktopUnavailableReason,
-      allowScreenControl: enrollment.allowScreenControl,
-      sharedSessionCount,
-      lastSeenAt: enrollment.lastSeenAt,
-      metrics: metricsRow ? metricRowToSample(metricsRow) : null,
-    }));
+    machines.push(
+      MachineView.parse({
+        sandboxId: sandbox.id,
+        enrollmentId: enrollment.id,
+        name: sandbox.name,
+        kind: "selfhosted",
+        state,
+        active: activeSandboxId === sandbox.id,
+        isSessionGroup: false,
+        os: enrollment.os,
+        arch: enrollment.arch,
+        hasDisplay: enrollment.hasDisplay,
+        desktopUnavailableReason: enrollment.desktopUnavailableReason,
+        allowScreenControl: enrollment.allowScreenControl,
+        sharedSessionCount,
+        lastSeenAt: enrollment.lastSeenAt,
+        metrics: metricsRow ? metricRowToSample(metricsRow) : null,
+      }),
+    );
   }
 
   return { activeSandboxId, activeEpoch, machines };

@@ -98,7 +98,9 @@ describe("get.<domain> install routes", () => {
   // GitHub-Releases redirect, so these assertions hold whether or not a Linux
   // binary happens to be baked into the local tree.
   test("GET /agent/latest/<unbaked-asset> redirects to the moving agent-latest release", async () => {
-    const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
+    const res = await appFor(testSettings()).request(
+      "/agent/latest/opengeni-agent-universal-apple-darwin",
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
       "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-latest/opengeni-agent-universal-apple-darwin",
@@ -106,7 +108,9 @@ describe("get.<domain> install routes", () => {
   });
 
   test("GET /agent/v<ver>/<unbaked-asset> redirects to the immutable agent-v<ver> tag asset", async () => {
-    const res = await appFor(testSettings()).request("/agent/v1.2.3/opengeni-agent-universal-apple-darwin.minisig");
+    const res = await appFor(testSettings()).request(
+      "/agent/v1.2.3/opengeni-agent-universal-apple-darwin.minisig",
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
       "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v1.2.3/opengeni-agent-universal-apple-darwin.minisig",
@@ -115,7 +119,9 @@ describe("get.<domain> install routes", () => {
 
   test("a configured agentReleasesBaseUrl overrides the redirect target", async () => {
     const settings = testSettings({ agentReleasesBaseUrl: "https://mirror.example.com/rel/" });
-    const res = await appFor(settings).request("/agent/latest/opengeni-agent-universal-apple-darwin");
+    const res = await appFor(settings).request(
+      "/agent/latest/opengeni-agent-universal-apple-darwin",
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
       "https://mirror.example.com/rel/download/agent-latest/opengeni-agent-universal-apple-darwin",
@@ -130,7 +136,11 @@ describe("get.<domain> install routes", () => {
   test("the install routes are reachable with auth REQUIRED (unauthenticated curl)", async () => {
     // A fresh machine holds no credentials; the install bodies carry no secrets,
     // so the routes must be auth-exempt even when authRequired is on.
-    const settings = testSettings({ authRequired: true, accessKey: "secret-key", authAllowHealth: true });
+    const settings = testSettings({
+      authRequired: true,
+      accessKey: "secret-key",
+      authAllowHealth: true,
+    });
     const app = appFor(settings);
 
     const installed = await app.request("/install.sh");
@@ -193,7 +203,9 @@ describe("get.<domain> install routes — baked binary serving", () => {
   });
 
   test("an un-baked asset still 302s to GitHub Releases even while another asset is baked", async () => {
-    const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
+    const res = await appFor(testSettings()).request(
+      "/agent/latest/opengeni-agent-universal-apple-darwin",
+    );
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toContain(
       "/releases/download/agent-latest/opengeni-agent-universal-apple-darwin",

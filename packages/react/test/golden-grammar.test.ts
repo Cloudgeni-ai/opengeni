@@ -34,18 +34,26 @@ describe("golden event grammar", () => {
       try {
         expect(actual).toEqual(expected);
       } catch (error) {
-        throw new Error(`${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(
+          `${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
       }
     });
   }
 
   test("coalesced compact fixture projects identically to its raw delta fixture", () => {
     const raw = project(readJson<SessionEvent[]>(join(fixturesDir, "05-coalesced-raw.json")));
-    const compact = project(readJson<SessionEvent[]>(join(fixturesDir, "05-coalesced-compact.json")));
+    const compact = project(
+      readJson<SessionEvent[]>(join(fixturesDir, "05-coalesced-compact.json")),
+    );
     try {
       expect(compact).toEqual(raw);
     } catch (error) {
-      throw new Error(`${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
     }
   });
 });

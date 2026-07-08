@@ -39,11 +39,7 @@ import {
   type EnrollmentArch,
   type EnrollmentOs,
 } from "@opengeni/contracts";
-import {
-  getWorkspace,
-  listEnrollments,
-  revokeEnrollment,
-} from "@opengeni/db";
+import { getWorkspace, listEnrollments, revokeEnrollment } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
@@ -66,7 +62,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // surface invisible while disabled — it does not exist for this deployment yet.
   function assertSelfhostedEnabled(): void {
     if (!settings.sandboxSelfhostedEnabled) {
-      throw new HTTPException(404, { message: "selfhosted enrollment is not enabled for this deployment" });
+      throw new HTTPException(404, {
+        message: "selfhosted enrollment is not enabled for this deployment",
+      });
     }
   }
 
@@ -106,18 +104,21 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
-    const result = await startDeviceEnrollment({ db, settings }, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.id,
-      publicKey: body.publicKey,
-      os: body.os as EnrollmentOs,
-      arch: body.arch as EnrollmentArch,
-      machineName: body.machineName ?? null,
-      canOfferDisplay: body.canOfferDisplay,
-      requestsScreenControl: body.requestsScreenControl,
-      // The approve page is served at the SAME origin as this request.
-      verificationOrigin: new URL(c.req.url).origin,
-    });
+    const result = await startDeviceEnrollment(
+      { db, settings },
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.id,
+        publicKey: body.publicKey,
+        os: body.os as EnrollmentOs,
+        arch: body.arch as EnrollmentArch,
+        machineName: body.machineName ?? null,
+        canOfferDisplay: body.canOfferDisplay,
+        requestsScreenControl: body.requestsScreenControl,
+        // The approve page is served at the SAME origin as this request.
+        verificationOrigin: new URL(c.req.url).origin,
+      },
+    );
     return c.json(result, 201);
   });
 
@@ -129,7 +130,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid device-poll request" });
     }
-    const result = await pollDeviceEnrollment({ db, settings }, { deviceCode: parsed.data.deviceCode });
+    const result = await pollDeviceEnrollment(
+      { db, settings },
+      { deviceCode: parsed.data.deviceCode },
+    );
     return c.json(result, 200);
   });
 
@@ -146,7 +150,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid device-lookup request" });
     }
-    const record = await lookupDeviceEnrollment({ db, settings }, { userCode: parsed.data.userCode });
+    const record = await lookupDeviceEnrollment(
+      { db, settings },
+      { userCode: parsed.data.userCode },
+    );
     if (!record) {
       // Unknown / terminal / expired code → 404 (indistinguishable from an
       // unauthorized one below, by design).
@@ -177,14 +184,17 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid enroll-token-exchange request" });
     }
     const body = parsed.data;
-    const result = await exchangeEnrollToken({ db, settings }, {
-      token: body.token,
-      publicKey: body.publicKey,
-      os: body.os as EnrollmentOs,
-      arch: body.arch as EnrollmentArch,
-      machineName: body.machineName ?? null,
-      canOfferDisplay: body.canOfferDisplay,
-    });
+    const result = await exchangeEnrollToken(
+      { db, settings },
+      {
+        token: body.token,
+        publicKey: body.publicKey,
+        os: body.os as EnrollmentOs,
+        arch: body.arch as EnrollmentArch,
+        machineName: body.machineName ?? null,
+        canOfferDisplay: body.canOfferDisplay,
+      },
+    );
     if (!result.ok) {
       if (result.reason === "disabled") {
         // The credential plane is off for this deployment (no signing secret).
@@ -207,25 +217,31 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid device-approve request" });
     }
     const body = parsed.data;
-    const approved = await approveDeviceEnrollment({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      userCode: body.userCode,
-      allowScreenControl: body.allowScreenControl,
-      // The LOUD consent record: WHO consented (the authenticated subject + label).
-      approvedBySubjectId: grant.subjectId,
-      approvedBySubjectLabel: grant.subjectLabel ?? null,
-    });
+    const approved = await approveDeviceEnrollment(
+      { db, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        userCode: body.userCode,
+        allowScreenControl: body.allowScreenControl,
+        // The LOUD consent record: WHO consented (the authenticated subject + label).
+        approvedBySubjectId: grant.subjectId,
+        approvedBySubjectLabel: grant.subjectLabel ?? null,
+      },
+    );
     if (!approved) {
       // An unknown / expired / already-terminal user_code in this workspace.
       throw new HTTPException(404, { message: "no pending enrollment for that code" });
     }
-    return c.json(DeviceEnrollmentApproveResponse.parse({
-      approved: true,
-      enrollmentId: approved.enrollmentId,
-      sandboxId: approved.sandboxId,
-      allowScreenControl: approved.allowScreenControl,
-    }), 201);
+    return c.json(
+      DeviceEnrollmentApproveResponse.parse({
+        approved: true,
+        enrollmentId: approved.enrollmentId,
+        sandboxId: approved.sandboxId,
+        allowScreenControl: approved.allowScreenControl,
+      }),
+      201,
+    );
   });
 
   // ── POST /workspaces/:workspaceId/enrollments/device/deny (user-authed) ─────
@@ -239,11 +255,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid device-deny request" });
     }
-    const result = await denyDeviceEnrollment({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      userCode: parsed.data.userCode,
-    });
+    const result = await denyDeviceEnrollment(
+      { db, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        userCode: parsed.data.userCode,
+      },
+    );
     return c.json(DeviceEnrollmentDenyResponse.parse({ denied: result.denied }), 200);
   });
 
@@ -261,11 +280,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid mint-enroll-token request" });
     }
-    const minted = await mintEnrollToken({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      allowScreenControl: parsed.data.allowScreenControl,
-    });
+    const minted = await mintEnrollToken(
+      { db, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        allowScreenControl: parsed.data.allowScreenControl,
+      },
+    );
     if (!minted) {
       // The credential plane is off (no signing secret) — mirror poll's disabled path.
       throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
@@ -279,23 +301,31 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "enrollments:read");
     assertSelfhostedEnabled();
     const statusFilter = c.req.query("status");
-    const rows = await listEnrollments(db, workspaceId, statusFilter === "active" ? { status: "active" } : {});
-    return c.json(ListEnrollmentsResponse.parse({
-      enrollments: rows.map((row) => EnrollmentSummary.parse({
-        id: row.id,
-        pubkey: row.pubkey,
-        exposure: row.exposure,
-        hasDisplay: row.hasDisplay,
-        desktopUnavailableReason: row.desktopUnavailableReason,
-        allowScreenControl: row.allowScreenControl,
-        status: row.status,
-        os: row.os,
-        arch: row.arch,
-        lastSeenAt: row.lastSeenAt,
-        createdAt: row.createdAt,
-        revokedAt: row.revokedAt,
-      })),
-    }));
+    const rows = await listEnrollments(
+      db,
+      workspaceId,
+      statusFilter === "active" ? { status: "active" } : {},
+    );
+    return c.json(
+      ListEnrollmentsResponse.parse({
+        enrollments: rows.map((row) =>
+          EnrollmentSummary.parse({
+            id: row.id,
+            pubkey: row.pubkey,
+            exposure: row.exposure,
+            hasDisplay: row.hasDisplay,
+            desktopUnavailableReason: row.desktopUnavailableReason,
+            allowScreenControl: row.allowScreenControl,
+            status: row.status,
+            os: row.os,
+            arch: row.arch,
+            lastSeenAt: row.lastSeenAt,
+            createdAt: row.createdAt,
+            revokedAt: row.revokedAt,
+          }),
+        ),
+      }),
+    );
   });
 
   // ── POST /workspaces/:workspaceId/enrollments/:id/revoke (user-authed) ──────

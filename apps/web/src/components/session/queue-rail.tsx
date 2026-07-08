@@ -34,7 +34,10 @@ import {
 } from "@/lib/queue";
 import { cn } from "@/lib/utils";
 
-export function QueueRail({ queue, sessionStatus }: {
+export function QueueRail({
+  queue,
+  sessionStatus,
+}: {
   queue: UseTurnQueueResult;
   sessionStatus: SessionStatus;
 }) {
@@ -46,7 +49,11 @@ export function QueueRail({ queue, sessionStatus }: {
   const queueIds = queue.queue.map((turn) => turn.id);
   // Honest active-turn area: when the turn list failed to load we do not know
   // whether a turn is running, so never claim "new messages start immediately".
-  const activeTurnView = listViewState({ loading: queue.loading, error: queue.error, count: queue.activeTurn ? 1 : 0 });
+  const activeTurnView = listViewState({
+    loading: queue.loading,
+    error: queue.error,
+    count: queue.activeTurn ? 1 : 0,
+  });
 
   // Claimed/too-late reconciliation: if the turn under edit leaves the queue
   // (the worker claimed it, or someone deleted it), close the editor honestly
@@ -62,7 +69,9 @@ export function QueueRail({ queue, sessionStatus }: {
     setEditingTurnId(null);
     setEditDraft("");
     if (fate.kind === "claimed") {
-      setClaimedNotice("That turn was claimed while you were editing — it is already running, so the edit was not applied.");
+      setClaimedNotice(
+        "That turn was claimed while you were editing — it is already running, so the edit was not applied.",
+      );
     } else if (fate.kind === "cancelled") {
       setClaimedNotice("That turn was deleted while you were editing.");
     }
@@ -119,11 +128,16 @@ export function QueueRail({ queue, sessionStatus }: {
       {claimedNotice ? (
         <Notice
           tone="waiting"
-          action={(
-            <button type="button" onClick={() => setClaimedNotice(null)} aria-label="Dismiss" className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg">
+          action={
+            <button
+              type="button"
+              onClick={() => setClaimedNotice(null)}
+              aria-label="Dismiss"
+              className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg"
+            >
               <XIcon className="size-3.5" />
             </button>
-          )}
+          }
         >
           {claimedNotice}
         </Notice>
@@ -132,11 +146,16 @@ export function QueueRail({ queue, sessionStatus }: {
       {queue.mutationError ? (
         <Notice
           tone="failed"
-          action={(
-            <button type="button" onClick={queue.clearMutationError} aria-label="Dismiss queue error" className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg">
+          action={
+            <button
+              type="button"
+              onClick={queue.clearMutationError}
+              aria-label="Dismiss queue error"
+              className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg"
+            >
               <XIcon className="size-3.5" />
             </button>
-          )}
+          }
         >
           {queue.mutationError.message}
         </Notice>
@@ -152,11 +171,17 @@ export function QueueRail({ queue, sessionStatus }: {
       ) : activeTurnView === "error" ? (
         <Notice
           tone="failed"
-          action={(
-            <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="text-status-failed hover:bg-status-failed/20 hover:text-status-failed">
+          action={
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => void queue.refresh()}
+              className="text-status-failed hover:bg-status-failed/20 hover:text-status-failed"
+            >
               Retry
             </Button>
-          )}
+          }
         >
           Couldn't load the turn queue{queue.error?.message ? ` — ${queue.error.message}` : ""}
         </Notice>
@@ -183,14 +208,18 @@ export function QueueRail({ queue, sessionStatus }: {
                 event.preventDefault();
                 setDropTargetId(turn.id);
               }}
-              onDragLeave={() => setDropTargetId((current) => (current === turn.id ? null : current))}
+              onDragLeave={() =>
+                setDropTargetId((current) => (current === turn.id ? null : current))
+              }
               onDrop={(event) => {
                 event.preventDefault();
                 void dropOn(turn.id);
               }}
               className={cn(
                 "group rounded-lg border border-border bg-surface/45 p-2 transition-colors",
-                dropTargetId === turn.id && draggedTurnId !== turn.id && "border-brand/60 bg-brand/10",
+                dropTargetId === turn.id &&
+                  draggedTurnId !== turn.id &&
+                  "border-brand/60 bg-brand/10",
                 draggedTurnId === turn.id && "opacity-50",
               )}
             >
@@ -204,18 +233,35 @@ export function QueueRail({ queue, sessionStatus }: {
                     className="min-h-16 w-full rounded-md border border-border bg-bg px-2.5 py-2 text-xs leading-5"
                   />
                   <div className="flex items-center justify-end gap-1.5">
-                    <Button type="button" variant="ghost" size="xs" onClick={() => setEditingTurnId(null)}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      onClick={() => setEditingTurnId(null)}
+                    >
                       Cancel
                     </Button>
-                    <Button type="button" size="xs" disabled={!editDraft.trim() || queue.mutating} onClick={() => void saveEdit(turn.id)}>
-                      {queue.mutating ? <Loader2Icon className="size-3 animate-spin" /> : <CheckIcon className="size-3" />}
+                    <Button
+                      type="button"
+                      size="xs"
+                      disabled={!editDraft.trim() || queue.mutating}
+                      onClick={() => void saveEdit(turn.id)}
+                    >
+                      {queue.mutating ? (
+                        <Loader2Icon className="size-3 animate-spin" />
+                      ) : (
+                        <CheckIcon className="size-3" />
+                      )}
                       Save
                     </Button>
                   </div>
                 </div>
               ) : (
                 <div className="flex min-w-0 items-start gap-2">
-                  <span className="mt-0.5 flex shrink-0 cursor-grab items-center gap-1 text-fg-subtle" title="Drag to reorder">
+                  <span
+                    className="mt-0.5 flex shrink-0 cursor-grab items-center gap-1 text-fg-subtle"
+                    title="Drag to reorder"
+                  >
                     <GripVerticalIcon className="size-3.5" />
                     <span className="font-mono text-2xs">#{index + 1}</span>
                   </span>
@@ -284,10 +330,20 @@ export function QueueRail({ queue, sessionStatus }: {
           </summary>
           <ol className="mt-2 space-y-1">
             {history.slice(0, 12).map((turn) => (
-              <li key={turn.id} className="flex min-w-0 items-start gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5">
+              <li
+                key={turn.id}
+                className="flex min-w-0 items-start gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5"
+              >
                 <TurnStatusDot status={turn.status} className="mt-1" />
-                <span className="line-clamp-2 min-w-0 flex-1 text-2xs leading-4 text-fg-muted" title={turn.prompt}>{turn.prompt}</span>
-                <span className="shrink-0 text-2xs text-fg-subtle">{turnStatusLabel(turn.status)}</span>
+                <span
+                  className="line-clamp-2 min-w-0 flex-1 text-2xs leading-4 text-fg-muted"
+                  title={turn.prompt}
+                >
+                  {turn.prompt}
+                </span>
+                <span className="shrink-0 text-2xs text-fg-subtle">
+                  {turnStatusLabel(turn.status)}
+                </span>
               </li>
             ))}
           </ol>
@@ -363,7 +419,15 @@ function turnStatusLabel(status: SessionTurn["status"]): string {
   return STATUS_META[turnStatusTone(status)].label;
 }
 
-function TurnStatusDot({ status, className }: { status: SessionTurn["status"]; className?: string }) {
+function TurnStatusDot({
+  status,
+  className,
+}: {
+  status: SessionTurn["status"];
+  className?: string;
+}) {
   const tone = turnStatusTone(status);
-  return <StatusDot tone={tone} pulse={tone === "running" || tone === "waiting"} className={className} />;
+  return (
+    <StatusDot tone={tone} pulse={tone === "running" || tone === "waiting"} className={className} />
+  );
 }

@@ -1,5 +1,10 @@
 export { OpenGeniClient } from "./client";
-export type { FetchLike, OpenGeniClientOptions, SendMessageInput, SteerMessageResult } from "./client";
+export type {
+  FetchLike,
+  OpenGeniClientOptions,
+  SendMessageInput,
+  SteerMessageResult,
+} from "./client";
 export { OpenGeniApiError, OpenGeniStreamError, isRetryableStreamError } from "./errors";
 export {
   formatSseEvent,

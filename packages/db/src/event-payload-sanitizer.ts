@@ -97,7 +97,8 @@ export function sanitizeEventPayload<T>(payload: T): T {
   }
   if (payload && typeof payload === "object") {
     const entries = Object.entries(payload as Record<string, unknown>).map(
-      ([key, value]) => [sanitizeEventString(key), sanitizeSensitiveEventField(key, value)] as const,
+      ([key, value]) =>
+        [sanitizeEventString(key), sanitizeSensitiveEventField(key, value)] as const,
     );
     return Object.fromEntries(entries) as unknown as T;
   }

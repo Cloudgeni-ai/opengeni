@@ -13,7 +13,11 @@ export function encryptEnvironmentValue(key: Uint8Array, plaintext: string): str
   assertKey(key);
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final(), cipher.getAuthTag()]);
+  const ciphertext = Buffer.concat([
+    cipher.update(plaintext, "utf8"),
+    cipher.final(),
+    cipher.getAuthTag(),
+  ]);
   return `${VERSION_PREFIX}:${iv.toString("base64")}:${ciphertext.toString("base64")}`;
 }
 

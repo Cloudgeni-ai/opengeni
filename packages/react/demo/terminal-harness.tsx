@@ -34,7 +34,9 @@ function transcriptChunks(): TerminalChunk[] {
   lines.push(`  ${ESC}31mdeleted:    demo/old-terminal.tsx${R}`);
   lines.push("");
   lines.push(`${ESC}2m$ ${R}${ESC}1mls${R} --color`);
-  lines.push(`${ESC}34msrc${R}  ${ESC}34mtest${R}  ${ESC}36mREADME.md${R}  ${ESC}33mpackage.json${R}  ${ESC}35mtsconfig.json${R}`);
+  lines.push(
+    `${ESC}34msrc${R}  ${ESC}34mtest${R}  ${ESC}36mREADME.md${R}  ${ESC}33mpackage.json${R}  ${ESC}35mtsconfig.json${R}`,
+  );
   lines.push("");
   // 16-color chart — normal row then bright row.
   const chart = (base: number) =>
@@ -45,7 +47,12 @@ function transcriptChunks(): TerminalChunk[] {
   lines.push(`${ESC}2m$ ${R}echo ${ESC}33m"warming complete — interactive shell ready"${R}`);
   lines.push(`warming complete — interactive shell ready`);
   lines.push(`${ESC}2m$ ${R}${ESC}5m▊${R}`);
-  return lines.map((text, i) => ({ id: `c${i}`, text: `${text}\r\n`, stream: "stdout" as const, seq: i }));
+  return lines.map((text, i) => ({
+    id: `c${i}`,
+    text: `${text}\r\n`,
+    stream: "stdout" as const,
+    seq: i,
+  }));
 }
 
 function makeResult(overrides: Partial<UseSandboxTerminalResult> = {}): UseSandboxTerminalResult {

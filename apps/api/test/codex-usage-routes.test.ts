@@ -19,9 +19,19 @@ const ID_A = "11111111-0000-4000-8000-000000000001";
 const ID_B = "22222222-0000-4000-8000-000000000002";
 const ID_C = "33333333-0000-4000-8000-000000000003";
 
-const settings = testSettings({ productAccessMode: "managed", delegationSecret: DELEGATION_SECRET });
+const settings = testSettings({
+  productAccessMode: "managed",
+  delegationSecret: DELEGATION_SECRET,
+});
 
-const poisonDb = new Proxy({}, { get() { throw new Error("db must not be touched directly on these route paths"); } });
+const poisonDb = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("db must not be touched directly on these route paths");
+    },
+  },
+);
 
 function app() {
   return createApp({
@@ -45,7 +55,10 @@ async function bearer(permissions: Permission[]): Promise<string> {
   return `Bearer ${token}`;
 }
 
-function account(id: string, over: Partial<opengeniDb.CodexAccountStatus> = {}): opengeniDb.CodexAccountStatus {
+function account(
+  id: string,
+  over: Partial<opengeniDb.CodexAccountStatus> = {},
+): opengeniDb.CodexAccountStatus {
   return {
     id,
     chatgptAccountId: `acct-${id}`,
@@ -69,16 +82,37 @@ function account(id: string, over: Partial<opengeniDb.CodexAccountStatus> = {}):
   };
 }
 
-function payload(status: CodexUsagePayload["status"], over: Partial<CodexUsagePayload> = {}): CodexUsagePayload {
+function payload(
+  status: CodexUsagePayload["status"],
+  over: Partial<CodexUsagePayload> = {},
+): CodexUsagePayload {
   return {
     status,
     planType: "pro",
-    fiveHour: status === "ok" || status === "limit_reached"
-      ? { used: 40, limit: 100, remaining: 60, percent: 40, resetAt: null, resetAfterSeconds: 3600, limitWindowSeconds: 18000 }
-      : null,
-    weekly: status === "ok" || status === "limit_reached"
-      ? { used: 10, limit: 100, remaining: 90, percent: 10, resetAt: null, resetAfterSeconds: 200000, limitWindowSeconds: 604800 }
-      : null,
+    fiveHour:
+      status === "ok" || status === "limit_reached"
+        ? {
+            used: 40,
+            limit: 100,
+            remaining: 60,
+            percent: 40,
+            resetAt: null,
+            resetAfterSeconds: 3600,
+            limitWindowSeconds: 18000,
+          }
+        : null,
+    weekly:
+      status === "ok" || status === "limit_reached"
+        ? {
+            used: 10,
+            limit: 100,
+            remaining: 90,
+            percent: 10,
+            resetAt: null,
+            resetAfterSeconds: 200000,
+            limitWindowSeconds: 604800,
+          }
+        : null,
     limitReached: status === "limit_reached",
     fetchedAt: new Date().toISOString(),
     ...over,
@@ -86,19 +120,25 @@ function payload(status: CodexUsagePayload["status"], over: Partial<CodexUsagePa
 }
 
 const restores: Array<() => void> = [];
-afterEach(() => { while (restores.length) restores.pop()!(); });
+afterEach(() => {
+  while (restores.length) restores.pop()!();
+});
 
 function spyAccounts(rows: opengeniDb.CodexAccountStatus[]): void {
   const spy = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue(rows);
   restores.push(() => spy.mockRestore());
 }
-function spyUsage(byId: Record<string, CodexUsagePayload | (() => Promise<CodexUsagePayload>)>): void {
-  const spy = spyOn(opengeniDb, "fetchCodexUsageForAccount").mockImplementation(async (_db, _settings, _ws, id: string) => {
-    const entry = byId[id];
-    if (typeof entry === "function") return entry();
-    if (!entry) throw new Error(`unexpected usage fetch for ${id}`);
-    return entry;
-  });
+function spyUsage(
+  byId: Record<string, CodexUsagePayload | (() => Promise<CodexUsagePayload>)>,
+): void {
+  const spy = spyOn(opengeniDb, "fetchCodexUsageForAccount").mockImplementation(
+    async (_db, _settings, _ws, id: string) => {
+      const entry = byId[id];
+      if (typeof entry === "function") return entry();
+      if (!entry) throw new Error(`unexpected usage fetch for ${id}`);
+      return entry;
+    },
+  );
   restores.push(() => spy.mockRestore());
 }
 
@@ -110,14 +150,18 @@ describe("POST /codex/usage/refresh — batched per-account live refresh", () =>
       [ID_B]: payload("limit_reached"),
       // An account whose usage read rejects: allSettled keeps the batch alive and
       // the route maps the rejection to an `error` entry.
-      [ID_C]: async () => { throw new Error("boom 401"); },
+      [ID_C]: async () => {
+        throw new Error("boom 401");
+      },
     });
     const res = await app().request(`/v1/workspaces/${WS}/codex/usage/refresh`, {
       method: "POST",
       headers: { authorization: await bearer(["workspace:read"]) },
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { usage: Record<string, { status: string; usage: CodexUsagePayload }> };
+    const body = (await res.json()) as {
+      usage: Record<string, { status: string; usage: CodexUsagePayload }>;
+    };
     expect(Object.keys(body.usage).sort()).toEqual([ID_A, ID_B, ID_C].sort());
     expect(body.usage[ID_A]!.status).toBe("ok");
     expect(body.usage[ID_B]!.status).toBe("limit_reached");
@@ -132,7 +176,7 @@ describe("POST /codex/usage/refresh — batched per-account live refresh", () =>
       method: "POST",
       headers: { authorization: await bearer(["workspace:read"]) },
     });
-    const body = await res.json() as { usage: Record<string, { status: string }> };
+    const body = (await res.json()) as { usage: Record<string, { status: string }> };
     expect(body.usage[ID_A]!.status).toBe("limit_reached");
   });
 
@@ -151,7 +195,7 @@ describe("GET /codex/accounts/:id/usage — single-account live read", () => {
       headers: { authorization: await bearer(["workspace:read"]) },
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { status: string; usage: CodexUsagePayload };
+    const body = (await res.json()) as { status: string; usage: CodexUsagePayload };
     expect(body.status).toBe("ok");
     expect(body.usage.weekly?.remaining).toBe(90);
   });
@@ -169,8 +213,15 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
   test("reads the active account via fetchCodexUsageForAccount (no stale-token 401)", async () => {
     {
       const spy = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
-        connected: true, credentialId: ID_A, chatgptAccountId: "a", scopes: null, planType: "pro",
-        status: "active", expiresAt: null, lastRefreshAt: null, lastError: null,
+        connected: true,
+        credentialId: ID_A,
+        chatgptAccountId: "a",
+        scopes: null,
+        planType: "pro",
+        status: "active",
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastError: null,
       });
       restores.push(() => spy.mockRestore());
     }
@@ -179,7 +230,7 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
       headers: { authorization: await bearer(["workspace:read"]) },
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { status: string };
+    const body = (await res.json()) as { status: string };
     expect(body.status).toBe("ok");
   });
 
@@ -214,11 +265,14 @@ describe("PATCH /codex/settings — rotation settings", () => {
     const { ensure, update } = spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
-      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(["workspace:admin"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ rotationEnabled: true }),
     });
     expect(res.status).toBe(200);
-    const body = await res.json() as { rotationEnabled: boolean; rotationStrategy: string };
+    const body = (await res.json()) as { rotationEnabled: boolean; rotationStrategy: string };
     expect(body.rotationEnabled).toBe(true);
     expect(body.rotationStrategy).toBe("most_remaining");
     expect(ensure).toHaveBeenCalledTimes(1);
@@ -229,7 +283,10 @@ describe("PATCH /codex/settings — rotation settings", () => {
     const { update } = spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
-      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(["workspace:admin"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ rotationStrategy: "bogus" }),
     });
     expect(res.status).toBe(400);
@@ -240,7 +297,10 @@ describe("PATCH /codex/settings — rotation settings", () => {
     spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
-      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(["workspace:admin"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
@@ -250,7 +310,10 @@ describe("PATCH /codex/settings — rotation settings", () => {
     spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
-      headers: { authorization: await bearer(["workspace:read"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(["workspace:read"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ rotationEnabled: true }),
     });
     expect([401, 403]).toContain(res.status);

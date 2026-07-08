@@ -249,16 +249,32 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
 describe("resolveActiveDesktopTransport — advertisement matches active-sandbox routing (both swap directions)", () => {
   test("selfhosted-active → RELAY framebuffer (relay-frames/frames, view-only)", () => {
     // modal-HOME swapped onto a machine, OR a machine-primary session.
-    expect(resolveActiveDesktopTransport(true, true)).toEqual({ transport: "relay-frames", client: "frames", mode: "read-only" });
+    expect(resolveActiveDesktopTransport(true, true)).toEqual({
+      transport: "relay-frames",
+      client: "frames",
+      mode: "read-only",
+    });
     // interactive policy is irrelevant for the relay framebuffer (view-only in v1).
-    expect(resolveActiveDesktopTransport(true, false)).toEqual({ transport: "relay-frames", client: "frames", mode: "read-only" });
+    expect(resolveActiveDesktopTransport(true, false)).toEqual({
+      transport: "relay-frames",
+      client: "frames",
+      mode: "read-only",
+    });
   });
 
   test("NOT selfhosted-active → Modal noVNC (vnc-ws/novnc); THE swap-away fix", () => {
     // selfhosted-HOME swapped AWAY to the cloud group box (activeSandboxId=null or a
     // non-selfhosted active sandbox): must be the Modal noVNC tunnel, NOT relay-frames.
-    expect(resolveActiveDesktopTransport(false, true)).toEqual({ transport: "vnc-ws", client: "novnc", mode: "interactive" });
+    expect(resolveActiveDesktopTransport(false, true)).toEqual({
+      transport: "vnc-ws",
+      client: "novnc",
+      mode: "interactive",
+    });
     // take-control disabled by deployment policy → read-only noVNC.
-    expect(resolveActiveDesktopTransport(false, false)).toEqual({ transport: "vnc-ws", client: "novnc", mode: "read-only" });
+    expect(resolveActiveDesktopTransport(false, false)).toEqual({
+      transport: "vnc-ws",
+      client: "novnc",
+      mode: "read-only",
+    });
   });
 });

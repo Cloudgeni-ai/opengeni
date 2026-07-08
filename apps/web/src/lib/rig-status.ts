@@ -14,7 +14,11 @@ export function changeVerificationPassed(change: RigChange): boolean {
 /** A verified `definition_edit` still sitting in `proposed` is awaiting a
  *  human promote (setup_append auto-merges, so it never lingers here). */
 export function changeIsPromotable(change: RigChange): boolean {
-  return change.kind === "definition_edit" && change.status === "proposed" && changeVerificationPassed(change);
+  return (
+    change.kind === "definition_edit" &&
+    change.status === "proposed" &&
+    changeVerificationPassed(change)
+  );
 }
 
 export function rigChangeKindLabel(kind: RigChangeKind): string {
@@ -36,17 +40,47 @@ export type RigStatusView = {
 export function rigChangeStatusView(change: RigChange): RigStatusView {
   switch (change.status) {
     case "verifying":
-      return { tone: "running", label: "Verifying", pulse: true, description: "Replaying in a clean sandbox to confirm it reproduces." };
+      return {
+        tone: "running",
+        label: "Verifying",
+        pulse: true,
+        description: "Replaying in a clean sandbox to confirm it reproduces.",
+      };
     case "merged":
-      return { tone: "idle", label: "Merged", pulse: false, description: "Verified and folded into a new rig version." };
+      return {
+        tone: "idle",
+        label: "Merged",
+        pulse: false,
+        description: "Verified and folded into a new rig version.",
+      };
     case "rejected":
-      return { tone: "failed", label: "Rejected", pulse: false, description: "Verification failed — the change did not reproduce cleanly." };
+      return {
+        tone: "failed",
+        label: "Rejected",
+        pulse: false,
+        description: "Verification failed — the change did not reproduce cleanly.",
+      };
     case "failed":
-      return { tone: "failed", label: "Verification error", pulse: false, description: "The verification run itself errored before it could decide." };
+      return {
+        tone: "failed",
+        label: "Verification error",
+        pulse: false,
+        description: "The verification run itself errored before it could decide.",
+      };
     case "proposed":
       return changeVerificationPassed(change)
-        ? { tone: "idle", label: "Verified", pulse: false, description: "Passed verification — ready to promote into a new version." }
-        : { tone: "queued", label: "Proposed", pulse: false, description: "Waiting to be verified against a clean sandbox." };
+        ? {
+            tone: "idle",
+            label: "Verified",
+            pulse: false,
+            description: "Passed verification — ready to promote into a new version.",
+          }
+        : {
+            tone: "queued",
+            label: "Proposed",
+            pulse: false,
+            description: "Waiting to be verified against a clean sandbox.",
+          };
   }
 }
 
@@ -57,11 +91,26 @@ export type RigCheckHealth = "passing" | "failing" | "unknown";
 export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
   switch (health) {
     case "passing":
-      return { tone: "idle", label: "Checks passing", pulse: false, description: "Every declared check exited zero on the last run." };
+      return {
+        tone: "idle",
+        label: "Checks passing",
+        pulse: false,
+        description: "Every declared check exited zero on the last run.",
+      };
     case "failing":
-      return { tone: "failed", label: "Check failing", pulse: false, description: "A declared check exited non-zero on the last run." };
+      return {
+        tone: "failed",
+        label: "Check failing",
+        pulse: false,
+        description: "A declared check exited non-zero on the last run.",
+      };
     case "unknown":
-      return { tone: "queued", label: "Not verified", pulse: false, description: "This version's checks have not been run yet." };
+      return {
+        tone: "queued",
+        label: "Not verified",
+        pulse: false,
+        description: "This version's checks have not been run yet.",
+      };
   }
 }
 

@@ -115,7 +115,10 @@ describe("E2 font resolution (no var())", () => {
 
   test("resolves the concrete --og-font-mono family + px size", () => {
     const font = resolveTerminalFontFromReader(
-      reader({ "--og-font-mono": "'JetBrains Mono', ui-monospace, monospace", "--og-code-font-size": "12px" }),
+      reader({
+        "--og-font-mono": "'JetBrains Mono', ui-monospace, monospace",
+        "--og-code-font-size": "12px",
+      }),
     );
     expect(font.fontFamily).toBe("'JetBrains Mono', ui-monospace, monospace");
     expect(font.fontFamily).not.toContain("var(");

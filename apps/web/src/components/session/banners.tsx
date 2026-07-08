@@ -1,4 +1,14 @@
-import { AlertTriangleIcon, ArrowLeftIcon, CreditCardIcon, DownloadIcon, FileJsonIcon, GitBranchIcon, ImageIcon, TerminalIcon, WrenchIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  ArrowLeftIcon,
+  CreditCardIcon,
+  DownloadIcon,
+  FileJsonIcon,
+  GitBranchIcon,
+  ImageIcon,
+  TerminalIcon,
+  WrenchIcon,
+} from "lucide-react";
 import { useLightboxOptional, type UserMessageItem } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -28,7 +38,13 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
           </div>
         </div>
       </div>
-      <Button type="button" size="sm" variant="secondary" onClick={props.onNewSession} className="shrink-0">
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        onClick={props.onNewSession}
+        className="shrink-0"
+      >
         <ArrowLeftIcon className="size-3.5" />
         Back to sessions
       </Button>
@@ -45,7 +61,11 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
  * when the workspace has no credits (the revive turn dies the same death), so
  * the banner points at the actual fix — the organization's Credits section.
  */
-export function FailedSessionBanner({ failure, creditExhausted, workspaceId }: {
+export function FailedSessionBanner({
+  failure,
+  creditExhausted,
+  workspaceId,
+}: {
   failure: SessionFailureSummary;
   creditExhausted?: boolean;
   workspaceId?: string;
@@ -53,13 +73,20 @@ export function FailedSessionBanner({ failure, creditExhausted, workspaceId }: {
   if (creditExhausted) {
     return (
       <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
-        <div data-testid="failed-session-banner" className="flex flex-col gap-3 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed sm:flex-row sm:items-center sm:justify-between">
+        <div
+          data-testid="failed-session-banner"
+          className="flex flex-col gap-3 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed sm:flex-row sm:items-center sm:justify-between"
+        >
           <div className="flex min-w-0 gap-2.5">
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
             <div className="min-w-0 text-sm">
-              <span className="font-medium">This workspace is out of OpenGeni credits{failure.failedAt ? ` (since ${formatTimestamp(failure.failedAt)})` : ""}.</span>
+              <span className="font-medium">
+                This workspace is out of OpenGeni credits
+                {failure.failedAt ? ` (since ${formatTimestamp(failure.failedAt)})` : ""}.
+              </span>
               <div className="mt-1 text-xs text-fg-muted">
-                The conversation history is preserved. Add credits to the organization, then keep working from right here.
+                The conversation history is preserved. Add credits to the organization, then keep
+                working from right here.
               </div>
             </div>
           </div>
@@ -77,10 +104,15 @@ export function FailedSessionBanner({ failure, creditExhausted, workspaceId }: {
   }
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
-      <div data-testid="failed-session-banner" className="flex gap-2.5 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed">
+      <div
+        data-testid="failed-session-banner"
+        className="flex gap-2.5 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed"
+      >
         <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
         <div className="min-w-0 text-sm">
-          <span className="font-medium">This session failed{failure.failedAt ? ` ${formatTimestamp(failure.failedAt)}` : ""}.</span>{" "}
+          <span className="font-medium">
+            This session failed{failure.failedAt ? ` ${formatTimestamp(failure.failedAt)}` : ""}.
+          </span>{" "}
           {failure.reason ? (
             <span className="text-status-failed/90">{failure.reason}</span>
           ) : (
@@ -88,12 +120,17 @@ export function FailedSessionBanner({ failure, creditExhausted, workspaceId }: {
           )}
           <div className="mt-1 text-xs text-fg-muted">
             {failure.redispatchCount > 0 ? (
-              <>{failure.redispatchCount} turn{failure.redispatchCount === 1 ? "" : "s"} timed out and {failure.redispatchCount === 1 ? "was" : "were"} retried automatically before this failure. </>
+              <>
+                {failure.redispatchCount} turn{failure.redispatchCount === 1 ? "" : "s"} timed out
+                and {failure.redispatchCount === 1 ? "was" : "were"} retried automatically before
+                this failure.{" "}
+              </>
             ) : null}
             {failure.failedTurnCount > 1 ? (
               <>{failure.failedTurnCount} turns have failed in this session. </>
             ) : null}
-            The conversation history is preserved — send a message to revive the session and keep working.
+            The conversation history is preserved — send a message to revive the session and keep
+            working.
           </div>
         </div>
       </div>
@@ -108,11 +145,10 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
         <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-md bg-surface-2 text-fg-muted">
           <TerminalIcon className="size-4" />
         </div>
-        <div className="text-sm font-medium">
-          Cancelled session (read-only)
-        </div>
+        <div className="text-sm font-medium">Cancelled session (read-only)</div>
         <p className="mt-1 text-xs leading-5 text-fg-muted">
-          This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Sanitized debug metadata is available in the inspector.
+          This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current
+          run. Sanitized debug metadata is available in the inspector.
         </p>
         <div className="mt-3 text-2xs uppercase tracking-wide text-fg-subtle">
           {props.eventCount} timeline item{props.eventCount === 1 ? "" : "s"}
@@ -130,13 +166,19 @@ type FileResource = Extract<ResourceRef, { kind: "file" }>;
  * to `null`), so the UI never flickers attachment-by-attachment. Keyed on the
  * concatenated ids so re-renders with the same attachments don't refetch.
  */
-function useFileAssets(workspaceId: string, resources: FileResource[]): { assets: Map<string, FileAsset | null>; ready: boolean } {
+function useFileAssets(
+  workspaceId: string,
+  resources: FileResource[],
+): { assets: Map<string, FileAsset | null>; ready: boolean } {
   const { client } = useAppContext();
   // The map remembers WHICH id-key it was fetched for: when the attachments
   // change, the stale map must not masquerade as this message's metadata while
   // the new fetch is in flight (previews briefly showed the previous message's
   // files). `ready` is key-matched, never inferred from map size.
-  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>({ key: "", assets: new Map() });
+  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>({
+    key: "",
+    assets: new Map(),
+  });
   const key = resources.map((resource) => resource.fileId).join(",");
   useEffect(() => {
     let mounted = true;
@@ -170,30 +212,47 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
 }
 
 /** Attachment previews/chips + repository/tool chips + markdown body inside the user bubble. */
-export function UserMessageBody({ workspaceId, item, resolveCapabilityName }: {
+export function UserMessageBody({
+  workspaceId,
+  item,
+  resolveCapabilityName,
+}: {
   workspaceId: string;
   item: UserMessageItem;
   /** Real capability name for a tool chip (from the workspace catalog), or null. */
   resolveCapabilityName?: (mcpServerId: string) => string | null;
 }) {
-  const fileResources = item.resources.filter((resource): resource is FileResource => resource.kind === "file");
-  const repositoryResources = item.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
+  const fileResources = item.resources.filter(
+    (resource): resource is FileResource => resource.kind === "file",
+  );
+  const repositoryResources = item.resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository",
+  );
   const { assets, ready } = useFileAssets(workspaceId, fileResources);
   // A single all-at-once populate: until THIS message's fetch lands every file
   // is "pending" and renders as a neutral skeleton, so an image never briefly
   // shows as a file chip — or as the PREVIOUS message's file — before its
   // preview resolves.
   const filesPending = fileResources.length > 0 && !ready;
-  const imageResources = filesPending ? [] : fileResources.filter((resource) => isImageAsset(assets.get(resource.fileId)));
-  const otherFileResources = filesPending ? [] : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
-  const hasChips = otherFileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0;
+  const imageResources = filesPending
+    ? []
+    : fileResources.filter((resource) => isImageAsset(assets.get(resource.fileId)));
+  const otherFileResources = filesPending
+    ? []
+    : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
+  const hasChips =
+    otherFileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0;
 
   return (
     <div data-testid="timeline-user">
       {filesPending ? (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {fileResources.map((resource) => (
-            <span key={resource.fileId} className="h-7 w-28 animate-pulse rounded-md border border-border bg-surface-2" />
+            <span
+              key={resource.fileId}
+              className="h-7 w-28 animate-pulse rounded-md border border-border bg-surface-2"
+            />
           ))}
         </div>
       ) : null}
@@ -242,7 +301,9 @@ export function UserMessageBody({ workspaceId, item, resolveCapabilityName }: {
               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
             >
               <WrenchIcon className="size-3.5 shrink-0" />
-              <span className="truncate">{resolveCapabilityName?.(tool.id) ?? capabilityChipLabel(tool.id)}</span>
+              <span className="truncate">
+                {resolveCapabilityName?.(tool.id) ?? capabilityChipLabel(tool.id)}
+              </span>
             </span>
           ))}
         </div>
@@ -284,7 +345,8 @@ function MessageImagePreview({
     setUrl(null);
     setFailed(false);
     setLoaded(false);
-    void client.createFileDownloadUrl(workspaceId, resource.fileId)
+    void client
+      .createFileDownloadUrl(workspaceId, resource.fileId)
       .then((signed) => {
         if (mounted) {
           setUrl(signed.url);
@@ -321,7 +383,9 @@ function MessageImagePreview({
       const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId);
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
-      toast.error("Failed to download image", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to download image", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -352,7 +416,9 @@ function MessageImagePreview({
       </button>
       <figcaption className="mt-1 flex items-center gap-1.5 px-0.5 text-2xs text-fg-subtle">
         <ImageIcon className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate" title={asset.filename}>{asset.filename}</span>
+        <span className="min-w-0 flex-1 truncate" title={asset.filename}>
+          {asset.filename}
+        </span>
         <button
           type="button"
           onClick={() => void download()}
@@ -387,11 +453,14 @@ export function MessageFileAttachment({
       return;
     }
     let mounted = true;
-    void client.getFile(workspaceId, resource.fileId).then((asset) => {
-      if (mounted) {
-        setFile(asset);
-      }
-    }).catch(() => undefined);
+    void client
+      .getFile(workspaceId, resource.fileId)
+      .then((asset) => {
+        if (mounted) {
+          setFile(asset);
+        }
+      })
+      .catch(() => undefined);
     return () => {
       mounted = false;
     };
@@ -403,7 +472,9 @@ export function MessageFileAttachment({
       const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId);
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
-      toast.error("Failed to open file", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to open file", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -417,7 +488,11 @@ export function MessageFileAttachment({
       disabled={busy}
       className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60"
     >
-      {isImage ? <ImageIcon className="size-3.5 shrink-0" /> : <FileJsonIcon className="size-3.5 shrink-0" />}
+      {isImage ? (
+        <ImageIcon className="size-3.5 shrink-0" />
+      ) : (
+        <FileJsonIcon className="size-3.5 shrink-0" />
+      )}
       <span className="truncate">{file?.filename ?? resource.fileId}</span>
       <DownloadIcon className="size-3 shrink-0" />
     </button>

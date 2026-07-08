@@ -15,7 +15,6 @@ import {
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
-  replaceIntegrationOAuthClient,
   storeIntegrationOAuthClient,
   updateConnection,
   type Database,
@@ -133,7 +132,9 @@ export async function startMcpOAuth(
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
   const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
-  const providerDomain = canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
+  const providerDomain = canonicalProviderDomain(
+    context.payload.providerDomain ?? new URL(mcpUrl).hostname,
+  );
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -151,8 +152,19 @@ export async function startMcpOAuth(
   const discovery = await discoverMcpOAuth(mcpUrl, settings);
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
   const verifier = randomPkceVerifier();
-  const authorizeScopes = chooseAuthorizeScopes(context.payload.requestedScopes, discovery.challenge.scope, discovery.prm.scopesSupported);
-  const client = await registerOAuthClient(db, settings, discovery.as, metadataUrl, redirectUri, authorizeScopes);
+  const authorizeScopes = chooseAuthorizeScopes(
+    context.payload.requestedScopes,
+    discovery.challenge.scope,
+    discovery.prm.scopesSupported,
+  );
+  const client = await registerOAuthClient(
+    db,
+    settings,
+    discovery.as,
+    metadataUrl,
+    redirectUri,
+    authorizeScopes,
+  );
   const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
     accountId: context.accountId,
@@ -196,14 +208,20 @@ export async function completeMcpOAuthCallback(
   const { db, settings, observability } = deps;
   let state: OAuthStatePayload | null = null;
   if (!input.state) {
-    const error = new OAuthCallbackStageError("state_verify", "state_invalid", new Error("missing OAuth state"));
+    const error = new OAuthCallbackStageError(
+      "state_verify",
+      "state_invalid",
+      new Error("missing OAuth state"),
+    );
     logOAuthCallbackFailure(observability, error, state);
     return { redirectTo: callbackReturnPath("/integrations", "error", { reason: error.reason }) };
   }
   try {
     state = readOAuthState(input.state, settings);
     if (!input.code) {
-      return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }) };
+      return {
+        redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }),
+      };
     }
     const consumed = await consumeIntegrationOAuthStateNonce(db, {
       accountId: state.accountId,
@@ -219,7 +237,11 @@ export async function completeMcpOAuthCallback(
   } catch (error) {
     const staged = new OAuthCallbackStageError("state_verify", "state_invalid", error);
     logOAuthCallbackFailure(observability, staged, state);
-    return { redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", "error", { reason: staged.reason }) };
+    return {
+      redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", "error", {
+        reason: staged.reason,
+      }),
+    };
   }
 
   try {
@@ -228,14 +250,16 @@ export async function completeMcpOAuthCallback(
     const key = requireEnvironmentEncryption(settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
     const client = await clientForState(db, settings, state);
-    const token = await stage("token_exchange", "token_exchange_failed", () => exchangeAuthorizationCode(settings, {
-      code: input.code!,
-      verifier,
-      redirectUri,
-      resource: state.resource,
-      tokenEndpoint: state.tokenEndpoint,
-      client,
-    }));
+    const token = await stage("token_exchange", "token_exchange_failed", () =>
+      exchangeAuthorizationCode(settings, {
+        code: input.code!,
+        verifier,
+        redirectUri,
+        resource: state.resource,
+        tokenEndpoint: state.tokenEndpoint,
+        client,
+      }),
+    );
     const verification = await verifyMcpToolsListNonFatal(observability, settings, state, token);
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
     const credential = credentialBundle(token, state, client);
@@ -251,35 +275,39 @@ export async function completeMcpOAuthCallback(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
-    const connection = await stage("persist", "persist_failed", () => state.connectionId
-      ? updateConnection(db, {
-        workspaceId: state.workspaceId,
-        connectionId: state.connectionId,
-        visibleToSubjectId: state.subjectId,
-        expectedVersion: state.connectionVersion,
-        providerDomain: state.providerDomain,
-        kind: "oauth2",
-        status: "active",
-        credentialEncrypted,
-        grantedScopes: scopes,
-        expiresAt: token.expiresAt,
-        metadata,
-        updatedBySubjectId: state.subjectId,
-      })
-      : createConnection(db, {
-        accountId: state.accountId,
-        workspaceId: state.workspaceId,
-        subjectId: null,
-        providerDomain: state.providerDomain,
-        kind: "oauth2",
-        credentialEncrypted,
-        grantedScopes: scopes,
-        expiresAt: token.expiresAt,
-        metadata,
-        createdBySubjectId: state.subjectId,
-      }));
+    const connection = await stage("persist", "persist_failed", () =>
+      state.connectionId
+        ? updateConnection(db, {
+            workspaceId: state.workspaceId,
+            connectionId: state.connectionId,
+            visibleToSubjectId: state.subjectId,
+            expectedVersion: state.connectionVersion,
+            providerDomain: state.providerDomain,
+            kind: "oauth2",
+            status: "active",
+            credentialEncrypted,
+            grantedScopes: scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            updatedBySubjectId: state.subjectId,
+          })
+        : createConnection(db, {
+            accountId: state.accountId,
+            workspaceId: state.workspaceId,
+            subjectId: null,
+            providerDomain: state.providerDomain,
+            kind: "oauth2",
+            credentialEncrypted,
+            grantedScopes: scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            createdBySubjectId: state.subjectId,
+          }),
+    );
     if (!connection) {
-      throw new HTTPException(409, { message: "connection changed during OAuth reconnect; start again" });
+      throw new HTTPException(409, {
+        message: "connection changed during OAuth reconnect; start again",
+      });
     }
     // Carry the canonical providerDomain (not just the id) so the SPA can build
     // the enable connectionRef straight from the redirect, without a listConnections
@@ -293,9 +321,10 @@ export async function completeMcpOAuthCallback(
       }),
     };
   } catch (error) {
-    const staged = error instanceof OAuthCallbackStageError
-      ? error
-      : new OAuthCallbackStageError("persist", "persist_failed", error);
+    const staged =
+      error instanceof OAuthCallbackStageError
+        ? error
+        : new OAuthCallbackStageError("persist", "persist_failed", error);
     logOAuthCallbackFailure(observability, staged, state);
     return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: staged.reason }) };
   }
@@ -308,30 +337,46 @@ export function integrationBaseUrl(publicBaseUrl: string | undefined, requestUrl
 export function requireIntegrationsStateSecret(settings: Settings): string {
   const secret = settings.integrationsStateSecret?.trim();
   if (!secret) {
-    throw new HTTPException(503, { message: "integrations OAuth requires OPENGENI_INTEGRATIONS_STATE_SECRET" });
+    throw new HTTPException(503, {
+      message: "integrations OAuth requires OPENGENI_INTEGRATIONS_STATE_SECRET",
+    });
   }
   return secret;
 }
 
-async function discoverMcpOAuth(resource: string, settings: Settings): Promise<{
+async function discoverMcpOAuth(
+  resource: string,
+  settings: Settings,
+): Promise<{
   challenge: WwwAuthenticateChallenge;
   prm: ProtectedResourceMetadata;
   as: AuthorizationServerMetadata;
 }> {
   const challenge = await probeMcpChallenge(resource, settings);
-  const prm = await discoverProtectedResourceMetadata(resource, settings, challenge.resourceMetadata);
+  const prm = await discoverProtectedResourceMetadata(
+    resource,
+    settings,
+    challenge.resourceMetadata,
+  );
   const authorizationServer = prm.authorizationServers[0];
   if (!authorizationServer) {
-    throw new HTTPException(422, { message: "MCP protected resource metadata did not advertise an authorization server" });
+    throw new HTTPException(422, {
+      message: "MCP protected resource metadata did not advertise an authorization server",
+    });
   }
   const as = await discoverAuthorizationServerMetadata(authorizationServer, settings);
   if (!as.codeChallengeMethodsSupported.includes("S256")) {
-    throw new HTTPException(422, { message: "authorization server does not support required PKCE S256" });
+    throw new HTTPException(422, {
+      message: "authorization server does not support required PKCE S256",
+    });
   }
   return { challenge, prm, as };
 }
 
-async function probeMcpChallenge(resource: string, settings: Settings): Promise<WwwAuthenticateChallenge> {
+async function probeMcpChallenge(
+  resource: string,
+  settings: Settings,
+): Promise<WwwAuthenticateChallenge> {
   const response = await fetchOAuth(resource, settings, {
     method: "GET",
     headers: { accept: "application/json" },
@@ -375,7 +420,10 @@ async function discoverProtectedResourceMetadata(
   throw new HTTPException(422, { message: "could not discover MCP protected resource metadata" });
 }
 
-async function discoverAuthorizationServerMetadata(authorizationServer: string, settings: Settings): Promise<AuthorizationServerMetadata> {
+async function discoverAuthorizationServerMetadata(
+  authorizationServer: string,
+  settings: Settings,
+): Promise<AuthorizationServerMetadata> {
   const candidates = uniqueStrings([
     authorizationServer,
     ...wellKnownCandidates(authorizationServer, "oauth-authorization-server"),
@@ -405,10 +453,14 @@ async function discoverAuthorizationServerMetadata(authorizationServer: string, 
       tokenEndpointAuthMethodsSupported: stringArray(payload.token_endpoint_auth_methods_supported),
       codeChallengeMethodsSupported: stringArray(payload.code_challenge_methods_supported),
       raw: payload,
-      ...(stringValue(payload.registration_endpoint) ? { registrationEndpoint: stringValue(payload.registration_endpoint)! } : {}),
+      ...(stringValue(payload.registration_endpoint)
+        ? { registrationEndpoint: stringValue(payload.registration_endpoint)! }
+        : {}),
     };
   }
-  throw new HTTPException(422, { message: "could not discover OAuth authorization server metadata" });
+  throw new HTTPException(422, {
+    message: "could not discover OAuth authorization server metadata",
+  });
 }
 
 async function registerOAuthClient(
@@ -450,7 +502,10 @@ async function getOrCreateDynamicClientRegistration(
       authorizationServer: storedClient.authorizationServer,
       clientId: storedClient.clientId,
       ...(storedClient.clientSecret ? { clientSecret: storedClient.clientSecret } : {}),
-      tokenEndpointAuthMethod: tokenAuthMethod(storedClient.tokenEndpointAuthMethod, Boolean(storedClient.clientSecret)),
+      tokenEndpointAuthMethod: tokenAuthMethod(
+        storedClient.tokenEndpointAuthMethod,
+        Boolean(storedClient.clientSecret),
+      ),
     };
   }
   if (!as.registrationEndpoint) {
@@ -464,7 +519,8 @@ async function getOrCreateDynamicClientRegistration(
     issuer: as.issuer,
     authorizationServer: as.authorizationServer,
     clientId: dcr.clientId,
-    clientSecretEncrypted: dcr.clientSecret && key ? encryptEnvironmentValue(key, dcr.clientSecret) : null,
+    clientSecretEncrypted:
+      dcr.clientSecret && key ? encryptEnvironmentValue(key, dcr.clientSecret) : null,
     tokenEndpointAuthMethod: dcr.tokenEndpointAuthMethod,
     metadata: registrationMetadata(as, scopes),
   };
@@ -472,7 +528,9 @@ async function getOrCreateDynamicClientRegistration(
   if (storedWinner.clientId !== dcr.clientId) {
     const winner = await loadIntegrationOAuthClient(db, settings, as.issuer);
     if (!winner) {
-      throw new HTTPException(422, { message: "OAuth client registration could not be loaded after a registration race" });
+      throw new HTTPException(422, {
+        message: "OAuth client registration could not be loaded after a registration race",
+      });
     }
     return dcrRegistrationFromStored(winner);
   }
@@ -494,7 +552,10 @@ function stableScopeKey(scopes: string[]): string {
   return uniqueStrings(scopes).sort().join(" ");
 }
 
-function registrationMetadata(as: AuthorizationServerMetadata, scopes: string[]): Record<string, unknown> {
+function registrationMetadata(
+  as: AuthorizationServerMetadata,
+  scopes: string[],
+): Record<string, unknown> {
   return {
     registrationEndpoint: as.registrationEndpoint,
     registeredAt: new Date().toISOString(),
@@ -515,11 +576,17 @@ function dcrRegistrationFromStored(stored: {
     authorizationServer: stored.authorizationServer,
     clientId: stored.clientId,
     ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
-    tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+    tokenEndpointAuthMethod: tokenAuthMethod(
+      stored.tokenEndpointAuthMethod,
+      Boolean(stored.clientSecret),
+    ),
   };
 }
 
-function operatorClientForAs(settings: Settings, as: AuthorizationServerMetadata): OAuthClientRegistration | null {
+function operatorClientForAs(
+  settings: Settings,
+  as: AuthorizationServerMetadata,
+): OAuthClientRegistration | null {
   const entry = operatorClientEntryFor(settings, [as.issuer, as.authorizationServer]);
   if (!entry) {
     return null;
@@ -530,7 +597,10 @@ function operatorClientForAs(settings: Settings, as: AuthorizationServerMetadata
     authorizationServer: as.authorizationServer,
     clientId: entry.clientId,
     ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
-    tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
+    tokenEndpointAuthMethod: tokenAuthMethod(
+      entry.tokenEndpointAuthMethod,
+      Boolean(entry.clientSecret),
+    ),
   };
 }
 
@@ -539,7 +609,9 @@ function operatorClientEntryFor(
   candidates: string[],
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const exactKeys = uniqueStrings(candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]));
+  const exactKeys = uniqueStrings(
+    candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
+  );
   for (const key of exactKeys) {
     const entry = configured[key];
     if (entry) {
@@ -566,7 +638,9 @@ async function dynamicClientRegistration(
   scopes: string[],
 ): Promise<OAuthClientRegistration> {
   if (!as.registrationEndpoint) {
-    throw new HTTPException(422, { message: "authorization server does not support dynamic client registration" });
+    throw new HTTPException(422, {
+      message: "authorization server does not support dynamic client registration",
+    });
   }
   await assertOAuthFetchAllowed(as.registrationEndpoint, settings);
   const response = await fetchOAuth(as.registrationEndpoint, settings, {
@@ -582,12 +656,16 @@ async function dynamicClientRegistration(
     }),
   });
   if (!response.ok) {
-    throw new HTTPException(422, { message: `dynamic client registration failed with HTTP ${response.status}` });
+    throw new HTTPException(422, {
+      message: `dynamic client registration failed with HTTP ${response.status}`,
+    });
   }
-  const payload = await response.json() as Record<string, unknown>;
+  const payload = (await response.json()) as Record<string, unknown>;
   const clientId = stringValue(payload.client_id);
   if (!clientId) {
-    throw new HTTPException(422, { message: "dynamic client registration response did not include client_id" });
+    throw new HTTPException(422, {
+      message: "dynamic client registration response did not include client_id",
+    });
   }
   const clientSecret = stringValue(payload.client_secret);
   return {
@@ -596,7 +674,10 @@ async function dynamicClientRegistration(
     authorizationServer: as.authorizationServer,
     clientId,
     ...(clientSecret ? { clientSecret } : {}),
-    tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.token_endpoint_auth_method), Boolean(clientSecret)),
+    tokenEndpointAuthMethod: tokenAuthMethod(
+      stringValue(payload.token_endpoint_auth_method),
+      Boolean(clientSecret),
+    ),
   };
 }
 
@@ -613,12 +694,15 @@ async function existingOAuthConnectionForStart(
     return await getConnectionMetadata(db, input.workspaceId, input.connectionId, input.subjectId);
   }
   const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
-  return visible.find((connection) =>
-    connection.subjectId === null &&
-    connection.kind === "oauth2" &&
-    connection.status === "active" &&
-    connection.providerDomain === input.providerDomain
-  ) ?? null;
+  return (
+    visible.find(
+      (connection) =>
+        connection.subjectId === null &&
+        connection.kind === "oauth2" &&
+        connection.status === "active" &&
+        connection.providerDomain === input.providerDomain,
+    ) ?? null
+  );
 }
 
 function buildAuthorizationUrl(input: {
@@ -645,7 +729,10 @@ function buildAuthorizationUrl(input: {
 }
 
 function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
-  const payload = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<string, unknown> | null;
+  const payload = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<
+    string,
+    unknown
+  > | null;
   if (!payload) {
     throw new HTTPException(400, { message: "invalid or expired OAuth state" });
   }
@@ -664,7 +751,10 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     resource,
     requestedScopes: stringArray(payload.requestedScopes),
     authorizeScopes: stringArray(payload.authorizeScopes),
-    encryptedPkceVerifier: requiredString(payload.encryptedPkceVerifier, "state.encryptedPkceVerifier"),
+    encryptedPkceVerifier: requiredString(
+      payload.encryptedPkceVerifier,
+      "state.encryptedPkceVerifier",
+    ),
     clientId: requiredString(payload.clientId, "state.clientId"),
     tokenEndpoint: requiredString(payload.tokenEndpoint, "state.tokenEndpoint"),
     authorizationServer: requiredString(payload.authorizationServer, "state.authorizationServer"),
@@ -684,7 +774,11 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   };
 }
 
-async function clientForState(db: Database, settings: Settings, state: OAuthStatePayload): Promise<OAuthClientRegistration> {
+async function clientForState(
+  db: Database,
+  settings: Settings,
+  state: OAuthStatePayload,
+): Promise<OAuthClientRegistration> {
   if (state.clientRegistrationMethod === "cimd") {
     return {
       method: "cimd",
@@ -705,12 +799,17 @@ async function clientForState(db: Database, settings: Settings, state: OAuthStat
       authorizationServer: stored.authorizationServer,
       clientId: stored.clientId,
       ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
-      tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+      tokenEndpointAuthMethod: tokenAuthMethod(
+        stored.tokenEndpointAuthMethod,
+        Boolean(stored.clientSecret),
+      ),
     };
   }
   const entry = operatorClientEntryFor(settings, [state.issuer, state.authorizationServer]);
   if (!entry || entry.clientId !== state.clientId) {
-    throw new HTTPException(400, { message: "operator OAuth client credentials are no longer available" });
+    throw new HTTPException(400, {
+      message: "operator OAuth client credentials are no longer available",
+    });
   }
   return {
     method: "operator",
@@ -718,7 +817,10 @@ async function clientForState(db: Database, settings: Settings, state: OAuthStat
     authorizationServer: state.authorizationServer,
     clientId: entry.clientId,
     ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
-    tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
+    tokenEndpointAuthMethod: tokenAuthMethod(
+      entry.tokenEndpointAuthMethod,
+      Boolean(entry.clientSecret),
+    ),
   };
 }
 
@@ -740,21 +842,35 @@ async function exchangeAuthorizationCode(
   body.set("redirect_uri", input.redirectUri);
   body.set("code_verifier", input.verifier);
   body.set("resource", input.resource);
-  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+    accept: "application/json",
+  };
   if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_post") {
     body.set("client_id", input.client.clientId);
     body.set("client_secret", input.client.clientSecret);
-  } else if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_basic") {
+  } else if (
+    input.client.clientSecret &&
+    input.client.tokenEndpointAuthMethod === "client_secret_basic"
+  ) {
     headers.authorization = `Basic ${Buffer.from(`${input.client.clientId}:${input.client.clientSecret}`).toString("base64")}`;
   } else {
     body.set("client_id", input.client.clientId);
   }
-  const response = await fetchOAuth(input.tokenEndpoint, settings, { method: "POST", headers, body });
+  const response = await fetchOAuth(input.tokenEndpoint, settings, {
+    method: "POST",
+    headers,
+    body,
+  });
   if (!response.ok) {
     const oauthError = await oauthErrorFromResponse(response);
-    throw new OAuthCallbackStageError("token_exchange", oauthError ?? "token_exchange_failed", new Error(`OAuth token endpoint returned HTTP ${response.status}`));
+    throw new OAuthCallbackStageError(
+      "token_exchange",
+      oauthError ?? "token_exchange_failed",
+      new Error(`OAuth token endpoint returned HTTP ${response.status}`),
+    );
   }
-  const payload = await response.json() as Record<string, unknown>;
+  const payload = (await response.json()) as Record<string, unknown>;
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
     throw new Error("OAuth token response did not include access_token");
@@ -764,7 +880,9 @@ async function exchangeAuthorizationCode(
     tokenType: stringValue(payload.token_type) ?? "Bearer",
     expiresAt: expiresAtFromTokenResponse(payload),
     raw: payload,
-    ...(stringValue(payload.refresh_token) ? { refreshToken: stringValue(payload.refresh_token)! } : {}),
+    ...(stringValue(payload.refresh_token)
+      ? { refreshToken: stringValue(payload.refresh_token)! }
+      : {}),
     ...(stringValue(payload.scope) ? { scopeText: stringValue(payload.scope)! } : {}),
   };
 }
@@ -846,7 +964,10 @@ async function oauthErrorFromResponse(response: Response): Promise<string | null
   if (!contentType.toLowerCase().includes("application/json")) {
     return null;
   }
-  const payload = await response.clone().json().catch(() => null) as Record<string, unknown> | null;
+  const payload = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as Record<string, unknown> | null;
   const error = stringValue(payload?.error);
   if (!error || !/^[a-zA-Z0-9_.-]{1,80}$/.test(error)) {
     return null;
@@ -854,17 +975,29 @@ async function oauthErrorFromResponse(response: Response): Promise<string | null
   return error;
 }
 
-async function verifyMcpToolsList(settings: Settings, resource: string, token: TokenResponse): Promise<Array<{ name: string; description?: string }>> {
+async function verifyMcpToolsList(
+  settings: Settings,
+  resource: string,
+  token: TokenResponse,
+): Promise<Array<{ name: string; description?: string }>> {
   await assertOAuthFetchAllowed(resource, settings);
-  const client = new Client({ name: "opengeni-integration-verify", version: "0.1.0" }, { capabilities: {} });
+  const client = new Client(
+    { name: "opengeni-integration-verify", version: "0.1.0" },
+    { capabilities: {} },
+  );
   try {
     const transport = new StreamableHTTPClientTransport(new URL(resource), {
       requestInit: {
-        headers: { authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}` },
+        headers: {
+          authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+        },
       },
       fetch: (url, init) => fetchOAuth(url.toString(), settings, init),
     });
-    await client.connect(transport as unknown as Transport, { timeout: 10_000, maxTotalTimeout: 10_000 });
+    await client.connect(transport as unknown as Transport, {
+      timeout: 10_000,
+      maxTotalTimeout: 10_000,
+    });
     const listed = await client.listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 });
     return listed.tools.map((tool) => ({
       name: tool.name,
@@ -887,7 +1020,9 @@ async function verifyMcpToolsListNonFatal(
   tools?: Array<{ name: string; description?: string }>;
 }> {
   try {
-    const tools = await stage("tools_list", "tools_list_failed", () => verifyMcpToolsList(settings, state.mcpUrl, token));
+    const tools = await stage("tools_list", "tools_list_failed", () =>
+      verifyMcpToolsList(settings, state.mcpUrl, token),
+    );
     return {
       metadata: {
         status: "ok",
@@ -897,9 +1032,10 @@ async function verifyMcpToolsListNonFatal(
       tools,
     };
   } catch (error) {
-    const staged = error instanceof OAuthCallbackStageError
-      ? error
-      : new OAuthCallbackStageError("tools_list", "tools_list_failed", error);
+    const staged =
+      error instanceof OAuthCallbackStageError
+        ? error
+        : new OAuthCallbackStageError("tools_list", "tools_list_failed", error);
     logOAuthVerificationWarning(observability, staged, state);
     return {
       metadata: {
@@ -911,7 +1047,11 @@ async function verifyMcpToolsListNonFatal(
   }
 }
 
-function credentialBundle(token: TokenResponse, state: OAuthStatePayload, client: OAuthClientRegistration): Record<string, unknown> {
+function credentialBundle(
+  token: TokenResponse,
+  state: OAuthStatePayload,
+  client: OAuthClientRegistration,
+): Record<string, unknown> {
   return {
     access_token: token.accessToken,
     ...(token.refreshToken ? { refresh_token: token.refreshToken } : {}),
@@ -919,14 +1059,27 @@ function credentialBundle(token: TokenResponse, state: OAuthStatePayload, client
     ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
     resource: state.resource,
     mcp_url: state.mcpUrl,
-    ...(token.scopeText ? { scope: token.scopeText } : state.authorizeScopes.length ? { scope: state.authorizeScopes.join(" ") } : {}),
+    ...(token.scopeText
+      ? { scope: token.scopeText }
+      : state.authorizeScopes.length
+        ? { scope: state.authorizeScopes.join(" ") }
+        : {}),
     token_endpoint: state.tokenEndpoint,
     client_id: client.clientId,
-    ...(client.clientSecret ? { client_secret: client.clientSecret, token_endpoint_auth_method: client.tokenEndpointAuthMethod } : {}),
+    ...(client.clientSecret
+      ? {
+          client_secret: client.clientSecret,
+          token_endpoint_auth_method: client.tokenEndpointAuthMethod,
+        }
+      : {}),
   };
 }
 
-function callbackReturnPath(returnPath: string, status: "success" | "error", params: Record<string, string>): string {
+function callbackReturnPath(
+  returnPath: string,
+  status: "success" | "error",
+  params: Record<string, string>,
+): string {
   const url = new URL(returnPath, "https://opengeni.local");
   url.searchParams.set("integration_oauth", status);
   for (const [key, value] of Object.entries(params)) {
@@ -952,7 +1105,9 @@ function canonicalMcpResource(value: string | undefined): string {
 function canonicalOAuthResource(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) {
-    throw new HTTPException(422, { message: "MCP protected resource metadata advertised an invalid resource" });
+    throw new HTTPException(422, {
+      message: "MCP protected resource metadata advertised an invalid resource",
+    });
   }
   try {
     const url = new URL(trimmed);
@@ -962,7 +1117,9 @@ function canonicalOAuthResource(value: string): string {
     }
     return trimmed;
   } catch {
-    throw new HTTPException(422, { message: "MCP protected resource metadata advertised an invalid resource" });
+    throw new HTTPException(422, {
+      message: "MCP protected resource metadata advertised an invalid resource",
+    });
   }
 }
 
@@ -989,7 +1146,12 @@ async function fetchJsonObject(url: string, settings: Settings): Promise<Record<
   return payload as Record<string, unknown>;
 }
 
-async function fetchOAuth(rawUrl: string, settings: Settings, init: RequestInit = {}, hop = 0): Promise<Response> {
+async function fetchOAuth(
+  rawUrl: string,
+  settings: Settings,
+  init: RequestInit = {},
+  hop = 0,
+): Promise<Response> {
   await assertOAuthFetchAllowed(rawUrl, settings);
   const response = await fetch(rawUrl, { ...init, redirect: "manual" });
   if (response.status < 300 || response.status >= 400) {
@@ -1016,20 +1178,29 @@ async function assertOAuthFetchAllowed(rawUrl: string, settings: Settings): Prom
   if (!["https:", "http:"].includes(url.protocol)) {
     throw new HTTPException(422, { message: "OAuth discovery only supports http and https URLs" });
   }
-  if (settings.integrationsAllowPrivateNetworkTargets || ["local", "test"].includes(settings.environment)) {
+  if (
+    settings.integrationsAllowPrivateNetworkTargets ||
+    ["local", "test"].includes(settings.environment)
+  ) {
     return;
   }
   if (url.protocol !== "https:") {
-    throw new HTTPException(422, { message: "OAuth discovery targets must use https outside local/test" });
+    throw new HTTPException(422, {
+      message: "OAuth discovery targets must use https outside local/test",
+    });
   }
   const hostname = url.hostname.toLowerCase();
   if (hostname === "localhost" || hostname.endsWith(".localhost")) {
     throw new HTTPException(422, { message: "OAuth discovery may not target localhost" });
   }
   const literal = isIP(hostname);
-  const addresses = literal ? [hostname] : (await lookup(hostname, { all: true })).map((entry) => entry.address);
+  const addresses = literal
+    ? [hostname]
+    : (await lookup(hostname, { all: true })).map((entry) => entry.address);
   if (addresses.some(isPrivateAddress)) {
-    throw new HTTPException(422, { message: "OAuth discovery may not target private network addresses" });
+    throw new HTTPException(422, {
+      message: "OAuth discovery may not target private network addresses",
+    });
   }
 }
 
@@ -1047,7 +1218,9 @@ function parseWwwAuthenticate(header: string | null): WwwAuthenticateChallenge {
   let match: RegExpExecArray | null;
   while ((match = re.exec(paramsText)) !== null) {
     const raw = match[2]!;
-    params[match[1]!.toLowerCase()] = raw.startsWith("\"") ? raw.slice(1, -1).replace(/\\"/g, "\"") : raw;
+    params[match[1]!.toLowerCase()] = raw.startsWith('"')
+      ? raw.slice(1, -1).replace(/\\"/g, '"')
+      : raw;
   }
   return {
     ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata } : {}),
@@ -1066,7 +1239,11 @@ function wellKnownCandidates(rawUrl: string, name: string): string[] {
   ]);
 }
 
-function chooseAuthorizeScopes(requested: string[] | undefined, challenged: string[] | undefined, supported: string[]): string[] {
+function chooseAuthorizeScopes(
+  requested: string[] | undefined,
+  challenged: string[] | undefined,
+  supported: string[],
+): string[] {
   if (requested?.length) {
     return uniqueStrings(requested);
   }
@@ -1083,7 +1260,10 @@ function grantedScopes(scopeText: string | undefined, fallback: string[]): strin
   return fallback;
 }
 
-function tokenAuthMethod(raw: string | undefined, hasSecret: boolean): OAuthClientRegistration["tokenEndpointAuthMethod"] {
+function tokenAuthMethod(
+  raw: string | undefined,
+  hasSecret: boolean,
+): OAuthClientRegistration["tokenEndpointAuthMethod"] {
   if (raw === "client_secret_post" || raw === "client_secret_basic") {
     return raw;
   }
@@ -1103,7 +1283,8 @@ function expiresAtFromTokenResponse(payload: Record<string, unknown>): Date | nu
     const parsed = new Date(expiresAt);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
-  const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : Number(payload.expires_in);
+  const expiresIn =
+    typeof payload.expires_in === "number" ? payload.expires_in : Number(payload.expires_in);
   if (Number.isFinite(expiresIn) && expiresIn > 0) {
     return new Date(Date.now() + expiresIn * 1000);
   }
@@ -1123,7 +1304,9 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? uniqueStrings(value.filter((entry): entry is string => typeof entry === "string")) : [];
+  return Array.isArray(value)
+    ? uniqueStrings(value.filter((entry): entry is string => typeof entry === "string"))
+    : [];
 }
 
 function stringValue(value: unknown): string | undefined {

@@ -19,7 +19,14 @@ import {
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
 import "./styles.css";
 
-const ALL_STATUSES: SessionStatusValue[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
+const ALL_STATUSES: SessionStatusValue[] = [
+  "queued",
+  "running",
+  "idle",
+  "requires_action",
+  "failed",
+  "cancelled",
+];
 
 function Harness() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -28,12 +35,17 @@ function Harness() {
   // the F2 embedder proof: provider + styles + mock client, no app plumbing.
   const { events } = useSessionEvents(MANAGER_SESSION_ID);
   return (
-    <div className="og-root min-h-full bg-og-bg" data-og-theme={theme === "light" ? "light" : undefined}>
+    <div
+      className="og-root min-h-full bg-og-bg"
+      data-og-theme={theme === "light" ? "light" : undefined}
+    >
       <div className="mx-auto flex h-dvh max-w-7xl flex-col px-4 sm:px-6">
         <header className="flex shrink-0 items-center justify-between gap-4 border-b border-og-border py-4">
           <div>
             <h1 className="text-sm font-semibold text-og-fg">@opengeni/react</h1>
-            <p className="text-xs text-og-fg-subtle">Component harness — real hooks against a scripted client</p>
+            <p className="text-xs text-og-fg-subtle">
+              Component harness — real hooks against a scripted client
+            </p>
           </div>
           <div className="flex items-center gap-2">
             {ALL_STATUSES.map((status) => (
@@ -100,7 +112,9 @@ function OpsChannel() {
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-og-border px-4 py-3">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-medium text-og-fg">Ops channel</h2>
-          <p className="truncate font-og-mono text-[11px] text-og-fg-subtle">{MANAGER_SESSION_ID}</p>
+          <p className="truncate font-og-mono text-[11px] text-og-fg-subtle">
+            {MANAGER_SESSION_ID}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-og-fg-subtle">{connectionState}</span>
@@ -133,11 +147,19 @@ function Fleet() {
   const { sessions, loading } = useWorkspaceSessions({ pollIntervalMs: 10000 });
   return (
     <section>
-      <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">Fleet</h2>
+      <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+        Fleet
+      </h2>
       <div className="grid grid-cols-1 gap-3">
-        {loading && sessions.length === 0 ? <p className="text-xs text-og-fg-subtle">Loading sessions…</p> : null}
+        {loading && sessions.length === 0 ? (
+          <p className="text-xs text-og-fg-subtle">Loading sessions…</p>
+        ) : null}
         {sessions.map((session) => (
-          <FleetTile key={session.id} session={session} onOpen={(s) => window.alert(`Open session ${s.id}`)} />
+          <FleetTile
+            key={session.id}
+            session={session}
+            onOpen={(s) => window.alert(`Open session ${s.id}`)}
+          />
         ))}
       </div>
     </section>
@@ -163,14 +185,21 @@ function Schedules() {
   );
   return (
     <section>
-      <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">Scheduled tasks</h2>
+      <h2 className="mb-3 text-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+        Scheduled tasks
+      </h2>
       <ul className="flex flex-col gap-2">
         {labels.map((task) => (
-          <li key={task.id} className="flex items-center justify-between gap-3 rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-2.5">
+          <li
+            key={task.id}
+            className="flex items-center justify-between gap-3 rounded-og-md border border-og-border bg-og-surface-1 px-3.5 py-2.5"
+          >
             <span className="min-w-0 truncate text-[13px] text-og-fg">{task.name}</span>
             <span className="flex shrink-0 items-center gap-2 text-[11px] text-og-fg-subtle">
               <span className="font-og-mono">{task.cadence}</span>
-              <span className={task.status === "active" ? "text-og-status-idle" : ""}>{task.status}</span>
+              <span className={task.status === "active" ? "text-og-status-idle" : ""}>
+                {task.status}
+              </span>
             </span>
           </li>
         ))}

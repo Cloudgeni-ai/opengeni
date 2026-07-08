@@ -57,30 +57,51 @@ describe("context compaction config defaults", () => {
   });
 
   test("threshold ratio is clamped to the supported range", () => {
-    expect(withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "0.1" }, () => getSettings()).contextCompactionThresholdRatio).toBe(0.3);
-    expect(withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "2" }, () => getSettings()).contextCompactionThresholdRatio).toBe(0.9);
+    expect(
+      withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "0.1" }, () => getSettings())
+        .contextCompactionThresholdRatio,
+    ).toBe(0.3);
+    expect(
+      withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "2" }, () => getSettings())
+        .contextCompactionThresholdRatio,
+    ).toBe(0.9);
   });
 });
 
 describe("resolveContextCompactionMode", () => {
   test("auto -> server on the OpenAI platform provider", () => {
-    expect(resolveContextCompactionMode({ contextCompactionMode: "auto", openaiProvider: "openai" })).toBe("server");
+    expect(
+      resolveContextCompactionMode({ contextCompactionMode: "auto", openaiProvider: "openai" }),
+    ).toBe("server");
   });
 
   test("auto -> client on Azure (server-side compaction unsupported there)", () => {
-    expect(resolveContextCompactionMode({ contextCompactionMode: "auto", openaiProvider: "azure" })).toBe("client");
+    expect(
+      resolveContextCompactionMode({ contextCompactionMode: "auto", openaiProvider: "azure" }),
+    ).toBe("client");
   });
 
   test("explicit modes override the provider", () => {
-    expect(resolveContextCompactionMode({ contextCompactionMode: "server", openaiProvider: "azure" })).toBe("server");
-    expect(resolveContextCompactionMode({ contextCompactionMode: "client", openaiProvider: "openai" })).toBe("client");
-    expect(resolveContextCompactionMode({ contextCompactionMode: "off", openaiProvider: "openai" })).toBe("off");
+    expect(
+      resolveContextCompactionMode({ contextCompactionMode: "server", openaiProvider: "azure" }),
+    ).toBe("server");
+    expect(
+      resolveContextCompactionMode({ contextCompactionMode: "client", openaiProvider: "openai" }),
+    ).toBe("client");
+    expect(
+      resolveContextCompactionMode({ contextCompactionMode: "off", openaiProvider: "openai" }),
+    ).toBe("off");
   });
 });
 
 describe("budget + server threshold", () => {
   test("input budget = window - reserved output", () => {
-    expect(contextInputBudgetTokens({ contextWindowTokens: 1_050_000, contextReservedOutputTokens: 128_000 })).toBe(922_000);
+    expect(
+      contextInputBudgetTokens({
+        contextWindowTokens: 1_050_000,
+        contextReservedOutputTokens: 128_000,
+      }),
+    ).toBe(922_000);
   });
 
   test("server threshold defaults to floor(window * threshold ratio)", () => {

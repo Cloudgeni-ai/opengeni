@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "**/*.md",
+    "**/*.yaml",
+    "**/*.yml",
+    "**/*.toml",
+    "**/*.css",
+    "**/*.d.ts",
+    "**/*.gen.ts",
+    "**/*.gen.tsx",
+    "**/*.gen.json",
+    "packages/db/drizzle/**",
+    "**/test/golden/**",
+    "**/fixtures/**",
+    "**/evidence/**",
+    "agent/**"
+  ]
+}

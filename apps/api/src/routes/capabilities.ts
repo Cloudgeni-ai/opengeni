@@ -23,30 +23,39 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    return c.json(CapabilityCatalogResponse.parse(await buildCapabilityCatalog({ db, workspaceId, settings })));
+    return c.json(
+      CapabilityCatalogResponse.parse(await buildCapabilityCatalog({ db, workspaceId, settings })),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = CreateCapabilityCatalogItemRequest.parse(await c.req.json());
-    return c.json(await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }), 201);
+    return c.json(
+      await createCatalogItem({ db, accountId: grant.accountId, workspaceId, payload }),
+      201,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const query = c.req.query("query");
-    const options: { query?: string; limit?: number } = { limit: boundedLimit(c.req.query("limit")) };
+    const options: { query?: string; limit?: number } = {
+      limit: boundedLimit(c.req.query("limit")),
+    };
     if (query) {
       options.query = query;
     }
     const items = await discoverMcpRegistryCapabilities(options);
-    return c.json(DiscoverMcpCapabilitiesResponse.parse({
-      items,
-      source: "official_mcp_registry",
-      sourceUrl: officialMcpRegistryUrl,
-    }));
+    return c.json(
+      DiscoverMcpCapabilitiesResponse.parse({
+        items,
+        source: "official_mcp_registry",
+        sourceUrl: officialMcpRegistryUrl,
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {

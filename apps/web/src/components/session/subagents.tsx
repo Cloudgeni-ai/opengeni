@@ -69,7 +69,13 @@ export function SubagentTree({
   return (
     <ul className="flex flex-col gap-px">
       {nodes.map((node) => (
-        <SubagentRow key={node.session.id} node={node} workspaceId={workspaceId} depth={0} onNavigate={onNavigate} />
+        <SubagentRow
+          key={node.session.id}
+          node={node}
+          workspaceId={workspaceId}
+          depth={0}
+          onNavigate={onNavigate}
+        />
       ))}
     </ul>
   );
@@ -87,7 +93,8 @@ function SubagentRow({
   onNavigate?: (() => void) | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const title = node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
+  const title =
+    node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
   const tone = sessionStatusTone(node.session.status);
   const live = isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;
@@ -97,7 +104,11 @@ function SubagentRow({
   // agent and one waiting on you spell the word out in their own status tone, so
   // they don't hide behind a color dot in a long list.
   const attentionWord =
-    node.session.status === "failed" ? "Failed" : node.session.status === "requires_action" ? "Needs you" : null;
+    node.session.status === "failed"
+      ? "Failed"
+      : node.session.status === "requires_action"
+        ? "Needs you"
+        : null;
   const hint = attentionWord ?? formatRelativeTime(node.session.updatedAt);
   const hintClass = attentionWord ? cn(STATUS_META[tone].text, "font-medium") : "text-fg-subtle";
 
@@ -119,9 +130,13 @@ function SubagentRow({
                 onClick={() => setOpen((prev) => !prev)}
                 className="inline-flex size-4 shrink-0 items-center justify-center rounded text-fg-subtle/50 outline-none transition-colors hover:text-fg group-hover/row:text-fg-subtle focus-visible:text-fg"
               >
-                <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
+                <ChevronRightIcon
+                  className={cn("size-3 transition-transform", open && "rotate-90")}
+                />
               </button>
-              <span className="text-2xs leading-none tabular-nums text-fg-subtle/60">{node.children.length}</span>
+              <span className="text-2xs leading-none tabular-nums text-fg-subtle/60">
+                {node.children.length}
+              </span>
             </>
           ) : null}
         </span>
@@ -134,7 +149,9 @@ function SubagentRow({
         >
           <StatusDot tone={tone} pulse={live} className="size-1.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{title}</span>
-          {hint ? <span className={cn("shrink-0 text-2xs tabular-nums", hintClass)}>{hint}</span> : null}
+          {hint ? (
+            <span className={cn("shrink-0 text-2xs tabular-nums", hintClass)}>{hint}</span>
+          ) : null}
         </Link>
       </div>
       {canExpand && open ? (
@@ -142,7 +159,13 @@ function SubagentRow({
         // chevron column — a descending line, not a box.
         <ul className="ml-2 mt-px flex flex-col gap-px border-l border-border/60 pl-2.5">
           {node.children.map((child) => (
-            <SubagentRow key={child.session.id} node={child} workspaceId={workspaceId} depth={depth + 1} onNavigate={onNavigate} />
+            <SubagentRow
+              key={child.session.id}
+              node={child}
+              workspaceId={workspaceId}
+              depth={depth + 1}
+              onNavigate={onNavigate}
+            />
           ))}
         </ul>
       ) : null}

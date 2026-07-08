@@ -26,7 +26,9 @@ describe("withCodexProvider", () => {
   });
 
   test("preserves existing registry providers", () => {
-    const existing = JSON.stringify([{ id: "fireworks", baseUrl: "https://api.fireworks.ai", models: [{ id: "glm" }] }]);
+    const existing = JSON.stringify([
+      { id: "fireworks", baseUrl: "https://api.fireworks.ai", models: [{ id: "glm" }] },
+    ]);
     const result = withCodexProvider(testSettings({ modelProvidersJson: existing }));
     const ids = parseModelProvidersJson(result.modelProvidersJson).map((p) => p.id);
     expect(ids).toContain("fireworks");
@@ -37,7 +39,10 @@ describe("withCodexProvider", () => {
     const once = withCodexProvider(testSettings({ modelProvidersJson: "[]" }));
     const twice = withCodexProvider(once);
     expect(twice).toBe(once); // same reference: no change
-    expect(parseModelProvidersJson(twice.modelProvidersJson).filter((p) => p.id === "codex-subscription").length).toBe(1);
+    expect(
+      parseModelProvidersJson(twice.modelProvidersJson).filter((p) => p.id === "codex-subscription")
+        .length,
+    ).toBe(1);
   });
 });
 
@@ -66,7 +71,11 @@ describe("withCodexAppsMcpServer", () => {
   });
 
   test("preserves pre-existing mcp servers", () => {
-    const settings = testSettings({ mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false }] });
+    const settings = testSettings({
+      mcpServers: [
+        { id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false },
+      ],
+    });
     const result = withCodexAppsMcpServer(settings);
     const ids = result.mcpServers.map((s) => s.id);
     expect(ids).toContain("opengeni");
@@ -77,16 +86,28 @@ describe("withCodexAppsMcpServer", () => {
 describe("settingsWithCodexCredential", () => {
   test("is a no-op when the feature is disabled (never touches the db)", async () => {
     const settings = testSettings({ codexSubscriptionEnabled: false, modelProvidersJson: "[]" });
-    const result = await settingsWithCodexCredential(undefined as unknown as Database, "ws_1", settings);
+    const result = await settingsWithCodexCredential(
+      undefined as unknown as Database,
+      "ws_1",
+      settings,
+    );
     expect(result).toBe(settings); // same reference, no db access
   });
 
   test("active credential WITHOUT connector scopes => provider AND codex_apps server (scopes do not gate)", async () => {
     const restore = mockCredentialStatus({ status: "active", scopes: null });
     try {
-      const settings = testSettings({ codexSubscriptionEnabled: true, modelProvidersJson: "[]", mcpServers: [] });
+      const settings = testSettings({
+        codexSubscriptionEnabled: true,
+        modelProvidersJson: "[]",
+        mcpServers: [],
+      });
       const result = await settingsWithCodexCredential({} as unknown as Database, "ws_1", settings);
-      expect(parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription")).toBe(true);
+      expect(
+        parseModelProvidersJson(result.modelProvidersJson).some(
+          (p) => p.id === "codex-subscription",
+        ),
+      ).toBe(true);
       // Connectors are account-gated server-side; a scope-less pro token still lists tools.
       expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
     } finally {
@@ -97,9 +118,17 @@ describe("settingsWithCodexCredential", () => {
   test("active credential WITH connector scopes => both provider and codex_apps server", async () => {
     const restore = mockCredentialStatus({ status: "active", scopes: BOTH_SCOPES });
     try {
-      const settings = testSettings({ codexSubscriptionEnabled: true, modelProvidersJson: "[]", mcpServers: [] });
+      const settings = testSettings({
+        codexSubscriptionEnabled: true,
+        modelProvidersJson: "[]",
+        mcpServers: [],
+      });
       const result = await settingsWithCodexCredential({} as unknown as Database, "ws_1", settings);
-      expect(parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription")).toBe(true);
+      expect(
+        parseModelProvidersJson(result.modelProvidersJson).some(
+          (p) => p.id === "codex-subscription",
+        ),
+      ).toBe(true);
       expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
     } finally {
       restore();
@@ -109,7 +138,11 @@ describe("settingsWithCodexCredential", () => {
   test("inactive credential => nothing new (no codex_apps server)", async () => {
     const restore = mockCredentialStatus({ status: "needs_relogin", scopes: BOTH_SCOPES });
     try {
-      const settings = testSettings({ codexSubscriptionEnabled: true, modelProvidersJson: "[]", mcpServers: [] });
+      const settings = testSettings({
+        codexSubscriptionEnabled: true,
+        modelProvidersJson: "[]",
+        mcpServers: [],
+      });
       const result = await settingsWithCodexCredential({} as unknown as Database, "ws_1", settings);
       expect(result).toBe(settings); // untouched
     } finally {

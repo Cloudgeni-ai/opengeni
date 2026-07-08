@@ -42,7 +42,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
 import {
   createSandboxLeaseActivities,
   type SweepModalOrphansFn,
@@ -115,7 +119,11 @@ function makeTerminateSpy(): {
   return { fn, calls, persisted };
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -129,7 +137,7 @@ type LeaseFixture = {
   turnHolders?: number;
   viewerHolders?: number;
   leaseEpoch?: number;
-  expiresInMs?: number;          // relative to now(); negative = already lapsed
+  expiresInMs?: number; // relative to now(); negative = already lapsed
   instanceId?: string | null;
   backend?: string;
   resumeBackendId?: string | null;
@@ -180,13 +188,23 @@ async function readRow(workspaceId: string, groupId: string) {
   const [r] = await admin`
     select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id
     from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
-  return r as {
-    liveness: string; refcount: number; turn_holders: number; viewer_holders: number;
-    lease_epoch: number; instance_id: string | null;
-  } | undefined;
+  return r as
+    | {
+        liveness: string;
+        refcount: number;
+        turn_holders: number;
+        viewer_holders: number;
+        lease_epoch: number;
+        instance_id: string | null;
+      }
+    | undefined;
 }
 
-async function holderCount(workspaceId: string, groupId: string, kind: "turn" | "viewer"): Promise<number> {
+async function holderCount(
+  workspaceId: string,
+  groupId: string,
+  kind: "turn" | "viewer",
+): Promise<number> {
   const [r] = await admin<{ n: number }[]>`
     select count(*)::int as n from sandbox_lease_holders h
     join sandbox_leases l on l.id = h.lease_id
@@ -210,7 +228,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -218,14 +238,21 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(1) one pass: reaps a stale viewer holder, resets warming-death, terminates a draining-past-grace box → lease cold", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
 
     // (a) a WARM lease with a single STALE viewer holder (heartbeat older than
     //     the viewer TTL) → the sweep reaps the holder, refcount→0, warm→draining.
     const staleViewer = await freshWorkspace();
     const wLease = await insertLease(staleViewer, {
-      liveness: "warm", refcount: 1, viewerHolders: 1, leaseEpoch: 2,
-      instanceId: "box-viewer", resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+      leaseEpoch: 2,
+      instanceId: "box-viewer",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(staleViewer, wLease, "viewer", "viewer-stale", 120_000); // > 90s TTL
 
@@ -233,23 +260,34 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     //     returned (no instance_id) → reset to cold.
     const warmingDeath = await freshWorkspace();
     await insertLease(warmingDeath, {
-      liveness: "warming", leaseEpoch: 1, expiresInMs: -1_000,
+      liveness: "warming",
+      leaseEpoch: 1,
+      expiresInMs: -1_000,
     });
 
     // (c) a WARMING lease whose lease TTL has LAPSED after provider create
     //     returned (instance_id recorded) → convert to drainable and terminate.
     const warmingCreated = await freshWorkspace();
     await insertLease(warmingCreated, {
-      liveness: "warming", leaseEpoch: 4, expiresInMs: -1_000,
-      instanceId: "box-warming-created", backend: "local", resumeBackendId: "local",
+      liveness: "warming",
+      leaseEpoch: 4,
+      expiresInMs: -1_000,
+      instanceId: "box-warming-created",
+      backend: "local",
+      resumeBackendId: "local",
       resumeState: { backendId: "local", sessionState: {} },
     });
 
     // (d) a DRAINING lease, refcount 0, grace ELAPSED → terminate + confirm cold.
     const drainable = await freshWorkspace();
     await insertLease(drainable, {
-      liveness: "draining", refcount: 0, leaseEpoch: 5, expiresInMs: -1_000,
-      instanceId: "box-drain", backend: "local", resumeBackendId: "local",
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 5,
+      expiresInMs: -1_000,
+      instanceId: "box-drain",
+      backend: "local",
+      resumeBackendId: "local",
       resumeState: { backendId: "local", sessionState: {} },
     });
 
@@ -292,33 +330,52 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // sweep in sibling tests does not pick this leftover draining row up — we are
     // unit-testing persistDrainSnapshot directly, not via a sweep.
     await insertLease(ids, {
-      liveness: "draining", refcount: 0, leaseEpoch: 7, expiresInMs: 600_000,
-      instanceId: "box-persist", backend: "modal", resumeBackendId: "modal",
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-old" }, workspaceReady: true } },
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 7,
+      expiresInMs: 600_000,
+      instanceId: "box-persist",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-old" }, workspaceReady: true },
+      },
     });
 
     // First persist: folds the archive, no prior snapshot to GC.
-    const archive1 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-1\"}").toString("base64");
+    const archive1 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-1"}').toString(
+      "base64",
+    );
     const r1 = await persistDrainSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 7, workspaceArchive: archive1,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      workspaceArchive: archive1,
     });
     expect(r1.wrote).toBe(true);
     expect(r1.priorArchive).toBeNull();
     expect(r1.priorArchivePrev).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
-    const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const [row1] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss1 = (row1!.resume_state as any).sessionState;
     expect(ss1.workspaceArchive).toBe(archive1);
     expect(ss1.providerState.sandboxId).toBe("sb-old");
 
     // Second persist (a later drain): supersedes, returns the PRIOR archive so the
     // reaper can GC the superseded snapshot (keep-latest-per-lease).
-    const archive2 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-2\"}").toString("base64");
+    const archive2 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-2"}').toString(
+      "base64",
+    );
     const r2 = await persistDrainSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 7, workspaceArchive: archive2,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      workspaceArchive: archive2,
     });
     expect(r2.wrote).toBe(true);
     expect(r2.priorArchive).toBe(archive1);
@@ -327,8 +384,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
     const r3 = await persistDrainSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 999, workspaceArchive: archive2,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 999,
+      workspaceArchive: archive2,
     });
     expect(r3.wrote).toBe(false);
   }, 60_000);
@@ -339,34 +399,58 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // without draining anything (sandbox-file-persistence, mid-session tier).
     const ids = await freshWorkspace();
     await insertLease(ids, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 5, expiresInMs: 600_000,
-      instanceId: "box-warm-persist", backend: "modal", resumeBackendId: "modal",
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true } },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 5,
+      expiresInMs: 600_000,
+      instanceId: "box-warm-persist",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true },
+      },
     });
 
     // Explicit capture clocks so ordering is deterministic (persistWarmSnapshot
     // orders by capture-initiation, not wall-clock-of-call).
     const t0 = 1_900_000_000_000;
     // First warm persist: folds archive + workspaceArchiveAt; providerState preserved.
-    const archive1 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w1\"}").toString("base64");
+    const archive1 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-w1"}').toString(
+      "base64",
+    );
     const r1 = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 60_000, capturedAtMs: t0,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: archive1,
+      minIntervalMs: 60_000,
+      capturedAtMs: t0,
     });
     expect(r1.wrote).toBe(true);
     expect(r1.throttled).toBe(false);
     expect(r1.priorArchiveForGc).toBeNull();
-    const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const [row1] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss1 = (row1!.resume_state as any).sessionState;
     expect(ss1.workspaceArchive).toBe(archive1);
     expect(Number.isFinite(Date.parse(ss1.workspaceArchiveAt))).toBe(true);
     expect(ss1.providerState.sandboxId).toBe("sb-warm");
 
     // Immediate second persist inside the interval: ATOMIC throttle skips it.
-    const archive2 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w2\"}").toString("base64");
+    const archive2 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-w2"}').toString(
+      "base64",
+    );
     const r2 = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 60_000, capturedAtMs: t0 + 1_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: archive2,
+      minIntervalMs: 60_000,
+      capturedAtMs: t0 + 1_000,
     });
     expect(r2.wrote).toBe(false);
     expect(r2.throttled).toBe(true);
@@ -375,45 +459,72 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // capture is stale (the bounded-wait race — a slow heartbeat capture landing
     // after a fresher turn-end one) and is a no-op: no overwrite, no throttle-clock
     // advance, nothing to GC.
-    const staleArchive = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-stale\"}").toString("base64");
+    const staleArchive = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-stale"}',
+    ).toString("base64");
     const rStale = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: staleArchive, minIntervalMs: 0, capturedAtMs: t0 - 5_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: staleArchive,
+      minIntervalMs: 0,
+      capturedAtMs: t0 - 5_000,
     });
     expect(rStale.wrote).toBe(false);
     expect(rStale.superseded).toBe(true);
-    const [rowStale] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const [rowStale] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     expect((rowStale!.resume_state as any).sessionState.workspaceArchive).toBe(archive1);
 
     // Interval 0 = always write: shifts current to previous and returns only the
     // two-ago archive for GC, retaining a 2-deep restore fallback.
     const r3 = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 0, capturedAtMs: t0 + 2_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: archive2,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 2_000,
     });
     expect(r3.wrote).toBe(true);
     expect(r3.priorArchiveForGc).toBeNull();
-    const [row3] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const [row3] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss3 = (row3!.resume_state as any).sessionState;
     expect(ss3.workspaceArchive).toBe(archive2);
     expect(ss3.workspaceArchivePrev).toBe(archive1);
 
-    const archive3 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w3\"}").toString("base64");
+    const archive3 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-w3"}').toString(
+      "base64",
+    );
     const r3b = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive3, minIntervalMs: 0, capturedAtMs: t0 + 3_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: archive3,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 3_000,
     });
     expect(r3b.wrote).toBe(true);
     expect(r3b.priorArchiveForGc).toBe(archive1);
-    const [row3b] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const [row3b] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss3b = (row3b!.resume_state as any).sessionState;
     expect(ss3b.workspaceArchive).toBe(archive3);
     expect(ss3b.workspaceArchivePrev).toBe(archive2);
 
     // Epoch fence: a stale-epoch persist writes ZERO rows.
     const r4 = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 999, workspaceArchive: archive1, minIntervalMs: 0, capturedAtMs: t0 + 4_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 999,
+      workspaceArchive: archive1,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 4_000,
     });
     expect(r4.wrote).toBe(false);
     expect(r4.throttled).toBe(false);
@@ -422,8 +533,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // never the warm path's — zero rows written.
     await admin`update sandbox_leases set liveness = 'draining', refcount = 0, turn_holders = 0 where sandbox_group_id = ${ids.groupId}`;
     const r5 = await persistWarmSnapshot(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 0, capturedAtMs: t0 + 5_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 5,
+      workspaceArchive: archive1,
+      minIntervalMs: 0,
+      capturedAtMs: t0 + 5_000,
     });
     expect(r5.wrote).toBe(false);
   }, 60_000);
@@ -457,7 +573,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(recorded.lease?.instanceId).toBe("sb-created");
     expect(recorded.lease?.resumeBackendId).toBe("modal");
 
-    const [row] = await admin<{ liveness: string; instance_id: string | null; resume_state: any; lease_epoch: number }[]>`
+    const [row] = await admin<
+      { liveness: string; instance_id: string | null; resume_state: any; lease_epoch: number }[]
+    >`
       select liveness, instance_id, resume_state, lease_epoch
       from sandbox_leases
       where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
@@ -497,7 +615,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       instanceId: "sb-live",
       backend: "modal",
       resumeBackendId: "modal",
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" } } },
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-live" } },
+      },
     });
 
     let capturedGroups: string[] = [];
@@ -508,10 +629,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return 2;
     };
 
-    const { reapSandboxLeases } = createSandboxLeaseActivities(
-      reaperServices(modalSettings),
-      { sweepModalOrphans: sweep },
-    );
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(modalSettings), {
+      sweepModalOrphans: sweep,
+    });
     const result = await reapSandboxLeases();
 
     expect(result.modalOrphansTerminated).toBe(2);
@@ -521,22 +641,34 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(2) provider stop() fires ONLY at refcount=0 past grace — never under a held turn/viewer or during the grace", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
 
     // (a) a WARM box with a LIVE turn holder (fresh heartbeat) → TTL-exempt; never
     //     reaped, never terminated.
     const turnHeld = await freshWorkspace();
     const tLease = await insertLease(turnHeld, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 3, instanceId: "box-turn",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 3,
+      instanceId: "box-turn",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(turnHeld, tLease, "turn", "turn-live", 1_000); // fresh
 
     // (b) a WARM box with a LIVE viewer holder (fresh heartbeat) → not reaped.
     const viewerHeld = await freshWorkspace();
     const vLease = await insertLease(viewerHeld, {
-      liveness: "warm", refcount: 1, viewerHolders: 1, leaseEpoch: 4, instanceId: "box-vw",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+      leaseEpoch: 4,
+      instanceId: "box-vw",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(viewerHeld, vLease, "viewer", "viewer-live", 1_000); // fresh
 
@@ -544,8 +676,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     //     terminable.
     const draining = await freshWorkspace();
     await insertLease(draining, {
-      liveness: "draining", refcount: 0, leaseEpoch: 6, expiresInMs: 60_000, instanceId: "box-grace",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 6,
+      expiresInMs: 60_000,
+      instanceId: "box-grace",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
 
     await reapSandboxLeases();
@@ -572,7 +709,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(3) a crashed-turn holder (its activity confirmed dead → holder released) becomes reapable → drains + terminates", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
     const ws = await freshWorkspace();
 
     // A warm box that once had a turn holder; the founder activity CRASHED and its
@@ -582,8 +721,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // holder rows → warm→draining (turn_holders=0), then on a later sweep, past
     // grace, terminates.
     const leaseId = await insertLease(ws, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 7, instanceId: "box-crashed",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 7,
+      instanceId: "box-crashed",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     // NOTE: no holder rows inserted — the crashed founder's turn holder is GONE.
     // (turn_holders=1 in the cached column is stale; the sweep recomputes from the
@@ -615,7 +759,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
   test("(3c) a DEAD-WORKER turn holder (heartbeat frozen past warming-budget+lease-TTL) is reaped; warming-window and live holders survive", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: spy.fn,
+    });
     const horizonMs = REAPER_SETTINGS.sandboxWarmingTimeoutMs + REAPER_SETTINGS.sandboxLeaseTtlMs;
 
     // (a) A SIGKILLed worker's holder: heartbeat frozen well past the horizon.
@@ -624,8 +770,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // (2026-07-06 staging deploy churn).
     const dead = await freshWorkspace();
     const deadLease = await insertLease(dead, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 8, instanceId: "box-deadworker",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 8,
+      instanceId: "box-deadworker",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(dead, deadLease, "turn", "turn-dead", horizonMs + 60_000);
 
@@ -633,16 +784,32 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // the first heartbeat): stale, but NOT past the horizon — must survive.
     const warming = await freshWorkspace();
     const warmingLease = await insertLease(warming, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 9, instanceId: "box-warmingsilence",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 9,
+      instanceId: "box-warmingsilence",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
-    await insertHolder(warming, warmingLease, "turn", "turn-warming", Math.max(horizonMs - 120_000, 1_000));
+    await insertHolder(
+      warming,
+      warmingLease,
+      "turn",
+      "turn-warming",
+      Math.max(horizonMs - 120_000, 1_000),
+    );
 
     // (c) A live multi-day turn: fresh 10s-cadence heartbeat — must survive.
     const live = await freshWorkspace();
     const liveLease = await insertLease(live, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 10, instanceId: "box-liveturn",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 10,
+      instanceId: "box-liveturn",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(live, liveLease, "turn", "turn-live-hb", 1_000);
 
@@ -673,7 +840,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
   test("(3d) touchLeaseHolder keeps a warmup-phase holder alive across the reap horizon; a released holder returns false", async () => {
     if (!available) return;
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: makeTerminateSpy().fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: makeTerminateSpy().fn,
+    });
     const horizonMs = REAPER_SETTINGS.sandboxWarmingTimeoutMs + REAPER_SETTINGS.sandboxLeaseTtlMs;
 
     // A holder registered long ago (frozen past the horizon) whose worker is
@@ -681,14 +850,22 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // touch must reset last_heartbeat_at so the (a2) reap never fires.
     const ws = await freshWorkspace();
     const leaseId = await insertLease(ws, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 11, instanceId: "box-warmup-touch",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      instanceId: "box-warmup-touch",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
     await insertHolder(ws, leaseId, "turn", "turn-warmup", horizonMs + 60_000);
 
     const touched = await touchLeaseHolder(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      kind: "turn", holderId: "turn-warmup",
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: "turn-warmup",
     });
     expect(touched).toBe(true);
 
@@ -699,8 +876,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     // A holder that no longer exists (released/reaped) returns false so a
     // stale liveness loop learns it is orphaned.
     const gone = await touchLeaseHolder(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      kind: "turn", holderId: "turn-never-existed",
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      kind: "turn",
+      holderId: "turn-never-existed",
     });
     expect(gone).toBe(false);
   }, 60_000);
@@ -723,7 +903,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       sandboxLeaseReaperPeriodMs: 30_000,
       sandboxIdleGraceMs: tenMinGraceMs,
     });
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(longGrace), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(longGrace), {
+      terminateBox: spy.fn,
+    });
 
     // (a) a WARM box that just dropped to refcount 0 (NO holders) → the sweep
     //     recomputes 0 holders → warm->draining and stamps expires_at = now +
@@ -731,16 +913,26 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     //     sweep — the user could navigate back within the grace.
     const justIdle = await freshWorkspace();
     await insertLease(justIdle, {
-      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 11, instanceId: "box-justidle",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      instanceId: "box-justidle",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
 
     // (b) a box already DRAINING whose grace has fully elapsed (expires in the past)
     //     → terminated this sweep. Proves the grace is a deadline, not an immortality.
     const graceElapsed = await freshWorkspace();
     await insertLease(graceElapsed, {
-      liveness: "draining", refcount: 0, leaseEpoch: 12, expiresInMs: -1_000, instanceId: "box-elapsed",
-      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 12,
+      expiresInMs: -1_000,
+      instanceId: "box-elapsed",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
     });
 
     await reapSandboxLeases();
@@ -781,54 +973,81 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     // reaperPeriod (100s) >= viewerHolderTTL (90s) → throws (the reaper must run
     // more often than the TTL it polices).
-    expect(() => withEnv({
-      ...base,
-      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "100000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
-    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS.*less than.*VIEWER_HOLDER_TTL_MS/s);
+    expect(() =>
+      withEnv(
+        {
+          ...base,
+          OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "100000",
+          OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/REAPER_PERIOD_MS.*less than.*VIEWER_HOLDER_TTL_MS/s);
 
     // viewerHolderTTL (4000s) >= effective box idle timeout (3600s, == hard
     // lifetime by default) → throws. (sandbox-file-persistence: the binding box
     // lifetime is the idle timeout, not the hard lifetime.)
-    expect(() => withEnv({
-      ...base,
-      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "4000000",
-      OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
-    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than the effective box idle timeout/s);
+    expect(() =>
+      withEnv(
+        {
+          ...base,
+          OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+          OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "4000000",
+          OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/VIEWER_HOLDER_TTL_MS.*less than the effective box idle timeout/s);
 
     // reaperPeriod + idleGrace (30s + 900s = 930s) >= effective box idle timeout
     // (900s, == hard lifetime since no explicit idle timeout) → throws. This is the
     // warm-window guard AND the file-persistence guard: a drained box must survive
     // its full warm window so the reaper can snapshot /workspace before Modal's
     // idle-reap (or the hard backstop) reclaims it.
-    expect(() => withEnv({
-      ...base,
-      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
-      OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
-      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
-    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS \+ OPENGENI_SANDBOX_IDLE_GRACE_MS.*less than the.*effective box idle timeout/s);
+    expect(() =>
+      withEnv(
+        {
+          ...base,
+          OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+          OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+          OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+          OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      /REAPER_PERIOD_MS \+ OPENGENI_SANDBOX_IDLE_GRACE_MS.*less than the.*effective box idle timeout/s,
+    );
 
     // sandbox-file-persistence: an explicit SHORT idle timeout below the warm
     // window ALSO throws — even though the hard lifetime is generous — because
     // Modal idle-reaps the box at the idle timeout, before the reaper snapshots it.
-    expect(() => withEnv({
-      ...base,
-      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
-      OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
-      OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
-      OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
-    }, () => getSettings())).toThrow(/effective box idle timeout/s);
+    expect(() =>
+      withEnv(
+        {
+          ...base,
+          OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+          OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+          OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+          OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
+          OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/effective box idle timeout/s);
 
     // The shipped defaults validate: reaper 30s < viewer 90s; reaper 30s + idleGrace
     // 900s = 930s < providerLifetime 3600s. (No idle-grace/modal env set → defaults.)
-    expect(() => withEnv({
-      ...base,
-      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
-    }, () => getSettings())).not.toThrow();
+    expect(() =>
+      withEnv(
+        {
+          ...base,
+          OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+          OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
   });
 
   test("(5) the Schedule registration is idempotent — a second create() collides and no-ops (registers exactly once)", async () => {
@@ -878,8 +1097,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const ws = await freshWorkspace();
     const EPOCH = 3;
     await insertLease(ws, {
-      liveness: "draining", refcount: 0, leaseEpoch: EPOCH, expiresInMs: -1_000,
-      instanceId: "box-no-archive", backend: "local", resumeBackendId: "local",
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: EPOCH,
+      expiresInMs: -1_000,
+      instanceId: "box-no-archive",
+      backend: "local",
+      resumeBackendId: "local",
       resumeState: { backendId: "local", sessionState: {} },
     });
 
@@ -907,7 +1131,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return true;
     };
 
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: reArmSpy });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: reArmSpy,
+    });
     const result = await reapSandboxLeases();
 
     // The terminate was ABORTED (the box was re-armed). No delete fired.
@@ -926,13 +1152,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     const ws = await freshWorkspace();
     await insertLease(ws, {
-      liveness: "draining", refcount: 0, leaseEpoch: 4, expiresInMs: -1_000,
-      instanceId: "box-no-archive-ok", backend: "local", resumeBackendId: "local",
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 4,
+      expiresInMs: -1_000,
+      instanceId: "box-no-archive-ok",
+      backend: "local",
+      resumeBackendId: "local",
       resumeState: { backendId: "local", sessionState: {} },
     });
 
     let deleteCount = 0;
-    const noArchiveSpy: TerminateBoxFn = async (_settings, _lease, _observability, persistArchive) => {
+    const noArchiveSpy: TerminateBoxFn = async (
+      _settings,
+      _lease,
+      _observability,
+      persistArchive,
+    ) => {
       // No archive produced. CAS-check via null: lease is still draining → wrote:true.
       const { wrote } = await persistArchive(null);
       if (!wrote) return false;
@@ -940,7 +1176,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return true;
     };
 
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: noArchiveSpy });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: noArchiveSpy,
+    });
     await reapSandboxLeases();
 
     expect(deleteCount).toBe(1);
@@ -978,10 +1216,22 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     // Simulate spawn failure: call failWarmingToCold.
     const { failWarmingToCold: failWarmToCold } = await import("@opengeni/db");
-    await failWarmToCold(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: 7 });
+    await failWarmToCold(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: 7,
+    });
 
     // The lease must be cold again, but the archive must survive.
-    const [row] = await admin<{ liveness: string; archive: string | null; backend_id: string | null; resume_backend_id: string | null }[]>`
+    const [row] = await admin<
+      {
+        liveness: string;
+        archive: string | null;
+        backend_id: string | null;
+        resume_backend_id: string | null;
+      }[]
+    >`
       select liveness,
              resume_state #>> '{sessionState,workspaceArchive}' as archive,
              resume_state ->> 'backendId' as backend_id,
@@ -1010,7 +1260,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       )`;
 
     const { failWarmingToCold: failWarmToCold } = await import("@opengeni/db");
-    await failWarmToCold(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: 3 });
+    await failWarmToCold(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: 3,
+    });
 
     const [row] = await admin<{ liveness: string; resume_state: unknown }[]>`
       select liveness, resume_state from sandbox_leases
@@ -1029,8 +1284,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       // Not a failure — the non-gated scope is green without Modal creds.
       return;
     }
-    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false, sandboxOwnershipEnabled: true });
-    const { createSandboxClientForBackend, establishSandboxSessionFromEnvelope, serializeEstablishedSandboxEnvelope } = await import("@opengeni/runtime");
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: true,
+    });
+    const {
+      createSandboxClientForBackend,
+      establishSandboxSessionFromEnvelope,
+      serializeEstablishedSandboxEnvelope,
+    } = await import("@opengeni/runtime");
     const client = createSandboxClientForBackend("modal", settings) as {
       backendId: string;
       delete?: (state: unknown) => Promise<unknown>;
@@ -1041,15 +1304,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const ws = await freshWorkspace();
     let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>> | undefined;
     try {
-      established = await establishSandboxSessionFromEnvelope(settings, null, { sessionId: ws.groupId, backendOverride: "modal" });
+      established = await establishSandboxSessionFromEnvelope(settings, null, {
+        sessionId: ws.groupId,
+        backendOverride: "modal",
+      });
       // Fold the box onto the lease via the SAME serializer production uses
       // (serializeEstablishedSandboxEnvelope), so the envelope nests the flat
       // provider state (with sandboxId) under sessionState.providerState — the
       // exact shape the reaper's terminate path must unwrap.
       const envelope = await serializeEstablishedSandboxEnvelope(established);
       await insertLease(ws, {
-        liveness: "draining", refcount: 0, leaseEpoch: 1, expiresInMs: -1_000,
-        instanceId: established.instanceId, backend: "modal", resumeBackendId: "modal",
+        liveness: "draining",
+        refcount: 0,
+        leaseEpoch: 1,
+        expiresInMs: -1_000,
+        instanceId: established.instanceId,
+        backend: "modal",
+        resumeBackendId: "modal",
         resumeState: envelope,
       });
       const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings));
@@ -1063,7 +1334,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         if (established && client.delete) {
           await client.delete(established.sessionState);
         }
-      } catch { /* already terminated */ }
+      } catch {
+        /* already terminated */
+      }
     }
   }, 180_000);
 });

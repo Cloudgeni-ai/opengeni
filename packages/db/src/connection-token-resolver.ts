@@ -1,4 +1,8 @@
-import { environmentsEncryptionKeyBytes, type McpServerConnectionRef, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  type McpServerConnectionRef,
+  type Settings,
+} from "@opengeni/config";
 import { Buffer } from "node:buffer";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -15,15 +19,18 @@ import {
 export type ResolveConnectionCredentialResult =
   | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
   | {
-    status: "auth_needed";
-    reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
-    providerDomain: string;
-    connectionId?: string;
-    scopes?: string[];
-    resource?: string;
-    authorizationUrl?: string;
-  };
-type AuthNeededReason = Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>["reason"];
+      status: "auth_needed";
+      reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+      providerDomain: string;
+      connectionId?: string;
+      scopes?: string[];
+      resource?: string;
+      authorizationUrl?: string;
+    };
+type AuthNeededReason = Extract<
+  ResolveConnectionCredentialResult,
+  { status: "auth_needed" }
+>["reason"];
 
 export type ResolveConnectionCredentialInput = {
   workspaceId: string;
@@ -64,7 +71,9 @@ export function buildConnectionTokenResolver(
   settings: Settings,
   deps: ConnectionBrokerDeps = defaultDeps,
 ): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
-  const load = async (input: ResolveConnectionCredentialInput): Promise<ConnectionCredentialForBroker | null> => {
+  const load = async (
+    input: ResolveConnectionCredentialInput,
+  ): Promise<ConnectionCredentialForBroker | null> => {
     const request: Parameters<typeof loadConnectionCredentialForBroker>[2] = {
       workspaceId: input.workspaceId,
       providerDomain: input.connectionRef.providerDomain,
@@ -83,7 +92,10 @@ export function buildConnectionTokenResolver(
     return deps.loadCredential(db, settings, request);
   };
 
-  const snapshot = async (cred: ConnectionCredentialForBroker, ref: McpServerConnectionRef): Promise<ResolveConnectionCredentialResult> => {
+  const snapshot = async (
+    cred: ConnectionCredentialForBroker,
+    ref: McpServerConnectionRef,
+  ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
     }
@@ -118,7 +130,10 @@ export function buildConnectionTokenResolver(
     };
   };
 
-  const performRefresh = async (cred: ConnectionCredentialForBroker, ref: McpServerConnectionRef): Promise<ConnectionCredentialForBroker> => {
+  const performRefresh = async (
+    cred: ConnectionCredentialForBroker,
+    ref: McpServerConnectionRef,
+  ): Promise<ConnectionCredentialForBroker> => {
     const key = deps.keyBytes(settings);
     if (!key) {
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
@@ -157,7 +172,10 @@ export function buildConnectionTokenResolver(
     throw new Error("connection credential changed during token refresh");
   };
 
-  const refreshSingleFlight = (cred: ConnectionCredentialForBroker, ref: McpServerConnectionRef): Promise<ConnectionCredentialForBroker> => {
+  const refreshSingleFlight = (
+    cred: ConnectionCredentialForBroker,
+    ref: McpServerConnectionRef,
+  ): Promise<ConnectionCredentialForBroker> => {
     const key = `${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
@@ -193,10 +211,18 @@ export function buildConnectionTokenResolver(
         // Only a rejected grant may poison the connection; transient failures
         // (network errors, AS 5xx) leave it active so the next resolve retries.
         if (isPermanentRefreshError(error)) {
-          await deps.setStatus(db, input.workspaceId, "needs_reauth", error instanceof Error ? error.message : String(error), {
-            id: cred.id,
-            version: cred.version,
-          }).catch(() => undefined);
+          await deps
+            .setStatus(
+              db,
+              input.workspaceId,
+              "needs_reauth",
+              error instanceof Error ? error.message : String(error),
+              {
+                id: cred.id,
+                version: cred.version,
+              },
+            )
+            .catch(() => undefined);
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
@@ -219,9 +245,13 @@ export class ConnectionRefreshHttpError extends Error {
 // forward. 429 (throttling) and 408 are transient despite being 4xx; network
 // failures and AS 5xx are likewise retryable.
 function isPermanentRefreshError(error: unknown): boolean {
-  return error instanceof ConnectionRefreshHttpError
-    && error.httpStatus >= 400 && error.httpStatus < 500
-    && error.httpStatus !== 408 && error.httpStatus !== 429;
+  return (
+    error instanceof ConnectionRefreshHttpError &&
+    error.httpStatus >= 400 &&
+    error.httpStatus < 500 &&
+    error.httpStatus !== 408 &&
+    error.httpStatus !== 429
+  );
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
@@ -237,7 +267,11 @@ function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now:
   return cred.expiresAt.getTime() <= now.getTime() + REFRESH_WINDOW_MS;
 }
 
-function authNeeded(ref: McpServerConnectionRef, reason: AuthNeededReason, connectionId?: string): ResolveConnectionCredentialResult {
+function authNeeded(
+  ref: McpServerConnectionRef,
+  reason: AuthNeededReason,
+  connectionId?: string,
+): ResolveConnectionCredentialResult {
   return {
     status: "auth_needed",
     reason,
@@ -248,11 +282,18 @@ function authNeeded(ref: McpServerConnectionRef, reason: AuthNeededReason, conne
   };
 }
 
-function authNeededForStatus(cred: ConnectionCredentialForBroker, ref: McpServerConnectionRef): ResolveConnectionCredentialResult {
+function authNeededForStatus(
+  cred: ConnectionCredentialForBroker,
+  ref: McpServerConnectionRef,
+): ResolveConnectionCredentialResult {
   if (cred.status === "revoked") {
     return authNeeded(ref, "missing_connection", cred.id);
   }
-  return authNeeded(ref, cred.expiresAt && cred.expiresAt.getTime() <= Date.now() ? "expired" : "refresh_failed", cred.id);
+  return authNeeded(
+    ref,
+    cred.expiresAt && cred.expiresAt.getTime() <= Date.now() ? "expired" : "refresh_failed",
+    cred.id,
+  );
 }
 
 function missingRequestedScopes(requested: string[] | undefined, granted: string[]): string[] {
@@ -282,7 +323,9 @@ function headersForCredential(cred: ConnectionCredentialForBroker): Record<strin
     if (!accessToken) {
       return null;
     }
-    return { authorization: `${normalizeBearerScheme(stringValue((cred.credential as { token_type?: unknown }).token_type))} ${accessToken}` };
+    return {
+      authorization: `${normalizeBearerScheme(stringValue((cred.credential as { token_type?: unknown }).token_type))} ${accessToken}`,
+    };
   }
   return stringRecord((cred.credential as { headers?: unknown }).headers);
 }
@@ -291,15 +334,23 @@ export async function refreshOAuthConnectionCredential(
   cred: ConnectionCredentialForBroker,
   ref: McpServerConnectionRef,
   settings?: Settings,
-): Promise<{ credential: Record<string, unknown>; expiresAt: Date | null; grantedScopes?: string[] }> {
+): Promise<{
+  credential: Record<string, unknown>;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+}> {
   if (cred.kind !== "oauth2") {
-    return { credential: cred.credential, expiresAt: cred.expiresAt, grantedScopes: cred.grantedScopes };
+    return {
+      credential: cred.credential,
+      expiresAt: cred.expiresAt,
+      grantedScopes: cred.grantedScopes,
+    };
   }
   const refreshToken = stringValue((cred.credential as { refresh_token?: unknown }).refresh_token);
   const tokenEndpoint =
-    stringValue((cred.credential as { token_endpoint?: unknown }).token_endpoint)
-    ?? stringValue((cred.metadata as { tokenEndpoint?: unknown }).tokenEndpoint)
-    ?? stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
+    stringValue((cred.credential as { token_endpoint?: unknown }).token_endpoint) ??
+    stringValue((cred.metadata as { tokenEndpoint?: unknown }).tokenEndpoint) ??
+    stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
   if (!refreshToken || !tokenEndpoint) {
     throw new Error("connection has no refresh token endpoint");
   }
@@ -313,11 +364,14 @@ export async function refreshOAuthConnectionCredential(
   // in the token request body (RFC 6749 §3.2.1); grant flows persist the
   // client_id they authorized with into the bundle/metadata.
   const clientId =
-    stringValue((cred.credential as { client_id?: unknown }).client_id)
-    ?? stringValue((cred.metadata as { clientId?: unknown }).clientId)
-    ?? stringValue((cred.metadata as { client_id?: unknown }).client_id);
+    stringValue((cred.credential as { client_id?: unknown }).client_id) ??
+    stringValue((cred.metadata as { clientId?: unknown }).clientId) ??
+    stringValue((cred.metadata as { client_id?: unknown }).client_id);
   const clientSecret = stringValue((cred.credential as { client_secret?: unknown }).client_secret);
-  const authMethod = stringValue((cred.credential as { token_endpoint_auth_method?: unknown }).token_endpoint_auth_method) ?? "none";
+  const authMethod =
+    stringValue(
+      (cred.credential as { token_endpoint_auth_method?: unknown }).token_endpoint_auth_method,
+    ) ?? "none";
   if (clientId) {
     body.set("client_id", clientId);
   }
@@ -327,7 +381,8 @@ export async function refreshOAuthConnectionCredential(
   } else if (clientId && clientSecret && authMethod === "client_secret_basic") {
     headers.authorization = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`;
   }
-  const resource = ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
+  const resource =
+    ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
   if (resource) {
     body.set("resource", resource);
   }
@@ -346,7 +401,7 @@ export async function refreshOAuthConnectionCredential(
   if (!response.ok) {
     throw new ConnectionRefreshHttpError(response.status);
   }
-  const payload = await response.json() as Record<string, unknown>;
+  const payload = (await response.json()) as Record<string, unknown>;
   const accessToken = stringValue(payload.access_token);
   if (!accessToken) {
     throw new Error("connection refresh response did not include access_token");
@@ -357,11 +412,16 @@ export async function refreshOAuthConnectionCredential(
     ...cred.credential,
     access_token: accessToken,
     refresh_token: stringValue(payload.refresh_token) ?? refreshToken,
-    token_type: stringValue(payload.token_type) ?? stringValue((cred.credential as { token_type?: unknown }).token_type) ?? "Bearer",
+    token_type:
+      stringValue(payload.token_type) ??
+      stringValue((cred.credential as { token_type?: unknown }).token_type) ??
+      "Bearer",
     ...(expiresAt ? { expires_at: expiresAt.toISOString() } : {}),
     ...(resource ? { resource } : {}),
     ...(scopeText ? { scope: scopeText } : {}),
-    ...(clientSecret ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod } : {}),
+    ...(clientSecret
+      ? { client_secret: clientSecret, token_endpoint_auth_method: authMethod }
+      : {}),
   };
   return {
     credential: nextCredential,
@@ -370,7 +430,10 @@ export async function refreshOAuthConnectionCredential(
   };
 }
 
-function expiresAtFromTokenResponse(payload: Record<string, unknown>, fallback: Date | null): Date | null {
+function expiresAtFromTokenResponse(
+  payload: Record<string, unknown>,
+  fallback: Date | null,
+): Date | null {
   const expiresAt = stringValue(payload.expires_at);
   if (expiresAt) {
     const parsed = new Date(expiresAt);
@@ -402,7 +465,10 @@ function stringValue(value: unknown): string | undefined {
 }
 
 async function assertOAuthEndpointAllowed(rawUrl: string, settings: Settings): Promise<void> {
-  if (settings.integrationsAllowPrivateNetworkTargets || ["local", "test"].includes(settings.environment)) {
+  if (
+    settings.integrationsAllowPrivateNetworkTargets ||
+    ["local", "test"].includes(settings.environment)
+  ) {
     return;
   }
   const url = new URL(rawUrl);
@@ -432,14 +498,16 @@ export function isPrivateAddress(address: string): boolean {
     if (isIP(normalized) !== 6) {
       return true;
     }
-    return normalized === "::1"
-      || normalized === "::"
-      || normalized.startsWith("fc")
-      || normalized.startsWith("fd")
-      || normalized.startsWith("fe8")
-      || normalized.startsWith("fe9")
-      || normalized.startsWith("fea")
-      || normalized.startsWith("feb");
+    return (
+      normalized === "::1" ||
+      normalized === "::" ||
+      normalized.startsWith("fc") ||
+      normalized.startsWith("fd") ||
+      normalized.startsWith("fe8") ||
+      normalized.startsWith("fe9") ||
+      normalized.startsWith("fea") ||
+      normalized.startsWith("feb")
+    );
   }
   return isPrivateIpv4Address(normalized);
 }
@@ -466,7 +534,14 @@ function ipv4FromMappedIpv6(address: string): string | null {
   }
   const high = Number.parseInt(parts[0]!, 16);
   const low = Number.parseInt(parts[1]!, 16);
-  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 0xffff || low < 0 || low > 0xffff) {
+  if (
+    !Number.isInteger(high) ||
+    !Number.isInteger(low) ||
+    high < 0 ||
+    high > 0xffff ||
+    low < 0 ||
+    low > 0xffff
+  ) {
     return null;
   }
   return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
@@ -477,14 +552,19 @@ function isPrivateIpv4Address(address: string): boolean {
     return true;
   }
   const parts = address.split(".").map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
     return true;
   }
   const [a, b] = parts as [number, number, number, number];
-  return a === 0
-    || a === 10
-    || a === 127
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168);
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
 }

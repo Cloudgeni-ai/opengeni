@@ -1,4 +1,11 @@
-import type { CapabilityCatalogItem, ClientConfig, GitHubRepository, ReasoningEffort, ResourceRef, ToolRef } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  ClientConfig,
+  GitHubRepository,
+  ReasoningEffort,
+  ResourceRef,
+  ToolRef,
+} from "@/types";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -10,7 +17,14 @@ export type McpServerOption = { id: string; name: string };
 
 // Canonical low→high ordering over the full enum; the picker renders efforts in
 // this order, filtered to whatever the host curates in `allowedReasoningEfforts`.
-export const reasoningEffortOrder: IntelligenceEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+export const reasoningEffortOrder: IntelligenceEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
 
 export function labelEffort(value: IntelligenceEffort): string {
   if (value === "xhigh") {
@@ -23,7 +37,9 @@ export function labelEffort(value: IntelligenceEffort): string {
 // to the full enum when the host exposes no allow-list. No lossy UI filter: every
 // effort the host allows (including `none`/`minimal`) is offered, so the deployer's
 // configured default is always representable/selectable.
-export function effortOptionsFor(config: Pick<ClientConfig, "allowedReasoningEfforts"> | null): IntelligenceEffort[] {
+export function effortOptionsFor(
+  config: Pick<ClientConfig, "allowedReasoningEfforts"> | null,
+): IntelligenceEffort[] {
   const allowed = config?.allowedReasoningEfforts ?? reasoningEffortOrder;
   return reasoningEffortOrder.filter((effort) => allowed.includes(effort));
 }
@@ -31,11 +47,16 @@ export function effortOptionsFor(config: Pick<ClientConfig, "allowedReasoningEff
 // The composer's initial effort once config lands: the deployment default,
 // faithfully — no clamping to a UI subset (the bug that pinned `none`/`minimal`
 // defaults to "low").
-export function initialReasoningEffort(config: Pick<ClientConfig, "defaultReasoningEffort">): IntelligenceEffort {
+export function initialReasoningEffort(
+  config: Pick<ClientConfig, "defaultReasoningEffort">,
+): IntelligenceEffort {
   return config.defaultReasoningEffort;
 }
 
-export function buildTools(existing: ToolRef[] | undefined, mcpServerIds: string[] = []): ToolRef[] {
+export function buildTools(
+  existing: ToolRef[] | undefined,
+  mcpServerIds: string[] = [],
+): ToolRef[] {
   const out = [...(existing ?? [])];
   const ids = [...mcpServerIds];
   // Document Search is one user-facing tool but needs its file-download helper
@@ -51,15 +72,22 @@ export function buildTools(existing: ToolRef[] | undefined, mcpServerIds: string
   return out;
 }
 
-export function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], selected: Set<number>, selectedRefs: Record<number, string>): ResourceRef[] {
+export function buildResources(
+  manualRepos: RepoDraft[],
+  repos: GitHubRepository[],
+  selected: Set<number>,
+  selectedRefs: Record<number, string>,
+): ResourceRef[] {
   const raw = [
-    ...repos.filter((repo) => selected.has(repo.id)).map((repo) => ({
-      url: repo.cloneUrl,
-      ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
-      repositoryId: repo.id,
-      installationId: repo.installationId,
-      private: repo.private,
-    })),
+    ...repos
+      .filter((repo) => selected.has(repo.id))
+      .map((repo) => ({
+        url: repo.cloneUrl,
+        ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
+        repositoryId: repo.id,
+        installationId: repo.installationId,
+        private: repo.private,
+      })),
     ...manualRepos.map((repo) => ({
       url: repo.url.trim(),
       ref: repo.ref.trim(),
@@ -90,20 +118,31 @@ export function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository
   });
 }
 
-export function gitHubRepositoryResource(repo: GitHubRepository, ref: string): Extract<ResourceRef, { kind: "repository" }> {
+export function gitHubRepositoryResource(
+  repo: GitHubRepository,
+  ref: string,
+): Extract<ResourceRef, { kind: "repository" }> {
   const parsed = normalizeRepositoryUrl(repo.cloneUrl);
   return {
     kind: "repository",
     uri: `https://${parsed.host}/${parsed.repo}.git`,
     ref: ref.trim() || repo.defaultBranch,
     mountPath: `repos/${parsed.repo}`,
-    ...(repo.private ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId } : {}),
+    ...(repo.private
+      ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
+      : {}),
   };
 }
 
-export function isRepositoryResourceForGitHubRepo(resource: Extract<ResourceRef, { kind: "repository" }>, repo: GitHubRepository): boolean {
+export function isRepositoryResourceForGitHubRepo(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+  repo: GitHubRepository,
+): boolean {
   if (repo.private) {
-    return resource.githubRepositoryId === repo.id && resource.githubInstallationId === repo.installationId;
+    return (
+      resource.githubRepositoryId === repo.id &&
+      resource.githubInstallationId === repo.installationId
+    );
   }
   return sameRepositoryUri(resource, gitHubRepositoryResource(repo, repo.defaultBranch).uri);
 }
@@ -112,7 +151,9 @@ export function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
   return resource.kind === "repository" && resource.uri === uri;
 }
 
-export function repositoryDisplayName(resource: Extract<ResourceRef, { kind: "repository" }>): string {
+export function repositoryDisplayName(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): string {
   try {
     return new URL(resource.uri).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
   } catch {
@@ -133,7 +174,12 @@ export function normalizeRepositoryUrl(value: string): { host: string; repo: str
   return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
 }
 
-export type RepositoryGroup = { installationId: number; label: string; detail: string; repositories: GitHubRepository[] };
+export type RepositoryGroup = {
+  installationId: number;
+  label: string;
+  detail: string;
+  repositories: GitHubRepository[];
+};
 
 export function groupRepositories(repositories: GitHubRepository[]): RepositoryGroup[] {
   return repositories.reduce<RepositoryGroup[]>((groups, repo) => {
@@ -164,9 +210,16 @@ export function selectableMcpServers(config: ClientConfig | null): McpServerOpti
   return config.mcpServers.filter((server) => !hidden.has(server.id));
 }
 
-export function enabledWorkspaceCapabilityMcpServers(items: CapabilityCatalogItem[]): McpServerOption[] {
+export function enabledWorkspaceCapabilityMcpServers(
+  items: CapabilityCatalogItem[],
+): McpServerOption[] {
   return items.flatMap((item) => {
-    if (item.kind !== "mcp" || !item.enabled || !item.runtime.available || !item.runtime.mcpServerId) {
+    if (
+      item.kind !== "mcp" ||
+      !item.enabled ||
+      !item.runtime.available ||
+      !item.runtime.mcpServerId
+    ) {
       return [];
     }
     return [{ id: item.runtime.mcpServerId, name: item.name }];
@@ -185,7 +238,11 @@ export function mergeMcpServerOptions(...groups: McpServerOption[][]): McpServer
   return [...byId.values()];
 }
 
-export function selectedAvailableCapabilityToolIds(current: Set<string>, availableIds: string[], previouslyAvailableIds: Set<string> = new Set()): Set<string> {
+export function selectedAvailableCapabilityToolIds(
+  current: Set<string>,
+  availableIds: string[],
+  previouslyAvailableIds: Set<string> = new Set(),
+): Set<string> {
   const available = new Set(availableIds);
   const next = new Set([...current].filter((id) => available.has(id)));
   for (const id of availableIds) {

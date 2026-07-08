@@ -8,7 +8,12 @@ import {
   createSessionGoal,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { MemoryEventBus, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
+import {
+  MemoryEventBus,
+  startTestServices,
+  testSettings,
+  type TestServices,
+} from "@opengeni/testing";
 
 const delegationSecret = "workspace-isolation-delegation-secret";
 
@@ -50,15 +55,19 @@ describe("workspace isolation matrix", () => {
       headers: { ...authA, "content-type": "application/json" },
     });
     expect(createdSession.status).toBe(202);
-    const session = await createdSession.json() as { id: string };
+    const session = (await createdSession.json()) as { id: string };
 
     const listA = await app.request(workspacePath(a.workspaceId, "/sessions"), { headers: authA });
     expect(listA.status).toBe(200);
-    expect((await listA.json() as Array<{ id: string }>).some((item) => item.id === session.id)).toBe(true);
+    expect(
+      ((await listA.json()) as Array<{ id: string }>).some((item) => item.id === session.id),
+    ).toBe(true);
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/sessions"), 403);
     const listB = await app.request(workspacePath(b.workspaceId, "/sessions"), { headers: authB });
     expect(listB.status).toBe(200);
-    expect((await listB.json() as Array<{ id: string }>).some((item) => item.id === session.id)).toBe(false);
+    expect(
+      ((await listB.json()) as Array<{ id: string }>).some((item) => item.id === session.id),
+    ).toBe(false);
 
     await expectStatus(app, authA, workspacePath(b.workspaceId, `/sessions/${session.id}`), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, `/sessions/${session.id}`), 404);
@@ -71,9 +80,24 @@ describe("workspace isolation matrix", () => {
       text: "workspace A objective",
       createdBy: "api",
     });
-    await expectStatus(app, authA, workspacePath(a.workspaceId, `/sessions/${session.id}/goal`), 200);
-    await expectStatus(app, authA, workspacePath(b.workspaceId, `/sessions/${session.id}/goal`), 403);
-    await expectStatus(app, authB, workspacePath(b.workspaceId, `/sessions/${session.id}/goal`), 404);
+    await expectStatus(
+      app,
+      authA,
+      workspacePath(a.workspaceId, `/sessions/${session.id}/goal`),
+      200,
+    );
+    await expectStatus(
+      app,
+      authA,
+      workspacePath(b.workspaceId, `/sessions/${session.id}/goal`),
+      403,
+    );
+    await expectStatus(
+      app,
+      authB,
+      workspacePath(b.workspaceId, `/sessions/${session.id}/goal`),
+      404,
+    );
 
     const fileId = crypto.randomUUID();
     await createFileUpload(dbClient.db, {
@@ -98,7 +122,7 @@ describe("workspace isolation matrix", () => {
       headers: { ...authA, "content-type": "application/json" },
     });
     expect(baseResponse.status).toBe(201);
-    const base = await baseResponse.json() as { id: string };
+    const base = (await baseResponse.json()) as { id: string };
     await expectStatus(app, authA, workspacePath(b.workspaceId, `/document-bases/${base.id}`), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, `/document-bases/${base.id}`), 404);
     await expectStatus(app, authA, legacyRoute("document-bases", base.id), 404);
@@ -113,24 +137,44 @@ describe("workspace isolation matrix", () => {
       headers: { ...authA, "content-type": "application/json" },
     });
     expect(taskResponse.status).toBe(201);
-    const task = await taskResponse.json() as { id: string };
-    await expectStatus(app, authA, workspacePath(b.workspaceId, `/scheduled-tasks/${task.id}`), 403);
-    await expectStatus(app, authB, workspacePath(b.workspaceId, `/scheduled-tasks/${task.id}`), 404);
+    const task = (await taskResponse.json()) as { id: string };
+    await expectStatus(
+      app,
+      authA,
+      workspacePath(b.workspaceId, `/scheduled-tasks/${task.id}`),
+      403,
+    );
+    await expectStatus(
+      app,
+      authB,
+      workspacePath(b.workspaceId, `/scheduled-tasks/${task.id}`),
+      404,
+    );
     await expectStatus(app, authA, legacyRoute("scheduled-tasks", task.id), 404);
 
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/packs"), 403);
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/capabilities"), 403);
-    const connectionResponse = await app.request(workspacePath(a.workspaceId, "/social/connections"), {
-      method: "POST",
-      body: JSON.stringify({ provider: "linkedin", accountHandle: "isolation-a" }),
-      headers: { ...authA, "content-type": "application/json" },
-    });
+    const connectionResponse = await app.request(
+      workspacePath(a.workspaceId, "/social/connections"),
+      {
+        method: "POST",
+        body: JSON.stringify({ provider: "linkedin", accountHandle: "isolation-a" }),
+        headers: { ...authA, "content-type": "application/json" },
+      },
+    );
     expect(connectionResponse.status).toBe(201);
-    const connection = await connectionResponse.json() as { id: string };
+    const connection = (await connectionResponse.json()) as { id: string };
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/social/connections"), 403);
-    const otherWorkspaceConnections = await app.request(workspacePath(b.workspaceId, "/social/connections"), { headers: authB });
+    const otherWorkspaceConnections = await app.request(
+      workspacePath(b.workspaceId, "/social/connections"),
+      { headers: authB },
+    );
     expect(otherWorkspaceConnections.status).toBe(200);
-    expect((await otherWorkspaceConnections.json() as Array<{ id: string }>).some((item) => item.id === connection.id)).toBe(false);
+    expect(
+      ((await otherWorkspaceConnections.json()) as Array<{ id: string }>).some(
+        (item) => item.id === connection.id,
+      ),
+    ).toBe(false);
 
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/mcp"), 403, "POST");
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/github/app"), 403);
@@ -138,22 +182,45 @@ describe("workspace isolation matrix", () => {
 
     const environmentResponse = await app.request(workspacePath(a.workspaceId, "/environments"), {
       method: "POST",
-      body: JSON.stringify({ name: "Workspace A environment", variables: [{ name: "ISOLATION_TOKEN", value: "isolation-secret-a" }] }),
+      body: JSON.stringify({
+        name: "Workspace A environment",
+        variables: [{ name: "ISOLATION_TOKEN", value: "isolation-secret-a" }],
+      }),
       headers: { ...authA, "content-type": "application/json" },
     });
     expect(environmentResponse.status).toBe(201);
-    const environment = await environmentResponse.json() as { id: string };
-    await expectStatus(app, authA, workspacePath(b.workspaceId, `/environments/${environment.id}`), 403);
-    await expectStatus(app, authB, workspacePath(b.workspaceId, `/environments/${environment.id}`), 404);
-    const environmentsVisibleToB = await app.request(workspacePath(b.workspaceId, "/environments"), { headers: authB });
+    const environment = (await environmentResponse.json()) as { id: string };
+    await expectStatus(
+      app,
+      authA,
+      workspacePath(b.workspaceId, `/environments/${environment.id}`),
+      403,
+    );
+    await expectStatus(
+      app,
+      authB,
+      workspacePath(b.workspaceId, `/environments/${environment.id}`),
+      404,
+    );
+    const environmentsVisibleToB = await app.request(
+      workspacePath(b.workspaceId, "/environments"),
+      { headers: authB },
+    );
     expect(environmentsVisibleToB.status).toBe(200);
-    expect((await environmentsVisibleToB.json() as Array<{ id: string }>).some((item) => item.id === environment.id)).toBe(false);
+    expect(
+      ((await environmentsVisibleToB.json()) as Array<{ id: string }>).some(
+        (item) => item.id === environment.id,
+      ),
+    ).toBe(false);
     // Cross-workspace attachment is indistinguishable from a missing variable set.
     // Request still uses the deprecated `environmentId` alias field on purpose (alias coverage);
     // the canonical error message names the variable set.
     const crossAttachment = await app.request(workspacePath(b.workspaceId, "/sessions"), {
       method: "POST",
-      body: JSON.stringify({ initialMessage: "cross-workspace attach", environmentId: environment.id }),
+      body: JSON.stringify({
+        initialMessage: "cross-workspace attach",
+        environmentId: environment.id,
+      }),
       headers: { ...authB, "content-type": "application/json" },
     });
     expect(crossAttachment.status).toBe(422);
@@ -165,13 +232,26 @@ describe("workspace isolation matrix", () => {
       headers: { ...authA, "content-type": "application/json" },
     });
     expect(apiKeyResponse.status).toBe(201);
-    const apiKey = await apiKeyResponse.json() as { token: string };
-    await expectStatus(app, { authorization: `Bearer ${apiKey.token}` }, workspacePath(a.workspaceId, `/sessions/${session.id}`), 200);
-    await expectStatus(app, { authorization: `Bearer ${apiKey.token}` }, workspacePath(b.workspaceId, `/sessions/${session.id}`), 403);
+    const apiKey = (await apiKeyResponse.json()) as { token: string };
+    await expectStatus(
+      app,
+      { authorization: `Bearer ${apiKey.token}` },
+      workspacePath(a.workspaceId, `/sessions/${session.id}`),
+      200,
+    );
+    await expectStatus(
+      app,
+      { authorization: `Bearer ${apiKey.token}` },
+      workspacePath(b.workspaceId, `/sessions/${session.id}`),
+      403,
+    );
   });
 });
 
-async function workspaceGrant(db: ReturnType<typeof createDb>["db"], label: string): Promise<AccessGrant> {
+async function workspaceGrant(
+  db: ReturnType<typeof createDb>["db"],
+  label: string,
+): Promise<AccessGrant> {
   const id = crypto.randomUUID();
   const context = await bootstrapWorkspace(db, {
     accountExternalSource: "test:isolation",
@@ -190,7 +270,10 @@ async function workspaceGrant(db: ReturnType<typeof createDb>["db"], label: stri
   return grant;
 }
 
-async function authHeader(grant: AccessGrant, permissions: Permission[] = allWorkspacePermissions): Promise<{ authorization: string }> {
+async function authHeader(
+  grant: AccessGrant,
+  permissions: Permission[] = allWorkspacePermissions,
+): Promise<{ authorization: string }> {
   const token = await signDelegatedAccessToken(delegationSecret, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,

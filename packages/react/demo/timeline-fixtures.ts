@@ -35,19 +35,41 @@ export class EventLog {
 
   /** A settled tool call: created (+raw) then output. */
   tool(
-    args: { name: string; id: string; arguments?: unknown; raw?: unknown; output?: unknown; error?: boolean },
+    args: {
+      name: string;
+      id: string;
+      arguments?: unknown;
+      raw?: unknown;
+      output?: unknown;
+      error?: boolean;
+    },
     turnId: string | null = null,
   ): this {
-    this.push("agent.toolCall.created", { id: args.id, name: args.name, arguments: args.arguments ?? null, raw: args.raw }, turnId);
+    this.push(
+      "agent.toolCall.created",
+      { id: args.id, name: args.name, arguments: args.arguments ?? null, raw: args.raw },
+      turnId,
+    );
     if (args.output !== undefined || args.error) {
-      this.push("agent.toolCall.output", { id: args.id, output: args.output ?? null, error: args.error ?? false }, turnId);
+      this.push(
+        "agent.toolCall.output",
+        { id: args.id, output: args.output ?? null, error: args.error ?? false },
+        turnId,
+      );
     }
     return this;
   }
 
   /** A still-running tool call: created, no output. */
-  toolRunning(args: { name: string; id: string; arguments?: unknown; raw?: unknown }, turnId: string | null = null): this {
-    return this.push("agent.toolCall.created", { id: args.id, name: args.name, arguments: args.arguments ?? null, raw: args.raw }, turnId);
+  toolRunning(
+    args: { name: string; id: string; arguments?: unknown; raw?: unknown },
+    turnId: string | null = null,
+  ): this {
+    return this.push(
+      "agent.toolCall.created",
+      { id: args.id, name: args.name, arguments: args.arguments ?? null, raw: args.raw },
+      turnId,
+    );
   }
 }
 
@@ -85,7 +107,8 @@ export const SHOT_ERR = screenshot("localhost:5173/login  x invalid", "err");
 
 const HUGE_OUTPUT = Array.from(
   { length: 80 },
-  (_, i) => `  installed package-${String(i).padStart(3, "0")}@${(i % 4) + 1}.${i % 9}.${(i * 3) % 9}`,
+  (_, i) =>
+    `  installed package-${String(i).padStart(3, "0")}@${(i % 4) + 1}.${i % 9}.${(i * 3) % 9}`,
 ).join("\n");
 
 /* ----------------------------------------------------------------------------
@@ -114,7 +137,10 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "exec_command",
       id: "call-exec-0",
-      arguments: { cmd: "/opt/chrome/chrome --headless --remote-debugging-port=9222 &", workdir: "/workspace" },
+      arguments: {
+        cmd: "/opt/chrome/chrome --headless --remote-debugging-port=9222 &",
+        workdir: "/workspace",
+      },
       output:
         "Chunk ID: a1b2c3\nWall time: 2.5210 seconds\nProcess exited with code 0\nOutput:\nDevTools listening on ws://127.0.0.1:9222/devtools/browser/8f3a\n",
     },
@@ -169,13 +195,18 @@ export function tourEvents(): SessionEvent[] {
       id: "call-exec-5",
       arguments: { cmd: "cat /tmp/chrome.bin | head -c 200", workdir: "/tmp" },
       // a NUL byte in the stream classifies as binary
-      output: "Chunk ID: bbb222\nWall time: 0.0200 seconds\nProcess exited with code 0\nOutput:\n\u0000\u0001\u0002binary\u0000blob",
+      output:
+        "Chunk ID: bbb222\nWall time: 0.0200 seconds\nProcess exited with code 0\nOutput:\n\u0000\u0001\u0002binary\u0000blob",
     },
     turn,
   );
   // exec_command — RUNNING (no output event)
   log.toolRunning(
-    { name: "exec_command", id: "call-exec-run", arguments: { cmd: "npm run e2e", workdir: "/workspace" } },
+    {
+      name: "exec_command",
+      id: "call-exec-run",
+      arguments: { cmd: "npm run e2e", workdir: "/workspace" },
+    },
     turn,
   );
 
@@ -185,7 +216,8 @@ export function tourEvents(): SessionEvent[] {
       name: "write_stdin",
       id: "call-ws-0",
       arguments: { session_id: 1, chars: "" },
-      output: "Chunk ID: ccc333\nWall time: 1.0010 seconds\nProcess exited with code 130\nOutput:\n^C\n",
+      output:
+        "Chunk ID: ccc333\nWall time: 1.0010 seconds\nProcess exited with code 130\nOutput:\n^C\n",
     },
     turn,
   );
@@ -277,7 +309,10 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "apply_patch_call",
       id: "call-ap-3",
-      raw: { type: "apply_patch_call", operation: { type: "update_file", path: "src/auth/guard.ts", diff: "@@ ..." } },
+      raw: {
+        type: "apply_patch_call",
+        operation: { type: "update_file", path: "src/auth/guard.ts", diff: "@@ ..." },
+      },
       output: "Patch failed: Update File patch for src/auth/guard.ts must include a hunk.",
       error: true,
     },
@@ -306,7 +341,11 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "computer_call",
       id: "call-cc-0",
-      raw: { type: "computer_call", action: { type: "screenshot" }, actions: [{ type: "screenshot" }] },
+      raw: {
+        type: "computer_call",
+        action: { type: "screenshot" },
+        actions: [{ type: "screenshot" }],
+      },
       output: SHOT_DASH,
     },
     turn,
@@ -348,7 +387,11 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "computer_call",
       id: "call-cc-3",
-      raw: { type: "computer_call", action: { type: "screenshot" }, actions: [{ type: "screenshot" }] },
+      raw: {
+        type: "computer_call",
+        action: { type: "screenshot" },
+        actions: [{ type: "screenshot" }],
+      },
       output: "",
     },
     turn,
@@ -368,14 +411,22 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "computer_call",
       id: "call-cc-5",
-      raw: { type: "computer_call", action: { x: 300, y: 400, type: "click", button: "left" }, providerData: { approvalStatus: "rejected" } },
+      raw: {
+        type: "computer_call",
+        action: { x: 300, y: 400, type: "click", button: "left" },
+        providerData: { approvalStatus: "rejected" },
+      },
       output: "",
     },
     turn,
   );
   // computer_call — RUNNING (skeleton)
   log.toolRunning(
-    { name: "computer_call", id: "call-cc-run", raw: { type: "computer_call", action: { type: "screenshot" } } },
+    {
+      name: "computer_call",
+      id: "call-cc-run",
+      raw: { type: "computer_call", action: { type: "screenshot" } },
+    },
     turn,
   );
 
@@ -384,7 +435,16 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "web_search_call",
       id: "call-ws-run",
-      raw: { type: "hosted_tool_call", providerData: { action: { type: "search", query: '"naughty-engelbart"', queries: ['"naughty-engelbart"'] } } },
+      raw: {
+        type: "hosted_tool_call",
+        providerData: {
+          action: {
+            type: "search",
+            query: '"naughty-engelbart"',
+            queries: ['"naughty-engelbart"'],
+          },
+        },
+      },
     },
     turn,
   );
@@ -393,11 +453,25 @@ export function tourEvents(): SessionEvent[] {
     {
       name: "web_search_call",
       id: "call-search-0",
-      raw: { type: "hosted_tool_call", providerData: { action: { type: "search", query: "signed session handle cookie SameSite best practice" } } },
+      raw: {
+        type: "hosted_tool_call",
+        providerData: {
+          action: { type: "search", query: "signed session handle cookie SameSite best practice" },
+        },
+      },
       output: {
         results: [
-          { title: "SameSite cookies explained", domain: "web.dev", snippet: "Lax vs Strict vs None — when to set each for session handles." },
-          { title: "Secure session tokens", domain: "owasp.org", snippet: "Rotate the handle on privilege change; bind to the user agent where feasible." },
+          {
+            title: "SameSite cookies explained",
+            domain: "web.dev",
+            snippet: "Lax vs Strict vs None — when to set each for session handles.",
+          },
+          {
+            title: "Secure session tokens",
+            domain: "owasp.org",
+            snippet:
+              "Rotate the handle on privilege change; bind to the user agent where feasible.",
+          },
         ],
       },
     },
@@ -410,7 +484,13 @@ export function tourEvents(): SessionEvent[] {
       id: "call-search-1",
       raw: {
         type: "hosted_tool_call",
-        providerData: { action: { type: "search", query: '"naughty-engelbart" deploy log', queries: ['"naughty-engelbart" deploy log', "naughty engelbart preview"] } },
+        providerData: {
+          action: {
+            type: "search",
+            query: '"naughty-engelbart" deploy log',
+            queries: ['"naughty-engelbart" deploy log', "naughty engelbart preview"],
+          },
+        },
       },
       output: null,
     },
@@ -418,27 +498,55 @@ export function tourEvents(): SessionEvent[] {
   );
 
   // view_image — ok
-  log.tool({ name: "view_image", id: "call-vi-0", arguments: { path: "artifacts/login-error.png" }, output: SHOT_ERR }, turn);
+  log.tool(
+    {
+      name: "view_image",
+      id: "call-vi-0",
+      arguments: { path: "artifacts/login-error.png" },
+      output: SHOT_ERR,
+    },
+    turn,
+  );
   // view_image — too large
   log.tool(
     {
       name: "view_image",
       id: "call-vi-1",
       arguments: { path: "artifacts/full-page.png" },
-      output: "image path `artifacts/full-page.png` exceeded the allowed size of 10MB; resize or compress the image and try again",
+      output:
+        "image path `artifacts/full-page.png` exceeded the allowed size of 10MB; resize or compress the image and try again",
     },
     turn,
   );
   // view_image — OpenAI file reference
-  log.tool({ name: "view_image", id: "call-vi-2", arguments: { path: "uploads/spec.png" }, output: "OpenAI file reference: file-9aF2bQ" }, turn);
+  log.tool(
+    {
+      name: "view_image",
+      id: "call-vi-2",
+      arguments: { path: "uploads/spec.png" },
+      output: "OpenAI file reference: file-9aF2bQ",
+    },
+    turn,
+  );
 
   // environment_set_variable — secret-safe write-only
   log.tool(
     {
       name: "environment_set_variable",
       id: "call-sec-0",
-      arguments: { environmentName: "preview", name: "SESSION_SIGNING_KEY", value: "sk_live_9f2a7c1e8b4d_REDACTED" },
-      output: { content: [{ type: "text", text: JSON.stringify({ variable: { name: "SESSION_SIGNING_KEY" } }, null, 2) }] },
+      arguments: {
+        environmentName: "preview",
+        name: "SESSION_SIGNING_KEY",
+        value: "sk_live_9f2a7c1e8b4d_REDACTED",
+      },
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ variable: { name: "SESSION_SIGNING_KEY" } }, null, 2),
+          },
+        ],
+      },
     },
     turn,
   );
@@ -448,7 +556,22 @@ export function tourEvents(): SessionEvent[] {
       name: "environment_list",
       id: "call-mcp-0",
       arguments: {},
-      output: { content: [{ type: "text", text: JSON.stringify({ environments: [{ id: "env_1", name: "preview", variables: [{ name: "DATABASE_URL" }] }] }, null, 2) }] },
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                environments: [
+                  { id: "env_1", name: "preview", variables: [{ name: "DATABASE_URL" }] },
+                ],
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      },
     },
     turn,
   );
@@ -468,19 +591,40 @@ export function tourEvents(): SessionEvent[] {
       name: "create_issue",
       id: "call-mcp-2",
       arguments: { title: "Auth refactor follow-up", team: "ENG", priority: 2 },
-      output: { content: [{ type: "text", text: 'Created ENG-482 · "Auth refactor follow-up"\nhttps://linear.app/eng/issue/ENG-482' }] },
+      output: {
+        content: [
+          {
+            type: "text",
+            text: 'Created ENG-482 · "Auth refactor follow-up"\nhttps://linear.app/eng/issue/ENG-482',
+          },
+        ],
+      },
     },
     turn,
   );
   // external MCP — RUNNING
-  log.toolRunning({ name: "create_issue", id: "call-mcp-run", arguments: { title: "Flaky e2e on CI", team: "ENG" } }, turn);
+  log.toolRunning(
+    {
+      name: "create_issue",
+      id: "call-mcp-run",
+      arguments: { title: "Flaky e2e on CI", team: "ENG" },
+    },
+    turn,
+  );
   // generic / unknown tool fallback
   log.tool(
     {
       name: "workspace_provision_db",
       id: "call-gen-0",
       arguments: { engine: "postgres", size: "small", region: "eu-north" },
-      output: { content: [{ type: "text", text: JSON.stringify({ id: "db_9f2a", status: "provisioning" }, null, 2) }] },
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ id: "db_9f2a", status: "provisioning" }, null, 2),
+          },
+        ],
+      },
     },
     turn,
   );
@@ -495,12 +639,18 @@ export function tourEvents(): SessionEvent[] {
 export function workerGoalEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-workers";
-  log.push("user.message", { text: "Spin up a browser-verify worker and set a goal for the suite." });
+  log.push("user.message", {
+    text: "Spin up a browser-verify worker and set a goal for the suite.",
+  });
   log.push("goal.set", { text: "test suite green & dashboard captured" }, turn);
 
   // session_create -> WorkerItem (running)
   log.toolRunning(
-    { name: "session_create", id: "call-wk-0", arguments: { initialMessage: "verify login flow end-to-end" } },
+    {
+      name: "session_create",
+      id: "call-wk-0",
+      arguments: { initialMessage: "verify login flow end-to-end" },
+    },
     turn,
   );
   // a completed worker (spawn + output carrying the worker session id)
@@ -509,7 +659,17 @@ export function workerGoalEvents(): SessionEvent[] {
       name: "session_create",
       id: "call-wk-1",
       arguments: { initialMessage: "verify login flow end-to-end" },
-      output: { content: [{ type: "text", text: JSON.stringify({ sessionId: "9efcd759-1e2f-4a3b-8c4d-5e6f7a8b9c0d", status: "running" }) }] },
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              sessionId: "9efcd759-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+              status: "running",
+            }),
+          },
+        ],
+      },
     },
     turn,
   );
@@ -537,7 +697,8 @@ export function workerCompletionEvents(): SessionEvent[] {
       goal: {
         status: "completed",
         text: "verify login flow end-to-end",
-        evidence: "128/128 assertions green on 3 consecutive runs; screenshot dashboard-2026-07-07.png captured.",
+        evidence:
+          "128/128 assertions green on 3 consecutive runs; screenshot dashboard-2026-07-07.png captured.",
       },
     },
   });
@@ -575,10 +736,14 @@ export function workerCompletionEvents(): SessionEvent[] {
 export function completedTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-done";
-  log.push("user.message", { text: "Set up the project, get the test suite green, and screenshot the dashboard." });
+  log.push("user.message", {
+    text: "Set up the project, get the test suite green, and screenshot the dashboard.",
+  });
   log.push(
     "agent.reasoning.delta",
-    { text: "I'll scaffold the repo, install deps, then run the suite. The failing tests look like a missing fixture import, so I'll patch the helper first." },
+    {
+      text: "I'll scaffold the repo, install deps, then run the suite. The failing tests look like a missing fixture import, so I'll patch the helper first.",
+    },
     turn,
   );
   log.tool(
@@ -586,12 +751,21 @@ export function completedTurnEvents(): SessionEvent[] {
       name: "exec_command",
       id: "td-0",
       arguments: { cmd: "npm ci", workdir: "/workspace" },
-      output: "Chunk ID: 111\nWall time: 8.1\nProcess exited with code 0\nOutput:\nadded 412 packages, audited 413 packages in 8s\nfound 0 vulnerabilities\n",
+      output:
+        "Chunk ID: 111\nWall time: 8.1\nProcess exited with code 0\nOutput:\nadded 412 packages, audited 413 packages in 8s\nfound 0 vulnerabilities\n",
     },
     turn,
   );
-  log.push("agent.message.delta", { text: "Dependencies are installed; I found one helper import missing in the test setup." }, turn);
-  log.push("agent.message.completed", { text: "Dependencies are installed; I found one helper import missing in the test setup." }, turn);
+  log.push(
+    "agent.message.delta",
+    { text: "Dependencies are installed; I found one helper import missing in the test setup." },
+    turn,
+  );
+  log.push(
+    "agent.message.completed",
+    { text: "Dependencies are installed; I found one helper import missing in the test setup." },
+    turn,
+  );
   log.tool(
     {
       name: "apply_patch_call",
@@ -608,24 +782,46 @@ export function completedTurnEvents(): SessionEvent[] {
     },
     turn,
   );
-  log.push("agent.message.delta", { text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot." }, turn);
-  log.push("agent.message.completed", { text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot." }, turn);
+  log.push(
+    "agent.message.delta",
+    {
+      text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot.",
+    },
+    turn,
+  );
+  log.push(
+    "agent.message.completed",
+    {
+      text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot.",
+    },
+    turn,
+  );
   log.tool(
     {
       name: "exec_command",
       id: "td-2",
       arguments: { cmd: "npm test", workdir: "/workspace" },
-      output: "Chunk ID: 222\nWall time: 6.4\nProcess exited with code 0\nOutput:\nTest Suites: 14 passed, 14 total\nTests:       128 passed, 128 total\n",
+      output:
+        "Chunk ID: 222\nWall time: 6.4\nProcess exited with code 0\nOutput:\nTest Suites: 14 passed, 14 total\nTests:       128 passed, 128 total\n",
     },
     turn,
   );
   log.tool(
-    { name: "computer_call", id: "td-3", raw: { type: "computer_call", action: { type: "screenshot" } }, output: SHOT_DASH },
+    {
+      name: "computer_call",
+      id: "td-3",
+      raw: { type: "computer_call", action: { type: "screenshot" } },
+      output: SHOT_DASH,
+    },
     turn,
   );
-  log.push("agent.message.completed", {
-    text: "Done. The suite is green (128/128) after patching the missing fixture import in `test-helpers.ts`, and here is the dashboard once it built. Want me to wire up CI next?",
-  }, turn);
+  log.push(
+    "agent.message.completed",
+    {
+      text: "Done. The suite is green (128/128) after patching the missing fixture import in `test-helpers.ts`, and here is the dashboard once it built. Want me to wire up CI next?",
+    },
+    turn,
+  );
   log.push("turn.completed", {}, turn);
   return log.events;
 }
@@ -642,10 +838,14 @@ export function completedTurnEvents(): SessionEvent[] {
 export function memoryTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-memory";
-  log.push("user.message", { text: "Note our deploy conventions for next time, and fix that stale database note — I checked and it's wrong now." });
+  log.push("user.message", {
+    text: "Note our deploy conventions for next time, and fix that stale database note — I checked and it's wrong now.",
+  });
   log.push(
     "agent.reasoning.delta",
-    { text: "I'll record the standing conventions as workspace memory, then correct the two facts that have drifted so future sessions don't repeat them." },
+    {
+      text: "I'll record the standing conventions as workspace memory, then correct the two facts that have drifted so future sessions don't repeat them.",
+    },
     turn,
   );
   log.tool(
@@ -653,41 +853,63 @@ export function memoryTurnEvents(): SessionEvent[] {
       name: "exec_command",
       id: "mem-0",
       arguments: { cmd: "cat infra/README.md", workdir: "/workspace" },
-      output: "Chunk ID: 909\nWall time: 0.3\nProcess exited with code 0\nOutput:\nDeploys: staging from main only, via opengeni-ops.\n",
+      output:
+        "Chunk ID: 909\nWall time: 0.3\nProcess exited with code 0\nOutput:\nDeploys: staging from main only, via opengeni-ops.\n",
     },
     turn,
   );
-  log.push("memory.saved", {
-    memoryId: "aa11bb22-0000-4000-8000-000000000001",
-    kind: "preference",
-    preview: "Prefer Terraform over Pulumi for all new infrastructure in this workspace.",
-    deduped: false,
-  }, turn);
-  log.push("memory.saved", {
-    memoryId: "aa11bb22-0000-4000-8000-000000000002",
-    kind: "semantic",
-    preview: "Staging deploys run from the main branch only, via the opengeni-ops workflow.",
-    deduped: false,
-  }, turn);
-  log.push("memory.corrected", {
-    memoryId: "aa11bb22-0000-4000-8000-000000000003",
-    kind: "semantic",
-    preview: "The staging database is walrus-primary and lives in the neu region.",
-    action: "superseded",
-    reason: "Verified in-session: the instance was migrated and renamed.",
-    replacementMemoryId: "aa11bb22-0000-4000-8000-000000000004",
-    replacementPreview: "The staging database is walrus-2 (Postgres 16) in the neu region; walrus-primary was retired.",
-  }, turn);
-  log.push("memory.corrected", {
-    memoryId: "aa11bb22-0000-4000-8000-000000000005",
-    kind: "procedural",
-    preview: "Run database migrations with `make db-migrate` before every deploy.",
-    action: "updated",
-    reason: "The command moved under the ops wrapper.",
-  }, turn);
-  log.push("agent.message.completed", {
-    text: "Saved the Terraform preference and the staging-deploy rule, corrected the database note (walrus-primary → walrus-2), and updated the migration command in place. Future sessions will start with the right picture.",
-  }, turn);
+  log.push(
+    "memory.saved",
+    {
+      memoryId: "aa11bb22-0000-4000-8000-000000000001",
+      kind: "preference",
+      preview: "Prefer Terraform over Pulumi for all new infrastructure in this workspace.",
+      deduped: false,
+    },
+    turn,
+  );
+  log.push(
+    "memory.saved",
+    {
+      memoryId: "aa11bb22-0000-4000-8000-000000000002",
+      kind: "semantic",
+      preview: "Staging deploys run from the main branch only, via the opengeni-ops workflow.",
+      deduped: false,
+    },
+    turn,
+  );
+  log.push(
+    "memory.corrected",
+    {
+      memoryId: "aa11bb22-0000-4000-8000-000000000003",
+      kind: "semantic",
+      preview: "The staging database is walrus-primary and lives in the neu region.",
+      action: "superseded",
+      reason: "Verified in-session: the instance was migrated and renamed.",
+      replacementMemoryId: "aa11bb22-0000-4000-8000-000000000004",
+      replacementPreview:
+        "The staging database is walrus-2 (Postgres 16) in the neu region; walrus-primary was retired.",
+    },
+    turn,
+  );
+  log.push(
+    "memory.corrected",
+    {
+      memoryId: "aa11bb22-0000-4000-8000-000000000005",
+      kind: "procedural",
+      preview: "Run database migrations with `make db-migrate` before every deploy.",
+      action: "updated",
+      reason: "The command moved under the ops wrapper.",
+    },
+    turn,
+  );
+  log.push(
+    "agent.message.completed",
+    {
+      text: "Saved the Terraform preference and the staging-deploy rule, corrected the database note (walrus-primary → walrus-2), and updated the migration command in place. Future sessions will start with the right picture.",
+    },
+    turn,
+  );
   log.push("turn.completed", {}, turn);
   return log.events;
 }
@@ -701,7 +923,9 @@ export function memoryTurnEvents(): SessionEvent[] {
 export function authNeededEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-reconnect";
-  log.push("user.message", { text: "File a Linear issue for the flaky test, then log the same in Notion." });
+  log.push("user.message", {
+    text: "File a Linear issue for the flaky test, then log the same in Notion.",
+  });
   log.push(
     "agent.reasoning.delta",
     { text: "I'll create the Linear issue first, then mirror it into the Notion database." },
@@ -739,8 +963,20 @@ export function failedTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-fail";
   log.push("user.message", { text: "Deploy the preview to staging." });
-  log.push("agent.message.delta", { text: "I am applying the chart and watching the rollout until Kubernetes reports readiness." }, turn);
-  log.push("agent.message.completed", { text: "I am applying the chart and watching the rollout until Kubernetes reports readiness." }, turn);
+  log.push(
+    "agent.message.delta",
+    {
+      text: "I am applying the chart and watching the rollout until Kubernetes reports readiness.",
+    },
+    turn,
+  );
+  log.push(
+    "agent.message.completed",
+    {
+      text: "I am applying the chart and watching the rollout until Kubernetes reports readiness.",
+    },
+    turn,
+  );
   log.tool(
     {
       name: "exec_command",
@@ -751,7 +987,11 @@ export function failedTurnEvents(): SessionEvent[] {
     },
     turn,
   );
-  log.push("turn.failed", { error: "helm upgrade failed — ImagePullBackOff (desktop image not found)" }, turn);
+  log.push(
+    "turn.failed",
+    { error: "helm upgrade failed — ImagePullBackOff (desktop image not found)" },
+    turn,
+  );
   return log.events;
 }
 
@@ -759,7 +999,14 @@ export function cancelledTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-cancel";
   log.push("user.message", { text: "Tail the prod logs forever." });
-  log.toolRunning({ name: "exec_command", id: "tc-0", arguments: { cmd: "kubectl logs -f deploy/api", workdir: "/workspace" } }, turn);
+  log.toolRunning(
+    {
+      name: "exec_command",
+      id: "tc-0",
+      arguments: { cmd: "kubectl logs -f deploy/api", workdir: "/workspace" },
+    },
+    turn,
+  );
   log.push("turn.cancelled", {}, turn);
   return log.events;
 }
@@ -772,9 +1019,27 @@ export function liveTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-live";
   log.push("user.message", { text: "Now run the e2e suite and confirm the login redirect." });
-  log.push("agent.reasoning.delta", { text: "Running the suite now and watching for the redirect assertion…" }, turn);
-  log.toolRunning({ name: "exec_command", id: "lv-0", arguments: { cmd: "npm run e2e", workdir: "/workspace" } }, turn);
-  log.toolRunning({ name: "computer_call", id: "lv-1", raw: { type: "computer_call", action: { type: "screenshot" } } }, turn);
-  log.push("agent.message.delta", { text: "Kicking off the e2e suite and driving the browser to the login page" }, turn);
+  log.push(
+    "agent.reasoning.delta",
+    { text: "Running the suite now and watching for the redirect assertion…" },
+    turn,
+  );
+  log.toolRunning(
+    { name: "exec_command", id: "lv-0", arguments: { cmd: "npm run e2e", workdir: "/workspace" } },
+    turn,
+  );
+  log.toolRunning(
+    {
+      name: "computer_call",
+      id: "lv-1",
+      raw: { type: "computer_call", action: { type: "screenshot" } },
+    },
+    turn,
+  );
+  log.push(
+    "agent.message.delta",
+    { text: "Kicking off the e2e suite and driving the browser to the login page" },
+    turn,
+  );
   return log.events;
 }

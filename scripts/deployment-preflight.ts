@@ -44,31 +44,39 @@ const missingEnvVars = args.checkEnv ? missingRuntimeEnvVars(contract) : [];
 const liveResults = args.live ? await runLiveProbes(contract) : [];
 
 if (args.json) {
-  console.log(JSON.stringify({
-    profile: contract.profile,
-    runtime: contract.runtime,
-    modes: {
-      database: contract.database.mode,
-      temporal: contract.temporal.mode,
-      nats: contract.nats.mode,
-      objectStorage: contract.objectStorage.mode,
-      secrets: contract.secrets.mode,
-      access: contract.access.mode,
-      productAccess: contract.product.accessMode,
-      billing: contract.product.billingMode,
-      entitlements: contract.product.entitlementsMode,
-      usageLimits: contract.product.usageLimitsMode,
-      sandbox: contract.sandbox.backend,
-      observability: contract.observability.backend,
-    },
-    requiredEnvVars,
-    ...(args.checkEnv ? {
-      missingEnvVars,
-      envOk: missingEnvVars.length === 0,
-    } : {}),
-    checks,
-    liveResults: args.live ? liveResults : undefined,
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        profile: contract.profile,
+        runtime: contract.runtime,
+        modes: {
+          database: contract.database.mode,
+          temporal: contract.temporal.mode,
+          nats: contract.nats.mode,
+          objectStorage: contract.objectStorage.mode,
+          secrets: contract.secrets.mode,
+          access: contract.access.mode,
+          productAccess: contract.product.accessMode,
+          billing: contract.product.billingMode,
+          entitlements: contract.product.entitlementsMode,
+          usageLimits: contract.product.usageLimitsMode,
+          sandbox: contract.sandbox.backend,
+          observability: contract.observability.backend,
+        },
+        requiredEnvVars,
+        ...(args.checkEnv
+          ? {
+              missingEnvVars,
+              envOk: missingEnvVars.length === 0,
+            }
+          : {}),
+        checks,
+        liveResults: args.live ? liveResults : undefined,
+      },
+      null,
+      2,
+    ),
+  );
   if (args.live && liveResults.some((result) => result.status === "failed")) {
     process.exit(1);
   }
@@ -202,28 +210,41 @@ async function runLiveProbes(contract: DeploymentContract): Promise<LiveProbeRes
   }
 
   const databaseUrl = process.env.OPENGENI_DATABASE_URL;
-  results.push(databaseUrl
-    ? await tcpUrlProbe("postgres-connectivity", databaseUrl, 5432)
-    : skipped("postgres-connectivity", "OPENGENI_DATABASE_URL is not set in this environment."));
+  results.push(
+    databaseUrl
+      ? await tcpUrlProbe("postgres-connectivity", databaseUrl, 5432)
+      : skipped("postgres-connectivity", "OPENGENI_DATABASE_URL is not set in this environment."),
+  );
 
   const temporalHost = process.env.OPENGENI_TEMPORAL_HOST;
-  results.push(temporalHost
-    ? await tcpHostPortProbe("temporal-connectivity", temporalHost, 7233)
-    : skipped("temporal-connectivity", "OPENGENI_TEMPORAL_HOST is not set in this environment."));
+  results.push(
+    temporalHost
+      ? await tcpHostPortProbe("temporal-connectivity", temporalHost, 7233)
+      : skipped("temporal-connectivity", "OPENGENI_TEMPORAL_HOST is not set in this environment."),
+  );
 
   const natsUrl = process.env.OPENGENI_NATS_URL;
-  results.push(natsUrl
-    ? await tcpUrlProbe("nats-pubsub", natsUrl, 4222)
-    : skipped("nats-pubsub", "OPENGENI_NATS_URL is not set in this environment."));
+  results.push(
+    natsUrl
+      ? await tcpUrlProbe("nats-pubsub", natsUrl, 4222)
+      : skipped("nats-pubsub", "OPENGENI_NATS_URL is not set in this environment."),
+  );
 
   const objectEndpoint = process.env.OPENGENI_OBJECT_STORAGE_ENDPOINT;
-  results.push(objectEndpoint
-    ? await httpReachabilityProbe("object-storage-read-write", objectEndpoint)
-    : skipped("object-storage-read-write", "OPENGENI_OBJECT_STORAGE_ENDPOINT is not set in this environment."));
+  results.push(
+    objectEndpoint
+      ? await httpReachabilityProbe("object-storage-read-write", objectEndpoint)
+      : skipped(
+          "object-storage-read-write",
+          "OPENGENI_OBJECT_STORAGE_ENDPOINT is not set in this environment.",
+        ),
+  );
 
   const apiBaseUrl = process.env.OPENGENI_API_BASE_URL;
   if (apiBaseUrl) {
-    results.push(await httpReachabilityProbe("api-health", new URL("/healthz", apiBaseUrl).toString()));
+    results.push(
+      await httpReachabilityProbe("api-health", new URL("/healthz", apiBaseUrl).toString()),
+    );
   }
 
   return results;
@@ -240,12 +261,22 @@ function runKubectlNamespaceProbe(namespace: string | undefined): LiveProbeResul
     return failed("kubernetes-context", result.error.message);
   }
   if (result.status !== 0) {
-    return failed("kubernetes-context", compactDetail(result.stderr || result.stdout || "kubectl probe failed"));
+    return failed(
+      "kubernetes-context",
+      compactDetail(result.stderr || result.stdout || "kubectl probe failed"),
+    );
   }
-  return passed("kubernetes-context", namespace ? `namespace ${namespace} is reachable` : "kubectl client is available");
+  return passed(
+    "kubernetes-context",
+    namespace ? `namespace ${namespace} is reachable` : "kubectl client is available",
+  );
 }
 
-async function tcpUrlProbe(id: PreflightCheckId, rawUrl: string, defaultPort: number): Promise<LiveProbeResult> {
+async function tcpUrlProbe(
+  id: PreflightCheckId,
+  rawUrl: string,
+  defaultPort: number,
+): Promise<LiveProbeResult> {
   try {
     const url = new URL(rawUrl);
     const port = Number(url.port || defaultPort);
@@ -255,7 +286,11 @@ async function tcpUrlProbe(id: PreflightCheckId, rawUrl: string, defaultPort: nu
   }
 }
 
-async function tcpHostPortProbe(id: PreflightCheckId, hostPort: string, defaultPort: number): Promise<LiveProbeResult> {
+async function tcpHostPortProbe(
+  id: PreflightCheckId,
+  hostPort: string,
+  defaultPort: number,
+): Promise<LiveProbeResult> {
   const parsed = parseHostPort(hostPort, defaultPort);
   if (!parsed) {
     return failed(id, `invalid host:port value: ${hostPort}`);
@@ -263,7 +298,11 @@ async function tcpHostPortProbe(id: PreflightCheckId, hostPort: string, defaultP
   return await tcpConnectProbe(id, parsed.host, parsed.port);
 }
 
-async function tcpConnectProbe(id: PreflightCheckId, host: string, port: number): Promise<LiveProbeResult> {
+async function tcpConnectProbe(
+  id: PreflightCheckId,
+  host: string,
+  port: number,
+): Promise<LiveProbeResult> {
   return await new Promise((resolve) => {
     const socket = net.createConnection({ host, port });
     const timeout = setTimeout(() => {
@@ -282,7 +321,10 @@ async function tcpConnectProbe(id: PreflightCheckId, host: string, port: number)
   });
 }
 
-async function httpReachabilityProbe(id: LiveProbeResult["id"], endpoint: string): Promise<LiveProbeResult> {
+async function httpReachabilityProbe(
+  id: LiveProbeResult["id"],
+  endpoint: string,
+): Promise<LiveProbeResult> {
   try {
     const response = await fetch(endpoint, {
       method: "GET",

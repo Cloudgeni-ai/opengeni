@@ -34,16 +34,31 @@ const observability = createObservability(testSettings(), { component: "worker-t
 
 // A storage that FAILS LOUDLY if touched — proves the skip gates never write.
 function forbiddenStorage(): ObjectStorage {
-  const boom = (): never => { throw new Error("storage must not be touched on a skip"); };
+  const boom = (): never => {
+    throw new Error("storage must not be touched on a skip");
+  };
   return {
-    bucket: "test", backend: "s3-compatible", maxSinglePutSizeBytes: 1,
-    createPutUrl: boom as never, createGetUrl: boom as never, headFile: boom as never,
-    getFileBytes: boom as never, getObjectBytes: boom as never,
-    putObject: boom as never, deleteObject: boom as never,
+    bucket: "test",
+    backend: "s3-compatible",
+    maxSinglePutSizeBytes: 1,
+    createPutUrl: boom as never,
+    createGetUrl: boom as never,
+    headFile: boom as never,
+    getFileBytes: boom as never,
+    getObjectBytes: boom as never,
+    putObject: boom as never,
+    deleteObject: boom as never,
   };
 }
 // A DB that FAILS LOUDLY if touched.
-const forbiddenDb = new Proxy({}, { get() { throw new Error("db must not be touched on a skip"); } }) as unknown as Database;
+const forbiddenDb = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("db must not be touched on a skip");
+    },
+  },
+) as unknown as Database;
 const dummySession = {} as ChannelASession;
 
 function baseInput() {
@@ -80,7 +95,16 @@ describe("workspace-capture — guard constants", () => {
     // mid-walk and aborted the whole capture (0/3 on staging). They are never
     // review content, so the tree walk collapses them and the after-image loop
     // skips them. (Regression guard for the S2 fix.)
-    for (const dir of [".config", ".cache", ".local", ".dbus", ".gnupg", ".ssh", ".mozilla", ".xfce4"]) {
+    for (const dir of [
+      ".config",
+      ".cache",
+      ".local",
+      ".dbus",
+      ".gnupg",
+      ".ssh",
+      ".mozilla",
+      ".xfce4",
+    ]) {
       expect(RESIDUE_DIRS).toContain(dir);
     }
     // But legit hidden entries a user authors stay VISIBLE (never residue).
@@ -93,7 +117,9 @@ describe("workspace-capture — guard constants", () => {
 describe("workspace-capture — residue-path classification (S2 desktop-box fix)", () => {
   test("paths inside a residue dir are excluded; authored hidden files are kept", () => {
     // The exact staging churn path that aborted capture.
-    expect(isUnderResidueDir(".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml")).toBe(true);
+    expect(isUnderResidueDir(".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml")).toBe(
+      true,
+    );
     expect(isUnderResidueDir(".config/mimeapps.list")).toBe(true); // a file directly inside a residue dir
     expect(isUnderResidueDir(".config")).toBe(false); // a root FILE named .config is legit user content
     expect(isUnderResidueDir(".cache/pip/http/abc")).toBe(true);
@@ -112,7 +138,11 @@ describe("workspace-capture — box-exit vs vanished-file classification (S2)", 
     // The exact production error: a fsRead whose inner cause is the box tearing
     // down. MUST classify as box-exiting so the capture aborts (no bogus row)
     // rather than skip-and-continue.
-    expect(isBoxExitingError(new Error("file not found: .config (request cancelled due to container exiting)"))).toBe(true);
+    expect(
+      isBoxExitingError(
+        new Error("file not found: .config (request cancelled due to container exiting)"),
+      ),
+    ).toBe(true);
     expect(isBoxExitingError(new Error("request cancelled due to container exiting"))).toBe(true);
     expect(isBoxExitingError(new Error("sandbox is not running"))).toBe(true);
     expect(isBoxExitingError("the sandbox has been terminated")).toBe(true);
@@ -143,7 +173,10 @@ describe("workspace-capture — path & key helpers", () => {
 
 describe("workspace-capture — GC key-math (dossier B5)", () => {
   const row = (id: string, blobKeys: string[]) => ({
-    id, manifestKey: `m/${id}`, treeIndexKey: `t/${id}`, blobKeys,
+    id,
+    manifestKey: `m/${id}`,
+    treeIndexKey: `t/${id}`,
+    blobKeys,
   });
 
   test("evicts revisions beyond keep-N and deletes their per-revision keys", () => {
@@ -158,11 +191,7 @@ describe("workspace-capture — GC key-math (dossier B5)", () => {
 
   test("a content-addressed blob shared with a SURVIVING revision is NOT deleted", () => {
     // r2,r1 survive (keep 2); r0 evicted. r0 shares "shared" with r2, owns "only0".
-    const rows = [
-      row("r2", ["shared", "s2"]),
-      row("r1", ["s1"]),
-      row("r0", ["shared", "only0"]),
-    ];
+    const rows = [row("r2", ["shared", "s2"]), row("r1", ["s1"]), row("r0", ["shared", "only0"])];
     const plan = computeWorkspaceCaptureGcPlan(rows, 2);
     expect(plan.evictedRowIds).toEqual(["r0"]);
     expect(plan.deleteBlobKeys).toEqual(["only0"]); // "shared" preserved
@@ -172,7 +201,9 @@ describe("workspace-capture — GC key-math (dossier B5)", () => {
   test("nothing evicted when rows <= keep-N", () => {
     const rows = [row("r1", ["a"]), row("r0", ["b"])];
     expect(computeWorkspaceCaptureGcPlan(rows, 10)).toEqual({
-      evictedRowIds: [], deleteBlobKeys: [], deletePerRevisionKeys: [],
+      evictedRowIds: [],
+      deleteBlobKeys: [],
+      deletePerRevisionKeys: [],
     });
   });
 
@@ -192,22 +223,117 @@ describe("workspace-capture — manifest & event serialization", () => {
       capturedAt: new Date().toISOString(),
       turnId: "turn-1",
       leaseEpoch: 7,
-      treeIndex: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, children: [
-        { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: 1, mode: 493, truncated: false, children: [] },
-        { name: "node_modules", path: "node_modules", type: "dir", sizeBytes: null, mtimeMs: 1, mode: 493, truncated: true, children: [] },
-      ], truncated: false },
+      treeIndex: {
+        name: "",
+        path: "",
+        type: "dir",
+        sizeBytes: null,
+        mtimeMs: null,
+        mode: null,
+        children: [
+          {
+            name: "src",
+            path: "src",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: 1,
+            mode: 493,
+            truncated: false,
+            children: [],
+          },
+          {
+            name: "node_modules",
+            path: "node_modules",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: 1,
+            mode: 493,
+            truncated: true,
+            children: [],
+          },
+        ],
+        truncated: false,
+      },
       treeTruncated: false,
-      repos: [{
-        root: "", head: "main", detached: false, upstream: null, ahead: 0, behind: 0,
-        status: [{ path: "a.txt", oldPath: null, index: null, worktree: "modified" as const, isConflicted: false }],
-        diff: [{ path: "a.txt", oldPath: null, status: "modified" as const, isBinary: false, isImage: false, additions: 1, deletions: 0, hunks: [], truncated: false }],
-      }],
-      files: [
-        { path: "a.txt", status: "modified" as const, hash: "h1", baseHash: null, contentRef: "workspace-captures/ws/s/blobs/h1", sizeBytes: 4, isBinary: false, tooLarge: false, deleted: false },
-        { path: "big.bin", status: "modified" as const, hash: null, baseHash: null, contentRef: null, sizeBytes: 5 * 1024 * 1024, isBinary: false, tooLarge: true, deleted: false },
-        { path: "gone.txt", status: "deleted" as const, hash: null, baseHash: null, contentRef: null, sizeBytes: 0, isBinary: false, tooLarge: false, deleted: true },
+      repos: [
+        {
+          root: "",
+          head: "main",
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          status: [
+            {
+              path: "a.txt",
+              oldPath: null,
+              index: null,
+              worktree: "modified" as const,
+              isConflicted: false,
+            },
+          ],
+          diff: [
+            {
+              path: "a.txt",
+              oldPath: null,
+              status: "modified" as const,
+              isBinary: false,
+              isImage: false,
+              additions: 1,
+              deletions: 0,
+              hunks: [],
+              truncated: false,
+            },
+          ],
+        },
       ],
-      stats: { repoCount: 1, fileCount: 3, additions: 1, deletions: 0, totalBytes: 4, tooLargeCount: 1, binaryCount: 0, treeEntryCount: 2, treeTruncated: false, durationMs: 12 },
+      files: [
+        {
+          path: "a.txt",
+          status: "modified" as const,
+          hash: "h1",
+          baseHash: null,
+          contentRef: "workspace-captures/ws/s/blobs/h1",
+          sizeBytes: 4,
+          isBinary: false,
+          tooLarge: false,
+          deleted: false,
+        },
+        {
+          path: "big.bin",
+          status: "modified" as const,
+          hash: null,
+          baseHash: null,
+          contentRef: null,
+          sizeBytes: 5 * 1024 * 1024,
+          isBinary: false,
+          tooLarge: true,
+          deleted: false,
+        },
+        {
+          path: "gone.txt",
+          status: "deleted" as const,
+          hash: null,
+          baseHash: null,
+          contentRef: null,
+          sizeBytes: 0,
+          isBinary: false,
+          tooLarge: false,
+          deleted: true,
+        },
+      ],
+      stats: {
+        repoCount: 1,
+        fileCount: 3,
+        additions: 1,
+        deletions: 0,
+        totalBytes: 4,
+        tooLargeCount: 1,
+        binaryCount: 0,
+        treeEntryCount: 2,
+        treeTruncated: false,
+        durationMs: 12,
+      },
     };
     const parsed = WorkspaceCaptureManifest.parse(JSON.parse(JSON.stringify(manifest)));
     expect(parsed.revision).toBe(3);
@@ -217,8 +343,22 @@ describe("workspace-capture — manifest & event serialization", () => {
 
   test("the announce payload parses under the contract (metadata only)", () => {
     const payload = {
-      revision: 3, turnId: "t1", capturedAt: new Date().toISOString(), leaseEpoch: 7,
-      stats: { repoCount: 1, fileCount: 1, additions: 1, deletions: 0, totalBytes: 4, tooLargeCount: 0, binaryCount: 0, treeEntryCount: 1, treeTruncated: false, durationMs: 5 },
+      revision: 3,
+      turnId: "t1",
+      capturedAt: new Date().toISOString(),
+      leaseEpoch: 7,
+      stats: {
+        repoCount: 1,
+        fileCount: 1,
+        additions: 1,
+        deletions: 0,
+        totalBytes: 4,
+        tooLargeCount: 0,
+        binaryCount: 0,
+        treeEntryCount: 1,
+        treeTruncated: false,
+        durationMs: 5,
+      },
     };
     expect(() => WorkspaceRevisionCapturedPayload.parse(payload)).not.toThrow();
   });
@@ -226,18 +366,22 @@ describe("workspace-capture — manifest & event serialization", () => {
 
 describe("workspace-capture — pre-service skip gates", () => {
   test("flag off → returns without touching storage or db", async () => {
-    await expect(captureWorkspaceRevision({
-      ...baseInput(),
-      settings: testSettings({ workspaceCaptureEnabled: false }),
-      objectStorage: forbiddenStorage(),
-    })).resolves.toBeUndefined();
+    await expect(
+      captureWorkspaceRevision({
+        ...baseInput(),
+        settings: testSettings({ workspaceCaptureEnabled: false }),
+        objectStorage: forbiddenStorage(),
+      }),
+    ).resolves.toBeUndefined();
   });
 
   test("storage null → returns without touching db", async () => {
-    await expect(captureWorkspaceRevision({
-      ...baseInput(),
-      objectStorage: null,
-    })).resolves.toBeUndefined();
+    await expect(
+      captureWorkspaceRevision({
+        ...baseInput(),
+        objectStorage: null,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   test("B6: a box-exec failure is swallowed — never throws past the boundary", async () => {
@@ -245,23 +389,32 @@ describe("workspace-capture — pre-service skip gates", () => {
     // step. captureWorkspaceRevision must resolve (the turn already completed) and
     // touch neither the db nor storage — proving "turn outcome unaffected".
     const throwingSession = {
-      exec: async () => { throw new Error("box exec failed"); },
+      exec: async () => {
+        throw new Error("box exec failed");
+      },
     } as unknown as ChannelASession;
-    await expect(captureWorkspaceRevision({
-      ...baseInput(),
-      objectStorage: forbiddenStorage(),
-      session: throwingSession,
-    })).resolves.toBeUndefined();
+    await expect(
+      captureWorkspaceRevision({
+        ...baseInput(),
+        objectStorage: forbiddenStorage(),
+        session: throwingSession,
+      }),
+    ).resolves.toBeUndefined();
   });
 });
 
 describe("workspace-capture — B7 static safety guard", () => {
-  const source = readFileSync(join(here, "..", "src", "activities", "workspace-capture.ts"), "utf8");
+  const source = readFileSync(
+    join(here, "..", "src", "activities", "workspace-capture.ts"),
+    "utf8",
+  );
   // Strip line comments + block comments so the doctrine words in the header
   // (which explain WHY we never close) don't trip the code grep.
   const code = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+    .split("\n")
+    .map((l) => l.replace(/\/\/.*$/, ""))
+    .join("\n");
 
   test("never calls close()/terminate()/kill() on any session handle", () => {
     expect(code).not.toMatch(/\.close\s*\(/);

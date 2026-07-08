@@ -67,14 +67,23 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
 describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer", () => {
   test("migration adds sessions.active_sandbox_id (nullable) + active_epoch (NOT NULL default 0, integer)", async () => {
     if (!available) return;
-    const cols = await admin<{ column_name: string; is_nullable: string; data_type: string; column_default: string | null }[]>`
+    const cols = await admin<
+      {
+        column_name: string;
+        is_nullable: string;
+        data_type: string;
+        column_default: string | null;
+      }[]
+    >`
       SELECT column_name, is_nullable, data_type, column_default
       FROM information_schema.columns
       WHERE table_name = 'sessions' AND column_name IN ('active_sandbox_id', 'active_epoch')
@@ -96,7 +105,12 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     const { accountId, workspaceId } = await freshWorkspace();
 
     const created = await createEnrollment(db, {
-      accountId, workspaceId, pubkey: "ed25519:AAAA", hasDisplay: true, os: "linux", arch: "x86_64",
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:AAAA",
+      hasDisplay: true,
+      os: "linux",
+      arch: "x86_64",
     });
     expect(created.status).toBe("active");
     expect(created.exposure).toBe("whole-machine");
@@ -112,7 +126,12 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     // Idempotent re-enroll of the SAME (workspace, pubkey) -> SAME row id, updated
     // consent fields, NOT a duplicate.
     const reEnrolled = await createEnrollment(db, {
-      accountId, workspaceId, pubkey: "ed25519:AAAA", hasDisplay: false, allowScreenControl: true, os: "linux",
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:AAAA",
+      hasDisplay: false,
+      allowScreenControl: true,
+      os: "linux",
     });
     expect(reEnrolled.id).toBe(created.id);
     expect(reEnrolled.hasDisplay).toBe(false);
@@ -139,7 +158,11 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect((await listEnrollments(db, workspaceId, { status: "active" })).length).toBe(0);
 
     // re-enroll re-activates (status->active, revoked_at cleared)
-    const reactivated = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:AAAA" });
+    const reactivated = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:AAAA",
+    });
     expect(reactivated.id).toBe(created.id);
     expect(reactivated.status).toBe("active");
     expect(reactivated.revokedAt).toBeNull();
@@ -148,23 +171,44 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
   test("sandbox create: selfhosted requires enrollment, modal forbids it; get + list", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:BBBB" });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:BBBB",
+    });
 
-    const modal = await createSandbox(db, { accountId, workspaceId, kind: "modal", name: "cloud box" });
+    const modal = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "cloud box",
+    });
     expect(modal.kind).toBe("modal");
     expect(modal.enrollmentId).toBeNull();
 
     const selfhosted = await createSandbox(db, {
-      accountId, workspaceId, kind: "selfhosted", name: "my laptop", enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "my laptop",
+      enrollmentId: enrollment.id,
     });
     expect(selfhosted.kind).toBe("selfhosted");
     expect(selfhosted.enrollmentId).toBe(enrollment.id);
 
     // Typed pre-checks (a selfhosted sandbox MUST carry an enrollment; modal MUST NOT).
-    await expect(createSandbox(db, { accountId, workspaceId, kind: "selfhosted", name: "bad" }))
-      .rejects.toThrow(/requires an enrollmentId/);
-    await expect(createSandbox(db, { accountId, workspaceId, kind: "modal", name: "bad", enrollmentId: enrollment.id }))
-      .rejects.toThrow(/must not carry an enrollmentId/);
+    await expect(
+      createSandbox(db, { accountId, workspaceId, kind: "selfhosted", name: "bad" }),
+    ).rejects.toThrow(/requires an enrollmentId/);
+    await expect(
+      createSandbox(db, {
+        accountId,
+        workspaceId,
+        kind: "modal",
+        name: "bad",
+        enrollmentId: enrollment.id,
+      }),
+    ).rejects.toThrow(/must not carry an enrollmentId/);
 
     const fetched = await getSandbox(db, workspaceId, selfhosted.id);
     expect(fetched?.id).toBe(selfhosted.id);
@@ -197,8 +241,13 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     // A fresh session: active_sandbox_id NULL, active_epoch 0 (the backward-compat
     // default) — and the mapSession round-trip carries BOTH new columns.
     const session = await createSession(db, {
-      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
-      model: "gpt", sandboxBackend: "modal",
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "modal",
     });
     expect(session.activeSandboxId).toBeNull();
     expect(session.activeEpoch).toBe(0);
@@ -209,28 +258,49 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     const pointer0 = await readActiveSandbox(db, workspaceId, session.id);
     expect(pointer0).toEqual({ activeSandboxId: null, activeEpoch: 0, workingDir: null });
 
-    const target = await createSandbox(db, { accountId, workspaceId, kind: "modal", name: "target" });
+    const target = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "target",
+    });
 
     // Swap at the correct epoch -> wins, epoch bumps to 1, pointer set.
     const swap1 = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: target.id, expectedEpoch: 0,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: target.id,
+      expectedEpoch: 0,
     });
     expect(swap1.swapped).toBe(true);
     expect(swap1.pointer).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: null });
 
     // A concurrent double-swap reading the OLD epoch (0) loses — the fence rejects it.
     const stale = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 0,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: 0,
     });
     expect(stale.swapped).toBe(false);
     expect(stale.pointer).toBeNull();
 
     // The pointer is unchanged by the losing swap.
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: null });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({
+      activeSandboxId: target.id,
+      activeEpoch: 1,
+      workingDir: null,
+    });
 
     // Swap back to the group sandbox (NULL) at the current epoch -> wins, epoch 2.
     const swap2 = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 1,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: 1,
     });
     expect(swap2.swapped).toBe(true);
     expect(swap2.pointer).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: null });
@@ -243,7 +313,11 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     // Deleting the pointed-at sandbox degrades the pointer to NULL (ON DELETE SET
     // NULL), never a dangling FK. Re-point first, then delete.
     const swap3 = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: target.id, expectedEpoch: 2,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: target.id,
+      expectedEpoch: 2,
     });
     expect(swap3.swapped).toBe(true);
     await admin`delete from sandboxes where id = ${target.id}`;
@@ -255,51 +329,109 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const session = await createSession(db, {
-      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
-      model: "gpt", sandboxBackend: "modal",
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "modal",
     });
-    const target = await createSandbox(db, { accountId, workspaceId, kind: "modal", name: "wd-target" });
+    const target = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "wd-target",
+    });
 
     // A fresh pointer has a NULL working_dir (today's default — byte-identical no-op).
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 0, workingDir: null });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 0,
+      workingDir: null,
+    });
 
     // Seeding the pointer WITH a working_dir writes it in the SAME epoch-fenced CAS
     // (the create-time machine-targeting path), and readActiveSandbox surfaces it.
     const seed = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: target.id, expectedEpoch: 0,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: target.id,
+      expectedEpoch: 0,
       workingDir: "/home/u/proj",
     });
     expect(seed.swapped).toBe(true);
-    expect(seed.pointer).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: "/home/u/proj" });
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: "/home/u/proj" });
+    expect(seed.pointer).toEqual({
+      activeSandboxId: target.id,
+      activeEpoch: 1,
+      workingDir: "/home/u/proj",
+    });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({
+      activeSandboxId: target.id,
+      activeEpoch: 1,
+      workingDir: "/home/u/proj",
+    });
 
     // A plain swap with workingDir OMITTED (undefined) leaves the column UNCHANGED —
     // a live swap/attach never touches the working dir.
     const plainSwap = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 1,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: 1,
     });
     expect(plainSwap.swapped).toBe(true);
-    expect(plainSwap.pointer).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: "/home/u/proj" });
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: "/home/u/proj" });
+    expect(plainSwap.pointer).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 2,
+      workingDir: "/home/u/proj",
+    });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 2,
+      workingDir: "/home/u/proj",
+    });
 
     // Explicit null clears it back to the default.
     const cleared = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 2,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: 2,
       workingDir: null,
     });
     expect(cleared.swapped).toBe(true);
     expect(cleared.pointer).toEqual({ activeSandboxId: null, activeEpoch: 3, workingDir: null });
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 3, workingDir: null });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({
+      activeSandboxId: null,
+      activeEpoch: 3,
+      workingDir: null,
+    });
   }, 60_000);
 
   test("metrics: last-sample upsert (one row per enrollment) + append-only series", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:CCCC" });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:CCCC",
+    });
 
     await upsertMachineMetricsLatest(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
-      sample: { cpuPercent: 12.5, load1: 0.5, memUsedBytes: 1024, memTotalBytes: 4096, sampledAt: new Date() },
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      sample: {
+        cpuPercent: 12.5,
+        load1: 0.5,
+        memUsedBytes: 1024,
+        memTotalBytes: 4096,
+        sampledAt: new Date(),
+      },
     });
     const latest1 = await admin<{ cpu_percent: string; mem_used_bytes: string }[]>`
       select cpu_percent, mem_used_bytes from machine_metrics_latest where enrollment_id = ${enrollment.id}`;
@@ -308,7 +440,9 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
 
     // Second upsert overwrites the SAME row (one row per enrollment).
     await upsertMachineMetricsLatest(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
       sample: { cpuPercent: 88, contention: 3, sampledAt: new Date() },
     });
     const latest2 = await admin<{ cpu_percent: string }[]>`
@@ -318,11 +452,15 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
 
     // Series is append-only.
     await insertMachineMetricsSeries(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
       sample: { cpuPercent: 10, sampledAt: new Date(Date.now() - 60_000) },
     });
     await insertMachineMetricsSeries(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
       sample: { cpuPercent: 20, sampledAt: new Date() },
     });
     const series = await admin<{ n: string }[]>`
@@ -333,12 +471,23 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
   test("M10 ingestMachineMetricsSample: latest upsert always + series downsampled to ~1/min", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:DOWN" });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:DOWN",
+    });
     const t0 = Date.now();
     const ingest = (cpu: number, atMs: number) =>
       ingestMachineMetricsSample(db, {
-        accountId, workspaceId, enrollmentId: enrollment.id,
-        sample: { cpuPercent: cpu, memUsedBytes: 100, memTotalBytes: 200, sampledAt: new Date(atMs) },
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        sample: {
+          cpuPercent: cpu,
+          memUsedBytes: 100,
+          memTotalBytes: 200,
+          sampledAt: new Date(atMs),
+        },
       });
 
     // First sample → latest upserted + series appended (no prior series row).
@@ -376,7 +525,9 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(byWs.get(enrollment.id)?.cpuPercent).toBe(40);
 
     const window = await readMachineMetricsSeries(db, {
-      workspaceId, enrollmentId: enrollment.id, since: new Date(t0 - 1000),
+      workspaceId,
+      enrollmentId: enrollment.id,
+      since: new Date(t0 - 1000),
     });
     expect(window.length).toBe(2);
     // Oldest-first ordering (a left-to-right chart).
@@ -385,7 +536,9 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
 
     // A tight window excludes the older point.
     const recent = await readMachineMetricsSeries(db, {
-      workspaceId, enrollmentId: enrollment.id, since: new Date(t0 + 30_000),
+      workspaceId,
+      enrollmentId: enrollment.id,
+      since: new Date(t0 + 30_000),
     });
     expect(recent.length).toBe(1);
     expect(recent[0]!.cpuPercent).toBe(40);
@@ -394,13 +547,22 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
   test("M10 readMachineMetricsLatest: GPU + null-when-absent round-trips through the DAO", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
-    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:GPU" });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:GPU",
+    });
 
     // A sample WITH gpu fields.
     await ingestMachineMetricsSample(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
       sample: {
-        cpuPercent: 50, gpuUtilPercent: 73, gpuMemUsedBytes: 4096, gpuMemTotalBytes: 40960,
+        cpuPercent: 50,
+        gpuUtilPercent: 73,
+        gpuMemUsedBytes: 4096,
+        gpuMemTotalBytes: 40960,
         sampledAt: new Date(),
       },
     });
@@ -411,7 +573,9 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     // A later sample with NO gpu fields → the latest row's gpu columns are null
     // (the not-reported contract — an absent GPU is null, never a real zero).
     await ingestMachineMetricsSample(db, {
-      accountId, workspaceId, enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
       sample: { cpuPercent: 51, sampledAt: new Date() },
     });
     const noGpu = await readMachineMetricsLatest(db, workspaceId, enrollment.id);
@@ -427,8 +591,17 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     if (!available) return;
     const a = await freshWorkspace();
     const b = await freshWorkspace();
-    const enrollmentA = await createEnrollment(db, { accountId: a.accountId, workspaceId: a.workspaceId, pubkey: "ed25519:ISO" });
-    await createSandbox(db, { accountId: a.accountId, workspaceId: a.workspaceId, kind: "modal", name: "A box" });
+    const enrollmentA = await createEnrollment(db, {
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      pubkey: "ed25519:ISO",
+    });
+    await createSandbox(db, {
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      kind: "modal",
+      name: "A box",
+    });
 
     // Reading A's rows scoped to B returns nothing (FORCE RLS).
     expect(await getEnrollment(db, b.workspaceId, enrollmentA.id)).toBeNull();

@@ -22,7 +22,8 @@ export type MachineCardProps = {
 };
 
 function KindIcon({ machine }: { machine: MachineView }) {
-  if (machine.isSessionGroup) return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  if (machine.isSessionGroup)
+    return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   if (machine.kind === "modal") return <CpuIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   return <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />;
 }
@@ -71,7 +72,9 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span className="capitalize">{machine.isSessionGroup ? "session sandbox" : machine.kind}</span>
+              <span className="capitalize">
+                {machine.isSessionGroup ? "session sandbox" : machine.kind}
+              </span>
               <span aria-hidden>·</span>
               <span className="font-og-mono">
                 {machine.os}/{machine.arch}
@@ -88,7 +91,12 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
             </div>
           </div>
         </div>
-        <MachineStatusPill state={machine.state} sharedSessionCount={machine.sharedSessionCount} size="sm" className="shrink-0" />
+        <MachineStatusPill
+          state={machine.state}
+          sharedSessionCount={machine.sharedSessionCount}
+          size="sm"
+          className="shrink-0"
+        />
       </div>
 
       {shared ? (
@@ -105,7 +113,11 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
 
       <div className="mt-1 flex items-center justify-between gap-3 text-og-xs text-og-fg-subtle">
         <span>
-          {machine.lastSeenAt ? <>Last seen {formatRelativeTime(machine.lastSeenAt)}</> : "Never connected"}
+          {machine.lastSeenAt ? (
+            <>Last seen {formatRelativeTime(machine.lastSeenAt)}</>
+          ) : (
+            "Never connected"
+          )}
         </span>
         {machine.active ? (
           <span className="text-og-accent">Routing here</span>

@@ -35,20 +35,29 @@ export function assertDescriptorRegistryInvariants(): void {
 
     // DesktopStream implies a non-"none" port-exposure mechanism (split-plane B
     // needs a way to surface 6080 to a viewer).
-    if (descriptor.capabilities.DesktopStream.available && descriptor.portExposure.kind === "none") {
+    if (
+      descriptor.capabilities.DesktopStream.available &&
+      descriptor.portExposure.kind === "none"
+    ) {
       throw new Error(`"${backend}" claims DesktopStream but portExposure.kind=none`);
     }
 
     // DesktopStream implies a transport, and a desktop transport implies the
     // capability is available (no half-declared desktop rows).
-    if (descriptor.capabilities.DesktopStream.available && descriptor.capabilities.DesktopStream.transport === null) {
+    if (
+      descriptor.capabilities.DesktopStream.available &&
+      descriptor.capabilities.DesktopStream.transport === null
+    ) {
       throw new Error(`"${backend}" claims DesktopStream but transport is null`);
     }
 
     // Recording feasibility is the same Xvfb display as DesktopStream: a desktop
     // backend MUST be able to x11grab; a non-desktop backend MUST NOT claim it
     // (Recording.available == DesktopStream.available && os==linux — Part D).
-    if (descriptor.capabilities.DesktopStream.available !== descriptor.capabilities.Recording.available) {
+    if (
+      descriptor.capabilities.DesktopStream.available !==
+      descriptor.capabilities.Recording.available
+    ) {
       throw new Error(
         `"${backend}" Recording.available (${descriptor.capabilities.Recording.available}) must equal DesktopStream.available (${descriptor.capabilities.DesktopStream.available})`,
       );

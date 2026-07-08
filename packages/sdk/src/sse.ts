@@ -12,7 +12,9 @@ export type SseMessage = {
   data: string;
 };
 
-export async function* parseSseStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<SseMessage, void, void> {
+export async function* parseSseStream(
+  stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<SseMessage, void, void> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -21,13 +23,14 @@ export async function* parseSseStream(stream: ReadableStream<Uint8Array>): Async
   let dataLines: string[] | null = null;
 
   const dispatch = (): SseMessage | null => {
-    const message = dataLines === null
-      ? null
-      : {
-        ...(id !== undefined ? { id } : {}),
-        ...(event !== undefined ? { event } : {}),
-        data: dataLines.join("\n"),
-      };
+    const message =
+      dataLines === null
+        ? null
+        : {
+            ...(id !== undefined ? { id } : {}),
+            ...(event !== undefined ? { event } : {}),
+            data: dataLines.join("\n"),
+          };
     id = undefined;
     event = undefined;
     dataLines = null;

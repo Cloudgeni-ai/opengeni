@@ -44,17 +44,26 @@ const liveSessions: Array<{ close?: () => Promise<void> }> = [];
  *  a SelfhostedSession pinned active. Returns the serialized RunState string (the
  *  worker's `state.toString()` — the call that triggers the cross-backend serialize
  *  that used to crash). A contract gap or a serialize crash throws before return. */
-async function runPinnedToVmTurn(model: ScriptedModel, opts: {
-  toolspaceTokenSeed?: string;
-  responder?: MockAgentResponder;
-  activeSandboxBackend?: "selfhosted";
-} = {}): Promise<string> {
-  const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false, gitAuthorName: "OpenGeni Bot" });
+async function runPinnedToVmTurn(
+  model: ScriptedModel,
+  opts: {
+    toolspaceTokenSeed?: string;
+    responder?: MockAgentResponder;
+    activeSandboxBackend?: "selfhosted";
+  } = {},
+): Promise<string> {
+  const settings = testSettings({
+    sandboxBackend: "local",
+    webSearchEnabled: false,
+    gitAuthorName: "OpenGeni Bot",
+  });
   // A real local session seeds the proxy DEFAULT (group) backend (createEditor /
   // viewImage bearing), but its manifest is forced to the empty-entries shape the
   // prod modal box is created with ({environment} only).
   const local = createSandboxClientForBackend("local", settings) as unknown as {
-    create: (m?: unknown) => Promise<{ close?: () => Promise<void>; state: { manifest: Manifest } }>;
+    create: (
+      m?: unknown,
+    ) => Promise<{ close?: () => Promise<void>; state: { manifest: Manifest } }>;
   };
   const groupSession = await local.create({});
   liveSessions.push(groupSession);
@@ -80,7 +89,11 @@ async function runPinnedToVmTurn(model: ScriptedModel, opts: {
   const proxy = new RoutingSandboxSession({
     defaultResolved: { session: groupSession as never, sandboxId: null, kind: "modal" },
     readPointer: async () => ({ activeSandboxId: "sbx-self", activeEpoch: 1 }),
-    resolveActiveBackend: async () => ({ session: self as never, sandboxId: "sbx-self", kind: "selfhosted" }),
+    resolveActiveBackend: async () => ({
+      session: self as never,
+      sandboxId: "sbx-self",
+      kind: "selfhosted",
+    }),
   });
 
   const agent = buildOpenGeniAgent(settings, [], {
@@ -107,21 +120,30 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // The exact prod shape: assistant deltas, an exec_command tool call that runs on
     // vm2 (over NATS), a tool result, then a final assistant reply — and the
     // post-tool-result serialize that crashed in prod now succeeds.
-    const s = await runPinnedToVmTurn(new ScriptedModel([
-      { output: [assistantMessage("let me check the machine"), functionCall("exec_command", { cmd: "echo PINNED" })] },
-      { output: [assistantMessage("the machine says PINNED")] },
-    ]));
+    const s = await runPinnedToVmTurn(
+      new ScriptedModel([
+        {
+          output: [
+            assistantMessage("let me check the machine"),
+            functionCall("exec_command", { cmd: "echo PINNED" }),
+          ],
+        },
+        { output: [assistantMessage("the machine says PINNED")] },
+      ]),
+    );
     expect(typeof s).toBe("string");
   });
 
   test("THREE-STEP turn (two tool calls -> final reply) runs + serializes clean", async () => {
     // Two exec rounds on the selfhosted backend (re-resolve each op within the same
     // epoch) then a final reply, with the cross-backend serialize at the end.
-    const s = await runPinnedToVmTurn(new ScriptedModel([
-      { output: [functionCall("exec_command", { cmd: "hostname" })] },
-      { output: [functionCall("exec_command", { cmd: "whoami" })] },
-      { output: [assistantMessage("done on vm2")] },
-    ]));
+    const s = await runPinnedToVmTurn(
+      new ScriptedModel([
+        { output: [functionCall("exec_command", { cmd: "hostname" })] },
+        { output: [functionCall("exec_command", { cmd: "whoami" })] },
+        { output: [assistantMessage("done on vm2")] },
+      ]),
+    );
     expect(typeof s).toBe("string");
   });
 
@@ -136,7 +158,13 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       hostname: "vm2",
       exec: (req) => {
         execLog.push(req.command.join(" "));
-        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(""),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
       },
     });
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
@@ -145,7 +173,11 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       activeSandboxBackend: "selfhosted",
     });
     // The seed hook ran over the machine's exec channel and carried the token value.
-    expect(execLog.some((c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED") && c.includes("ogd_selfhosted_seed"))).toBe(true);
+    expect(
+      execLog.some(
+        (c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED") && c.includes("ogd_selfhosted_seed"),
+      ),
+    ).toBe(true);
     // But NO platform setup ran against the user's real computer.
     expect(execLog.some((c) => c.includes("git clone"))).toBe(false);
     expect(execLog.some((c) => c.includes("az login") || c.includes("az account"))).toBe(false);
@@ -157,7 +189,13 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       hostname: "vm2",
       exec: (req) => {
         execLog.push(req.command.join(" "));
-        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(""),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
       },
     });
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
@@ -176,7 +214,13 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const responder = new MockAgentResponder({
       exec: (req) => {
         capturedEnv = req.env;
-        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(""),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
       },
     });
     const self = new SelfhostedSession({
@@ -192,7 +236,9 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       },
     });
     await self.exec({ cmd: "ogtool list" });
-    expect(capturedEnv.OPENGENI_TOOLSPACE_URL).toBe("https://app.opengeni.example/v1/workspaces/ws/mcp");
+    expect(capturedEnv.OPENGENI_TOOLSPACE_URL).toBe(
+      "https://app.opengeni.example/v1/workspaces/ws/mcp",
+    );
     expect(capturedEnv.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
     expect(capturedEnv.HOME).toBeUndefined();
     expect(capturedEnv.GIT_AUTHOR_NAME).toBeUndefined();
@@ -205,11 +251,22 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // requires that input parameter not be null or undefined" (the prod crash). The
     // end-to-end modal serialize is covered by the TWO-STEP / THREE-STEP turns above
     // (which run it through the SDK manager); here we pin the load-bearing property.
-    const self = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: new MockAgentResponder(), relay: RELAY, environment: ENV });
+    const self = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: "enroll-1",
+      controlRpc: new MockAgentResponder(),
+      relay: RELAY,
+      environment: ENV,
+    });
     expect(self.state.environment).toEqual(ENV);
-    expect(Object.entries(self.state.environment)).not.toThrow;
+    expect(() => Object.entries(self.state.environment)).not.toThrow();
     // The negotiation/test path (no env) still yields a defined object, never undefined.
-    const bare = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: new MockAgentResponder(), relay: RELAY });
+    const bare = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: "enroll-1",
+      controlRpc: new MockAgentResponder(),
+      relay: RELAY,
+    });
     expect(bare.state.environment).toEqual({});
     expect(Object.entries(bare.state.environment)).toEqual([]);
   });
@@ -236,7 +293,12 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
 
   test("viewImage wraps machine bytes in the SDK tool-output image shape (png magic bytes)", async () => {
     const mock = new MockAgentResponder();
-    const self = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: mock, relay: RELAY });
+    const self = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: "enroll-1",
+      controlRpc: mock,
+      relay: RELAY,
+    });
     // Seed a tiny PNG (magic bytes) on the virtual fs.
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
     await self.writeFile({ path: "/workspace/img.png", content: png });
@@ -248,7 +310,12 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
 
   test("listDir maps the proto fs entries to the SDK {name,path,type} shape; pathExists works; supportsPty is false; materializeEntry is a no-op", async () => {
     const mock = new MockAgentResponder();
-    const self = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: mock, relay: RELAY });
+    const self = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: "enroll-1",
+      controlRpc: mock,
+      relay: RELAY,
+    });
     await self.writeFile({ path: "/workspace/a.txt", content: "a" });
     expect(await self.pathExists("/workspace/a.txt")).toBe(true);
     expect(await self.pathExists("/workspace/missing.txt")).toBe(false);

@@ -53,7 +53,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -67,10 +69,24 @@ describe("0025 device-enrollment-requests migration shape", () => {
       ORDER BY column_name`;
     const names = new Set(cols.map((c) => c.column_name));
     for (const required of [
-      "device_code", "user_code", "account_id", "workspace_id", "pubkey", "os", "arch",
-      "requested_exposure", "can_offer_display", "requests_screen_control", "status",
-      "approved_by_subject_id", "approved_by_subject_label", "allow_screen_control",
-      "approved_at", "enrollment_id", "sandbox_id", "expires_at",
+      "device_code",
+      "user_code",
+      "account_id",
+      "workspace_id",
+      "pubkey",
+      "os",
+      "arch",
+      "requested_exposure",
+      "can_offer_display",
+      "requests_screen_control",
+      "status",
+      "approved_by_subject_id",
+      "approved_by_subject_label",
+      "allow_screen_control",
+      "approved_at",
+      "enrollment_id",
+      "sandbox_id",
+      "expires_at",
     ]) {
       expect(names.has(required)).toBe(true);
     }
@@ -109,7 +125,10 @@ describe("0025 device-enrollment-requests migration shape", () => {
     const { join, dirname } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
     const here = dirname(fileURLToPath(import.meta.url));
-    const body = readFileSync(join(here, "..", "drizzle", "0025_device_enrollment_requests.sql"), "utf8");
+    const body = readFileSync(
+      join(here, "..", "drizzle", "0025_device_enrollment_requests.sql"),
+      "utf8",
+    );
     await admin.unsafe(body);
     gone = await admin<{ n: number }[]>`
       SELECT count(*)::int as n FROM information_schema.tables WHERE table_name = 'device_enrollment_requests'`;
@@ -128,10 +147,16 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const req = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId,
-      deviceCode: "dev-code-1", userCode: "AAAA-BBBB", pubkey: "ed25519:M5A",
-      os: "linux", arch: "x86_64", machineName: "laptop",
-      canOfferDisplay: true, requestsScreenControl: true,
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-1",
+      userCode: "AAAA-BBBB",
+      pubkey: "ed25519:M5A",
+      os: "linux",
+      arch: "x86_64",
+      machineName: "laptop",
+      canOfferDisplay: true,
+      requestsScreenControl: true,
       expiresAt: new Date(Date.now() + 600_000),
     });
     expect(req.status).toBe("pending");
@@ -155,16 +180,24 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const req = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId,
-      deviceCode: "dev-code-2", userCode: "CCCC-DDDD", pubkey: "ed25519:M5B",
-      os: "linux", canOfferDisplay: true, requestsScreenControl: true,
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-2",
+      userCode: "CCCC-DDDD",
+      pubkey: "ed25519:M5B",
+      os: "linux",
+      canOfferDisplay: true,
+      requestsScreenControl: true,
       expiresAt: new Date(Date.now() + 600_000),
     });
 
     const approved = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: req.id,
+      accountId,
+      workspaceId,
+      requestId: req.id,
       allowScreenControl: true,
-      approvedBySubjectId: "user-123", approvedBySubjectLabel: "Jane",
+      approvedBySubjectId: "user-123",
+      approvedBySubjectLabel: "Jane",
       sandboxName: "laptop",
     });
     expect(approved.approved).toBe(true);
@@ -191,8 +224,12 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     // Idempotent re-approve (same request) reuses the SAME enrollment + sandbox — no
     // duplicate machine.
     const reApproved = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: req.id,
-      allowScreenControl: true, approvedBySubjectId: "user-123", sandboxName: "laptop",
+      accountId,
+      workspaceId,
+      requestId: req.id,
+      allowScreenControl: true,
+      approvedBySubjectId: "user-123",
+      sandboxName: "laptop",
     });
     expect(reApproved.approved).toBe(true);
     expect(reApproved.enrollment!.id).toBe(approved.enrollment!.id);
@@ -205,15 +242,23 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const req = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId,
-      deviceCode: "dev-code-3", userCode: "EEEE-FFFF", pubkey: "ed25519:M5C",
-      os: "linux", canOfferDisplay: true, requestsScreenControl: true,
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-3",
+      userCode: "EEEE-FFFF",
+      pubkey: "ed25519:M5C",
+      os: "linux",
+      canOfferDisplay: true,
+      requestsScreenControl: true,
       expiresAt: new Date(Date.now() + 600_000),
     });
     const approved = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: req.id,
+      accountId,
+      workspaceId,
+      requestId: req.id,
       allowScreenControl: false, // the user declined screen control
-      approvedBySubjectId: "user-9", sandboxName: "headless",
+      approvedBySubjectId: "user-9",
+      sandboxName: "headless",
     });
     expect(approved.enrollment!.allowScreenControl).toBe(false);
     // whole-machine is still mandatory.
@@ -224,17 +269,32 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const req = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId,
-      deviceCode: "dev-code-4", userCode: "GGGG-HHHH", pubkey: "ed25519:M5D",
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-4",
+      userCode: "GGGG-HHHH",
+      pubkey: "ed25519:M5D",
       expiresAt: new Date(Date.now() + 600_000),
     });
     await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: req.id,
-      allowScreenControl: false, approvedBySubjectId: "u", sandboxName: "m",
+      accountId,
+      workspaceId,
+      requestId: req.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "m",
     });
-    const c1 = await consumeDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: req.id });
+    const c1 = await consumeDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: req.id,
+    });
     expect(c1.consumed).toBe(true);
-    const c2 = await consumeDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: req.id });
+    const c2 = await consumeDeviceEnrollmentRequest(db, {
+      accountId,
+      workspaceId,
+      requestId: req.id,
+    });
     expect(c2.consumed).toBe(false); // already consumed
     const reread = await getDeviceEnrollmentRequestByDeviceCode(db, "dev-code-4");
     expect(reread?.status).toBe("consumed");
@@ -245,24 +305,48 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     const { accountId, workspaceId } = await freshWorkspace();
     // deny
     const denyReq = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, deviceCode: "dev-code-5", userCode: "IIII-JJJJ", pubkey: "ed25519:M5E",
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-5",
+      userCode: "IIII-JJJJ",
+      pubkey: "ed25519:M5E",
       expiresAt: new Date(Date.now() + 600_000),
     });
-    expect((await denyDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: denyReq.id })).denied).toBe(true);
-    expect((await denyDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: denyReq.id })).denied).toBe(false);
+    expect(
+      (await denyDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: denyReq.id }))
+        .denied,
+    ).toBe(true);
+    expect(
+      (await denyDeviceEnrollmentRequest(db, { accountId, workspaceId, requestId: denyReq.id }))
+        .denied,
+    ).toBe(false);
     // approve of a denied row → no-op.
     const afterDeny = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: denyReq.id, allowScreenControl: false, approvedBySubjectId: "u", sandboxName: "m",
+      accountId,
+      workspaceId,
+      requestId: denyReq.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "m",
     });
     expect(afterDeny.approved).toBe(false);
 
     // expired pending → approve no-op.
     const expReq = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, deviceCode: "dev-code-6", userCode: "KKKK-LLLL", pubkey: "ed25519:M5F",
+      accountId,
+      workspaceId,
+      deviceCode: "dev-code-6",
+      userCode: "KKKK-LLLL",
+      pubkey: "ed25519:M5F",
       expiresAt: new Date(Date.now() - 1_000), // already expired
     });
     const afterExpire = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: expReq.id, allowScreenControl: false, approvedBySubjectId: "u", sandboxName: "m",
+      accountId,
+      workspaceId,
+      requestId: expReq.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "m",
     });
     expect(afterExpire.approved).toBe(false);
     expect((await listEnrollments(db, workspaceId)).length).toBe(0);
@@ -273,12 +357,19 @@ describe("device-flow DAOs (start -> approve -> poll-consume + deny + lookups)",
     const a = await freshWorkspace();
     const b = await freshWorkspace();
     await createDeviceEnrollmentRequest(db, {
-      accountId: a.accountId, workspaceId: a.workspaceId,
-      deviceCode: "dev-code-iso", userCode: "ISOX-ISOY", pubkey: "ed25519:ISO",
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      deviceCode: "dev-code-iso",
+      userCode: "ISOX-ISOY",
+      pubkey: "ed25519:ISO",
       expiresAt: new Date(Date.now() + 600_000),
     });
-    expect(await getPendingDeviceEnrollmentRequestByUserCode(db, b.workspaceId, "ISOX-ISOY")).toBeNull();
-    expect(await getPendingDeviceEnrollmentRequestByUserCode(db, a.workspaceId, "ISOX-ISOY")).not.toBeNull();
+    expect(
+      await getPendingDeviceEnrollmentRequestByUserCode(db, b.workspaceId, "ISOX-ISOY"),
+    ).toBeNull();
+    expect(
+      await getPendingDeviceEnrollmentRequestByUserCode(db, a.workspaceId, "ISOX-ISOY"),
+    ).not.toBeNull();
   }, 60_000);
 });
 
@@ -290,11 +381,22 @@ describe("the approved enrollment drives the M3 consent_required -> online trans
 
     // Approve a machine WITH screen control → the enrollment is fully consented.
     const onReq = await createDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, deviceCode: "dc-on", userCode: "ON11-ON22", pubkey: "ed25519:ON",
-      canOfferDisplay: true, requestsScreenControl: true, expiresAt: new Date(Date.now() + 600_000),
+      accountId,
+      workspaceId,
+      deviceCode: "dc-on",
+      userCode: "ON11-ON22",
+      pubkey: "ed25519:ON",
+      canOfferDisplay: true,
+      requestsScreenControl: true,
+      expiresAt: new Date(Date.now() + 600_000),
     });
     const on = await approveDeviceEnrollmentRequest(db, {
-      accountId, workspaceId, requestId: onReq.id, allowScreenControl: true, approvedBySubjectId: "u", sandboxName: "m",
+      accountId,
+      workspaceId,
+      requestId: onReq.id,
+      allowScreenControl: true,
+      approvedBySubjectId: "u",
+      sandboxName: "m",
     });
     const onEnrollment = await getEnrollment(db, workspaceId, on.enrollment!.id);
     const onState = selfhostedLiveness({ enrollment: onEnrollment!, probeResponded: true });
@@ -306,11 +408,22 @@ describe("the approved enrollment drives the M3 consent_required -> online trans
     // (the M3 negotiation stamps consent_required on the desktop/computer-use cells).
     const { accountId: a2, workspaceId: w2 } = await freshWorkspace();
     const offReq = await createDeviceEnrollmentRequest(db, {
-      accountId: a2, workspaceId: w2, deviceCode: "dc-off", userCode: "OF11-OF22", pubkey: "ed25519:OFF",
-      canOfferDisplay: true, requestsScreenControl: true, expiresAt: new Date(Date.now() + 600_000),
+      accountId: a2,
+      workspaceId: w2,
+      deviceCode: "dc-off",
+      userCode: "OF11-OF22",
+      pubkey: "ed25519:OFF",
+      canOfferDisplay: true,
+      requestsScreenControl: true,
+      expiresAt: new Date(Date.now() + 600_000),
     });
     const off = await approveDeviceEnrollmentRequest(db, {
-      accountId: a2, workspaceId: w2, requestId: offReq.id, allowScreenControl: false, approvedBySubjectId: "u", sandboxName: "m",
+      accountId: a2,
+      workspaceId: w2,
+      requestId: offReq.id,
+      allowScreenControl: false,
+      approvedBySubjectId: "u",
+      sandboxName: "m",
     });
     const offEnrollment = await getEnrollment(db, w2, off.enrollment!.id);
     const offState = selfhostedLiveness({ enrollment: offEnrollment!, probeResponded: true });

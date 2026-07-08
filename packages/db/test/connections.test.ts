@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import { acquireSharedTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
@@ -49,7 +53,9 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-function brokerCredential(overrides: Partial<ConnectionCredentialForBroker> = {}): ConnectionCredentialForBroker {
+function brokerCredential(
+  overrides: Partial<ConnectionCredentialForBroker> = {},
+): ConnectionCredentialForBroker {
   return {
     id: "conn_1",
     accountId: "acct_1",
@@ -78,8 +84,19 @@ type Counts = {
   refreshInputs: Array<{ id: string; version: number }>;
 };
 
-function resolverDeps(overrides: Partial<ConnectionBrokerDeps> = {}): { deps: ConnectionBrokerDeps; counts: Counts } {
-  const counts: Counts = { load: 0, refresh: 0, recordRefresh: 0, recordUsed: 0, status: 0, loadInputs: [], refreshInputs: [] };
+function resolverDeps(overrides: Partial<ConnectionBrokerDeps> = {}): {
+  deps: ConnectionBrokerDeps;
+  counts: Counts;
+} {
+  const counts: Counts = {
+    load: 0,
+    refresh: 0,
+    recordRefresh: 0,
+    recordUsed: 0,
+    status: 0,
+    loadInputs: [],
+    refreshInputs: [],
+  };
   const deps: ConnectionBrokerDeps = {
     loadCredential: async (_db, _settings, input) => {
       counts.load += 1;
@@ -101,7 +118,12 @@ function resolverDeps(overrides: Partial<ConnectionBrokerDeps> = {}): { deps: Co
     refresh: async (cred) => {
       counts.refresh += 1;
       return {
-        credential: { ...cred.credential, access_token: "AC2", refresh_token: "RF2", token_type: "Bearer" },
+        credential: {
+          ...cred.credential,
+          access_token: "AC2",
+          refresh_token: "RF2",
+          token_type: "Bearer",
+        },
         expiresAt: new Date(Date.now() + 3_600_000),
         grantedScopes: cred.grantedScopes,
       };
@@ -141,7 +163,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
@@ -178,11 +202,20 @@ describe("connections table and helpers", () => {
     expect(sharedOnly.some((connection) => "credentialEncrypted" in connection)).toBe(false);
 
     const visibleToSubjectA = await listConnectionsMetadata(db, ws.workspaceId, "subject-a");
-    expect(visibleToSubjectA.map((connection) => connection.id).sort()).toEqual([sharedConnection.id, subjectConnection.id].sort());
+    expect(visibleToSubjectA.map((connection) => connection.id).sort()).toEqual(
+      [sharedConnection.id, subjectConnection.id].sort(),
+    );
     expect(visibleToSubjectA.some((connection) => "credentialEncrypted" in connection)).toBe(false);
 
-    expect(await getConnectionMetadata(db, ws.workspaceId, subjectConnection.id, "subject-b")).toBeNull();
-    const sharedFetched = await getConnectionMetadata(db, ws.workspaceId, sharedConnection.id, "subject-b");
+    expect(
+      await getConnectionMetadata(db, ws.workspaceId, subjectConnection.id, "subject-b"),
+    ).toBeNull();
+    const sharedFetched = await getConnectionMetadata(
+      db,
+      ws.workspaceId,
+      sharedConnection.id,
+      "subject-b",
+    );
     expect(sharedFetched?.providerDomain).toBe("api.example.com");
     expect(sharedFetched && "credentialEncrypted" in sharedFetched).toBe(false);
   });
@@ -247,25 +280,37 @@ describe("connections table and helpers", () => {
       providerDomain: "oauth.example.com",
     });
 
-    expect(await recordConnectionTokenRefresh(db, {
-      id: before!.id,
-      version: before!.version + 99,
-      workspaceId: ws.workspaceId,
-      credentialEncrypted: enc({ access_token: "STALE", refresh_token: "RF", token_type: "Bearer" }),
-      expiresAt: null,
-      grantedScopes: ["write"],
-      lastRefreshAt: new Date(),
-    })).toBe(false);
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: before!.id,
+        version: before!.version + 99,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: enc({
+          access_token: "STALE",
+          refresh_token: "RF",
+          token_type: "Bearer",
+        }),
+        expiresAt: null,
+        grantedScopes: ["write"],
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(false);
 
-    expect(await recordConnectionTokenRefresh(db, {
-      id: before!.id,
-      version: before!.version,
-      workspaceId: ws.workspaceId,
-      credentialEncrypted: enc({ access_token: "AC2", refresh_token: "RF2", token_type: "Bearer" }),
-      expiresAt: new Date(Date.now() + 3_600_000),
-      grantedScopes: ["read", "write"],
-      lastRefreshAt: new Date(),
-    })).toBe(true);
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: before!.id,
+        version: before!.version,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: enc({
+          access_token: "AC2",
+          refresh_token: "RF2",
+          token_type: "Bearer",
+        }),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        grantedScopes: ["read", "write"],
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(true);
 
     const refreshed = await loadConnectionCredentialForBroker(db, settings, {
       workspaceId: ws.workspaceId,
@@ -275,14 +320,18 @@ describe("connections table and helpers", () => {
     expect(refreshed?.credential).toMatchObject({ access_token: "AC2", refresh_token: "RF2" });
     expect(refreshed?.version).toBe(before!.version + 1);
 
-    expect(await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "stale", {
-      id: connection.id,
-      version: before!.version,
-    })).toBe(false);
-    expect(await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "expired", {
-      id: connection.id,
-      version: refreshed!.version,
-    })).toBe(true);
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "stale", {
+        id: connection.id,
+        version: before!.version,
+      }),
+    ).toBe(false);
+    expect(
+      await setConnectionStatus(db, ws.workspaceId, "needs_reauth", "expired", {
+        id: connection.id,
+        version: refreshed!.version,
+      }),
+    ).toBe(true);
     const afterStatus = await getConnectionMetadata(db, ws.workspaceId, connection.id);
     expect(afterStatus?.status).toBe("needs_reauth");
     expect(afterStatus?.lastError).toBe("expired");
@@ -307,14 +356,20 @@ describe("connections table and helpers", () => {
     expect(revoked?.status).toBe("revoked");
 
     // The refresh raced the revoke: it still holds the pre-revoke version.
-    expect(await recordConnectionTokenRefresh(db, {
-      id: inFlight!.id,
-      version: inFlight!.version,
-      workspaceId: ws.workspaceId,
-      credentialEncrypted: enc({ access_token: "AC2", refresh_token: "RF2", token_type: "Bearer" }),
-      expiresAt: new Date(Date.now() + 3_600_000),
-      lastRefreshAt: new Date(),
-    })).toBe(false);
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: inFlight!.id,
+        version: inFlight!.version,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: enc({
+          access_token: "AC2",
+          refresh_token: "RF2",
+          token_type: "Bearer",
+        }),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(false);
     const after = await getConnectionMetadata(db, ws.workspaceId, connection.id);
     expect(after?.status).toBe("revoked");
   });
@@ -330,8 +385,12 @@ describe("connections table and helpers", () => {
       credentialEncrypted: enc({ headers: { authorization: "Bearer subject-a" } }),
     });
 
-    expect(await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-b")).toBeNull();
-    expect((await getConnectionMetadata(db, ws.workspaceId, subjectConnection.id, "subject-a"))?.status).toBe("active");
+    expect(
+      await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-b"),
+    ).toBeNull();
+    expect(
+      (await getConnectionMetadata(db, ws.workspaceId, subjectConnection.id, "subject-a"))?.status,
+    ).toBe("active");
 
     const ownRevoke = await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-a");
     expect(ownRevoke?.status).toBe("revoked");
@@ -452,7 +511,10 @@ describe("buildConnectionTokenResolver", () => {
       expiresAt: null,
     });
     expect(counts.recordUsed).toBe(1);
-    expect(counts.loadInputs[0]).toMatchObject({ allowSubjectOwned: false, subjectId: "subject-a" });
+    expect(counts.loadInputs[0]).toMatchObject({
+      allowSubjectOwned: false,
+      subjectId: "subject-a",
+    });
   });
 
   test("returns auth_needed for missing scopes without exposing credential material", async () => {
@@ -463,7 +525,11 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
-      connectionRef: { providerDomain: "api.example.com", kind: "api_key", scopes: ["read", "write"] },
+      connectionRef: {
+        providerDomain: "api.example.com",
+        kind: "api_key",
+        scopes: ["read", "write"],
+      },
     });
     expect(result).toEqual({
       status: "auth_needed",
@@ -478,7 +544,9 @@ describe("buildConnectionTokenResolver", () => {
 
   test("single-flight refresh coalesces concurrent forced oauth refreshes", async () => {
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let loadCalls = 0;
     const stale = brokerCredential({
       id: "conn_oauth",
@@ -511,8 +579,18 @@ describe("buildConnectionTokenResolver", () => {
     });
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
     const both = Promise.all([
-      resolver({ workspaceId: "ws_1", serverId: "srv_1", connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] }, forceRefresh: true }),
-      resolver({ workspaceId: "ws_1", serverId: "srv_1", connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] }, forceRefresh: true }),
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
+        forceRefresh: true,
+      }),
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
+        forceRefresh: true,
+      }),
     ]);
     release();
     const results = await both;
@@ -520,8 +598,18 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordRefresh).toBe(1);
     expect(counts.refreshInputs).toEqual([{ id: "conn_oauth", version: 7 }]);
     expect(results).toEqual([
-      { status: "ok", headers: { authorization: "Bearer AC2" }, connectionId: "conn_oauth", expiresAt: refreshed.expiresAt },
-      { status: "ok", headers: { authorization: "Bearer AC2" }, connectionId: "conn_oauth", expiresAt: refreshed.expiresAt },
+      {
+        status: "ok",
+        headers: { authorization: "Bearer AC2" },
+        connectionId: "conn_oauth",
+        expiresAt: refreshed.expiresAt,
+      },
+      {
+        status: "ok",
+        headers: { authorization: "Bearer AC2" },
+        connectionId: "conn_oauth",
+        expiresAt: refreshed.expiresAt,
+      },
     ]);
   });
 
@@ -546,7 +634,11 @@ describe("buildConnectionTokenResolver", () => {
       serverId: "srv_1",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
-    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+    expect(result).toMatchObject({
+      status: "auth_needed",
+      reason: "refresh_failed",
+      connectionId: "conn_oauth",
+    });
     expect(counts.status).toBe(0);
   });
 
@@ -582,7 +674,11 @@ describe("buildConnectionTokenResolver", () => {
       port: 0,
       fetch() {
         redirectTargetHits += 1;
-        return Response.json({ access_token: "redirected-token", token_type: "Bearer", expires_in: 3600 });
+        return Response.json({
+          access_token: "redirected-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+        });
       },
     });
     let tokenHits = 0;
@@ -632,7 +728,11 @@ describe("buildConnectionTokenResolver", () => {
         serverId: "srv_1",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
       });
-      expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+      expect(result).toMatchObject({
+        status: "auth_needed",
+        reason: "refresh_failed",
+        connectionId: "conn_oauth",
+      });
       expect(observedError).toBeInstanceOf(ConnectionRefreshHttpError);
       expect((observedError as ConnectionRefreshHttpError).httpStatus).toBe(302);
       expect(counts.status).toBe(0);
@@ -651,24 +751,32 @@ describe("buildConnectionTokenResolver", () => {
     let capturedBody: URLSearchParams | null = null;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = new URLSearchParams(String(init?.body));
-      return new Response(JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }) as typeof fetch;
     try {
-      const refreshed = await refreshOAuthConnectionCredential(brokerCredential({
-        kind: "oauth2",
-        credential: {
-          access_token: "AC",
-          refresh_token: "RF",
-          token_type: "Bearer",
-          token_endpoint: "https://as.example.com/token",
-          client_id: "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
-        },
-      }), { providerDomain: "oauth.example.com", kind: "oauth2" });
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_type: "Bearer",
+            token_endpoint: "https://as.example.com/token",
+            client_id: "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
+          },
+        }),
+        { providerDomain: "oauth.example.com", kind: "oauth2" },
+      );
       expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
-      expect(capturedBody!.get("client_id")).toBe("https://opengeni.example.com/v1/integrations/oauth/client-metadata.json");
+      expect(capturedBody!.get("client_id")).toBe(
+        "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
+      );
       expect(capturedBody!.get("grant_type")).toBe("refresh_token");
     } finally {
       globalThis.fetch = originalFetch;
@@ -696,13 +804,17 @@ describe("buildConnectionTokenResolver", () => {
       serverId: "srv_1",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
-    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+    expect(result).toMatchObject({
+      status: "auth_needed",
+      reason: "refresh_failed",
+      connectionId: "conn_oauth",
+    });
     expect(counts.status).toBe(1);
   });
 });
 
 describe("normalizeBearerScheme", () => {
-  test("canonicalizes a lowercase/absent bearer scheme to \"Bearer\" (Linear MCP rejects lowercase)", () => {
+  test('canonicalizes a lowercase/absent bearer scheme to "Bearer" (Linear MCP rejects lowercase)', () => {
     expect(normalizeBearerScheme("bearer")).toBe("Bearer");
     expect(normalizeBearerScheme("BEARER")).toBe("Bearer");
     expect(normalizeBearerScheme("Bearer")).toBe("Bearer");

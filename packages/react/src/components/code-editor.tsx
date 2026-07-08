@@ -279,13 +279,7 @@ export function CodeEditor({
   if (failed) {
     return (
       <div className={cn("flex h-full min-h-0 flex-col", className)}>
-        {fallback ?? (
-          <PlainTextarea
-            value={value}
-            readOnly={readOnly}
-            onChange={noteEdit}
-          />
-        )}
+        {fallback ?? <PlainTextarea value={value} readOnly={readOnly} onChange={noteEdit} />}
       </div>
     );
   }
@@ -301,11 +295,7 @@ export function CodeEditor({
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full transition-colors",
-            readOnly
-              ? "bg-transparent"
-              : dirty
-                ? "bg-og-status-running"
-                : "bg-og-status-idle",
+            readOnly ? "bg-transparent" : dirty ? "bg-og-status-running" : "bg-og-status-idle",
           )}
           title={readOnly ? "read-only" : dirty ? "unsaved changes" : "saved"}
         />
@@ -322,15 +312,9 @@ export function CodeEditor({
               {saveError.message}
             </span>
           )}
-          {!saveError && savedTick && (
-            <span className="text-og-xs text-og-status-idle">
-              Saved
-            </span>
-          )}
+          {!saveError && savedTick && <span className="text-og-xs text-og-status-idle">Saved</span>}
           {readOnly ? (
-            <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">
-              Read-only
-            </span>
+            <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">Read-only</span>
           ) : (
             <button
               type="button"
@@ -402,9 +386,5 @@ function PlainTextarea({
 }
 
 function EditorSkeleton() {
-  return (
-    <div className="p-3 text-og-sm text-og-fg-subtle">
-      Loading editor…
-    </div>
-  );
+  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading editor…</div>;
 }

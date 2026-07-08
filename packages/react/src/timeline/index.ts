@@ -16,7 +16,14 @@
    -------------------------------------------------------------------------- */
 
 // projection
-export { buildTimeline, creditExhaustedFromEvents, extractSessionRef, groupTimeline, sessionStatusFromEvents, toolDisplayName } from "./projection";
+export {
+  buildTimeline,
+  creditExhaustedFromEvents,
+  extractSessionRef,
+  groupTimeline,
+  sessionStatusFromEvents,
+  toolDisplayName,
+} from "./projection";
 
 // item types
 export type {
@@ -56,7 +63,16 @@ export { ActivityRail } from "./activity-rail";
 export type { ActivityRailProps } from "./activity-rail";
 
 // shared primitives (extension authors compose these)
-export { ActivityDisclosure, BodyNote, MediaEmpty, MediaSkeleton, PayloadBlock, ScreenshotFigure, TermBlock, Thumbnail } from "./shared";
+export {
+  ActivityDisclosure,
+  BodyNote,
+  MediaEmpty,
+  MediaSkeleton,
+  PayloadBlock,
+  ScreenshotFigure,
+  TermBlock,
+  Thumbnail,
+} from "./shared";
 export type { ActivityDisclosureProps, DisclosureChip } from "./shared";
 
 // screenshot lightbox

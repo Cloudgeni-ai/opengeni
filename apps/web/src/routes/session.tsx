@@ -28,10 +28,7 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
-import {
-  EnabledMcpToolPicker,
-  ModelPicker,
-} from "@/components/pickers";
+import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
 import {
   FailedSessionBanner,
   TerminalSessionArchive,
@@ -52,21 +49,41 @@ import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { normalizeProviderDomain } from "@/lib/capabilities";
-import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
+import {
+  isTerminalSessionStatus,
+  projectSessionTimeline,
+  summarizeSessionFailure,
+} from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
 import type { LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
+export function SessionRoute({
+  workspaceId,
+  sessionId,
+}: {
+  workspaceId: string;
+  sessionId: string;
+}) {
   const context = useAppContext();
   const navigate = useNavigate();
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
   const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
-  const { events, sessionStatus, connectionState, initialLoading, hasOlder, loadingOlder, loadOlder, error: streamError } = useSessionEvents(sessionId);
+  const {
+    events,
+    sessionStatus,
+    connectionState,
+    initialLoading,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    error: streamError,
+  } = useSessionEvents(sessionId);
   const session = useMemo(
-    () => fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
+    () =>
+      fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
     [fetchedSession, sessionStatus],
   );
   // Queue + goal share the timeline's event stream — one SSE connection total.
@@ -88,7 +105,10 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     setViewClearedAfter(latestSequence);
   }, [events]);
   const visibleEvents = useMemo(
-    () => viewClearedAfter !== null ? events.filter((event) => event.sequence > viewClearedAfter) : events,
+    () =>
+      viewClearedAfter !== null
+        ? events.filter((event) => event.sequence > viewClearedAfter)
+        : events,
     [events, viewClearedAfter],
   );
   const timeline = useMemo(() => {
@@ -119,9 +139,10 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // the banner shows for idle-but-broke sessions too, not only failed ones.
   const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
   const failure = useMemo(
-    () => session && (session.status === "failed" || creditExhausted)
-      ? summarizeSessionFailure(events, session.status)
-      : null,
+    () =>
+      session && (session.status === "failed" || creditExhausted)
+        ? summarizeSessionFailure(events, session.status)
+        : null,
     [events, session?.status, creditExhausted],
   );
 
@@ -132,10 +153,13 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   useEffect(() => {
     context.setConnectionState(connectionState);
   }, [connectionState]);
-  useEffect(() => () => {
-    context.setSession(null);
-    context.setConnectionState("idle");
-  }, []);
+  useEffect(
+    () => () => {
+      context.setSession(null);
+      context.setConnectionState("idle");
+    },
+    [],
+  );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
       toast.error("Event stream disconnected", { description: streamError.message });
@@ -174,27 +198,34 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // return to this session; api-key ones can't OAuth, so hand off to credential
   // re-entry on the capabilities sheet for that provider. Throwing bubbles a
   // calm inline error on the reconnect card.
-  const onReconnect = useCallback(async (item: AuthNeededItem) => {
-    const connections = await context.client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]);
-    const connection = item.connectionId ? connections.find((candidate) => candidate.id === item.connectionId) ?? null : null;
-    if (connection?.kind === "api_key") {
-      window.location.assign(
-        `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
-      );
-      return;
-    }
-    const returnPath = `${window.location.pathname}${window.location.search}`;
-    const response = await context.client.startConnectionOAuth(workspaceId, {
-      providerDomain: item.providerDomain,
-      ...(item.connectionId ? { connectionId: item.connectionId } : {}),
-      ...(item.resource ? { resource: item.resource } : {}),
-      returnPath,
-    });
-    if (!response.authorizationUrl) {
-      throw new Error("The provider did not return an authorization link.");
-    }
-    window.location.assign(response.authorizationUrl);
-  }, [context.client, workspaceId]);
+  const onReconnect = useCallback(
+    async (item: AuthNeededItem) => {
+      const connections = await context.client
+        .listConnections(workspaceId)
+        .catch(() => [] as ConnectionMetadata[]);
+      const connection = item.connectionId
+        ? (connections.find((candidate) => candidate.id === item.connectionId) ?? null)
+        : null;
+      if (connection?.kind === "api_key") {
+        window.location.assign(
+          `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+        );
+        return;
+      }
+      const returnPath = `${window.location.pathname}${window.location.search}`;
+      const response = await context.client.startConnectionOAuth(workspaceId, {
+        providerDomain: item.providerDomain,
+        ...(item.connectionId ? { connectionId: item.connectionId } : {}),
+        ...(item.resource ? { resource: item.resource } : {}),
+        returnPath,
+      });
+      if (!response.authorizationUrl) {
+        throw new Error("The provider did not return an authorization link.");
+      }
+      window.location.assign(response.authorizationUrl);
+    },
+    [context.client, workspaceId],
+  );
 
   // One lazy catalog fetch feeds two timeline resolvers: provider logos for any
   // inline reconnect card, and real capability names for the tool chips on user
@@ -203,7 +234,10 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // and reuse the single response. Logos serve from our own catalog-assets route
   // via `catalogAssetUrl`, never an off-origin favicon (the CSP forbids it and it
   // would leak which providers are connected).
-  const hasAuthNeeded = useMemo(() => timeline.some((item) => item.kind === "auth-needed"), [timeline]);
+  const hasAuthNeeded = useMemo(
+    () => timeline.some((item) => item.kind === "auth-needed"),
+    [timeline],
+  );
   const hasToolChips = useMemo(
     () => timeline.some((item) => item.kind === "user-message" && item.tools.length > 0),
     [timeline],
@@ -219,7 +253,8 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     }
     catalogRequestedRef.current = true;
     let cancelled = false;
-    void context.client.listCapabilities(workspaceId)
+    void context.client
+      .listCapabilities(workspaceId)
       .then((catalog) => {
         if (cancelled) {
           return;
@@ -280,13 +315,25 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
         <ProblemPanel
           title="Session not found in this workspace"
           description="The session ID is not available under the workspace in the URL."
-          action={<Button asChild type="button" variant="secondary"><Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>Back to sessions</Link></Button>}
+          action={
+            <Button asChild type="button" variant="secondary">
+              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
+                Back to sessions
+              </Link>
+            </Button>
+          }
         />
       ) : (
         <ProblemPanel
           title="Unable to open session"
           description={loadError instanceof Error ? loadError.message : String(loadError)}
-          action={<Button asChild type="button" variant="secondary"><Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>Back to sessions</Link></Button>}
+          action={
+            <Button asChild type="button" variant="secondary">
+              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
+                Back to sessions
+              </Link>
+            </Button>
+          }
         />
       );
     }
@@ -308,9 +355,22 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
       onClearView={clearView}
-      onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
-      onMemoryClick={(memoryId) => void navigate({ to: "/workspaces/$workspaceId/documents", params: { workspaceId }, search: { memory: memoryId } })}
-      onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
+      onOpenSession={(nextSessionId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId, sessionId: nextSessionId },
+        })
+      }
+      onMemoryClick={(memoryId) =>
+        void navigate({
+          to: "/workspaces/$workspaceId/documents",
+          params: { workspaceId },
+          search: { memory: memoryId },
+        })
+      }
+      onNewSession={() =>
+        void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })
+      }
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
@@ -342,7 +402,9 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision });
     } catch (error) {
-      toast.error("Couldn't submit the decision", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Couldn't submit the decision", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       throw error instanceof Error ? error : new Error(String(error));
     }
   }
@@ -387,7 +449,13 @@ function SessionDock(props: {
   const debugTab: WorkspaceTab = {
     id: "debug",
     label: "Debug",
-    content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
+    content: (
+      <SessionInspector
+        session={props.session}
+        events={props.events}
+        connectionState={props.connectionState}
+      />
+    ),
   };
 
   // The decoupled home for spawned workers (#318): SessionRoute owns the single
@@ -523,7 +591,10 @@ function SessionChatPane(props: {
   // /compact, /help) act on THIS session. Permissions come from the workspace
   // grant so the palette hides commands the operator can't run.
   const workspacePermissions = useMemo(
-    () => context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === props.session.workspaceId)?.permissions ?? [],
+    () =>
+      context.accessContext.workspaceGrants.find(
+        (grant) => grant.workspaceId === props.session.workspaceId,
+      )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
   const commandContext = useMemo(
@@ -534,19 +605,34 @@ function SessionChatPane(props: {
       status: props.session.status,
       permissions: workspacePermissions,
     }),
-    [context.client, props.session.workspaceId, props.session.id, props.session.status, workspacePermissions],
+    [
+      context.client,
+      props.session.workspaceId,
+      props.session.id,
+      props.session.status,
+      workspacePermissions,
+    ],
   );
 
-  const renderMessageText = useCallback((text: string, item: AgentMessageItem | UserMessageItem) => {
-    if (item.kind === "user-message") {
-      return <UserMessageBody workspaceId={props.session.workspaceId} item={item} resolveCapabilityName={props.resolveCapabilityName} />;
-    }
-    return (
-      <div data-testid="assistant-markdown">
-        <MarkdownText text={text} streaming={item.streaming} />
-      </div>
-    );
-  }, [props.session.workspaceId, props.resolveCapabilityName]);
+  const renderMessageText = useCallback(
+    (text: string, item: AgentMessageItem | UserMessageItem) => {
+      if (item.kind === "user-message") {
+        return (
+          <UserMessageBody
+            workspaceId={props.session.workspaceId}
+            item={item}
+            resolveCapabilityName={props.resolveCapabilityName}
+          />
+        );
+      }
+      return (
+        <div data-testid="assistant-markdown">
+          <MarkdownText text={text} streaming={item.streaming} />
+        </div>
+      );
+    },
+    [props.session.workspaceId, props.resolveCapabilityName],
+  );
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
@@ -562,8 +648,14 @@ function SessionChatPane(props: {
               hide the one banner that explains why nothing works anymore. It
               hides again while a turn is actually running (someone topped up
               and is trying), so the recovery turn isn't shadowed by it. */}
-          {props.failure && (props.session.status === "failed" || (props.creditExhausted && props.session.status === "idle")) ? (
-            <FailedSessionBanner failure={props.failure} creditExhausted={props.creditExhausted} workspaceId={props.session.workspaceId} />
+          {props.failure &&
+          (props.session.status === "failed" ||
+            (props.creditExhausted && props.session.status === "idle")) ? (
+            <FailedSessionBanner
+              failure={props.failure}
+              creditExhausted={props.creditExhausted}
+              workspaceId={props.session.workspaceId}
+            />
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
@@ -578,20 +670,22 @@ function SessionChatPane(props: {
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
-              emptyState={props.initialLoading ? (
-                // History is still fetching — a quiet shimmer, not the
-                // "waiting for the first step" copy (that's for NEW sessions).
-                <div className="grid min-h-[24rem] place-items-center text-sm">
-                  <span className="og-shimmer-text font-medium">Loading conversation…</span>
-                </div>
-              ) : (
-                <EmptyState
-                  className="min-h-[24rem]"
-                  icon={<MessagesSquareIcon className="size-4" />}
-                  title="Waiting for the first step"
-                  description="The agent's steps will appear here as it works."
-                />
-              )}
+              emptyState={
+                props.initialLoading ? (
+                  // History is still fetching — a quiet shimmer, not the
+                  // "waiting for the first step" copy (that's for NEW sessions).
+                  <div className="grid min-h-[24rem] place-items-center text-sm">
+                    <span className="og-shimmer-text font-medium">Loading conversation…</span>
+                  </div>
+                ) : (
+                  <EmptyState
+                    className="min-h-[24rem]"
+                    icon={<MessagesSquareIcon className="size-4" />}
+                    title="Waiting for the first step"
+                    description="The agent's steps will appear here as it works."
+                  />
+                )
+              }
             />
           </div>
         </>
@@ -614,12 +708,29 @@ function SessionChatPane(props: {
                     {payload}
                   </pre>
                   <div className="mt-3 flex justify-end gap-2">
-                    <Button size="sm" disabled={busy} onClick={() => void decideApproval(approval.id, "approve")}>
-                      {pending === "approve" ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void decideApproval(approval.id, "approve")}
+                    >
+                      {pending === "approve" ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <CheckIcon className="size-3.5" />
+                      )}
                       {settled === "approve" ? "Approved" : "Approve"}
                     </Button>
-                    <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decideApproval(approval.id, "reject")}>
-                      {pending === "reject" ? <Loader2Icon className="size-3.5 animate-spin" /> : <XIcon className="size-3.5" />}
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={busy}
+                      onClick={() => void decideApproval(approval.id, "reject")}
+                    >
+                      {pending === "reject" ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <XIcon className="size-3.5" />
+                      )}
                       {settled === "reject" ? "Rejected" : "Reject"}
                     </Button>
                   </div>
@@ -652,16 +763,19 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder={props.session.status === "cancelled"
-              ? "This session was cancelled."
-              : props.creditExhausted && (props.session.status === "failed" || props.session.status === "idle")
-                // "Send a message to revive" is a dead end without credits —
-                // the reply turn dies the same budget death.
-                ? "Out of OpenGeni credits — add credits to continue."
-                : props.session.status === "failed"
-                  ? "This session failed — send a message to revive it."
-                  : "Send a follow-up…"}
-            controls={(
+            placeholder={
+              props.session.status === "cancelled"
+                ? "This session was cancelled."
+                : props.creditExhausted &&
+                    (props.session.status === "failed" || props.session.status === "idle")
+                  ? // "Send a message to revive" is a dead end without credits —
+                    // the reply turn dies the same budget death.
+                    "Out of OpenGeni credits — add credits to continue."
+                  : props.session.status === "failed"
+                    ? "This session failed — send a message to revive it."
+                    : "Send a follow-up…"
+            }
+            controls={
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
                   config={context.clientConfig}
@@ -679,7 +793,7 @@ function SessionChatPane(props: {
                   onChange={context.setSelectedCapabilityToolIds}
                 />
               </div>
-            )}
+            }
           />
         </div>
       </div>

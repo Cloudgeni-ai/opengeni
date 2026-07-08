@@ -13,7 +13,10 @@ export type AsyncListState<T> = {
  * Shared fetch + optional polling loop for the list/read hooks. Stale
  * responses (superseded by a newer load or an unmount) are dropped.
  */
-export function usePolledValue<T>(load: () => Promise<T>, options: { pollIntervalMs?: number | undefined; enabled?: boolean | undefined } = {}): AsyncListState<T> {
+export function usePolledValue<T>(
+  load: () => Promise<T>,
+  options: { pollIntervalMs?: number | undefined; enabled?: boolean | undefined } = {},
+): AsyncListState<T> {
   const enabled = options.enabled ?? true;
   const pollIntervalMs = options.pollIntervalMs;
   const [data, setData] = useState<T | null>(null);
@@ -95,7 +98,7 @@ export function useMutationRunner(): MutationState & {
       mounted.current = false;
     };
   }, []);
-  const run = useCallback(async <T,>(operation: () => Promise<T>): Promise<T | null> => {
+  const run = useCallback(async <T>(operation: () => Promise<T>): Promise<T | null> => {
     inFlight.current += 1;
     if (mounted.current) {
       setMutating(true);

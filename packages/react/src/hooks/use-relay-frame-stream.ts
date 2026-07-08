@@ -85,7 +85,9 @@ function defaultWebSocketFactory(url: string): DesktopWebSocketLike {
  * decoded at a time; a frame arriving mid-decode replaces the pending one
  * (latest-wins), so a slow decode can never build an unbounded queue.
  */
-export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRelayFrameStreamResult {
+export function useRelayFrameStream(
+  options: UseRelayFrameStreamOptions,
+): UseRelayFrameStreamResult {
   const { capability, containerRef, webSocketFactory } = options;
   const [state, setState] = useState<DesktopConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);

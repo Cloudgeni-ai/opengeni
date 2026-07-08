@@ -40,7 +40,10 @@ export function useBillingUsage(options: UseBillingUsageOptions = {}): UseBillin
       }),
     [client, accountId, workspaceId],
   );
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   return {
     balance: state.data?.balance ?? null,
     usage: state.data?.usage ?? [],

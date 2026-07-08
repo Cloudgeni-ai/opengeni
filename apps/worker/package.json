@@ -8,6 +8,10 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "apps/worker"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -17,13 +21,6 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     }
-  },
-  "files": [
-    "dist",
-    "src"
-  ],
-  "engines": {
-    "node": ">=18"
   },
   "publishConfig": {
     "access": "public",
@@ -56,7 +53,10 @@
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
     "postgres": "^3.4.9",
-    "typescript": "^6.0.3",
-    "tsup": "^8.5.0"
+    "tsup": "^8.5.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

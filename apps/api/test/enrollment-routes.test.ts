@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { testSettings, MemoryEventBus, acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  testSettings,
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   signDelegatedAccessToken,
   verifyEnrollmentBearer,
@@ -43,8 +48,12 @@ const settings = testSettings({
 function appFor(overrides: Partial<AppDependencies> = {}) {
   const noop = async () => {};
   const workflowClient = {
-    signalUserMessage: noop, wakeSessionWorkflow: noop, signalApprovalDecision: noop,
-    signalInterrupt: noop, syncScheduledTask: noop, deleteScheduledTaskSchedule: noop,
+    signalUserMessage: noop,
+    wakeSessionWorkflow: noop,
+    signalApprovalDecision: noop,
+    signalInterrupt: noop,
+    syncScheduledTask: noop,
+    deleteScheduledTaskSchedule: noop,
     triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
   const deps: AppDependencies = {
@@ -59,15 +68,27 @@ function appFor(overrides: Partial<AppDependencies> = {}) {
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
-async function bearer(accountId: string, workspaceId: string, permissions: Permission[]): Promise<string> {
+async function bearer(
+  accountId: string,
+  workspaceId: string,
+  permissions: Permission[],
+): Promise<string> {
   return await signDelegatedAccessToken(DELEGATION_SECRET, {
-    accountId, workspaceId, subjectId: "user-m5", subjectLabel: "M5 User",
-    permissions, exp: Math.floor(Date.now() / 1000) + 3600,
+    accountId,
+    workspaceId,
+    subjectId: "user-m5",
+    subjectLabel: "M5 User",
+    permissions,
+    exp: Math.floor(Date.now() / 1000) + 3600,
   });
 }
 
@@ -87,7 +108,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -102,15 +125,23 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        publicKey: "ed25519:HAPPY", os: "linux", arch: "x86_64",
-        machineName: "build-box", canOfferDisplay: true, requestsScreenControl: true,
+        publicKey: "ed25519:HAPPY",
+        os: "linux",
+        arch: "x86_64",
+        machineName: "build-box",
+        canOfferDisplay: true,
+        requestsScreenControl: true,
         workspaceId,
       }),
     });
     expect(startRes.status).toBe(201);
-    const start = await startRes.json() as {
-      deviceCode: string; userCode: string; verificationUri: string;
-      verificationUriComplete: string; intervalSeconds: number; expiresInSeconds: number;
+    const start = (await startRes.json()) as {
+      deviceCode: string;
+      userCode: string;
+      verificationUri: string;
+      verificationUriComplete: string;
+      intervalSeconds: number;
+      expiresInSeconds: number;
     };
     expect(start.deviceCode).toBeTruthy();
     expect(start.userCode).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
@@ -119,20 +150,32 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
 
     // 2. POLL before approve → pending.
     const pollPending = await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceCode: start.deviceCode }),
     });
     expect(pollPending.status).toBe(200);
-    expect((await pollPending.json() as { state: string }).state).toBe("pending");
+    expect(((await pollPending.json()) as { state: string }).state).toBe("pending");
 
     // 3. APPROVE (user-authenticated, workspace-gated) WITH screen control.
-    const approveRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}` },
-      body: JSON.stringify({ userCode: start.userCode, allowScreenControl: true }),
-    });
+    const approveRes = await app.request(
+      `/v1/workspaces/${workspaceId}/enrollments/device/approve`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+        },
+        body: JSON.stringify({ userCode: start.userCode, allowScreenControl: true }),
+      },
+    );
     expect(approveRes.status).toBe(201);
-    const approve = await approveRes.json() as { approved: boolean; enrollmentId: string; sandboxId: string; allowScreenControl: boolean };
+    const approve = (await approveRes.json()) as {
+      approved: boolean;
+      enrollmentId: string;
+      sandboxId: string;
+      allowScreenControl: boolean;
+    };
     expect(approve.approved).toBe(true);
     expect(approve.enrollmentId).toBeTruthy();
     expect(approve.sandboxId).toBeTruthy();
@@ -140,16 +183,24 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
 
     // 4. POLL after approve → authorized + EnrollmentCredentials (signed bearer).
     const pollAuth = await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceCode: start.deviceCode }),
     });
     expect(pollAuth.status).toBe(200);
-    const poll = await pollAuth.json() as {
+    const poll = (await pollAuth.json()) as {
       state: string;
       credentials?: {
-        agentId: string; workspaceId: string; bearer: string; subjectPrefix: string;
-        natsUrls: string[]; relayUrl: string; natsAccountCreds: string; updatePublicKey: string;
-        consentedWholeMachine: boolean; consentedScreenControl: boolean;
+        agentId: string;
+        workspaceId: string;
+        bearer: string;
+        subjectPrefix: string;
+        natsUrls: string[];
+        relayUrl: string;
+        natsAccountCreds: string;
+        updatePublicKey: string;
+        consentedWholeMachine: boolean;
+        consentedScreenControl: boolean;
       };
     };
     expect(poll.state).toBe("authorized");
@@ -183,19 +234,36 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const app = appFor();
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:NOSCREEN", canOfferDisplay: true, requestsScreenControl: true, workspaceId }),
-    })).json() as { deviceCode: string; userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: "ed25519:NOSCREEN",
+          canOfferDisplay: true,
+          requestsScreenControl: true,
+          workspaceId,
+        }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
     await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`,
+      },
       body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
     });
-    const poll = await (await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deviceCode: start.deviceCode }),
-    })).json() as { state: string; credentials?: { consentedScreenControl: boolean; consentedWholeMachine: boolean } };
+    const poll = (await (
+      await app.request("/v1/enrollments/device/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: start.deviceCode }),
+      })
+    ).json()) as {
+      state: string;
+      credentials?: { consentedScreenControl: boolean; consentedWholeMachine: boolean };
+    };
     expect(poll.state).toBe("authorized");
     expect(poll.credentials!.consentedWholeMachine).toBe(true);
     expect(poll.credentials!.consentedScreenControl).toBe(false);
@@ -208,7 +276,8 @@ describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () 
     const { workspaceId } = await freshWorkspace();
     const app = appFor();
     const res = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ userCode: "AAAA-BBBB", allowScreenControl: false }),
     });
     expect(res.status).toBe(401);
@@ -220,7 +289,10 @@ describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () 
     const app = appFor();
     const res = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["sessions:read"])}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["sessions:read"])}`,
+      },
       body: JSON.stringify({ userCode: "AAAA-BBBB", allowScreenControl: false }),
     });
     expect(res.status).toBe(403);
@@ -232,24 +304,36 @@ describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () 
     const b = await freshWorkspace();
     const app = appFor();
     // Start a flow for workspace A.
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:XWS", workspaceId: a.workspaceId }),
-    })).json() as { userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:XWS", workspaceId: a.workspaceId }),
+      })
+    ).json()) as { userCode: string };
     // A user authenticated to workspace B tries to approve A's user_code IN B.
     const resInB = await app.request(`/v1/workspaces/${b.workspaceId}/enrollments/device/approve`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:manage"])}` },
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:manage"])}`,
+      },
       body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
     });
     // The user_code lookup is workspace-scoped → no pending request in B → 404.
     expect(resInB.status).toBe(404);
     // And a B-bearer cannot reach the A route at all (no grant in A → 403).
-    const resCrossRoute = await app.request(`/v1/workspaces/${a.workspaceId}/enrollments/device/approve`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:manage"])}` },
-      body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
-    });
+    const resCrossRoute = await app.request(
+      `/v1/workspaces/${a.workspaceId}/enrollments/device/approve`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:manage"])}`,
+        },
+        body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
+      },
+    );
     expect(resCrossRoute.status).toBe(403);
   }, 90_000);
 });
@@ -261,44 +345,72 @@ describe("M5 list + revoke + idempotent re-enroll", () => {
     const app = appFor();
     const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
 
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:LIST", machineName: "node-a", workspaceId }),
-    })).json() as { deviceCode: string; userCode: string };
-    const approve = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
-      body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
-    })).json() as { enrollmentId: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:LIST", machineName: "node-a", workspaceId }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
+    const approve = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: manageBearer },
+        body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
+      })
+    ).json()) as { enrollmentId: string };
 
     // LIST shows the machine.
-    const listRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments`, { headers: { authorization: manageBearer } });
+    const listRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+      headers: { authorization: manageBearer },
+    });
     expect(listRes.status).toBe(200);
-    const list = await listRes.json() as { enrollments: { id: string; status: string; pubkey: string }[] };
+    const list = (await listRes.json()) as {
+      enrollments: { id: string; status: string; pubkey: string }[];
+    };
     expect(list.enrollments.length).toBe(1);
     expect(list.enrollments[0]!.id).toBe(approve.enrollmentId);
     expect(list.enrollments[0]!.status).toBe("active");
 
     // REVOKE.
-    const revokeRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/${approve.enrollmentId}/revoke`, {
-      method: "POST", headers: { authorization: manageBearer },
-    });
+    const revokeRes = await app.request(
+      `/v1/workspaces/${workspaceId}/enrollments/${approve.enrollmentId}/revoke`,
+      {
+        method: "POST",
+        headers: { authorization: manageBearer },
+      },
+    );
     expect(revokeRes.status).toBe(200);
-    expect((await revokeRes.json() as { revoked: boolean }).revoked).toBe(true);
-    const activeList = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments?status=active`, { headers: { authorization: manageBearer } })).json() as { enrollments: unknown[] };
+    expect(((await revokeRes.json()) as { revoked: boolean }).revoked).toBe(true);
+    const activeList = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments?status=active`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: unknown[] };
     expect(activeList.enrollments.length).toBe(0);
 
     // Idempotent re-enroll: a NEW device-flow for the SAME pubkey re-activates the
     // SAME enrollment (the M2 upsert) — not a duplicate machine.
-    const start2 = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:LIST", machineName: "node-a", workspaceId }),
-    })).json() as { userCode: string };
-    const approve2 = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
-      body: JSON.stringify({ userCode: start2.userCode, allowScreenControl: true }),
-    })).json() as { enrollmentId: string };
+    const start2 = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:LIST", machineName: "node-a", workspaceId }),
+      })
+    ).json()) as { userCode: string };
+    const approve2 = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: manageBearer },
+        body: JSON.stringify({ userCode: start2.userCode, allowScreenControl: true }),
+      })
+    ).json()) as { enrollmentId: string };
     expect(approve2.enrollmentId).toBe(approve.enrollmentId); // same machine, re-activated
-    const finalList = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments`, { headers: { authorization: manageBearer } })).json() as { enrollments: { status: string }[] };
+    const finalList = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { status: string }[] };
     expect(finalList.enrollments.length).toBe(1);
     expect(finalList.enrollments[0]!.status).toBe("active");
   }, 120_000);
@@ -313,45 +425,62 @@ describe("M5 flag gate: selfhosted OFF -> routes 404", () => {
     const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
 
     const startRes = await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ publicKey: "ed25519:OFF", workspaceId }),
     });
     expect(startRes.status).toBe(404);
 
     const pollRes = await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ deviceCode: "anything" }),
     });
     expect(pollRes.status).toBe(404);
 
-    const listRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments`, { headers: { authorization: manageBearer } });
+    const listRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+      headers: { authorization: manageBearer },
+    });
     expect(listRes.status).toBe(404);
 
-    const approveRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/approve`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
-      body: JSON.stringify({ userCode: "AAAA-BBBB", allowScreenControl: false }),
-    });
+    const approveRes = await app.request(
+      `/v1/workspaces/${workspaceId}/enrollments/device/approve`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: manageBearer },
+        body: JSON.stringify({ userCode: "AAAA-BBBB", allowScreenControl: false }),
+      },
+    );
     expect(approveRes.status).toBe(404);
 
     // The enrollment-UX additions are gated the same.
     const lookupRes = await app.request("/v1/enrollments/device/lookup", {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ userCode: "AAAA-BBBB" }),
     });
     expect(lookupRes.status).toBe(404);
     const denyRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ userCode: "AAAA-BBBB" }),
     });
     expect(denyRes.status).toBe(404);
     const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ allowScreenControl: false }),
     });
     expect(mintRes.status).toBe(404);
     const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: "oget_x.y", publicKey: "ed25519:OFF", os: "linux", arch: "x86_64" }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "oget_x.y",
+        publicKey: "ed25519:OFF",
+        os: "linux",
+        arch: "x86_64",
+      }),
     });
     expect(exchangeRes.status).toBe(404);
   }, 60_000);
@@ -370,19 +499,39 @@ describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspac
     const app = appFor();
     const readBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
 
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:LOOKUP", os: "macos", arch: "aarch64", machineName: "mac-mini", canOfferDisplay: true, requestsScreenControl: true, workspaceId }),
-    })).json() as { deviceCode: string; userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: "ed25519:LOOKUP",
+          os: "macos",
+          arch: "aarch64",
+          machineName: "mac-mini",
+          canOfferDisplay: true,
+          requestsScreenControl: true,
+          workspaceId,
+        }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
 
     const lookupRes = await app.request("/v1/enrollments/device/lookup", {
-      method: "POST", headers: { "content-type": "application/json", authorization: readBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: readBearer },
       body: JSON.stringify({ userCode: start.userCode }),
     });
     expect(lookupRes.status).toBe(200);
-    const lookup = await lookupRes.json() as {
-      workspaceId: string; userCode: string; expiresAt: string;
-      machine: { machineName: string | null; os: string; arch: string; canOfferDisplay: boolean; requestsScreenControl: boolean };
+    const lookup = (await lookupRes.json()) as {
+      workspaceId: string;
+      userCode: string;
+      expiresAt: string;
+      machine: {
+        machineName: string | null;
+        os: string;
+        arch: string;
+        canOfferDisplay: boolean;
+        requestsScreenControl: boolean;
+      };
     };
     expect(lookup.workspaceId).toBe(workspaceId);
     expect(lookup.userCode).toBe(start.userCode);
@@ -393,10 +542,13 @@ describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspac
     expect(lookup.machine.requestsScreenControl).toBe(true);
 
     // The request was NOT consumed — a poll still says pending.
-    const poll = await (await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deviceCode: start.deviceCode }),
-    })).json() as { state: string };
+    const poll = (await (
+      await app.request("/v1/enrollments/device/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: start.deviceCode }),
+      })
+    ).json()) as { state: string };
     expect(poll.state).toBe("pending");
   }, 90_000);
 
@@ -406,7 +558,8 @@ describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspac
     const app = appFor();
     const readBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
     const unknown = await app.request("/v1/enrollments/device/lookup", {
-      method: "POST", headers: { "content-type": "application/json", authorization: readBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: readBearer },
       body: JSON.stringify({ userCode: "ZZZZ-ZZZZ" }),
     });
     expect(unknown.status).toBe(404);
@@ -415,12 +568,16 @@ describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspac
     // to a flat 404 (never reveals the code exists). (An UNKNOWN code is also 404
     // before auth is ever reached, so the two are indistinguishable — the intended
     // no-disclosure property.)
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:NOAUTHLOOKUP", workspaceId }),
-    })).json() as { userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:NOAUTHLOOKUP", workspaceId }),
+      })
+    ).json()) as { userCode: string };
     const noAuth = await app.request("/v1/enrollments/device/lookup", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ userCode: start.userCode }),
     });
     expect(noAuth.status).toBe(404);
@@ -431,15 +588,22 @@ describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspac
     const a = await freshWorkspace();
     const b = await freshWorkspace();
     const app = appFor();
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:XWSLOOKUP", workspaceId: a.workspaceId }),
-    })).json() as { userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:XWSLOOKUP", workspaceId: a.workspaceId }),
+      })
+    ).json()) as { userCode: string };
     // The code resolves to workspace A; a user holding a grant only in B must get a
     // flat 404 (indistinguishable from "no such code") — never a 403 that confirms
     // the code exists somewhere.
     const res = await app.request("/v1/enrollments/device/lookup", {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:read"])}` },
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:read"])}`,
+      },
       body: JSON.stringify({ userCode: start.userCode }),
     });
     expect(res.status).toBe(404);
@@ -452,30 +616,38 @@ describe("design-11 B.2 deny: mark a pending flow denied", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const app = appFor();
     const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
-    const start = await (await app.request("/v1/enrollments/device/start", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ publicKey: "ed25519:DENY", workspaceId }),
-    })).json() as { deviceCode: string; userCode: string };
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:DENY", workspaceId }),
+      })
+    ).json()) as { deviceCode: string; userCode: string };
 
     const denyRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ userCode: start.userCode }),
     });
     expect(denyRes.status).toBe(200);
-    expect((await denyRes.json() as { denied: boolean }).denied).toBe(true);
+    expect(((await denyRes.json()) as { denied: boolean }).denied).toBe(true);
 
-    const poll = await (await app.request("/v1/enrollments/device/poll", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deviceCode: start.deviceCode }),
-    })).json() as { state: string };
+    const poll = (await (
+      await app.request("/v1/enrollments/device/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: start.deviceCode }),
+      })
+    ).json()) as { state: string };
     expect(poll.state).toBe("denied");
 
     // An unknown / already-terminal code is a no-op.
     const denyAgain = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ userCode: start.userCode }),
     });
-    expect((await denyAgain.json() as { denied: boolean }).denied).toBe(false);
+    expect(((await denyAgain.json()) as { denied: boolean }).denied).toBe(false);
   }, 90_000);
 
   test("deny without enrollments:manage is rejected (403)", async () => {
@@ -483,7 +655,11 @@ describe("design-11 B.2 deny: mark a pending flow denied", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const app = appFor();
     const res = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}` },
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`,
+      },
       body: JSON.stringify({ userCode: "AAAA-BBBB" }),
     });
     expect(res.status).toBe(403);
@@ -499,28 +675,46 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
 
     // 1. MINT (user-authenticated).
     const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: manageBearer },
       body: JSON.stringify({ allowScreenControl: true }),
     });
     expect(mintRes.status).toBe(201);
-    const mint = await mintRes.json() as { token: string; expiresAt: string; expiresInSeconds: number };
+    const mint = (await mintRes.json()) as {
+      token: string;
+      expiresAt: string;
+      expiresInSeconds: number;
+    };
     expect(mint.token.startsWith("oget_")).toBe(true);
     expect(mint.expiresInSeconds).toBe(3600);
 
     // 2. EXCHANGE (UNAUTHENTICATED — the token is the auth).
     const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        token: mint.token, publicKey: "ed25519:HEADLESS", os: "linux", arch: "x86_64",
-        machineName: "fleet-node-1", canOfferDisplay: true, requestsScreenControl: false,
+        token: mint.token,
+        publicKey: "ed25519:HEADLESS",
+        os: "linux",
+        arch: "x86_64",
+        machineName: "fleet-node-1",
+        canOfferDisplay: true,
+        requestsScreenControl: false,
       }),
     });
     expect(exchangeRes.status).toBe(201);
-    const exchange = await exchangeRes.json() as {
+    const exchange = (await exchangeRes.json()) as {
       credentials: {
-        agentId: string; workspaceId: string; bearer: string; subjectPrefix: string;
-        natsUrls: string[]; relayUrl: string; natsAccountCreds: string; updatePublicKey: string;
-        consentedWholeMachine: boolean; consentedScreenControl: boolean;
+        agentId: string;
+        workspaceId: string;
+        bearer: string;
+        subjectPrefix: string;
+        natsUrls: string[];
+        relayUrl: string;
+        natsAccountCreds: string;
+        updatePublicKey: string;
+        consentedWholeMachine: boolean;
+        consentedScreenControl: boolean;
       };
     };
     const creds = exchange.credentials;
@@ -541,7 +735,11 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     expect(verified!.agentId).toBe(creds.agentId);
 
     // The exchange landed a real machine (the SAME finalize as approve).
-    const list = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments`, { headers: { authorization: manageBearer } })).json() as { enrollments: { id: string; status: string; allowScreenControl: boolean }[] };
+    const list = (await (
+      await app.request(`/v1/workspaces/${workspaceId}/enrollments`, {
+        headers: { authorization: manageBearer },
+      })
+    ).json()) as { enrollments: { id: string; status: string; allowScreenControl: boolean }[] };
     expect(list.enrollments.length).toBe(1);
     expect(list.enrollments[0]!.id).toBe(creds.agentId);
     expect(list.enrollments[0]!.status).toBe("active");
@@ -552,8 +750,14 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     if (!available) return;
     const app = appFor();
     const bad = await app.request("/v1/enrollments/token/exchange", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: "oget_garbage.sig", publicKey: "ed25519:BAD", os: "linux", arch: "x86_64" }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: "oget_garbage.sig",
+        publicKey: "ed25519:BAD",
+        os: "linux",
+        arch: "x86_64",
+      }),
     });
     expect(bad.status).toBe(401);
   }, 60_000);
@@ -563,12 +767,17 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     const { accountId, workspaceId } = await freshWorkspace();
     const app = appFor();
     const noPerm = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}` },
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`,
+      },
       body: JSON.stringify({ allowScreenControl: false }),
     });
     expect(noPerm.status).toBe(403);
     const noAuth = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ allowScreenControl: false }),
     });
     expect(noAuth.status).toBe(401);

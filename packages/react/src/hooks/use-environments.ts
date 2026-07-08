@@ -22,7 +22,11 @@ export type UseVariableSetsResult = {
   update: (variableSetId: string, request: UpdateVariableSetRequest) => Promise<VariableSet | null>;
   remove: (variableSetId: string) => Promise<boolean>;
   /** Set/rotate a variable. Values are write-only — reads expose metadata only. */
-  setVariable: (variableSetId: string, name: string, value: string) => Promise<VariableSetVariableMetadata | null>;
+  setVariable: (
+    variableSetId: string,
+    name: string,
+    value: string,
+  ) => Promise<VariableSetVariableMetadata | null>;
   deleteVariable: (variableSetId: string, name: string) => Promise<boolean>;
   mutating: boolean;
   mutationError: Error | null;
@@ -36,8 +40,14 @@ export type UseVariableSetsResult = {
  */
 export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariableSetsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listVariableSets(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const load = useCallback(
+    async () => await client.listVariableSets(workspaceId),
+    [client, workspaceId],
+  );
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const create = useCallback(
@@ -52,8 +62,13 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
   );
 
   const update = useCallback(
-    async (variableSetId: string, request: UpdateVariableSetRequest): Promise<VariableSet | null> => {
-      const result = await mutation.run(() => client.updateVariableSet(workspaceId, variableSetId, request));
+    async (
+      variableSetId: string,
+      request: UpdateVariableSetRequest,
+    ): Promise<VariableSet | null> => {
+      const result = await mutation.run(() =>
+        client.updateVariableSet(workspaceId, variableSetId, request),
+      );
       if (result) {
         await state.refresh();
       }
@@ -77,8 +92,14 @@ export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariab
   );
 
   const setVariable = useCallback(
-    async (variableSetId: string, name: string, value: string): Promise<VariableSetVariableMetadata | null> => {
-      const result = await mutation.run(() => client.setVariableSetVariable(workspaceId, variableSetId, name, value));
+    async (
+      variableSetId: string,
+      name: string,
+      value: string,
+    ): Promise<VariableSetVariableMetadata | null> => {
+      const result = await mutation.run(() =>
+        client.setVariableSetVariable(workspaceId, variableSetId, name, value),
+      );
       if (result) {
         await state.refresh();
       }
@@ -133,8 +154,10 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
       createVariableSet: options.client.createEnvironment ?? options.client.createVariableSet,
       updateVariableSet: options.client.updateEnvironment ?? options.client.updateVariableSet,
       deleteVariableSet: options.client.deleteEnvironment ?? options.client.deleteVariableSet,
-      setVariableSetVariable: options.client.setEnvironmentVariable ?? options.client.setVariableSetVariable,
-      deleteVariableSetVariable: options.client.deleteEnvironmentVariable ?? options.client.deleteVariableSetVariable,
+      setVariableSetVariable:
+        options.client.setEnvironmentVariable ?? options.client.setVariableSetVariable,
+      deleteVariableSetVariable:
+        options.client.deleteEnvironmentVariable ?? options.client.deleteVariableSetVariable,
     };
   }, [options.client]);
   const result = useVariableSets({ ...options, ...(legacyClient ? { client: legacyClient } : {}) });

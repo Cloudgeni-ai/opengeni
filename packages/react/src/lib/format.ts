@@ -140,13 +140,13 @@ export function humanizeFailureReason(reason: string | null): string | null {
     normalized.includes("invalid api key") ||
     normalized.includes("invalid_api_key") ||
     normalized.includes("platform.openai.com/account/api-keys") ||
-    (normalized.includes("401") && (normalized.includes("api key") || normalized.includes("unauthorized")));
+    (normalized.includes("401") &&
+      (normalized.includes("api key") || normalized.includes("unauthorized")));
   if (authFailure) {
     return "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.";
   }
   const quotaFailure =
-    normalized.includes("insufficient_quota") ||
-    normalized.includes("exceeded your current quota");
+    normalized.includes("insufficient_quota") || normalized.includes("exceeded your current quota");
   if (quotaFailure) {
     return "The model provider refused the request: this deployment's provider quota is exhausted.";
   }

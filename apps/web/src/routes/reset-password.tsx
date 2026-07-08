@@ -86,7 +86,9 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
           </span>
           <div>
             <h1 className="text-base font-semibold">Reset password</h1>
-            <p className="text-sm text-fg-subtle">Choose a new password for your OpenGeni account.</p>
+            <p className="text-sm text-fg-subtle">
+              Choose a new password for your OpenGeni account.
+            </p>
           </div>
         </div>
 
@@ -105,8 +107,8 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
         ) : !hasToken ? (
           <>
             <Notice tone="failed" title="This link is incomplete">
-              The reset link is missing its token, so we can't verify the request. Request a new reset email and open the
-              link from your inbox.
+              The reset link is missing its token, so we can't verify the request. Request a new
+              reset email and open the link from your inbox.
             </Notice>
             <Button asChild variant="secondary" className="mt-4 w-full">
               <Link to="/">Return to sign in</Link>
@@ -148,7 +150,11 @@ export function ResetPasswordRoute({ token }: { token?: string | undefined }) {
               </Notice>
             ) : null}
             <Button type="submit" className="mt-4 w-full" disabled={busy}>
-              {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
+              {busy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <CheckIcon className="size-4" />
+              )}
               Reset password
             </Button>
             <Button asChild variant="ghost" className="mt-2 w-full">

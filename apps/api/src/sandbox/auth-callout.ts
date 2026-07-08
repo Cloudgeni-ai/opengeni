@@ -28,7 +28,11 @@
 // on its callout timeout). The bearer's `exp` caps the minted credential's life so a
 // revoked/expired enrollment cannot outlive its bearer.
 
-import { resolveEnrollmentSigningSecret, type NatsCalloutConfig, type Settings } from "@opengeni/config";
+import {
+  resolveEnrollmentSigningSecret,
+  type NatsCalloutConfig,
+  type Settings,
+} from "@opengeni/config";
 import { verifyEnrollmentBearer } from "@opengeni/contracts";
 import { getEnrollment, type Database } from "@opengeni/db";
 import {

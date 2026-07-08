@@ -27,7 +27,12 @@ export function isLineageRefreshEvent(event: SessionEvent): boolean {
   // once after the child row has had time to commit.
   if (event.type === "agent.toolCall.output") {
     const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
-    const name = typeof payload?.name === "string" ? payload.name : typeof payload?.toolName === "string" ? payload.toolName : "";
+    const name =
+      typeof payload?.name === "string"
+        ? payload.name
+        : typeof payload?.toolName === "string"
+          ? payload.toolName
+          : "";
     return name === "session_create" || name.endsWith("__session_create");
   }
   return false;
@@ -38,16 +43,27 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
     return false;
   }
   const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
-  const name = typeof payload?.name === "string" ? payload.name : typeof payload?.toolName === "string" ? payload.toolName : "";
+  const name =
+    typeof payload?.name === "string"
+      ? payload.name
+      : typeof payload?.toolName === "string"
+        ? payload.toolName
+        : "";
   return name === "session_create" || name.endsWith("__session_create");
 }
 
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
-export function useSessionLineage(sessionId: string | null | undefined, options: UseSessionLineageOptions = {}): UseSessionLineageResult {
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions = {},
+): UseSessionLineageResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const load = useCallback(
-    async () => sessionId ? await client.getSessionLineage(workspaceId, sessionId) : { ancestors: [], children: [], truncated: false },
+    async () =>
+      sessionId
+        ? await client.getSessionLineage(workspaceId, sessionId)
+        : { ancestors: [], children: [], truncated: false },
     [client, workspaceId, sessionId],
   );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
@@ -94,5 +110,10 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
     refreshAfterChildCreate,
     { events: options.events, enabled: enabled && options.events !== undefined },
   );
-  return { lineage: state.data, loading: state.loading, error: state.error, refresh: state.refresh };
+  return {
+    lineage: state.data,
+    loading: state.loading,
+    error: state.error,
+    refresh: state.refresh,
+  };
 }

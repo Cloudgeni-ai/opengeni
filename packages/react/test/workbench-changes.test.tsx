@@ -17,7 +17,11 @@ registerDom();
  *  height estimate is non-trivial (the windowing math needs real spans). */
 function manyFiles(n: number, dir = "src"): GitFileDiff[] {
   return Array.from({ length: n }, (_, i) =>
-    fakeFileDiff({ path: `${dir}/file-${String(i).padStart(3, "0")}.ts`, additions: 3, deletions: 1 }),
+    fakeFileDiff({
+      path: `${dir}/file-${String(i).padStart(3, "0")}.ts`,
+      additions: 3,
+      deletions: 1,
+    }),
   );
 }
 
@@ -38,7 +42,9 @@ function mountedIndices(container: HTMLElement): number[] {
 
 describe("WorkbenchChanges — windowing (D2)", () => {
   test("a 40-file change set mounts a BOUNDED window, not all 40 sections", async () => {
-    const r = await renderComponent(<WorkbenchChanges diff={manyFiles(40)} source="live" capturedAt={null} />);
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(40)} source="live" capturedAt={null} />,
+    );
     await flush();
     const mounted = container(r).querySelectorAll("[data-diff-section]").length;
     expect(mounted).toBeGreaterThan(0);
@@ -47,7 +53,9 @@ describe("WorkbenchChanges — windowing (D2)", () => {
   });
 
   test("the window SHIFTS to later sections when the pane scrolls", async () => {
-    const r = await renderComponent(<WorkbenchChanges diff={manyFiles(40)} source="live" capturedAt={null} />);
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(40)} source="live" capturedAt={null} />,
+    );
     await flush();
     const pane = container(r).querySelector<HTMLElement>("[data-opengeni-changes-pane]");
     expect(pane).not.toBeNull();
@@ -86,7 +94,11 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
 
   test("renders group headers in the rail for a large change set", async () => {
     const r = await renderComponent(
-      <WorkbenchChanges diff={[...manyFiles(15, "api"), ...manyFiles(15, "web")]} source="live" capturedAt={null} />,
+      <WorkbenchChanges
+        diff={[...manyFiles(15, "api"), ...manyFiles(15, "web")]}
+        source="live"
+        capturedAt={null}
+      />,
     );
     await flush();
     expect(container(r).querySelectorAll("[data-rail-group]").length).toBeGreaterThanOrEqual(2);
@@ -96,7 +108,12 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
   test("source badge reads 'as of turn N · <time>' for a capture", async () => {
     const capturedAt = new Date().toISOString();
     const r = await renderComponent(
-      <WorkbenchChanges diff={manyFiles(3)} source="capture" capturedAt={capturedAt} captureRevision={7} />,
+      <WorkbenchChanges
+        diff={manyFiles(3)}
+        source="capture"
+        capturedAt={capturedAt}
+        captureRevision={7}
+      />,
     );
     await flush();
     expect(container(r).textContent).toContain("as of turn 7");
@@ -104,15 +121,27 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
   });
 
   test("source badge reads 'live' for the live source", async () => {
-    const r = await renderComponent(<WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />);
+    const r = await renderComponent(
+      <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
+    );
     await flush();
     expect(container(r).textContent).toContain("live");
     await r.unmount();
   });
 
   test("a binary file's section shows the open-live guard, not a diff body", async () => {
-    const diff = [fakeFileDiff({ path: "assets/logo.png", isBinary: true, hunks: [], additions: 0, deletions: 0 })];
-    const r = await renderComponent(<WorkbenchChanges diff={diff} source="live" capturedAt={null} />);
+    const diff = [
+      fakeFileDiff({
+        path: "assets/logo.png",
+        isBinary: true,
+        hunks: [],
+        additions: 0,
+        deletions: 0,
+      }),
+    ];
+    const r = await renderComponent(
+      <WorkbenchChanges diff={diff} source="live" capturedAt={null} />,
+    );
     await flush();
     expect(container(r).textContent).toContain("Binary file");
     expect(container(r).textContent).toContain("open it on the machine");
@@ -121,7 +150,9 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
 
   test("an over-cap (truncated) diff shows the open-live guard", async () => {
     const diff = [fakeFileDiff({ path: "src/huge.ts", truncated: true, hunks: [] })];
-    const r = await renderComponent(<WorkbenchChanges diff={diff} source="live" capturedAt={null} />);
+    const r = await renderComponent(
+      <WorkbenchChanges diff={diff} source="live" capturedAt={null} />,
+    );
     await flush();
     expect(container(r).textContent).toContain("Diff too large");
     await r.unmount();

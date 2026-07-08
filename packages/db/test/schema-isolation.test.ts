@@ -59,7 +59,7 @@ async function waitForReady(): Promise<void> {
       }
     } catch (err) {
       if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
+        throw new Error(`postgres did not become ready in time: ${String(err)}`, { cause: err });
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -71,7 +71,18 @@ let available = true;
 beforeAll(async () => {
   try {
     removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
+    docker([
+      "run",
+      "--rm",
+      "-d",
+      "-e",
+      `POSTGRES_PASSWORD=${PASSWORD}`,
+      "-p",
+      `${PORT}:5432`,
+      "--name",
+      CONTAINER,
+      IMAGE,
+    ]);
   } catch (err) {
     available = false;
     // eslint-disable-next-line no-console
@@ -133,25 +144,33 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
       expect(tablesInPublic.map((r) => r.name)).toEqual([]);
 
       // Every RLS policy is scoped to the dedicated schema, none in public.
-      const policiesInOpengeni = (await sql<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'opengeni'`)[0]!.count;
-      const policiesInPublic = (await sql<{ count: number }[]>`
-        SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'public'`)[0]!.count;
+      const policiesInOpengeni = (
+        await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'opengeni'`
+      )[0]!.count;
+      const policiesInPublic = (
+        await sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'public'`
+      )[0]!.count;
       expect(policiesInOpengeni).toBeGreaterThan(20);
       expect(policiesInPublic).toBe(0);
 
       // The opengeni_private RLS GUC-reader helpers exist (SECURITY DEFINER).
-      const privateFns = (await sql<{ count: number }[]>`
+      const privateFns = (
+        await sql<{ count: number }[]>`
         SELECT count(*)::int AS count FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
-        WHERE n.nspname = 'opengeni_private'`)[0]!.count;
+        WHERE n.nspname = 'opengeni_private'`
+      )[0]!.count;
       expect(privateFns).toBeGreaterThan(0);
 
       // RLS is enabled + FORCED on a representative table in the dedicated schema.
-      const rls = (await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      const rls = (
+        await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
         SELECT c.relrowsecurity, c.relforcerowsecurity
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'opengeni' AND c.relname = 'sessions'`)[0]!;
+        WHERE n.nspname = 'opengeni' AND c.relname = 'sessions'`
+      )[0]!;
       expect(rls.relrowsecurity).toBe(true);
       expect(rls.relforcerowsecurity).toBe(true);
 
@@ -202,11 +221,15 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
     await migrate(publicUrl("standalone_public"));
     const pub = postgres(publicUrl("standalone_public"), { max: 1 });
     try {
-      const tablesInPublic = (await pub<{ count: number }[]>`
+      const tablesInPublic = (
+        await pub<{ count: number }[]>`
         SELECT count(*)::int AS count FROM information_schema.tables
-        WHERE table_schema = 'public'`)[0]!.count;
-      const opengeniSchemaExists = (await pub<{ exists: boolean }[]>`
-        SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'opengeni') AS exists`)[0]!.exists;
+        WHERE table_schema = 'public'`
+      )[0]!.count;
+      const opengeniSchemaExists = (
+        await pub<{ exists: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'opengeni') AS exists`
+      )[0]!.exists;
       expect(tablesInPublic).toBeGreaterThan(30);
       expect(opengeniSchemaExists).toBe(false);
     } finally {

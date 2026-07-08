@@ -39,12 +39,18 @@ describe("exec banner parsing", () => {
   });
 
   test("parseExecBannerSessionId recovers a backgrounded process session id", () => {
-    expect(parseExecBannerSessionId("Process running with session ID 42\nOutput:\ntail -f")).toBe(42);
+    expect(parseExecBannerSessionId("Process running with session ID 42\nOutput:\ntail -f")).toBe(
+      42,
+    );
   });
 
   test("parseExecBannerSessionId only reads the banner, not the stdout body", () => {
     // A session-id-looking string in the OUTPUT must not be mistaken for the banner.
-    expect(parseExecBannerSessionId("Process exited with code 0\nOutput:\nProcess running with session ID 99")).toBeNull();
+    expect(
+      parseExecBannerSessionId(
+        "Process exited with code 0\nOutput:\nProcess running with session ID 99",
+      ),
+    ).toBeNull();
   });
 
   test("parseExecBannerSessionId is null for a finished (exited) process and nullish input", () => {
@@ -53,7 +59,9 @@ describe("exec banner parsing", () => {
   });
 
   test("stripExecBanner peels the banner down to stdout", () => {
-    expect(stripExecBanner("Chunk ID abc\nProcess exited with code 0\nOutput:\nhello\nworld")).toBe("hello\nworld");
+    expect(stripExecBanner("Chunk ID abc\nProcess exited with code 0\nOutput:\nhello\nworld")).toBe(
+      "hello\nworld",
+    );
   });
 
   test("stripExecBanner handles a leading Output marker and passes through bannerless text", () => {
@@ -126,14 +134,23 @@ describe("V4A apply_patch parsing", () => {
   });
 
   test("v4aToGitFileDiff marks a move as renamed and tracks oldPath", () => {
-    const diff = v4aToGitFileDiff({ type: "update_file", path: "old/p.ts", moveTo: "new/p.ts", diff: "@@ -1 +1 @@\n context" });
+    const diff = v4aToGitFileDiff({
+      type: "update_file",
+      path: "old/p.ts",
+      moveTo: "new/p.ts",
+      diff: "@@ -1 +1 @@\n context",
+    });
     expect(diff.status).toBe("renamed");
     expect(diff.path).toBe("new/p.ts");
     expect(diff.oldPath).toBe("old/p.ts");
   });
 
   test("v4aToGitFileDiff THROWS on a malformed update with no @@ anchor (the fallback path)", () => {
-    const op: ApplyPatchOperation = { type: "update_file", path: "x.ts", diff: "this has content but no hunk anchor" };
+    const op: ApplyPatchOperation = {
+      type: "update_file",
+      path: "x.ts",
+      diff: "this has content but no hunk anchor",
+    };
     expect(() => v4aToGitFileDiff(op)).toThrow(/malformed V4A/);
   });
 
@@ -205,7 +222,14 @@ describe("V4A apply_patch parsing", () => {
 
   test("applyPatchOps normalizes both wire shapes", () => {
     expect(applyPatchOps({ operation: { type: "update_file", path: "a" } })).toHaveLength(1);
-    expect(applyPatchOps({ operations: [{ type: "update_file", path: "a" }, { type: "delete_file", path: "b" }] })).toHaveLength(2);
+    expect(
+      applyPatchOps({
+        operations: [
+          { type: "update_file", path: "a" },
+          { type: "delete_file", path: "b" },
+        ],
+      }),
+    ).toHaveLength(2);
     expect(applyPatchOps({})).toHaveLength(0);
     expect(applyPatchOps(null)).toHaveLength(0);
   });
@@ -264,13 +288,19 @@ describe("tool-args + tail helpers", () => {
 
 describe("MCP output unwrap", () => {
   test("unwrapMcpOutput flattens an MCP content array", () => {
-    expect(unwrapMcpOutput({ content: [{ type: "text", text: "hello" }] })).toEqual({ text: "hello", isError: false });
+    expect(unwrapMcpOutput({ content: [{ type: "text", text: "hello" }] })).toEqual({
+      text: "hello",
+      isError: false,
+    });
   });
 
   test("unwrapMcpOutput surfaces isError and finds the text part among others", () => {
     const result = unwrapMcpOutput({
       isError: true,
-      content: [{ type: "image", data: "..." }, { type: "text", text: "boom" }],
+      content: [
+        { type: "image", data: "..." },
+        { type: "text", text: "boom" },
+      ],
     });
     expect(result).toEqual({ text: "boom", isError: true });
   });

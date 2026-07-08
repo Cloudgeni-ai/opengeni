@@ -28,7 +28,9 @@ import type {
 } from "./types";
 
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
-  async function maybeContinueGoal(input: MaybeContinueGoalInput): Promise<MaybeContinueGoalResult> {
+  async function maybeContinueGoal(
+    input: MaybeContinueGoalInput,
+  ): Promise<MaybeContinueGoalResult> {
     const { settings, db, bus } = await services();
     // Cheap pre-read: the common goal-less session skips the budget queries.
     const existingGoal = await getSessionGoal(db, input.workspaceId, input.sessionId);
@@ -42,11 +44,22 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
     // BASE settings (no codex overlay); the predicate does its own credential read.
-    const isCodexRun = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: session.model });
+    const isCodexRun = await isCodexBilledTurn({
+      db,
+      settings,
+      workspaceId: input.workspaceId,
+      model: session.model,
+    });
     // Budget exhaustion pauses the goal visibly instead of failing the
     // session. Computed up front and applied inside the locked decision so a
     // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(settings, db, input.accountId, input.workspaceId, isCodexRun);
+    const budgetBlocked = await goalRunBudgetBlocked(
+      settings,
+      db,
+      input.accountId,
+      input.workspaceId,
+      isCodexRun,
+    );
     const decision = await evaluateGoalContinuation(db, {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -58,17 +71,19 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       return { action: decision.decision };
     }
     if (decision.decision === "paused") {
-      await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
-        type: "goal.paused",
-        payload: {
-          goalId: decision.goal.id,
-          actor: "system",
-          reason: decision.reason,
-          ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
-          autoContinuations: decision.goal.autoContinuations,
-          noProgressStreak: decision.goal.noProgressStreak,
+      await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+        {
+          type: "goal.paused",
+          payload: {
+            goalId: decision.goal.id,
+            actor: "system",
+            reason: decision.reason,
+            ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
+            autoContinuations: decision.goal.autoContinuations,
+            noProgressStreak: decision.goal.noProgressStreak,
+          },
         },
-      }]);
+      ]);
       return { action: "paused" };
     }
     // Stop/continue race guard: a concurrent goal_complete/goal_pause/operator
@@ -82,16 +97,24 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       return { action: "none" };
     }
     const prompt = goalContinuationPrompt(decision.goal, decision.autoContinuation, decision.cap);
-    const [continuationEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
-      type: "goal.continuation",
-      payload: {
-        goalId: decision.goal.id,
-        text: prompt,
-        autoContinuation: decision.autoContinuation,
-        maxAutoContinuations: decision.cap,
-        goalVersion: decision.goal.version,
-      },
-    }]);
+    const [continuationEvent] = await appendAndPublishEvents(
+      db,
+      bus,
+      input.workspaceId,
+      input.sessionId,
+      [
+        {
+          type: "goal.continuation",
+          payload: {
+            goalId: decision.goal.id,
+            text: prompt,
+            autoContinuation: decision.autoContinuation,
+            maxAutoContinuations: decision.cap,
+            goalVersion: decision.goal.version,
+          },
+        },
+      ],
+    );
     if (!continuationEvent) {
       throw new Error("failed to append goal continuation trigger event");
     }
@@ -113,11 +136,13 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       metadata: { goalId: decision.goal.id, autoContinuation: decision.autoContinuation },
     });
     await setSessionGoalLastContinuationTurn(db, input.workspaceId, input.sessionId, turn.id);
-    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
-      type: "turn.queued",
-      turnId: turn.id,
-      payload: { turnId: turn.id, triggerEventId: continuationEvent.id, source: turn.source },
-    }]);
+    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+      {
+        type: "turn.queued",
+        turnId: turn.id,
+        payload: { turnId: turn.id, triggerEventId: continuationEvent.id, source: turn.source },
+      },
+    ]);
     // Continuations count as agent runs for limits/metering parity with
     // user-initiated and scheduled turns.
     await recordUsageEvent(db, {
@@ -158,12 +183,18 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
  * other user interrupt (the stop button, a plain `interrupt()` call) is the
  * explicit act of stopping and pauses the goal.
  */
-export function isSteerInterrupt(trigger: { type: string; payload: unknown } | null | undefined): boolean {
+export function isSteerInterrupt(
+  trigger: { type: string; payload: unknown } | null | undefined,
+): boolean {
   if (!trigger || trigger.type !== "user.interrupt") {
     return false;
   }
   const payload = trigger.payload;
-  return typeof payload === "object" && payload !== null && (payload as { reason?: unknown }).reason === "steer";
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as { reason?: unknown }).reason === "steer"
+  );
 }
 
 /**
@@ -173,7 +204,12 @@ export function isSteerInterrupt(trigger: { type: string; payload: unknown } | n
  * on `isSteerInterrupt` first: steer interrupts must NOT pause the goal.
  * No-op when the session has no goal or it is not active.
  */
-export async function pauseActiveGoalOnInterrupt(db: Database, bus: EventBus, workspaceId: string, sessionId: string): Promise<void> {
+export async function pauseActiveGoalOnInterrupt(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
   const goal = await getSessionGoal(db, workspaceId, sessionId);
   if (!goal || goal.status !== "active") {
     return;
@@ -183,20 +219,26 @@ export async function pauseActiveGoalOnInterrupt(db: Database, bus: EventBus, wo
     pausedReason: "user_interrupt",
   });
   if (changed) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "goal.paused",
-      payload: {
-        goalId: paused.id,
-        actor: "user",
-        reason: "user_interrupt",
-        autoContinuations: paused.autoContinuations,
-        noProgressStreak: paused.noProgressStreak,
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "goal.paused",
+        payload: {
+          goalId: paused.id,
+          actor: "user",
+          reason: "user_interrupt",
+          autoContinuations: paused.autoContinuations,
+          noProgressStreak: paused.noProgressStreak,
+        },
       },
-    }]);
+    ]);
   }
 }
 
-export function goalContinuationPrompt(goal: SessionGoal, autoContinuation: number, cap: number | null): string {
+export function goalContinuationPrompt(
+  goal: SessionGoal,
+  autoContinuation: number,
+  cap: number | null,
+): string {
   const counter = cap === null ? `${autoContinuation}` : `${autoContinuation}/${cap}`;
   return [
     `[GOAL CONTINUATION ${counter}] The session goal is not done. Goal: ${goal.text}.`,
@@ -239,11 +281,20 @@ export function withCodexAppsTool(settings: Settings, tools: ToolRef[]): ToolRef
  * Non-throwing variant of the scheduled-run admission check: returns a human
  * readable reason when balance or monthly caps block another agent run.
  */
-async function goalRunBudgetBlocked(settings: Settings, db: Database, accountId: string, workspaceId: string, isCodexRun: boolean): Promise<string | null> {
+async function goalRunBudgetBlocked(
+  settings: Settings,
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  isCodexRun: boolean,
+): Promise<string | null> {
   // Codex-billed continuations are paid by the user's ChatGPT/Codex plan: skip
   // the credit-balance gate and the monthly model-cost cap. The agent-run COUNT
   // cap below is a volume quota (not a credit/cost gate) and is intentionally kept.
-  if (!isCodexRun && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
+  if (
+    !isCodexRun &&
+    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
+  ) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       return "insufficient OpenGeni credits";

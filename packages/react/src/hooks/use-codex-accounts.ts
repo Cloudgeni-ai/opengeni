@@ -1,7 +1,17 @@
 import { useCallback, useState } from "react";
-import type { CodexAccount, CodexAccountsResponse, CodexRotationSettings, SessionEvent } from "@opengeni/sdk";
+import type {
+  CodexAccount,
+  CodexAccountsResponse,
+  CodexRotationSettings,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useMutationRunner, usePolledValue, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
+import {
+  useMutationRunner,
+  usePolledValue,
+  useSessionEventTrigger,
+  type SessionEventFeedOptions,
+} from "./internal";
 
 /** Events that change which Codex account a session runs on (or just ran). */
 export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean {
@@ -17,19 +27,27 @@ export function isCodexAccountEvent(event: Pick<SessionEvent, "type">): boolean 
  */
 export type CodexAccountsClientLike = {
   listCodexAccounts: (workspaceId: string) => Promise<CodexAccountsResponse>;
-  getSession?: (workspaceId: string, sessionId: string) => Promise<{ codexPinnedCredentialId?: string | null; codexLastCredentialId?: string | null }>;
-  pinSessionCodexAccount?: (workspaceId: string, sessionId: string, target: string) => Promise<{ pinned: string }>;
+  getSession?: (
+    workspaceId: string,
+    sessionId: string,
+  ) => Promise<{ codexPinnedCredentialId?: string | null; codexLastCredentialId?: string | null }>;
+  pinSessionCodexAccount?: (
+    workspaceId: string,
+    sessionId: string,
+    target: string,
+  ) => Promise<{ pinned: string }>;
   /** Optional (absent ⇒ the card hides live refresh): batched live /wham/usage refresh. */
   refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: Record<string, unknown> }>;
 };
 
-export type UseCodexAccountsOptions = ClientOverride & SessionEventFeedOptions & {
-  pollIntervalMs?: number | undefined;
-  /** Scope to a session so the hook resolves the pin + the effective account. */
-  sessionId?: string | undefined;
-  /** Override the client with one implementing `CodexAccountsClientLike`. */
-  codexClient?: CodexAccountsClientLike | undefined;
-};
+export type UseCodexAccountsOptions = ClientOverride &
+  SessionEventFeedOptions & {
+    pollIntervalMs?: number | undefined;
+    /** Scope to a session so the hook resolves the pin + the effective account. */
+    sessionId?: string | undefined;
+    /** Override the client with one implementing `CodexAccountsClientLike`. */
+    codexClient?: CodexAccountsClientLike | undefined;
+  };
 
 export type UseCodexAccountsResult = {
   accounts: CodexAccount[];
@@ -60,7 +78,11 @@ export type UseCodexAccountsResult = {
   mutationError: Error | null;
 };
 
-const EMPTY_SETTINGS: CodexRotationSettings = { rotationEnabled: false, rotationStrategy: "most_remaining", activeCredentialId: null };
+const EMPTY_SETTINGS: CodexRotationSettings = {
+  rotationEnabled: false,
+  rotationStrategy: "most_remaining",
+  activeCredentialId: null,
+};
 
 type CodexAccountsState = {
   accounts: CodexAccount[];
@@ -87,15 +109,16 @@ const EMPTY_STATE: CodexAccountsState = {
  */
 export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCodexAccountsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const codexClient = (options.codexClient ?? (client as unknown as CodexAccountsClientLike));
+  const codexClient = options.codexClient ?? (client as unknown as CodexAccountsClientLike);
   const sessionId = options.sessionId;
   const sharedEvents = options.events;
 
   const load = useCallback(async (): Promise<CodexAccountsState> => {
     const accountsP = codexClient.listCodexAccounts(workspaceId);
-    const sessionP = sessionId && codexClient.getSession
-      ? codexClient.getSession(workspaceId, sessionId).catch(() => null)
-      : Promise.resolve(null);
+    const sessionP =
+      sessionId && codexClient.getSession
+        ? codexClient.getSession(workspaceId, sessionId).catch(() => null)
+        : Promise.resolve(null);
     const [acc, session] = await Promise.all([accountsP, sessionP]);
     return {
       accounts: acc.accounts,
@@ -106,7 +129,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     };
   }, [codexClient, workspaceId, sessionId]);
 
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
   const usageMutation = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
@@ -119,7 +145,10 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     sessionId,
     isCodexAccountEvent,
     () => void state.refresh(),
-    { enabled: options.enabled ?? true, ...(sharedEvents !== undefined ? { events: sharedEvents } : {}) },
+    {
+      enabled: options.enabled ?? true,
+      ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
+    },
   );
 
   const pin = useCallback(
@@ -142,20 +171,17 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
   // Live usage refresh: hit the batched provider read, then re-read cached
   // metadata so the fresh windows land on `accounts`. The provider read writes the
   // cache columns server-side; state.refresh() pulls them back.
-  const refreshUsage = useCallback(
-    async (): Promise<boolean> => {
-      if (!codexClient.refreshCodexUsage) {
-        return false;
-      }
-      const result = await usageMutation.run(async () => {
-        await codexClient.refreshCodexUsage!(workspaceId);
-        return true;
-      });
-      if (result) await state.refresh();
-      return result === true;
-    },
-    [codexClient, workspaceId, usageMutation.run, state.refresh],
-  );
+  const refreshUsage = useCallback(async (): Promise<boolean> => {
+    if (!codexClient.refreshCodexUsage) {
+      return false;
+    }
+    const result = await usageMutation.run(async () => {
+      await codexClient.refreshCodexUsage!(workspaceId);
+      return true;
+    });
+    if (result) await state.refresh();
+    return result === true;
+  }, [codexClient, workspaceId, usageMutation.run, state.refresh]);
 
   const data = state.data ?? EMPTY_STATE;
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;

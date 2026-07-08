@@ -48,18 +48,37 @@ import {
   sumUsageQuantity,
   updateScheduledTask,
 } from "@opengeni/db";
-import type { AccessGrant, ResourceRef, SandboxBackend, ScheduledTaskAgentConfig } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  createProductionAgentRuntime,
+  MaxTurnsExceededError,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE, PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
+import {
+  CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
+  PROVIDER_BACKPRESSURE_DELAY_MS,
+  WORKER_DEATH_RESUME_TEXT,
+} from "../../apps/worker/src/activities/agent-turn";
 import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
-import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
+import {
+  loadWorkspaceEnvironmentForRun,
+  sandboxEnvironmentForRun,
+} from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
-import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
+import {
+  ScriptedModel,
+  functionCall,
+  latestStatus,
+  startTestMcpServer,
+  startTestServices,
+  testSettings,
+  type TestServices,
+} from "@opengeni/testing";
 
 describe("worker activities integration", () => {
   let services: TestServices;
@@ -96,7 +115,9 @@ describe("worker activities integration", () => {
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "hello from model", chunks: ["hello ", "from ", "model"] }]),
+        model: new ScriptedModel([
+          { outputText: "hello from model", chunks: ["hello ", "from ", "model"] },
+        ]),
       }),
     });
 
@@ -126,17 +147,19 @@ describe("worker activities integration", () => {
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
-      mcpServers: [{
-        id: "crm",
-        name: "CRM MCP",
-        url: "https://crm.example/mcp",
-        allowedTools: ["workouts.list"],
-        timeoutMs: 3000,
-        cacheToolsList: false,
-        headersEncrypted: {
-          Authorization: encryptEnvironmentValue(encryptionKey, "Bearer run-secret"),
+      mcpServers: [
+        {
+          id: "crm",
+          name: "CRM MCP",
+          url: "https://crm.example/mcp",
+          allowedTools: ["workouts.list"],
+          timeoutMs: 3000,
+          cacheToolsList: false,
+          headersEncrypted: {
+            Authorization: encryptEnvironmentValue(encryptionKey, "Bearer run-secret"),
+          },
         },
-      }],
+      ],
     });
     let preparedSettings: Parameters<OpenGeniRuntime["prepareTools"]>[0] | null = null;
     const runtime = {
@@ -190,20 +213,27 @@ describe("worker activities integration", () => {
         metadata: {},
         model: "scripted-model",
         sandboxBackend: "none",
-        mcpServers: [{
-          id: "crm",
-          name: "CRM",
-          url: mcp.url,
-          cacheToolsList: false,
-          requireApproval: true,
-          headersEncrypted: {},
-        }],
+        mcpServers: [
+          {
+            id: "crm",
+            name: "CRM",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: true,
+            headersEncrypted: {},
+          },
+        ],
       });
       const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "search please" } },
       ]);
       const model = new ScriptedModel([
-        { id: "approval-call-1", output: [functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1")] },
+        {
+          id: "approval-call-1",
+          output: [
+            functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1"),
+          ],
+        },
         { id: "approval-call-2", outputText: "found it", chunks: ["found ", "it"] },
       ]);
       const activities = createActivities({
@@ -222,18 +252,28 @@ describe("worker activities integration", () => {
         workflowId: "workflow-mcp-approval",
       });
       expect(first.status).toBe("requires_action");
-      const afterFirst = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      const afterFirst = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        0,
+        100,
+      );
       expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
       expect(latestStatus(afterFirst)).toBe("requires_action");
       // The MCP tool did NOT execute while approval is pending.
       expect(mcp.calls).toEqual([]);
 
-      const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId;
+      const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))
+        ?.activeTurnId;
       expect(activeTurnId).toBeTruthy();
 
       // Turn 2: approve → the saved run resumes and the tool finally runs.
       const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "user.approvalDecision", payload: { approvalId: "call-appr-1", decision: "approve" } },
+        {
+          type: "user.approvalDecision",
+          payload: { approvalId: "call-appr-1", decision: "approve" },
+        },
       ]);
       const second = await activities.runAgentTurn({
         accountId: grant.accountId,
@@ -248,7 +288,13 @@ describe("worker activities integration", () => {
       });
       expect(second.status).toBe("idle");
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
-      const afterSecond = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      const afterSecond = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        0,
+        100,
+      );
       expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
       expect(latestStatus(afterSecond)).toBe("idle");
     } finally {
@@ -287,16 +333,21 @@ describe("worker activities integration", () => {
     try {
       const settings = {
         ...apiSettings,
-        mcpServers: [{
-          id: "opengeni",
-          name: "OpenGeni",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+            timeoutMs: undefined,
+            cacheToolsList: false,
+          },
+        ],
       };
       const model = new ScriptedModel([
-        { id: "manager-call-1", output: [functionCall("opengeni__sessions_list", { limit: 10 }, "call-manager-1")] },
+        {
+          id: "manager-call-1",
+          output: [functionCall("opengeni__sessions_list", { limit: 10 }, "call-manager-1")],
+        },
         { id: "manager-call-2", outputText: "fleet listed", chunks: ["fleet ", "listed"] },
       ]);
       const session = await createOwnedSession(dbClient.db, grant, {
@@ -329,7 +380,9 @@ describe("worker activities integration", () => {
       // to the model: the tool call resolved against the live MCP endpoint
       // with a token carrying the session's permission set.
       expect(model.calls).toBe(2);
-      const followupInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+      const followupInput = JSON.stringify(
+        (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+      );
       expect(followupInput).toContain(session.id);
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
       expect(events.some((event) => event.type === "turn.completed")).toBe(true);
@@ -361,21 +414,37 @@ describe("worker activities integration", () => {
       productAccessMode: "configured",
       delegationSecret,
     });
-    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const app = createApp({
+      settings: apiSettings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+    });
     const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
     try {
       const settings = {
         ...apiSettings,
-        mcpServers: [{
-          id: "opengeni",
-          name: "OpenGeni",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+            timeoutMs: undefined,
+            cacheToolsList: false,
+          },
+        ],
       };
       const model = new ScriptedModel([
-        { id: "spawn-1", output: [functionCall("opengeni__session_create", { initialMessage: "worker: reply ready then goal_complete", sandboxBackend: "none" }, "call-spawn-1")] },
+        {
+          id: "spawn-1",
+          output: [
+            functionCall(
+              "opengeni__session_create",
+              { initialMessage: "worker: reply ready then goal_complete", sandboxBackend: "none" },
+              "call-spawn-1",
+            ),
+          ],
+        },
         { id: "spawn-2", outputText: "worker spawned", chunks: ["worker ", "spawned"] },
       ]);
       const manager = await createOwnedSession(dbClient.db, grant, {
@@ -506,7 +575,9 @@ describe("worker activities integration", () => {
     expect(request).not.toContain("data:image/png");
     expect(request).toContain("look at this");
     expect(request).toContain("Attached files are available in the sandbox");
-    expect(request).toContain(`diagram.png (image/png, 4 bytes): /workspace/files/${fileId}/diagram.png`);
+    expect(request).toContain(
+      `diagram.png (image/png, 4 bytes): /workspace/files/${fileId}/diagram.png`,
+    );
   });
 
   test("does not require object storage reads for attached file path context", async () => {
@@ -573,7 +644,10 @@ describe("worker activities integration", () => {
       scheduledTaskTemplates: [],
       metadata: {},
     });
-    for (const [packId, image] of [["img-a", "example.com/a@sha256:aaaa"], ["img-b", "example.com/b@sha256:bbbb"]] as const) {
+    for (const [packId, image] of [
+      ["img-a", "example.com/a@sha256:aaaa"],
+      ["img-b", "example.com/b@sha256:bbbb"],
+    ] as const) {
       await registerWorkspacePack(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -616,7 +690,9 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     const failure = events.find((event) => event.type === "turn.failed");
     expect(failure).toBeDefined();
-    expect(JSON.stringify(failure!.payload)).toContain("Multiple enabled packs declare a sandbox image (img-a, img-b)");
+    expect(JSON.stringify(failure!.payload)).toContain(
+      "Multiple enabled packs declare a sandbox image (img-a, img-b)",
+    );
     expect(latestStatus(events)).toBe("failed");
   });
 
@@ -641,13 +717,15 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-fail",
-    })).resolves.toEqual({ status: "failed" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-fail",
+      }),
+    ).resolves.toEqual({ status: "failed" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
@@ -668,7 +746,10 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old context" } },
-        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) } },
+        {
+          position: 1,
+          item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) },
+        },
       ],
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
@@ -679,19 +760,26 @@ describe("worker activities integration", () => {
       { outputText: "recovered", chunks: ["recovered"] },
     ]);
     const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+      }),
       db: dbClient.db,
       bus,
       runtime: runtimeWithFakeCompactionSummarizer(model, "overflow recovery summary"),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-overflow-retry",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-overflow-retry",
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     expect(model.calls).toBe(2);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
@@ -716,9 +804,28 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "deploy the app" } },
-        { position: 1, item: { type: "function_call", callId: "call_vern", name: "opengeni__sessions_list", arguments: "{}" } },
-        { position: 2, item: { type: "function_call_result", callId: "call_vern", status: "completed", output: "ok" } },
-        { position: 3, item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) } },
+        {
+          position: 1,
+          item: {
+            type: "function_call",
+            callId: "call_vern",
+            name: "opengeni__sessions_list",
+            arguments: "{}",
+          },
+        },
+        {
+          position: 2,
+          item: {
+            type: "function_call_result",
+            callId: "call_vern",
+            status: "completed",
+            output: "ok",
+          },
+        },
+        {
+          position: 3,
+          item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) },
+        },
       ],
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
@@ -729,7 +836,10 @@ describe("worker activities integration", () => {
     const runtime = runtimeWithCompactionClient(model, async (request) => {
       summarizerInput = request.input;
       if (typeof request.input !== "string") {
-        throw Object.assign(new Error("Missing required parameter: input[1].call_id. You provided callId."), { status: 400 });
+        throw Object.assign(
+          new Error("Missing required parameter: input[1].call_id. You provided callId."),
+          { status: 400 },
+        );
       }
       return { output_text: "rendered goal continuation summary" };
     });
@@ -747,13 +857,15 @@ describe("worker activities integration", () => {
       runtime,
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-goal-rendered-compaction",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-goal-rendered-compaction",
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     expect(model.calls).toBe(1);
     expect(typeof summarizerInput).toBe("string");
@@ -778,9 +890,7 @@ describe("worker activities integration", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "tiny" } },
-      ],
+      items: [{ position: 0, item: { type: "message", role: "user", content: "tiny" } }],
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "overflow but do not retry unchanged" } },
@@ -803,19 +913,25 @@ describe("worker activities integration", () => {
       runtime: runtimeWithFakeCompactionSummarizer(model, "summary larger than source"),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-compacted-false-no-retry",
-    })).resolves.toEqual({ status: "failed" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-compacted-false-no-retry",
+      }),
+    ).resolves.toEqual({ status: "failed" });
 
     expect(model.calls).toBe(1);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
     const failed = events.find((event) => event.type === "turn.failed");
-    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).toContain("compaction summarization failed:");
-    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).not.toContain("Context compaction needed");
+    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).toContain(
+      "compaction summarization failed:",
+    );
+    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).not.toContain(
+      "Context compaction needed",
+    );
   });
 
   test("summarizer hard failure uses deterministic fallback and the turn continues", async () => {
@@ -833,13 +949,18 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old fallback context" } },
-        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) } },
+        {
+          position: 1,
+          item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) },
+        },
       ],
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "continue after fallback" } },
     ]);
-    const model = new ScriptedModel([{ outputText: "continued after fallback", chunks: ["continued"] }]);
+    const model = new ScriptedModel([
+      { outputText: "continued after fallback", chunks: ["continued"] },
+    ]);
     let summarizerCalls = 0;
     const activities = createActivities({
       settings: testSettings({
@@ -858,13 +979,15 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-fallback-compaction-continues",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-fallback-compaction-continues",
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     expect(summarizerCalls).toBe(2);
     expect(model.calls).toBe(1);
@@ -872,7 +995,13 @@ describe("worker activities integration", () => {
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.some((event) => event.type === "turn.completed")).toBe(true);
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.some((row) => String((row.item as Record<string, unknown>).content).includes("Non-LLM context compaction fallback"))).toBe(true);
+    expect(
+      active.some((row) =>
+        String((row.item as Record<string, unknown>).content).includes(
+          "Non-LLM context compaction fallback",
+        ),
+      ),
+    ).toBe(true);
   });
 
   test("mid-turn proactive compaction before model progress retries once in-activity", async () => {
@@ -890,16 +1019,21 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "x".repeat(75_000 * 4) } },
-        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+        {
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "old answer" }],
+          },
+        },
       ],
     });
     await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 1);
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "continue after proactive compaction" } },
     ]);
-    const model = new ScriptedModel([
-      { outputText: "recovered", chunks: ["recovered"] },
-    ]);
+    const model = new ScriptedModel([{ outputText: "recovered", chunks: ["recovered"] }]);
     const activities = createActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -914,13 +1048,15 @@ describe("worker activities integration", () => {
       runtime: runtimeWithFakeCompactionSummarizer(model, "proactive retry summary"),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-proactive-retry",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-proactive-retry",
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     expect(model.calls).toBe(1);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
@@ -928,7 +1064,9 @@ describe("worker activities integration", () => {
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
+    expect(
+      active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true),
+    ).toBe(true);
   });
 
   test("mid-turn proactive compaction after persisted progress AUTO-CONTINUES via a resume-notice requeue", async () => {
@@ -948,7 +1086,12 @@ describe("worker activities integration", () => {
       productAccessMode: "configured",
       delegationSecret: "test-delegation-secret",
     });
-    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const app = createApp({
+      settings: apiSettings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+    });
     const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
     try {
       const settings = testSettings({
@@ -958,13 +1101,15 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
-        mcpServers: [{
-          id: "opengeni",
-          name: "OpenGeni",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+            timeoutMs: undefined,
+            cacheToolsList: false,
+          },
+        ],
       });
       const session = await createOwnedSession(dbClient.db, grant, {
         initialMessage: "overflow after progress",
@@ -981,16 +1126,34 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         items: [
           { position: 0, item: { type: "message", role: "user", content: "old context" } },
-          { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+          {
+            position: 1,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "old answer" }],
+            },
+          },
           { position: 2, item: { type: "message", role: "user", content: "recent context" } },
-          { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "recent answer" }] } },
+          {
+            position: 3,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "recent answer" }],
+            },
+          },
         ],
       });
       const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "overflow after progress" } },
       ]);
       const model = new ScriptedModel([
-        { id: "proactive-progress-1", inputTokens: 80_000, output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")] },
+        {
+          id: "proactive-progress-1",
+          inputTokens: 80_000,
+          output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")],
+        },
         { outputText: "should be requeued before this call" },
       ]);
       const activities = createActivities({
@@ -1000,13 +1163,15 @@ describe("worker activities integration", () => {
         runtime: runtimeWithFakeCompactionSummarizer(model, "forced recovery summary"),
       });
 
-      await expect(activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-overflow-progress",
-      })).resolves.toEqual({ status: "preempted" });
+      await expect(
+        activities.runAgentTurn({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: trigger!.id,
+          workflowId: "workflow-overflow-progress",
+        }),
+      ).resolves.toEqual({ status: "preempted" });
 
       expect(model.calls).toBe(1);
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
@@ -1023,11 +1188,17 @@ describe("worker activities integration", () => {
       expect(latestStatus(events)).toBe("queued");
       expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
       const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-      expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
-      expect(active.every((row) => {
-        const item = row.item as Record<string, unknown>;
-        return item.type === "message" && item.role === "user";
-      })).toBe(true);
+      expect(
+        active.some(
+          (row) => (row.item as Record<string, unknown>).opengeni_context_summary === true,
+        ),
+      ).toBe(true);
+      expect(
+        active.every((row) => {
+          const item = row.item as Record<string, unknown>;
+          return item.type === "message" && item.role === "user";
+        }),
+      ).toBe(true);
     } finally {
       server.stop(true);
     }
@@ -1050,7 +1221,12 @@ describe("worker activities integration", () => {
       productAccessMode: "configured",
       delegationSecret: "test-delegation-secret",
     });
-    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const app = createApp({
+      settings: apiSettings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+    });
     const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
     try {
       const settings = testSettings({
@@ -1060,13 +1236,15 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
-        mcpServers: [{
-          id: "opengeni",
-          name: "OpenGeni",
-          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-          timeoutMs: undefined,
-          cacheToolsList: false,
-        }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+            timeoutMs: undefined,
+            cacheToolsList: false,
+          },
+        ],
       });
       const session = await createOwnedSession(dbClient.db, grant, {
         initialMessage: "overflow after resume",
@@ -1083,18 +1261,43 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         items: [
           { position: 0, item: { type: "message", role: "user", content: "old context" } },
-          { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+          {
+            position: 1,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "old answer" }],
+            },
+          },
           { position: 2, item: { type: "message", role: "user", content: "recent context" } },
-          { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "recent answer" }] } },
+          {
+            position: 3,
+            item: {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "recent answer" }],
+            },
+          },
         ],
       });
       // The trigger IS a compaction resume: a second compaction in this lineage
       // must idle, not requeue forever.
       const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "turn.preempted", payload: { reason: "context_compacted", resumeWithNotice: true, text: "[resumed after compaction]" } },
+        {
+          type: "turn.preempted",
+          payload: {
+            reason: "context_compacted",
+            resumeWithNotice: true,
+            text: "[resumed after compaction]",
+          },
+        },
       ]);
       const model = new ScriptedModel([
-        { id: "compaction-loop-1", inputTokens: 80_000, output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")] },
+        {
+          id: "compaction-loop-1",
+          inputTokens: 80_000,
+          output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")],
+        },
         { outputText: "should not run" },
       ]);
       const activities = createActivities({
@@ -1104,13 +1307,15 @@ describe("worker activities integration", () => {
         runtime: runtimeWithFakeCompactionSummarizer(model, "loop guard summary"),
       });
 
-      await expect(activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-overflow-loop-guard",
-      })).resolves.toEqual({ status: "idle" });
+      await expect(
+        activities.runAgentTurn({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: trigger!.id,
+          workflowId: "workflow-overflow-loop-guard",
+        }),
+      ).resolves.toEqual({ status: "idle" });
 
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
       const failed = events.find((event) => event.type === "turn.failed");
@@ -1142,7 +1347,10 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old overflow context" } },
-        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) } },
+        {
+          position: 1,
+          item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) },
+        },
       ],
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
@@ -1153,19 +1361,26 @@ describe("worker activities integration", () => {
       { error: contextOverflowError("Your input exceeds the context window of this model again.") },
     ]);
     const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+      }),
       db: dbClient.db,
       bus,
       runtime: runtimeWithFakeCompactionSummarizer(model, "first overflow recovery summary"),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-overflow-twice",
-    })).resolves.toEqual({ status: "failed" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-overflow-twice",
+      }),
+    ).resolves.toEqual({ status: "failed" });
 
     expect(model.calls).toBe(2);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
@@ -1195,17 +1410,23 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-max-turns",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-max-turns",
+      }),
+    ).resolves.toEqual({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     const completed = events.find((event) => event.type === "turn.completed");
-    expect(completed?.payload).toEqual({ output: "", segmentLimit: "max_turns", runStateSaved: false });
+    expect(completed?.payload).toEqual({
+      output: "",
+      segmentLimit: "max_turns",
+      runStateSaved: false,
+    });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
     expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
@@ -1234,13 +1455,15 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-rate-limit",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-rate-limit",
+      }),
+    ).resolves.toEqual({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     const failed = events.find((event) => event.type === "turn.failed");
     expect(failed?.payload).toEqual({
@@ -1288,13 +1511,15 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-rate-limit-goal",
-    })).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-rate-limit-goal",
+      }),
+    ).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     const failed = events.find((event) => event.type === "turn.failed");
     expect(failed?.payload).toEqual({
@@ -1309,7 +1534,9 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
     expect(turns.some((turn) => turn.status === "failed")).toBe(true);
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe("active");
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
   });
 
   test("records worker observability when setup fails before a turn starts", async () => {
@@ -1336,13 +1563,15 @@ describe("worker activities integration", () => {
       observability,
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: crypto.randomUUID(),
-      triggerEventId: crypto.randomUUID(),
-      workflowId: "workflow-missing-session",
-    })).rejects.toThrow("Session not found");
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: crypto.randomUUID(),
+        triggerEventId: crypto.randomUUID(),
+        workflowId: "workflow-missing-session",
+      }),
+    ).rejects.toThrow("Session not found");
     await Bun.sleep(0);
 
     expect(exported).toHaveLength(1);
@@ -1373,20 +1602,24 @@ describe("worker activities integration", () => {
     const failingDb = new Proxy(dbClient.db, {
       get(target, prop, receiver) {
         if (prop === "transaction") {
-          return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) => await (target.transaction as any)(async (tx: typeof dbClient.db) => {
-            const failingTx = new Proxy(tx, {
-              get(txTarget, txProp, txReceiver) {
-                if (txProp === "update") {
-                  return () => {
-                    throw new Error("status update failed");
-                  };
-                }
-                const value = Reflect.get(txTarget, txProp, txReceiver);
-                return typeof value === "function" ? value.bind(txTarget) : value;
+          return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) =>
+            await (target.transaction as any)(
+              async (tx: typeof dbClient.db) => {
+                const failingTx = new Proxy(tx, {
+                  get(txTarget, txProp, txReceiver) {
+                    if (txProp === "update") {
+                      return () => {
+                        throw new Error("status update failed");
+                      };
+                    }
+                    const value = Reflect.get(txTarget, txProp, txReceiver);
+                    return typeof value === "function" ? value.bind(txTarget) : value;
+                  },
+                }) as typeof dbClient.db;
+                return await fn(failingTx);
               },
-            }) as typeof dbClient.db;
-            return await fn(failingTx);
-          }, ...args);
+              ...args,
+            );
         }
         const value = Reflect.get(target, prop, receiver);
         return typeof value === "function" ? value.bind(target) : value;
@@ -1401,16 +1634,20 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-status-update-fails",
-      turnId,
-    })).rejects.toThrow("status update failed");
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-status-update-fails",
+        turnId,
+      }),
+    ).rejects.toThrow("status update failed");
 
-    const eventTypes = (await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)).map((event) => event.type);
+    const eventTypes = (
+      await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)
+    ).map((event) => event.type);
     expect(eventTypes).not.toContain("turn.started");
     expect(eventTypes).not.toContain("turn.failed");
   });
@@ -1451,7 +1688,7 @@ describe("worker activities integration", () => {
     const runtime: OpenGeniRuntime = {
       configure: () => {},
       resolveTurnModel: () => null,
-      buildAgent: () => ({} as never),
+      buildAgent: () => ({}) as never,
       prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
       prepareInput: async (_agent, input) => {
         expect(input.kind).toBe("approval");
@@ -1480,23 +1717,34 @@ describe("worker activities integration", () => {
       runtime,
     });
 
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: approvalTrigger!.id,
-      workflowId,
-      turnId,
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: approvalTrigger!.id,
+        workflowId,
+        turnId,
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turnId });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
   test("sets Docker and Modal sandbox home defaults", async () => {
-    const { environment: docker } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "docker" }), []);
-    const { environment: modal } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "modal" }), []);
-    const { environment: disabled } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "none" }), []);
+    const { environment: docker } = await sandboxEnvironmentForRun(
+      testSettings({ sandboxBackend: "docker" }),
+      [],
+    );
+    const { environment: modal } = await sandboxEnvironmentForRun(
+      testSettings({ sandboxBackend: "modal" }),
+      [],
+    );
+    const { environment: disabled } = await sandboxEnvironmentForRun(
+      testSettings({ sandboxBackend: "none" }),
+      [],
+    );
 
     expect(docker.HOME).toBe("/workspace");
     expect(docker.AZURE_CONFIG_DIR).toBeUndefined();
@@ -1519,19 +1767,24 @@ describe("worker activities integration", () => {
       });
     }) as typeof fetch;
     try {
-      const { environment, gitToken } = await sandboxEnvironmentForRun(testSettings({
-        githubAppId: "99",
-        githubClientId: "client-id",
-        githubClientSecret: "client-secret",
-        githubAppSlug: "opengeni",
-        githubAppPrivateKey: privateKeyPem,
-      }), [{
-        kind: "repository",
-        uri: "https://github.com/cloudgeni-ai/opengeni.git",
-        ref: "main",
-        githubInstallationId: 123,
-        githubRepositoryId: 456,
-      }]);
+      const { environment, gitToken } = await sandboxEnvironmentForRun(
+        testSettings({
+          githubAppId: "99",
+          githubClientId: "client-id",
+          githubClientSecret: "client-secret",
+          githubAppSlug: "opengeni",
+          githubAppPrivateKey: privateKeyPem,
+        }),
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/cloudgeni-ai/opengeni.git",
+            ref: "main",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+      );
 
       expect(tokenRequestBody).toEqual({ repository_ids: [456] });
       expect(gitToken).toBe("installation-token");
@@ -1552,11 +1805,13 @@ describe("worker activities integration", () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "read repo",
-      resources: [{
-        kind: "repository",
-        uri: "https://github.com/Futhark-AS/aifilesearch.git",
-        ref: "main",
-      }],
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/Futhark-AS/aifilesearch.git",
+          ref: "main",
+        },
+      ],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "modal",
@@ -1594,13 +1849,19 @@ describe("worker activities integration", () => {
 
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls).toHaveLength(1);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("clone_repository '/workspace/repos/Futhark-AS/aifilesearch'");
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      "clone_repository '/workspace/repos/Futhark-AS/aifilesearch'",
+    );
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+      'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
+    );
     expect(String(sandboxExecCalls[0]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
-    expect(JSON.stringify(events)).toContain("Filesystem sandbox sessions must provide createEditor");
+    expect(JSON.stringify(events)).toContain(
+      "Filesystem sandbox sessions must provide createEditor",
+    );
   });
 
   test("attaches configured MCP tools and executes a prefixed tool call during a run", async () => {
@@ -1633,13 +1894,15 @@ describe("worker activities integration", () => {
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           natsUrl: services.natsUrl,
-          mcpServers: [{
-            id: "docs",
-            name: "Document Search",
-            url: mcp.url,
-            allowedTools: ["search_documents"],
-            cacheToolsList: false,
-          }],
+          mcpServers: [
+            {
+              id: "docs",
+              name: "Document Search",
+              url: mcp.url,
+              allowedTools: ["search_documents"],
+              cacheToolsList: false,
+            },
+          ],
         }),
         db: dbClient.db,
         bus,
@@ -1715,13 +1978,15 @@ describe("worker activities integration", () => {
               outputMicrosPerMillionTokens: 1_000_000,
             },
           }),
-          mcpServers: [{
-            id: "docs",
-            name: "Document Search",
-            url: mcp.url,
-            allowedTools: ["search_documents"],
-            cacheToolsList: false,
-          }],
+          mcpServers: [
+            {
+              id: "docs",
+              name: "Document Search",
+              url: mcp.url,
+              allowedTools: ["search_documents"],
+              cacheToolsList: false,
+            },
+          ],
         }),
         db: dbClient.db,
         bus,
@@ -1738,7 +2003,11 @@ describe("worker activities integration", () => {
 
       expect(result.status).toBe("idle");
       expect(model.calls).toBe(2);
-      const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
+      const usage = await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 20,
+      });
       const tokenEvents = usage.filter((event) => event.eventType === "model.tokens");
       expect(tokenEvents).toHaveLength(2);
       expect(tokenEvents.map((event) => event.sourceResourceId?.split(":").at(-1)).sort()).toEqual([
@@ -1790,7 +2059,13 @@ describe("worker activities integration", () => {
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ id: "expensive-response", outputText: "expensive response", chunks: ["expensive response"] }]),
+        model: new ScriptedModel([
+          {
+            id: "expensive-response",
+            outputText: "expensive response",
+            chunks: ["expensive response"],
+          },
+        ]),
       }),
     });
 
@@ -1808,12 +2083,22 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     const completed = events.find((event) => event.type === "turn.completed");
-    expect(completed?.payload).toMatchObject({ segmentLimit: "budget_exhausted", detail: "insufficient OpenGeni credits" });
+    expect(completed?.payload).toMatchObject({
+      segmentLimit: "budget_exhausted",
+      detail: "insufficient OpenGeni credits",
+    });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const balance = await getBillingBalance(dbClient.db, grant.accountId);
     expect(balance.balanceMicros).toBe(0);
-    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
-    const cost = usage.find((event) => event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"));
+    const usage = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 20,
+    });
+    const cost = usage.find(
+      (event) =>
+        event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"),
+    );
     expect(cost?.quantity).toBeGreaterThan(1);
   });
 
@@ -1840,16 +2125,24 @@ describe("worker activities integration", () => {
     const [trigger1] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "remember the codeword zebra" } },
     ]);
-    await expect(runStateActivities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger1!.id,
-      workflowId: "workflow-items-turn-1",
-    })).resolves.toEqual({ status: "idle" });
-    const itemsAfterTurn1 = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    await expect(
+      runStateActivities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger1!.id,
+        workflowId: "workflow-items-turn-1",
+      }),
+    ).resolves.toEqual({ status: "idle" });
+    const itemsAfterTurn1 = await getSessionHistoryItems(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+    );
     expect(itemsAfterTurn1.length).toBeGreaterThanOrEqual(2);
-    expect(itemsAfterTurn1.map((row) => row.position)).toEqual(itemsAfterTurn1.map((_, index) => index));
+    expect(itemsAfterTurn1.map((row) => row.position)).toEqual(
+      itemsAfterTurn1.map((_, index) => index),
+    );
     expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
     const blobAfterTurn1 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
     expect(blobAfterTurn1).not.toBeNull();
@@ -1857,7 +2150,11 @@ describe("worker activities integration", () => {
     // Turn 2 reads conversation truth from the items table (items mode) and
     // writes no new blob: the model must still see the full prior turn.
     const itemsActivities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" }),
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+      }),
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({ model }),
@@ -1865,18 +2162,26 @@ describe("worker activities integration", () => {
     const [trigger2] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "what is the codeword?" } },
     ]);
-    await expect(itemsActivities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger2!.id,
-      workflowId: "workflow-items-turn-2",
-    })).resolves.toEqual({ status: "idle" });
-    const lastRequestInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    await expect(
+      itemsActivities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger2!.id,
+        workflowId: "workflow-items-turn-2",
+      }),
+    ).resolves.toEqual({ status: "idle" });
+    const lastRequestInput = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
     expect(lastRequestInput).toContain("remember the codeword zebra");
     expect(lastRequestInput).toContain("noted: zebra");
     expect(lastRequestInput).toContain("what is the codeword?");
-    const itemsAfterTurn2 = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    const itemsAfterTurn2 = await getSessionHistoryItems(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+    );
     expect(itemsAfterTurn2.length).toBeGreaterThan(itemsAfterTurn1.length);
     const blobAfterTurn2 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
     expect(blobAfterTurn2?.id).toBe(blobAfterTurn1?.id);
@@ -1912,8 +2217,24 @@ describe("worker activities integration", () => {
       turnId: turn,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
-        { position: 1, item: { type: "function_call_result", callId: "call_orphaned", status: "completed", output: { type: "text", text: "stale result" } } },
-        { position: 2, item: { type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ack" }] } },
+        {
+          position: 1,
+          item: {
+            type: "function_call_result",
+            callId: "call_orphaned",
+            status: "completed",
+            output: { type: "text", text: "stale result" },
+          },
+        },
+        {
+          position: 2,
+          item: {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "ack" }],
+          },
+        },
       ],
     });
 
@@ -1921,7 +2242,11 @@ describe("worker activities integration", () => {
       { id: "orphan-recover", outputText: "recovered", chunks: ["recovered"] },
     ]);
     const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" }),
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+      }),
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({ model }),
@@ -1931,17 +2256,21 @@ describe("worker activities integration", () => {
     ]);
 
     // The turn SUCCEEDS instead of failing the session with a 400.
-    await expect(activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      workflowId: "workflow-orphan-recover",
-    })).resolves.toEqual({ status: "idle" });
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-orphan-recover",
+      }),
+    ).resolves.toEqual({ status: "idle" });
 
     // The orphan never reached the model: the sanitized request omits it while
     // keeping the surrounding valid items and the new user turn.
-    const lastRequestInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    const lastRequestInput = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
     expect(lastRequestInput).not.toContain("call_orphaned");
     expect(lastRequestInput).not.toContain("stale result");
     expect(lastRequestInput).toContain("earlier work");
@@ -1949,7 +2278,9 @@ describe("worker activities integration", () => {
 
     // The stored audit trail is untouched — the orphan row still exists.
     const storedItems = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(storedItems.some((row) => JSON.stringify(row.item).includes("call_orphaned"))).toBe(true);
+    expect(storedItems.some((row) => JSON.stringify(row.item).includes("call_orphaned"))).toBe(
+      true,
+    );
   });
 
   test("blocks async document embeddings when managed credits are empty", async () => {
@@ -2001,10 +2332,12 @@ describe("worker activities integration", () => {
           }),
         },
         chunker: {
-          chunk: (parsed, inputFile) => [{
-            text: parsed.text,
-            metadata: { filename: inputFile.filename, chunkIndex: 0 },
-          }],
+          chunk: (parsed, inputFile) => [
+            {
+              text: parsed.text,
+              metadata: { filename: inputFile.filename, chunkIndex: 0 },
+            },
+          ],
         },
         embedder: {
           model: "test-embedder",
@@ -2027,7 +2360,11 @@ describe("worker activities integration", () => {
     expect(indexed.status).toBe("failed");
     expect(indexed.error).toContain("insufficient OpenGeni credits");
     expect(embedderCalled).toBe(false);
-    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
+    const usage = await listUsageEvents(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      limit: 20,
+    });
     expect(usage.some((event) => event.eventType === "document.indexed")).toBe(false);
   });
 
@@ -2092,19 +2429,23 @@ describe("worker activities integration", () => {
           }),
         },
         chunker: {
-          chunk: (parsed, inputFile) => [0, 1].map((index) => ({
-            text: parsed.text.slice(index * 8, index * 8 + 8),
-            metadata: { filename: inputFile.filename, chunkIndex: index },
-          })),
+          chunk: (parsed, inputFile) =>
+            [0, 1].map((index) => ({
+              text: parsed.text.slice(index * 8, index * 8 + 8),
+              metadata: { filename: inputFile.filename, chunkIndex: index },
+            })),
         },
         embedder: {
           model: "test-embedder",
           dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
           embedMany: async (chunks) => {
             embedCalls += 1;
-            return chunks.map((chunk) => deterministicEmbedding(chunk, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS));
+            return chunks.map((chunk) =>
+              deterministicEmbedding(chunk, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+            );
           },
-          embedQuery: async (query) => deterministicEmbedding(query, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+          embedQuery: async (query) =>
+            deterministicEmbedding(query, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
         },
       } satisfies DocumentServices,
     });
@@ -2123,7 +2464,9 @@ describe("worker activities integration", () => {
     ]);
 
     expect(results.map((document) => document.status).sort()).toEqual(["failed", "ready"]);
-    expect(results.find((document) => document.status === "failed")?.error).toContain("monthly document indexing limit reached (2 chunks)");
+    expect(results.find((document) => document.status === "failed")?.error).toContain(
+      "monthly document indexing limit reached (2 chunks)",
+    );
     expect(embedCalls).toBe(1);
     const indexedChunks = await sumUsageQuantity(dbClient.db, {
       workspaceId: grant.workspaceId,
@@ -2178,7 +2521,9 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("idle");
-    expect(latestStatus(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50))).toBe("idle");
+    expect(
+      latestStatus(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)),
+    ).toBe("idle");
   });
 
   test("uses MCP tools added by a follow-up turn", async () => {
@@ -2204,28 +2549,36 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendSessionEventsAndUpdateSession(dbClient.db, grant.workspaceId, session.id, [
-        {
-          type: "user.message",
-          payload: {
-            text: "search docs now",
-            tools: [{ kind: "mcp", id: "docs" }],
+      const [trigger] = await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        [
+          {
+            type: "user.message",
+            payload: {
+              text: "search docs now",
+              tools: [{ kind: "mcp", id: "docs" }],
+            },
           },
+        ],
+        {
+          tools: [{ kind: "mcp", id: "docs" }],
         },
-      ], {
-        tools: [{ kind: "mcp", id: "docs" }],
-      });
+      );
       const activities = createActivities({
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           natsUrl: services.natsUrl,
-          mcpServers: [{
-            id: "docs",
-            name: "Document Search",
-            url: mcp.url,
-            allowedTools: ["search_documents"],
-            cacheToolsList: false,
-          }],
+          mcpServers: [
+            {
+              id: "docs",
+              name: "Document Search",
+              url: mcp.url,
+              allowedTools: ["search_documents"],
+              cacheToolsList: false,
+            },
+          ],
         }),
         db: dbClient.db,
         bus,
@@ -2248,7 +2601,7 @@ describe("worker activities integration", () => {
     }
   });
 
-	  test("dispatches scheduled tasks into new sessions and run history", async () => {
+  test("dispatches scheduled tasks into new sessions and run history", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
@@ -2276,7 +2629,11 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
-    const result = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "scheduled" });
+    const result = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
 
     expect(result.action).toBe("start");
     expect(result.workflowId).toBe(`session-${result.sessionId}`);
@@ -2284,113 +2641,129 @@ describe("worker activities integration", () => {
     expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
-    expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
-    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({ text: "inspect nightly", scheduledTaskId: task.id });
-	    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-	    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
-	  });
+    expect(events.map((event) => event.type)).toEqual([
+      "session.created",
+      "user.message",
+      "session.status.changed",
+      "turn.queued",
+    ]);
+    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
+      text: "inspect nightly",
+      scheduledTaskId: task.id,
+    });
+    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(run).toMatchObject({
+      status: "dispatched",
+      sessionId: result.sessionId,
+      triggerEventId: result.triggerEventId,
+    });
+  });
 
-	  test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
-	    const grant = await testGrant(dbClient.db);
-	    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-	      name: "scheduled-cost-cap",
-	      status: "active",
-	      schedule: { type: "interval", everySeconds: 3600 },
-	      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-	      runMode: "new_session_per_run",
-	      overlapPolicy: "allow_concurrent",
-	      agentConfig: {
-	        prompt: "inspect after cost cap",
-	        resources: [],
-	        tools: [],
-	        metadata: {},
-	      },
-	      metadata: {},
-	    });
-	    await recordUsageEvent(dbClient.db, {
-	      accountId: grant.accountId,
-	      workspaceId: grant.workspaceId,
-	      eventType: "model.cost",
-	      quantity: 100,
-	      unit: "micro_usd",
-	      sourceResourceType: "test",
-	      sourceResourceId: task.id,
-	      idempotencyKey: `test:scheduled-cost-cap:${task.id}`,
-	    });
-	    const activities = createActivities({
-	      settings: testSettings({
-	        databaseUrl: services.databaseUrl,
-	        natsUrl: services.natsUrl,
-	        usageLimitsMode: "static",
-	        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100 }),
-	      }),
-	      db: dbClient.db,
-	      bus,
-	      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "should not run" }]) }),
-	    });
+  test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-cost-cap",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "inspect after cost cap",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    await recordUsageEvent(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "model.cost",
+      quantity: 100,
+      unit: "micro_usd",
+      sourceResourceType: "test",
+      sourceResourceId: task.id,
+      idempotencyKey: `test:scheduled-cost-cap:${task.id}`,
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100 }),
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "should not run" }]),
+      }),
+    });
 
-	    await expect(activities.dispatchScheduledTaskRun({
-	      workspaceId: grant.workspaceId,
-	      taskId: task.id,
-	      triggerType: "scheduled",
-	    })).rejects.toThrow("monthly model cost limit reached (100 micros)");
-	    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
-	  });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("monthly model cost limit reached (100 micros)");
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
+  });
 
-	  test("does not double count a manually reserved scheduled task run", async () => {
-	    const grant = await testGrant(dbClient.db);
-	    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-	      name: "scheduled-manual-reserved",
-	      status: "active",
-	      schedule: { type: "interval", everySeconds: 3600 },
-	      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-	      runMode: "new_session_per_run",
-	      overlapPolicy: "allow_concurrent",
-	      agentConfig: {
-	        prompt: "manual reserved",
-	        resources: [],
-	        tools: [],
-	        metadata: {},
-	      },
-	      metadata: {},
-	    });
-	    const reservationKey = `test:manual-reserved:${task.id}`;
-	    await recordUsageEvent(dbClient.db, {
-	      accountId: grant.accountId,
-	      workspaceId: grant.workspaceId,
-	      eventType: "agent_run.created",
-	      quantity: 1,
-	      unit: "run",
-	      sourceResourceType: "scheduled_task",
-	      sourceResourceId: task.id,
-	      idempotencyKey: reservationKey,
-	    });
-	    const activities = createActivities({
-	      settings: testSettings({
-	        databaseUrl: services.databaseUrl,
-	        natsUrl: services.natsUrl,
+  test("does not double count a manually reserved scheduled task run", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-manual-reserved",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "manual reserved",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const reservationKey = `test:manual-reserved:${task.id}`;
+    await recordUsageEvent(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      idempotencyKey: reservationKey,
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
         usageLimitsMode: "static",
         staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
-	      }),
-	      db: dbClient.db,
-	      bus,
-	      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-	    });
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
 
-	    await activities.dispatchScheduledTaskRun({
-	      workspaceId: grant.workspaceId,
-	      taskId: task.id,
-	      triggerType: "manual",
-	      agentRunUsageIdempotencyKey: reservationKey,
-	    });
-	    const used = await sumUsageQuantity(dbClient.db, {
-	      accountId: grant.accountId,
-	      workspaceId: grant.workspaceId,
-	      eventType: "agent_run.created",
-	      since: startOfUtcMonth(),
-	    });
-	    expect(used).toBe(1);
-	  });
+    await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+      agentRunUsageIdempotencyKey: reservationKey,
+    });
+    const used = await sumUsageQuantity(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+    expect(used).toBe(1);
+  });
 
   test("records scheduled dispatch usage when live event publish fails", async () => {
     const grant = await testGrant(dbClient.db);
@@ -2423,14 +2796,18 @@ describe("worker activities integration", () => {
       }),
       db: dbClient.db,
       bus: failingBus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "should not run" }]) }),
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "should not run" }]),
+      }),
     });
 
-    await expect(activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    })).resolves.toMatchObject({ action: "start", workspaceId: grant.workspaceId });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).resolves.toMatchObject({ action: "start", workspaceId: grant.workspaceId });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ status: "dispatched" });
@@ -2450,7 +2827,7 @@ describe("worker activities integration", () => {
     expect(fired).toBe(1);
   });
 
-	  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
+  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-reusable",
@@ -2478,9 +2855,17 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
-    const first = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "scheduled" });
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
     const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
-    const second = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "manual" });
+    const second = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+    });
 
     expect(first.action).toBe("start");
     expect(second.action).toBe("signal");
@@ -2495,14 +2880,29 @@ describe("worker activities integration", () => {
 
   test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
     const grant = await testGrant(dbClient.db);
-    const settings = testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: workerEnvironmentsKey });
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      API_TOKEN: "worker-secret-token-1234",
-      DB_PASSWORD: "worker-secret-pass-5678",
-    }, "Operator notes: API_TOKEN authenticates the worker against the test API.");
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      environmentsEncryptionKey: workerEnvironmentsKey,
+    });
+    const environment = await seedWorkspaceEnvironment(
+      dbClient.db,
+      grant,
+      {
+        API_TOKEN: "worker-secret-token-1234",
+        DB_PASSWORD: "worker-secret-pass-5678",
+      },
+      "Operator notes: API_TOKEN authenticates the worker against the test API.",
+    );
 
-    expect(await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null)).toBeNull();
-    const loaded = await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, environment.id);
+    expect(
+      await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null),
+    ).toBeNull();
+    const loaded = await loadWorkspaceEnvironmentForRun(
+      dbClient.db,
+      settings,
+      grant.workspaceId,
+      environment.id,
+    );
     expect(loaded).toMatchObject({
       id: environment.id,
       name: environment.name,
@@ -2513,14 +2913,17 @@ describe("worker activities integration", () => {
       DB_PASSWORD: "worker-secret-pass-5678",
     });
 
-    await expect(loadWorkspaceEnvironmentForRun(
-      dbClient.db,
-      testSettings({ databaseUrl: services.databaseUrl }),
-      grant.workspaceId,
-      environment.id,
-    )).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
-    await expect(loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()))
-      .rejects.toThrow("variable set not found");
+    await expect(
+      loadWorkspaceEnvironmentForRun(
+        dbClient.db,
+        testSettings({ databaseUrl: services.databaseUrl }),
+        grant.workspaceId,
+        environment.id,
+      ),
+    ).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+    await expect(
+      loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()),
+    ).rejects.toThrow("variable set not found");
   });
 
   test("layers workspace environment values between deployment env and GitHub run auth", async () => {
@@ -2555,7 +2958,9 @@ describe("worker activities integration", () => {
   test("redacts attached environment values echoed by the agent into session events", async () => {
     const secret = "echoed-workspace-secret-987654";
     const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { LEAKED_TOKEN: secret });
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      LEAKED_TOKEN: secret,
+    });
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "run",
       resources: [],
@@ -2576,10 +2981,12 @@ describe("worker activities integration", () => {
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{
-          outputText: `the token is ${secret} end`,
-          chunks: ["the token is ", secret, " end"],
-        }]),
+        model: new ScriptedModel([
+          {
+            outputText: `the token is ${secret} end`,
+            chunks: ["the token is ", secret, " end"],
+          },
+        ]),
       }),
     });
     const result = await activities.runAgentTurn({
@@ -2595,12 +3002,16 @@ describe("worker activities integration", () => {
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
     const completed = events.find((event) => event.type === "agent.message.completed");
-    expect((completed?.payload as { text: string }).text).toBe("the token is [redacted:LEAKED_TOKEN] end");
+    expect((completed?.payload as { text: string }).text).toBe(
+      "the token is [redacted:LEAKED_TOKEN] end",
+    );
   });
 
   test("fails attached runs closed when the worker has no encryption key", async () => {
     const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { REQUIRED_TOKEN: "required-secret-123456" });
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      REQUIRED_TOKEN: "required-secret-123456",
+    });
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "run",
       resources: [],
@@ -2616,7 +3027,9 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "never reached" }]) }),
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "never reached" }]),
+      }),
     });
     const result = await activities.runAgentTurn({
       accountId: grant.accountId,
@@ -2634,7 +3047,9 @@ describe("worker activities integration", () => {
 
   test("propagates scheduled task environment attachments into dispatched sessions", async () => {
     const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { TASK_TOKEN: "task-secret-123456" });
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      TASK_TOKEN: "task-secret-123456",
+    });
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "environment dispatch",
       status: "active",
@@ -2664,15 +3079,26 @@ describe("worker activities integration", () => {
     expect(dispatched.action).toBe("start");
     const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
     expect(session?.environmentId).toBe(environment.id);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, dispatched.sessionId, 0, 10);
+    const events = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      dispatched.sessionId,
+      0,
+      10,
+    );
     const createdEvent = events.find((event) => event.type === "session.created");
-    expect(createdEvent?.payload).toMatchObject({ variableSetId: environment.id, variableSetName: environment.name });
+    expect(createdEvent?.payload).toMatchObject({
+      variableSetId: environment.id,
+      variableSetName: environment.name,
+    });
     expect(JSON.stringify(events)).not.toContain("task-secret-123456");
   });
 
   test("fails reusable dispatch when the task attachment diverges from its session", async () => {
     const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { DIVERGED_TOKEN: "diverged-value-123456" });
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      DIVERGED_TOKEN: "diverged-value-123456",
+    });
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "reusable",
       resources: [],
@@ -2691,7 +3117,9 @@ describe("worker activities integration", () => {
       variableSetId: environment.id,
       metadata: {},
     });
-    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { reusableSessionId: session.id });
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      reusableSessionId: session.id,
+    });
     const activities = createActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -2702,11 +3130,13 @@ describe("worker activities integration", () => {
       bus,
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
-    await expect(activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    })).rejects.toThrow("scheduled task variableSet attachment does not match its reusable session");
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow("scheduled task variableSet attachment does not match its reusable session");
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
   });
@@ -2734,7 +3164,9 @@ describe("worker activities integration", () => {
       agentConfig: { prompt: "follow up", resources: [], tools: [], metadata: {} },
       metadata: {},
     });
-    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { reusableSessionId: session.id });
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      reusableSessionId: session.id,
+    });
     const activities = createActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
@@ -2742,11 +3174,13 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
-    await expect(activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    })).rejects.toThrow(/cancelled/i);
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow(/cancelled/i);
 
     // Nothing was appended to the cancelled session: no new user.message, no
     // turn queued, and the session stays cancelled (not revived to queued).
@@ -2785,7 +3219,14 @@ describe("worker activities integration", () => {
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
         goalNoProgressLimit: 1,
-        mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:65531/v1/workspaces/{workspaceId}/mcp", cacheToolsList: true }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: "http://127.0.0.1:65531/v1/workspaces/{workspaceId}/mcp",
+            cacheToolsList: true,
+          },
+        ],
       }),
       db: dbClient.db,
       bus,
@@ -2817,17 +3258,31 @@ describe("worker activities integration", () => {
     const continuationEvent = events.find((event) => event.type === "goal.continuation");
     expect(continuationEvent).toBeTruthy();
     expect(continuation!.triggerEventId).toBe(continuationEvent!.id);
-    expect(events.some((event) => event.type === "turn.queued" && event.turnId === continuation!.id)).toBe(true);
-    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId });
-    expect(usage.some((event) => event.eventType === "agent_run.created" && event.sourceResourceId === continuation!.id)).toBe(true);
-
-    // While the continuation turn is queued the queue wins.
-    expect((await activities.maybeContinueGoal({
+    expect(
+      events.some((event) => event.type === "turn.queued" && event.turnId === continuation!.id),
+    ).toBe(true);
+    const usage = await listUsageEvents(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    })).action).toBe("queue");
+    });
+    expect(
+      usage.some(
+        (event) =>
+          event.eventType === "agent_run.created" && event.sourceResourceId === continuation!.id,
+      ),
+    ).toBe(true);
+
+    // While the continuation turn is queued the queue wins.
+    expect(
+      (
+        await activities.maybeContinueGoal({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          workflowId: `session-${session.id}`,
+        })
+      ).action,
+    ).toBe("queue");
 
     // The continuation finishes without tool calls; goalNoProgressLimit 1
     // pauses the goal on the next pass with a visible event.
@@ -2866,7 +3321,11 @@ describe("worker activities integration", () => {
     });
     const activities = createActivities({
       // Managed limits with a zero credit balance block new agent runs.
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, usageLimitsMode: "managed" }),
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        usageLimitsMode: "managed",
+      }),
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
@@ -2935,17 +3394,24 @@ describe("worker activities integration", () => {
     expect((pausedEvents[0]!.payload as { actor?: string }).actor).toBe("user");
 
     // Idempotent: a second interrupt pause emits no duplicate event.
-    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id });
+    await activities.pauseGoalForInterrupt({
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+    });
     const after = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(after.filter((event) => event.type === "goal.paused")).toHaveLength(1);
 
     // And a paused goal declines continuation.
-    expect((await activities.maybeContinueGoal({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    })).action).toBe("none");
+    expect(
+      (
+        await activities.maybeContinueGoal({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          workflowId: `session-${session.id}`,
+        })
+      ).action,
+    ).toBe("none");
   });
 
   test("steer interrupts cancel the active turn without pausing the goal", async () => {
@@ -2989,7 +3455,11 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       metadata: {},
     });
-    const claimed = await activities.claimNextQueuedTurn({ workspaceId: grant.workspaceId, sessionId: session.id, workflowId });
+    const claimed = await activities.claimNextQueuedTurn({
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId,
+    });
     expect(claimed).not.toBeNull();
 
     // A steer interrupt (`reason: "steer"`, sent by steerMessage) cancels the
@@ -3014,14 +3484,24 @@ describe("worker activities integration", () => {
     expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
 
     // The idle-path pause activity also recognizes the steer tag.
-    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id, triggerEventId: steerEvent!.id });
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe("active");
+    await activities.pauseGoalForInterrupt({
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: steerEvent!.id,
+    });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
 
     // A plain stop (no steer tag) still pauses the goal.
     const [stopEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.interrupt", payload: {} },
     ]);
-    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id, triggerEventId: stopEvent!.id });
+    await activities.pauseGoalForInterrupt({
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: stopEvent!.id,
+    });
     const paused = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
     expect(paused?.status).toBe("paused");
     expect(paused?.pausedReason).toBe("user_interrupt");
@@ -3049,7 +3529,14 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:65532/v1/workspaces/{workspaceId}/mcp", cacheToolsList: true }],
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: "http://127.0.0.1:65532/v1/workspaces/{workspaceId}/mcp",
+            cacheToolsList: true,
+          },
+        ],
       }),
       db: dbClient.db,
       bus,
@@ -3068,11 +3555,24 @@ describe("worker activities integration", () => {
     expect(goal?.successCriteria).toBe("all probes green");
     const session = await getSession(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
     expect(session?.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, firstDispatch.sessionId, 0, 50);
-    expect(events.map((event) => event.type).slice(0, 3)).toEqual(["session.created", "goal.set", "user.message"]);
+    const events = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      firstDispatch.sessionId,
+      0,
+      50,
+    );
+    expect(events.map((event) => event.type).slice(0, 3)).toEqual([
+      "session.created",
+      "goal.set",
+      "user.message",
+    ]);
 
     // The goal paused between fires; the next fire re-arms it.
-    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: firstDispatch.sessionId });
+    await activities.pauseGoalForInterrupt({
+      workspaceId: grant.workspaceId,
+      sessionId: firstDispatch.sessionId,
+    });
     const secondDispatch = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
@@ -3083,7 +3583,13 @@ describe("worker activities integration", () => {
     const rearmed = await getSessionGoal(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
     expect(rearmed?.status).toBe("active");
     expect(rearmed?.autoContinuations).toBe(0);
-    const rearmEvents = await listSessionEvents(dbClient.db, grant.workspaceId, firstDispatch.sessionId, 0, 100);
+    const rearmEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      firstDispatch.sessionId,
+      0,
+      100,
+    );
     const goalSetEvents = rearmEvents.filter((event) => event.type === "goal.set");
     expect(goalSetEvents).toHaveLength(2);
     expect((goalSetEvents[1]!.payload as { replaced?: boolean }).replaced).toBe(true);
@@ -3111,13 +3617,17 @@ describe("worker activities integration", () => {
     const [userTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "start" } },
     ]);
-    expect((await activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: userTrigger!.id,
-      workflowId: "workflow-goal-continuation",
-    })).status).toBe("idle");
+    expect(
+      (
+        await activities.runAgentTurn({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: userTrigger!.id,
+          workflowId: "workflow-goal-continuation",
+        })
+      ).status,
+    ).toBe("idle");
 
     const [goalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "goal.continuation", payload: { text: "[GOAL CONTINUATION 1/20] keep going" } },
@@ -3156,12 +3666,18 @@ describe("worker activities integration", () => {
 
   test("requeueTurnAfterWorkerDeath requeues from dual-written truth and bounds crash loops", async () => {
     const grant = await testGrant(dbClient.db);
-    const settings = testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" });
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      sessionHistorySource: "items",
+    });
     const activities = createActivities({
       settings,
       db: dbClient.db,
       bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "unused" }]) }),
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "unused" }]),
+      }),
     });
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "long job",
@@ -3204,7 +3720,10 @@ describe("worker activities integration", () => {
     });
 
     // Death before any checkpoint: the original trigger replays cleanly.
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({ action: "requeued", redispatches: 1 });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
+      action: "requeued",
+      redispatches: 1,
+    });
     let turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns.map((turn) => turn.status)).toEqual(["queued"]);
     expect(turns[0]?.triggerEventId).toBe(trigger!.id);
@@ -3212,7 +3731,10 @@ describe("worker activities integration", () => {
     let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     let preemptions = events.filter((event) => event.type === "turn.preempted");
     expect(preemptions).toHaveLength(1);
-    expect(preemptions[0]!.payload as Record<string, unknown>).toMatchObject({ reason: "worker_death", resumeWithNotice: false });
+    expect(preemptions[0]!.payload as Record<string, unknown>).toMatchObject({
+      reason: "worker_death",
+      resumeWithNotice: false,
+    });
 
     // Death after the turn checkpointed conversation truth: the rerun enters
     // through a synthesized resume notice instead of replaying input the
@@ -3225,12 +3747,19 @@ describe("worker activities integration", () => {
       turnId,
       items: [{ position: 0, item: { type: "message", role: "user", content: "long job" } }],
     });
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({ action: "requeued", redispatches: 2 });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
+      action: "requeued",
+      redispatches: 2,
+    });
     events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     preemptions = events.filter((event) => event.type === "turn.preempted");
     expect(preemptions).toHaveLength(2);
     const notice = preemptions[1]!;
-    expect(notice.payload as Record<string, unknown>).toMatchObject({ reason: "worker_death", resumeWithNotice: true, text: WORKER_DEATH_RESUME_TEXT });
+    expect(notice.payload as Record<string, unknown>).toMatchObject({
+      reason: "worker_death",
+      resumeWithNotice: true,
+      text: WORKER_DEATH_RESUME_TEXT,
+    });
     turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns[0]?.status).toBe("queued");
     expect(turns[0]?.triggerEventId).toBe(notice.id);
@@ -3238,14 +3767,22 @@ describe("worker activities integration", () => {
     // Crash-loop guard: the counter persists on the turn row; past the
     // ceiling the activity refuses so the workflow fails the session for real.
     await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "requeued", redispatches: WORKER_DEATH_MAX_REDISPATCHES });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
+      action: "requeued",
+      redispatches: WORKER_DEATH_MAX_REDISPATCHES,
+    });
     await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "exceeded", redispatches: WORKER_DEATH_MAX_REDISPATCHES });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
+      action: "exceeded",
+      redispatches: WORKER_DEATH_MAX_REDISPATCHES,
+    });
 
     // A settled turn (the timed-out attempt was a zombie that actually
     // finished) is left untouched.
     await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "stale" });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
+      action: "stale",
+    });
   });
 
   // Parent wakeup: a spawned worker reaching a terminal-for-now state must
@@ -3305,7 +3842,13 @@ describe("worker activities integration", () => {
     expect(managerTurns).toHaveLength(1);
     expect(managerTurns[0]?.status).toBe("queued");
     // The wake message names the worker and reuses the user.message path.
-    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const managerEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      manager.id,
+      0,
+      50,
+    );
     const wake = managerEvents.find((event) => event.type === "user.message");
     expect(wake).toBeDefined();
     expect(JSON.stringify(wake?.payload)).toContain(worker.id);
@@ -3317,7 +3860,12 @@ describe("worker activities integration", () => {
     // Idempotent: re-running the SAME terminal transition (activity retry, the
     // workflow's idle re-check) does not enqueue a second manager turn.
     await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    const managerTurnsAfterRetry = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
+    const managerTurnsAfterRetry = await listSessionTurns(
+      dbClient.db,
+      grant.workspaceId,
+      manager.id,
+      10,
+    );
     expect(managerTurnsAfterRetry).toHaveLength(1);
     expect(wakes).toHaveLength(1);
   });
@@ -3333,7 +3881,9 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       parentSessionId: manager.id,
     });
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [{ type: "turn.completed", payload: { output: "batch 1" } }]);
+    await appendOwnedEvents(dbClient.db, grant, worker.id, [
+      { type: "turn.completed", payload: { output: "batch 1" } },
+    ]);
     await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
 
     const wakes: Array<{ sessionId: string; workflowId: string }> = [];
@@ -3351,7 +3901,9 @@ describe("worker activities integration", () => {
     // A genuinely new work episode (new events advance lastSequence) before the
     // next idle DOES notify the manager again — managers expect to be woken on
     // each batch of worker progress, which is correct re-entrant behavior.
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [{ type: "turn.completed", payload: { output: "batch 2" } }]);
+    await appendOwnedEvents(dbClient.db, grant, worker.id, [
+      { type: "turn.completed", payload: { output: "batch 2" } },
+    ]);
     await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
     await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
     expect(wakes).toHaveLength(2);
@@ -3387,7 +3939,13 @@ describe("worker activities integration", () => {
       error: "boom",
     });
     expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const managerEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      manager.id,
+      0,
+      50,
+    );
     const wake = managerEvents.find((event) => event.type === "user.message");
     expect(JSON.stringify(wake?.payload)).toContain("FAILED");
 
@@ -3400,7 +3958,9 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    await appendOwnedEvents(dbClient.db, grant, lonely.id, [{ type: "turn.completed", payload: { output: "done" } }]);
+    await appendOwnedEvents(dbClient.db, grant, lonely.id, [
+      { type: "turn.completed", payload: { output: "done" } },
+    ]);
     await setSessionStatus(dbClient.db, grant.workspaceId, lonely.id, "running", null);
     const wakesBefore = wakes.length;
     await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: lonely.id });
@@ -3429,7 +3989,9 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ error: new Error("worker exploded mid-turn") }]) }),
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ error: new Error("worker exploded mid-turn") }]),
+      }),
       wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
         wakes.push({ sessionId, workflowId });
       },
@@ -3445,7 +4007,13 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, worker.id))?.status).toBe("failed");
     // The manager was woken with a FAILED wake even though failSession never ran.
     expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const managerEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      manager.id,
+      0,
+      50,
+    );
     const wake = managerEvents.find((event) => event.type === "user.message");
     expect(JSON.stringify(wake?.payload)).toContain("FAILED");
     expect(JSON.stringify(wake?.payload)).toContain(worker.id);
@@ -3456,7 +4024,9 @@ describe("worker activities integration", () => {
     // the activity and the workflow calls failSession on the already-failed
     // session. That must NOT wake the manager a second time nor re-append
     // terminal events: failSession no-ops on an already-failed session.
-    const workerEventsBefore = (await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)).length;
+    const workerEventsBefore = (
+      await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)
+    ).length;
     await activities.failSession({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -3466,8 +4036,10 @@ describe("worker activities integration", () => {
       error: "redundant failSession after in-turn failure",
     });
     expect(wakes).toHaveLength(1);
-    expect((await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10))).toHaveLength(1);
-    const workerEventsAfter = (await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)).length;
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10)).toHaveLength(1);
+    const workerEventsAfter = (
+      await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)
+    ).length;
     expect(workerEventsAfter).toBe(workerEventsBefore);
   });
 
@@ -3488,15 +4060,48 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        { position: 1, item: { type: "function_call", callId: "c0", name: "shell", arguments: "{}" } },
-        { position: 2, item: { type: "function_call_result", callId: "c0", status: "completed", output: "ok0" } },
-        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        {
+          position: 1,
+          item: { type: "function_call", callId: "c0", name: "shell", arguments: "{}" },
+        },
+        {
+          position: 2,
+          item: { type: "function_call_result", callId: "c0", status: "completed", output: "ok0" },
+        },
+        {
+          position: 3,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a1" }],
+          },
+        },
         { position: 4, item: { type: "message", role: "user", content: "old turn 2" } },
-        { position: 5, item: { type: "function_call", callId: "c1", name: "shell", arguments: "{}" } },
-        { position: 6, item: { type: "function_call_result", callId: "c1", status: "completed", output: "ok1" } },
-        { position: 7, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        {
+          position: 5,
+          item: { type: "function_call", callId: "c1", name: "shell", arguments: "{}" },
+        },
+        {
+          position: 6,
+          item: { type: "function_call_result", callId: "c1", status: "completed", output: "ok1" },
+        },
+        {
+          position: 7,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a2" }],
+          },
+        },
         { position: 8, item: { type: "message", role: "user", content: "recent turn" } },
-        { position: 9, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a3" }] } },
+        {
+          position: 9,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a3" }],
+          },
+        },
       ],
     });
 
@@ -3524,10 +4129,24 @@ describe("worker activities integration", () => {
       async (_s, messages) => {
         summarizerCalls += 1;
         // The summarizer sees the current active history plus Codex's checkpoint prompt.
-        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("old turn 1"))).toBe(true);
-        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("old turn 2"))).toBe(true);
-        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("recent turn"))).toBe(true);
-        expect(String((messages.at(-1) as Record<string, unknown> | undefined)?.content)).toContain("CONTEXT CHECKPOINT COMPACTION");
+        expect(
+          messages.some((item) =>
+            String((item as Record<string, unknown>).content).includes("old turn 1"),
+          ),
+        ).toBe(true);
+        expect(
+          messages.some((item) =>
+            String((item as Record<string, unknown>).content).includes("old turn 2"),
+          ),
+        ).toBe(true);
+        expect(
+          messages.some((item) =>
+            String((item as Record<string, unknown>).content).includes("recent turn"),
+          ),
+        ).toBe(true);
+        expect(String((messages.at(-1) as Record<string, unknown> | undefined)?.content)).toContain(
+          "CONTEXT CHECKPOINT COMPACTION",
+        );
         return "objective: ship; blocker: none; next: continue. Durable facts are in the notebook (pointers only).";
       },
     );
@@ -3542,7 +4161,9 @@ describe("worker activities integration", () => {
     expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
     expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c0")).toBe(false);
     expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c1")).toBe(false);
-    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(["old turn 1", "old turn 2", "recent turn"]);
+    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(
+      ["old turn 1", "old turn 2", "recent turn"],
+    );
     expect(types).not.toContain("function_call_result");
     expect(active.every((row) => (row.item as Record<string, unknown>).role === "user")).toBe(true);
 
@@ -3550,7 +4171,9 @@ describe("worker activities integration", () => {
     // plus three retained user-message replacement rows and one summary row.
     const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
     expect(all.length).toBe(14);
-    expect(all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toHaveLength(1);
+    expect(
+      all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true),
+    ).toHaveLength(1);
     // Every original seeded position (0..9) survives verbatim — in particular the
     // assistant 'a2' at position 7 that the half-step before the boundary used to
     // overwrite is untouched.
@@ -3558,7 +4181,10 @@ describe("worker activities integration", () => {
       expect(all.some((row) => row.position === position)).toBe(true);
     }
     const seededAssistant = all.find((row) => row.position === 7);
-    expect(seededAssistant!.item).toMatchObject({ role: "assistant", content: [{ type: "output_text", text: "a2" }] });
+    expect(seededAssistant!.item).toMatchObject({
+      role: "assistant",
+      content: [{ type: "output_text", text: "a2" }],
+    });
   });
 
   test("maybeCompactContext records the summary under the current turn (per-turn count stays correct)", async () => {
@@ -3587,11 +4213,32 @@ describe("worker activities integration", () => {
       turnId: oldTurnId,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        {
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a1" }],
+          },
+        },
         { position: 2, item: { type: "message", role: "user", content: "old turn 2" } },
-        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        {
+          position: 3,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a2" }],
+          },
+        },
         { position: 4, item: { type: "message", role: "user", content: "recent turn" } },
-        { position: 5, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a3" }] } },
+        {
+          position: 5,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a3" }],
+          },
+        },
       ],
     });
     const compactionTurnId = await createTurn(dbClient.db, {
@@ -3616,7 +4263,12 @@ describe("worker activities integration", () => {
     const result = await maybeCompactContext(
       dbClient.db,
       settings,
-      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id, turnId: compactionTurnId },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: compactionTurnId,
+      },
       900,
       async () => "objective: ship; durable facts in the notebook (pointers only).",
     );
@@ -3625,7 +4277,9 @@ describe("worker activities integration", () => {
     // The summary is attributed to the compaction turn, not the prefix's old
     // turn — so the per-turn count used by the worker-death resume decision sees
     // exactly the one row this turn wrote.
-    expect(await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, compactionTurnId)).toBe(1);
+    expect(
+      await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, compactionTurnId),
+    ).toBe(1);
     expect(await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, oldTurnId)).toBe(6);
   });
 
@@ -3644,16 +4298,32 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "u" } },
-        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a" }] } },
+        {
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a" }],
+          },
+        },
       ],
     });
     let called = false;
     const result = await maybeCompactContext(
       dbClient.db,
-      testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", openaiProvider: "openai", contextCompactionMode: "auto" }),
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        openaiProvider: "openai",
+        contextCompactionMode: "auto",
+      }),
       { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
       9_000_000,
-      async () => { called = true; return "x"; },
+      async () => {
+        called = true;
+        return "x";
+      },
     );
     expect(result).toEqual({ compacted: false, reason: "mode_not_client" });
     expect(called).toBe(false);
@@ -3674,15 +4344,35 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old" } },
-        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(50_000 * 4) } },
+        {
+          position: 1,
+          item: { type: "message", role: "assistant", content: "x".repeat(50_000 * 4) },
+        },
         { position: 2, item: { type: "message", role: "user", content: "recent" } },
-        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        {
+          position: 3,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a2" }],
+          },
+        },
       ],
     });
     let attempts = 0;
     const result = await maybeCompactContext(
       dbClient.db,
-      testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", openaiProvider: "azure", contextCompactionMode: "client", contextWindowTokens: 1000, contextReservedOutputTokens: 0, contextCompactSoftFraction: 0.5, contextKeepRecentTokens: 30 }),
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        openaiProvider: "azure",
+        contextCompactionMode: "client",
+        contextWindowTokens: 1000,
+        contextReservedOutputTokens: 0,
+        contextCompactSoftFraction: 0.5,
+        contextKeepRecentTokens: 30,
+      }),
       { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
       900,
       async (_settings, _messages, options) => {
@@ -3698,8 +4388,18 @@ describe("worker activities integration", () => {
     expect(result.compacted && result.method).toBe("fallback");
     expect(attempts).toBe(2);
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.some((row) => String((row.item as Record<string, unknown>).content).includes("Non-LLM context compaction fallback"))).toBe(true);
-    expect(active.some((row) => (row.item as Record<string, unknown>).content === "x".repeat(50_000 * 4))).toBe(false);
+    expect(
+      active.some((row) =>
+        String((row.item as Record<string, unknown>).content).includes(
+          "Non-LLM context compaction fallback",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      active.some(
+        (row) => (row.item as Record<string, unknown>).content === "x".repeat(50_000 * 4),
+      ),
+    ).toBe(false);
   });
 
   test("maybeCompactContext force bypasses the budget trigger (the /compact path)", async () => {
@@ -3717,9 +4417,23 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        {
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a1" }],
+          },
+        },
         { position: 2, item: { type: "message", role: "user", content: "recent turn" } },
-        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        {
+          position: 3,
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "a2" }],
+          },
+        },
       ],
     });
     // A budget so high the soft trigger would never fire on its own.
@@ -3734,7 +4448,11 @@ describe("worker activities integration", () => {
       contextCompactSoftFraction: 0.9,
       contextKeepRecentTokens: 20,
     });
-    const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id };
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+    };
     const summarize = async () => "summary of the old prefix.";
 
     // Without force, the tiny token count is below budget -> no-op.
@@ -3742,11 +4460,15 @@ describe("worker activities integration", () => {
     expect(skipped.compacted).toBe(false);
 
     // With force, it compacts despite being below budget.
-    const forced = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, { force: true });
+    const forced = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, {
+      force: true,
+    });
     expect(forced.compacted).toBe(true);
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
     expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
-    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(["old turn 1", "recent turn"]);
+    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(
+      ["old turn 1", "recent turn"],
+    );
   });
 });
 
@@ -3754,7 +4476,12 @@ type TestDb = ReturnType<typeof createDb>["db"];
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
 
-async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: Record<string, string>, description?: string): Promise<{ id: string; name: string }> {
+async function seedWorkspaceEnvironment(
+  db: TestDb,
+  grant: AccessGrant,
+  values: Record<string, string>,
+  description?: string,
+): Promise<{ id: string; name: string }> {
   const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
   const environment = await createWorkspaceEnvironment(db, {
     accountId: grant.accountId,
@@ -3773,7 +4500,6 @@ async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: 
   }
   return { id: environment.id, name: environment.name };
 }
-
 
 async function testGrant(db: TestDb): Promise<AccessGrant> {
   const id = crypto.randomUUID();
@@ -3857,16 +4583,20 @@ function runtimeWithCompactionClient(
   };
   return {
     ...runtime,
-    resolveTurnModel: () => ({
-      provider: { kind: "api-key", api: "responses", compactionMode: "client" },
-      client: fakeClient,
-      model: {} as never,
-      configured: { id: "scripted-model", hostedWebSearch: false },
-    } as never),
+    resolveTurnModel: () =>
+      ({
+        provider: { kind: "api-key", api: "responses", compactionMode: "client" },
+        client: fakeClient,
+        model: {} as never,
+        configured: { id: "scripted-model", hostedWebSearch: false },
+      }) as never,
   };
 }
 
-function runtimeWithFakeCompactionSummarizer(model: ScriptedModel, summary: string): OpenGeniRuntime {
+function runtimeWithFakeCompactionSummarizer(
+  model: ScriptedModel,
+  summary: string,
+): OpenGeniRuntime {
   return runtimeWithCompactionClient(model, async () => ({ output_text: summary }));
 }
 
@@ -3875,9 +4605,19 @@ function fakeObjectStorage(body: string): ObjectStorage {
     bucket: "test",
     backend: "s3-compatible",
     maxSinglePutSizeBytes: 5_000_000_000,
-    createPutUrl: async () => ({ url: "https://storage.example.test/put", requiredHeaders: {}, expiresAt: new Date(Date.now() + 60_000) }),
-    createGetUrl: async () => ({ url: "https://storage.example.test/get", expiresAt: new Date(Date.now() + 60_000) }),
-    headFile: async () => ({ ContentLength: new TextEncoder().encode(body).byteLength, ContentType: "text/plain" }),
+    createPutUrl: async () => ({
+      url: "https://storage.example.test/put",
+      requiredHeaders: {},
+      expiresAt: new Date(Date.now() + 60_000),
+    }),
+    createGetUrl: async () => ({
+      url: "https://storage.example.test/get",
+      expiresAt: new Date(Date.now() + 60_000),
+    }),
+    headFile: async () => ({
+      ContentLength: new TextEncoder().encode(body).byteLength,
+      ContentType: "text/plain",
+    }),
     getFileBytes: async () => new TextEncoder().encode(body),
   };
 }

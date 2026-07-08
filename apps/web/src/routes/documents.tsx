@@ -1,6 +1,13 @@
 // Documents: indexed document bases for agent search, with upload, reindex,
 // and semantic search — all through the SDK client.
-import { CheckIcon, FileSearchIcon, FilesIcon, Loader2Icon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import {
+  CheckIcon,
+  FileSearchIcon,
+  FilesIcon,
+  Loader2Icon,
+  PlusIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -14,15 +21,38 @@ import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
-import type { DocumentBase, DocumentSearchMode, DocumentSearchResult, IndexedDocument, KnowledgeSourceKind } from "@/types";
+import type {
+  DocumentBase,
+  DocumentSearchMode,
+  DocumentSearchResult,
+  IndexedDocument,
+  KnowledgeSourceKind,
+} from "@/types";
 
-const sourceKindOptions: KnowledgeSourceKind[] = ["manual_upload", "meeting_transcript", "repository", "email", "chat", "document", "web", "other"];
+const sourceKindOptions: KnowledgeSourceKind[] = [
+  "manual_upload",
+  "meeting_transcript",
+  "repository",
+  "email",
+  "chat",
+  "document",
+  "web",
+  "other",
+];
 
-export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: string; focusMemoryId?: string | undefined }) {
+export function DocumentsRoute({
+  workspaceId,
+  focusMemoryId,
+}: {
+  workspaceId: string;
+  focusMemoryId?: string | undefined;
+}) {
   const context = useAppContext();
   const client = context.client;
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
-  const memoryEnabled = context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings?.memoryEnabled === true;
+  const memoryEnabled =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings
+      ?.memoryEnabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
   const [basesError, setBasesError] = useState<Error | null>(null);
@@ -59,8 +89,16 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
   // Honest list states: an initial fetch renders as loading and a failed load
   // as an error with retry — never as "Create a document base to start." or
   // "Upload files to index this base."
-  const basesView = listViewState({ loading: basesLoading, error: basesError, count: bases.length });
-  const documentsView = listViewState({ loading: documentsLoading, error: documentsError, count: documents.length });
+  const basesView = listViewState({
+    loading: basesLoading,
+    error: basesError,
+    count: bases.length,
+  });
+  const documentsView = listViewState({
+    loading: documentsLoading,
+    error: documentsError,
+    count: documents.length,
+  });
 
   useEffect(() => {
     void refreshBases();
@@ -79,11 +117,15 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
   }, [workspaceId, selectedBaseId]);
 
   useEffect(() => {
-    if (!selectedBaseId || !documents.some((document) => document.status === "queued" || document.status === "indexing")) {
+    if (
+      !selectedBaseId ||
+      !documents.some((document) => document.status === "queued" || document.status === "indexing")
+    ) {
       return;
     }
     const timer = window.setInterval(() => {
-      void client.listDocuments(workspaceId, selectedBaseId)
+      void client
+        .listDocuments(workspaceId, selectedBaseId)
         .then((next) => {
           setDocuments(next);
           setPollFailed(false);
@@ -130,9 +172,13 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
       setBases((current) => [...current, base]);
       setSelectedBaseId(base.id);
       setName("");
-      toast.success("Document base created", { description: `“${base.name}” is ready for uploads.` });
+      toast.success("Document base created", {
+        description: `“${base.name}” is ready for uploads.`,
+      });
     } catch (error) {
-      toast.error("Failed to create document base", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to create document base", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setCreatingBase(false);
     }
@@ -161,7 +207,9 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
       }
       toast.success("Document indexed");
     } catch (error) {
-      toast.error("Failed to index document", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to index document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -186,7 +234,9 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
       // reading as current; the toast carries the cause.
       setResults([]);
       setSearched(null);
-      toast.error("Document search failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Document search failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setSearching(false);
     }
@@ -212,7 +262,9 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
       await retryDocument(document);
       toast.success("Document retry started");
     } catch (error) {
-      toast.error("Failed to retry document", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to retry document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -223,9 +275,13 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
       for (const document of failedDocuments) {
         await retryDocument(document);
       }
-      toast.success(`Retry started for ${failedDocuments.length} failed ${failedDocuments.length === 1 ? "document" : "documents"}`);
+      toast.success(
+        `Retry started for ${failedDocuments.length} failed ${failedDocuments.length === 1 ? "document" : "documents"}`,
+      );
     } catch (error) {
-      toast.error("Failed to retry documents", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to retry documents", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setRetryingAll(false);
     }
@@ -238,7 +294,7 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
           description="Indexed document bases the agent can search."
-          actions={(
+          actions={
             <div className="flex min-w-0 gap-2">
               <Input
                 ref={nameInputRef}
@@ -250,12 +306,22 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                   if (event.key === "Enter") void handleCreateBase();
                 }}
               />
-              <Button type="button" size="sm" onClick={() => void handleCreateBase()} disabled={creatingBase || !name.trim()} className="h-8 shrink-0 pointer-coarse:min-h-10">
-                {creatingBase ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void handleCreateBase()}
+                disabled={creatingBase || !name.trim()}
+                className="h-8 shrink-0 pointer-coarse:min-h-10"
+              >
+                {creatingBase ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <PlusIcon className="size-3.5" />
+                )}
                 Create base
               </Button>
             </div>
-          )}
+          }
         />
 
         <div className="mt-5 grid min-h-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
@@ -271,27 +337,35 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                   Loading bases
                 </div>
               ) : basesView === "error" ? (
-                <LoadErrorState title="Couldn't load document bases" error={basesError} onRetry={() => void refreshBases()} />
+                <LoadErrorState
+                  title="Couldn't load document bases"
+                  error={basesError}
+                  onRetry={() => void refreshBases()}
+                />
               ) : basesView === "empty" ? (
                 <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
                   No bases yet. Name one above to start indexing documents.
                 </div>
-              ) : bases.map((base) => (
-                <button
-                  key={base.id}
-                  type="button"
-                  onClick={() => setSelectedBaseId(base.id)}
-                  className={cn(
-                    "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
-                    selectedBaseId === base.id
-                      ? "border-brand/40 bg-brand/10 text-fg"
-                      : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
-                  )}
-                >
-                  <span className="truncate">{base.name}</span>
-                  {selectedBaseId === base.id ? <CheckIcon className="size-3.5 shrink-0" /> : null}
-                </button>
-              ))}
+              ) : (
+                bases.map((base) => (
+                  <button
+                    key={base.id}
+                    type="button"
+                    onClick={() => setSelectedBaseId(base.id)}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
+                      selectedBaseId === base.id
+                        ? "border-brand/40 bg-brand/10 text-fg"
+                        : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
+                    )}
+                  >
+                    <span className="truncate">{base.name}</span>
+                    {selectedBaseId === base.id ? (
+                      <CheckIcon className="size-3.5 shrink-0" />
+                    ) : null}
+                  </button>
+                ))
+              )}
             </div>
           </aside>
 
@@ -320,7 +394,11 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                       onClick={() => fileInputRef.current?.click()}
                       className="h-8"
                     >
-                      {uploading ? <Loader2Icon className="size-3.5 animate-spin" /> : <FilesIcon className="size-3.5" />}
+                      {uploading ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <FilesIcon className="size-3.5" />
+                      )}
                       Upload
                     </Button>
                     <Button
@@ -331,7 +409,11 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                       onClick={() => void handleRetryFailedDocuments()}
                       className="h-8"
                     >
-                      {retryingAll ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />}
+                      {retryingAll ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCwIcon className="size-3.5" />
+                      )}
                       Retry failed
                     </Button>
                   </div>
@@ -342,27 +424,53 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                     Source
                     <select
                       value={uploadSourceKind}
-                      onChange={(event) => setUploadSourceKind(event.target.value as KnowledgeSourceKind)}
+                      onChange={(event) =>
+                        setUploadSourceKind(event.target.value as KnowledgeSourceKind)
+                      }
                       className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
                     >
-                      {sourceKindOptions.map((kind) => <option key={kind} value={kind}>{formatToken(kind)}</option>)}
+                      {sourceKindOptions.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {formatToken(kind)}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
                     URI
-                    <Input value={uploadSourceUri} onChange={(event) => setUploadSourceUri(event.target.value)} className="h-8 text-xs" placeholder="https://..." />
+                    <Input
+                      value={uploadSourceUri}
+                      onChange={(event) => setUploadSourceUri(event.target.value)}
+                      className="h-8 text-xs"
+                      placeholder="https://..."
+                    />
                   </label>
                   <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
                     Title
-                    <Input value={uploadSourceTitle} onChange={(event) => setUploadSourceTitle(event.target.value)} className="h-8 text-xs" placeholder="Source title" />
+                    <Input
+                      value={uploadSourceTitle}
+                      onChange={(event) => setUploadSourceTitle(event.target.value)}
+                      className="h-8 text-xs"
+                      placeholder="Source title"
+                    />
                   </label>
                   <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
                     Author
-                    <Input value={uploadSourceAuthor} onChange={(event) => setUploadSourceAuthor(event.target.value)} className="h-8 text-xs" placeholder="Owner" />
+                    <Input
+                      value={uploadSourceAuthor}
+                      onChange={(event) => setUploadSourceAuthor(event.target.value)}
+                      className="h-8 text-xs"
+                      placeholder="Owner"
+                    />
                   </label>
                   <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
                     ACL tags
-                    <Input value={uploadAclTags} onChange={(event) => setUploadAclTags(event.target.value)} className="h-8 text-xs" placeholder="team, confidential" />
+                    <Input
+                      value={uploadAclTags}
+                      onChange={(event) => setUploadAclTags(event.target.value)}
+                      className="h-8 text-xs"
+                      placeholder="team, confidential"
+                    />
                   </label>
                 </div>
 
@@ -371,17 +479,19 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                     <Notice
                       tone="waiting"
                       title="Indexing status may be stale"
-                      action={(
+                      action={
                         <Button
                           type="button"
                           variant="ghost"
                           size="xs"
-                          onClick={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined}
+                          onClick={() =>
+                            selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined
+                          }
                         >
                           <RefreshCwIcon className="size-3" />
                           Refresh
                         </Button>
-                      )}
+                      }
                     >
                       Couldn't reach the server to refresh indexing progress. It will keep retrying.
                     </Notice>
@@ -392,24 +502,46 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                       Loading documents
                     </div>
                   ) : documentsView === "error" ? (
-                    <LoadErrorState title="Couldn't load documents" error={documentsError} onRetry={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined} />
+                    <LoadErrorState
+                      title="Couldn't load documents"
+                      error={documentsError}
+                      onRetry={() =>
+                        selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined
+                      }
+                    />
                   ) : documentsView === "empty" ? (
                     <EmptyState
                       icon={<FilesIcon className="size-4" />}
                       title="No documents yet"
-                      description={fileUploadsEnabled
-                        ? "Upload files to index them for agent search."
-                        : "File uploads are turned off for this deployment."}
-                      action={fileUploadsEnabled ? (
-                        <Button type="button" size="sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-                          {uploading ? <Loader2Icon className="size-3.5 animate-spin" /> : <FilesIcon className="size-3.5" />}
-                          Upload files
-                        </Button>
-                      ) : undefined}
+                      description={
+                        fileUploadsEnabled
+                          ? "Upload files to index them for agent search."
+                          : "File uploads are turned off for this deployment."
+                      }
+                      action={
+                        fileUploadsEnabled ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            disabled={uploading}
+                            onClick={() => fileInputRef.current?.click()}
+                          >
+                            {uploading ? (
+                              <Loader2Icon className="size-3.5 animate-spin" />
+                            ) : (
+                              <FilesIcon className="size-3.5" />
+                            )}
+                            Upload files
+                          </Button>
+                        ) : undefined
+                      }
                     />
                   ) : (
                     documents.map((document) => (
-                      <div key={document.id} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5">
+                      <div
+                        key={document.id}
+                        className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5"
+                      >
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium">{document.title}</div>
                           <div className="mt-1 text-2xs text-fg-subtle">
@@ -418,7 +550,14 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                           <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                             <span>{formatToken(document.sourceKind)}</span>
                             {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
-                            {document.aclTags.slice(0, 3).map((tag) => <span key={tag} className="rounded border border-[color:var(--color-border)] px-1">{tag}</span>)}
+                            {document.aclTags.slice(0, 3).map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded border border-[color:var(--color-border)] px-1"
+                              >
+                                {tag}
+                              </span>
+                            ))}
                           </div>
                           {document.status === "failed" && document.error ? (
                             <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
@@ -427,7 +566,10 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                           ) : null}
                         </div>
                         <div className="flex shrink-0 items-center gap-2 pt-0.5">
-                          <StatusDot tone={documentStatusTone(document.status)} pulse={document.status === "indexing"} />
+                          <StatusDot
+                            tone={documentStatusTone(document.status)}
+                            pulse={document.status === "indexing"}
+                          />
                           <span className="sr-only">{document.status}</span>
                           {document.status === "failed" ? (
                             <Button
@@ -439,7 +581,11 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                               aria-label={`Retry ${document.title}`}
                               title="Retry indexing"
                             >
-                              {retryingIds.has(document.id) ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+                              {retryingIds.has(document.id) ? (
+                                <Loader2Icon className="size-4 animate-spin" />
+                              ) : (
+                                <RefreshCwIcon className="size-4" />
+                              )}
                             </Button>
                           ) : null}
                         </div>
@@ -453,12 +599,12 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                 icon={<FileSearchIcon className="size-4" />}
                 title="Create your first base"
                 description="A document base is an indexed corpus the agent can search. Name one and upload files to it."
-                action={(
+                action={
                   <Button type="button" size="sm" onClick={() => nameInputRef.current?.focus()}>
                     <PlusIcon className="size-3.5" />
                     Create base
                   </Button>
-                )}
+                }
               />
             ) : (
               <EmptyState
@@ -498,12 +644,18 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                 </select>
                 <select
                   value={searchSourceKind}
-                  onChange={(event) => setSearchSourceKind(event.target.value as KnowledgeSourceKind | "")}
+                  onChange={(event) =>
+                    setSearchSourceKind(event.target.value as KnowledgeSourceKind | "")
+                  }
                   className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
                   disabled={!selectedBaseId}
                 >
                   <option value="">All sources</option>
-                  {sourceKindOptions.map((kind) => <option key={kind} value={kind}>{formatToken(kind)}</option>)}
+                  {sourceKindOptions.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {formatToken(kind)}
+                    </option>
+                  ))}
                 </select>
               </div>
               <Input
@@ -513,8 +665,18 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
                 className="h-8 text-xs"
                 disabled={!selectedBaseId}
               />
-              <Button type="button" size="sm" onClick={() => void handleSearch()} disabled={searching || !selectedBaseId || !query.trim()} className="h-9">
-                {searching ? <Loader2Icon className="size-3.5 animate-spin" /> : <FileSearchIcon className="size-3.5" />}
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void handleSearch()}
+                disabled={searching || !selectedBaseId || !query.trim()}
+                className="h-9"
+              >
+                {searching ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <FileSearchIcon className="size-3.5" />
+                )}
                 Search
               </Button>
             </div>
@@ -522,15 +684,23 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
             <div className="mt-4 space-y-2">
               {results.length > 0 ? (
                 results.map((result) => (
-                  <div key={result.chunkId} className="rounded-lg border border-border bg-surface/35 p-3">
+                  <div
+                    key={result.chunkId}
+                    className="rounded-lg border border-border bg-surface/35 p-3"
+                  >
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <span className="truncate font-medium text-fg">{result.title}</span>
-                      <span className="shrink-0 text-fg-subtle">{result.matchType} · {Math.round(result.score * 100)}%</span>
+                      <span className="shrink-0 text-fg-subtle">
+                        {result.matchType} · {Math.round(result.score * 100)}%
+                      </span>
                     </div>
                     <div className="mt-1 text-[11px] text-fg-subtle">
-                      {formatToken(result.sourceKind)}{result.sourceTitle ? ` · ${result.sourceTitle}` : ""}
+                      {formatToken(result.sourceKind)}
+                      {result.sourceTitle ? ` · ${result.sourceTitle}` : ""}
                     </div>
-                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-fg-muted">{result.text}</p>
+                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-fg-muted">
+                      {result.text}
+                    </p>
                   </div>
                 ))
               ) : searched ? (
@@ -544,7 +714,11 @@ export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: st
               )}
             </div>
 
-            <MemoryPane workspaceId={workspaceId} memoryEnabled={memoryEnabled} focusMemoryId={focusMemoryId} />
+            <MemoryPane
+              workspaceId={workspaceId}
+              memoryEnabled={memoryEnabled}
+              focusMemoryId={focusMemoryId}
+            />
           </aside>
         </div>
       </section>
@@ -560,7 +734,14 @@ function documentStatusTone(status: IndexedDocument["status"]): StatusTone {
 }
 
 function splitTags(value: string): string[] {
-  return [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      value
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean),
+    ),
+  ];
 }
 
 function formatToken(value: string): string {

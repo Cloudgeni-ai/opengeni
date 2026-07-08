@@ -34,16 +34,19 @@ export function RailFooter() {
   const rail = useRail();
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
-  const displayName = context.authSession?.user.name
-    ?? context.authSession?.user.email
-    ?? context.accessContext.subjectLabel
-    ?? context.accessContext.subjectId;
+  const displayName =
+    context.authSession?.user.name ??
+    context.authSession?.user.email ??
+    context.accessContext.subjectLabel ??
+    context.accessContext.subjectId;
   const secondary = context.authSession?.user.email ?? context.accessContext.subjectId;
   const image = context.authSession?.user.image ?? undefined;
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      <div className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}>
+      <div
+        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}
+      >
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -67,7 +70,11 @@ export function RailFooter() {
               ) : null}
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" side={rail.collapsed ? "right" : "top"} className="min-w-56">
+          <DropdownMenuContent
+            align="start"
+            side={rail.collapsed ? "right" : "top"}
+            className="min-w-56"
+          >
             <DropdownMenuLabel className="grid gap-0.5">
               <span className="truncate text-sm">{displayName}</span>
               {secondary && secondary !== displayName ? (
@@ -76,7 +83,10 @@ export function RailFooter() {
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuItem asChild>
-              <Link to="/workspaces/$workspaceId/organization" params={{ workspaceId: rail.workspaceId }}>
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId: rail.workspaceId }}
+              >
                 <SettingsIcon className="size-4" />
                 Organization settings
               </Link>
@@ -85,7 +95,11 @@ export function RailFooter() {
               <DropdownMenuItem
                 variant="destructive"
                 onSelect={() => {
-                  void context.handleManagedSignOut().catch((error) => toast.error("Sign out failed", { description: String(error) }));
+                  void context
+                    .handleManagedSignOut()
+                    .catch((error) =>
+                      toast.error("Sign out failed", { description: String(error) }),
+                    );
                 }}
               >
                 <LogOutIcon className="size-4" />
@@ -115,10 +129,16 @@ export function RailFooter() {
               onClick={rail.toggleCollapsed}
               className="shrink-0 text-fg-subtle hover:text-fg"
             >
-              {rail.collapsed ? <ChevronsRightIcon className="size-4" /> : <ChevronsLeftIcon className="size-4" />}
+              {rail.collapsed ? (
+                <ChevronsRightIcon className="size-4" />
+              ) : (
+                <ChevronsLeftIcon className="size-4" />
+              )}
             </Button>
           </TooltipTrigger>
-          <TooltipContent side="right">{rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}</TooltipContent>
+          <TooltipContent side="right">
+            {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          </TooltipContent>
         </Tooltip>
       </div>
     </div>

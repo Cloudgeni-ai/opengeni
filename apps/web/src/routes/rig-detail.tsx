@@ -4,7 +4,16 @@
 // rigs:use gates read + propose.
 import { useRig, useRigChanges, useRigVersions, useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, CheckIcon, Loader2Icon, PencilIcon, ServerCogIcon, StarIcon, StarOffIcon, Trash2Icon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CheckIcon,
+  Loader2Icon,
+  PencilIcon,
+  ServerCogIcon,
+  StarIcon,
+  StarOffIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -51,7 +60,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
   const versionLabel = useMemo(() => {
     const byId = new Map(versions.versions.map((version) => [version.id, `v${version.version}`]));
-    return (id: string | null) => (id ? byId.get(id) ?? null : null);
+    return (id: string | null) => (id ? (byId.get(id) ?? null) : null);
   }, [versions.versions]);
 
   const refreshAll = async () => {
@@ -72,7 +81,11 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
     return (
       <Shell workspaceId={workspaceId}>
         <div className="mt-6">
-          <LoadErrorState title="Couldn't load this rig" error={rig.error} onRetry={() => void refreshAll()} />
+          <LoadErrorState
+            title="Couldn't load this rig"
+            error={rig.error}
+            onRetry={() => void refreshAll()}
+          />
         </div>
       </Shell>
     );
@@ -92,8 +105,12 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
   const current = rig.rig;
   const active = current.activeVersion;
-  const pendingChanges = changes.changes.filter((change) => change.status === "proposed" || change.status === "verifying").length;
-  const isDefaultRig = context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId === current.id;
+  const pendingChanges = changes.changes.filter(
+    (change) => change.status === "proposed" || change.status === "verifying",
+  ).length;
+  const isDefaultRig =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId ===
+    current.id;
 
   return (
     <Shell workspaceId={workspaceId}>
@@ -116,9 +133,15 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
           ) : (
             <>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-brand"><ServerCogIcon className="size-5" /></span>
+                <span className="text-brand">
+                  <ServerCogIcon className="size-5" />
+                </span>
                 <h1 className="min-w-0 truncate text-lg font-semibold">{current.name}</h1>
-                {active ? <MetaChip title="Active version">v{active.version}</MetaChip> : <MetaChip dot="queued">Draft</MetaChip>}
+                {active ? (
+                  <MetaChip title="Active version">v{active.version}</MetaChip>
+                ) : (
+                  <MetaChip dot="queued">Draft</MetaChip>
+                )}
                 {isDefaultRig ? (
                   <MetaChip
                     title="Workspace default — new sessions use this rig unless another is picked"
@@ -131,7 +154,9 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                   </MetaChip>
                 ) : null}
               </div>
-              <p className="mt-1 max-w-2xl text-sm leading-5 text-fg-muted">{current.description ?? "No description"}</p>
+              <p className="mt-1 max-w-2xl text-sm leading-5 text-fg-muted">
+                {current.description ?? "No description"}
+              </p>
             </>
           )}
         </div>
@@ -144,16 +169,33 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               className="h-9"
               disabled={rig.mutating}
               onClick={async () => {
-                const updated = await context.setWorkspaceDefaultRig(workspaceId, isDefaultRig ? null : current.id);
+                const updated = await context.setWorkspaceDefaultRig(
+                  workspaceId,
+                  isDefaultRig ? null : current.id,
+                );
                 if (updated) {
-                  toast.success(isDefaultRig ? "Cleared the workspace default rig" : `“${current.name}” is now the workspace default`);
+                  toast.success(
+                    isDefaultRig
+                      ? "Cleared the workspace default rig"
+                      : `“${current.name}” is now the workspace default`,
+                  );
                 }
               }}
             >
-              {isDefaultRig ? <StarOffIcon className="size-3.5" /> : <StarIcon className="size-3.5" />}
+              {isDefaultRig ? (
+                <StarOffIcon className="size-3.5" />
+              ) : (
+                <StarIcon className="size-3.5" />
+              )}
               {isDefaultRig ? "Clear default" : "Set as default"}
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-9" onClick={() => setEditing(true)}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9"
+              onClick={() => setEditing(true)}
+            >
               <PencilIcon className="size-3.5" />
               Edit
             </Button>
@@ -173,24 +215,38 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
       </div>
 
       {rig.mutationError ? (
-        <Notice tone="failed" className="mt-4" action={(
-          <Button type="button" variant="ghost" size="xs" onClick={rig.clearMutationError}>Dismiss</Button>
-        )}>
+        <Notice
+          tone="failed"
+          className="mt-4"
+          action={
+            <Button type="button" variant="ghost" size="xs" onClick={rig.clearMutationError}>
+              Dismiss
+            </Button>
+          }
+        >
           {rig.mutationError.message}
         </Notice>
       ) : null}
 
       <Tabs value={tab} onValueChange={setTab} className="mt-5 gap-0">
         <TabsList variant="line" className="h-9 gap-1">
-          <TabsTrigger value="overview" className="px-3 text-xs">Overview</TabsTrigger>
-          <TabsTrigger value="setup" className="px-3 text-xs">Setup</TabsTrigger>
+          <TabsTrigger value="overview" className="px-3 text-xs">
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="setup" className="px-3 text-xs">
+            Setup
+          </TabsTrigger>
           <TabsTrigger value="versions" className="px-3 text-xs">
             Versions
             <span className="ml-1.5 text-fg-subtle">{current.versionCount}</span>
           </TabsTrigger>
           <TabsTrigger value="changes" className="px-3 text-xs">
             Changes
-            {pendingChanges > 0 ? <span className="ml-1.5 rounded-full bg-status-waiting/15 px-1.5 text-2xs font-medium text-status-waiting">{pendingChanges}</span> : null}
+            {pendingChanges > 0 ? (
+              <span className="ml-1.5 rounded-full bg-status-waiting/15 px-1.5 text-2xs font-medium text-status-waiting">
+                {pendingChanges}
+              </span>
+            ) : null}
           </TabsTrigger>
         </TabsList>
 
@@ -222,7 +278,11 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
         <TabsContent value="versions" className="mt-5">
           {versions.error && versions.versions.length === 0 ? (
-            <LoadErrorState title="Couldn't load versions" error={versions.error} onRetry={() => void versions.refresh()} />
+            <LoadErrorState
+              title="Couldn't load versions"
+              error={versions.error}
+              onRetry={() => void versions.refresh()}
+            />
           ) : (
             <RigVersionsTimeline
               versions={versions.versions}
@@ -241,7 +301,11 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
         <TabsContent value="changes" className="mt-5">
           {changes.error && changes.changes.length === 0 ? (
-            <LoadErrorState title="Couldn't load changes" error={changes.error} onRetry={() => void changes.refresh()} />
+            <LoadErrorState
+              title="Couldn't load changes"
+              error={changes.error}
+              onRetry={() => void changes.refresh()}
+            />
           ) : (
             <RigChangesQueue
               changes={changes.changes}
@@ -314,19 +378,42 @@ function RenameForm({
   return (
     <div className="grid max-w-xl gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
       <div className="grid gap-2">
-        <Input value={name} onChange={(event) => setName(event.target.value)} aria-label="Rig name" className="h-9" autoFocus />
-        <Input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" aria-label="Rig description" className="h-9" />
+        <Input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          aria-label="Rig name"
+          className="h-9"
+          autoFocus
+        />
+        <Input
+          value={description}
+          onChange={(event) => setDescription(event.target.value)}
+          placeholder="Description"
+          aria-label="Rig description"
+          className="h-9"
+        />
       </div>
       <div className="flex items-start gap-1.5">
-        <Button type="button" variant="ghost" size="sm" className="h-9" onClick={onCancel}>Cancel</Button>
+        <Button type="button" variant="ghost" size="sm" className="h-9" onClick={onCancel}>
+          Cancel
+        </Button>
         <Button
           type="button"
           size="sm"
           className="h-9"
           disabled={mutating || !name.trim()}
-          onClick={() => void onSave({ name: name.trim() || rig.name, description: description.trim() ? description.trim() : null })}
+          onClick={() =>
+            void onSave({
+              name: name.trim() || rig.name,
+              description: description.trim() ? description.trim() : null,
+            })
+          }
         >
-          {mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+          {mutating ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <CheckIcon className="size-3.5" />
+          )}
           Save
         </Button>
       </div>

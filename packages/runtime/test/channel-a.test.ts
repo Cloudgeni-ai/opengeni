@@ -55,7 +55,13 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
 
-    const write = await svc.fsWrite({ path: "hello.txt", encoding: "utf8", content: "hello channel-a\n", overwrite: true, createParents: true });
+    const write = await svc.fsWrite({
+      path: "hello.txt",
+      encoding: "utf8",
+      content: "hello channel-a\n",
+      overwrite: true,
+      createParents: true,
+    });
     expect(write.path).toBe("hello.txt");
     expect(write.sizeBytes).toBe("hello channel-a\n".length);
     expect(write.revision).toBe(1);
@@ -74,7 +80,13 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0xff]);
     const b64 = bytes.toString("base64");
 
-    await svc.fsWrite({ path: "blob.bin", encoding: "base64", content: b64, overwrite: true, createParents: true });
+    await svc.fsWrite({
+      path: "blob.bin",
+      encoding: "base64",
+      content: b64,
+      overwrite: true,
+      createParents: true,
+    });
 
     const read = await svc.fsRead({ path: "blob.bin", encoding: "base64", maxBytes: 1024 });
     expect(read.encoding).toBe("base64");
@@ -86,7 +98,13 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
     const bytes = Buffer.from([0x00, 0x01, 0x02, 0x03]);
-    await svc.fsWrite({ path: "raw.dat", encoding: "base64", content: bytes.toString("base64"), overwrite: true, createParents: true });
+    await svc.fsWrite({
+      path: "raw.dat",
+      encoding: "base64",
+      content: bytes.toString("base64"),
+      overwrite: true,
+      createParents: true,
+    });
     const read = await svc.fsRead({ path: "raw.dat", encoding: "utf8", maxBytes: 1024 });
     expect(read.isBinary).toBe(true);
     expect(read.encoding).toBe("base64"); // forced to base64 despite the utf8 request
@@ -95,15 +113,36 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("fsList returns a coherent tree of a known directory", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await svc.fsWrite({ path: "src/a.ts", encoding: "utf8", content: "export const a = 1;\n", overwrite: true, createParents: true });
-    await svc.fsWrite({ path: "src/b.ts", encoding: "utf8", content: "export const b = 2;\n", overwrite: true, createParents: true });
-    await svc.fsWrite({ path: "README.md", encoding: "utf8", content: "# hi\n", overwrite: true, createParents: true });
+    await svc.fsWrite({
+      path: "src/a.ts",
+      encoding: "utf8",
+      content: "export const a = 1;\n",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsWrite({
+      path: "src/b.ts",
+      encoding: "utf8",
+      content: "export const b = 2;\n",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsWrite({
+      path: "README.md",
+      encoding: "utf8",
+      content: "# hi\n",
+      overwrite: true,
+      createParents: true,
+    });
 
     const list = await svc.fsList({ path: "", depth: 3, maxEntries: 1000, includeHidden: true });
     expect(list.root.type).toBe("dir");
     // collect all node paths
     const paths: string[] = [];
-    const walk = (n: typeof list.root): void => { paths.push(n.path); n.children?.forEach(walk); };
+    const walk = (n: typeof list.root): void => {
+      paths.push(n.path);
+      n.children?.forEach(walk);
+    };
     walk(list.root);
     expect(paths).toContain("src");
     expect(paths).toContain("src/a.ts");
@@ -112,7 +151,10 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     // a.ts is a file with a non-null size; src is a dir with null size + children
     const findNode = (path: string): typeof list.root | undefined => {
       let found: typeof list.root | undefined;
-      const rec = (n: typeof list.root): void => { if (n.path === path) found = n; n.children?.forEach(rec); };
+      const rec = (n: typeof list.root): void => {
+        if (n.path === path) found = n;
+        n.children?.forEach(rec);
+      };
       rec(list.root);
       return found;
     };
@@ -127,16 +169,33 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("write with overwrite:false on an existing path throws conflict", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await svc.fsWrite({ path: "x.txt", encoding: "utf8", content: "first", overwrite: true, createParents: true });
-    await expect(svc.fsWrite({ path: "x.txt", encoding: "utf8", content: "second", overwrite: false, createParents: true }))
-      .rejects.toThrow(/exists/);
+    await svc.fsWrite({
+      path: "x.txt",
+      encoding: "utf8",
+      content: "first",
+      overwrite: true,
+      createParents: true,
+    });
+    await expect(
+      svc.fsWrite({
+        path: "x.txt",
+        encoding: "utf8",
+        content: "second",
+        overwrite: false,
+        createParents: true,
+      }),
+    ).rejects.toThrow(/exists/);
   });
 
   test("path traversal is rejected with a validation error", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await expect(svc.fsRead({ path: "../escape", encoding: "utf8", maxBytes: 16 })).rejects.toThrow(/traversal/);
-    await expect(svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 })).rejects.toThrow(/absolute/);
+    await expect(svc.fsRead({ path: "../escape", encoding: "utf8", maxBytes: 16 })).rejects.toThrow(
+      /traversal/,
+    );
+    await expect(
+      svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
+    ).rejects.toThrow(/absolute/);
   });
 
   test("fsWrite emits an fs.changed notification through the emitter", async () => {
@@ -145,12 +204,24 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const svc = new SandboxChannelAService({
       session,
       leaseEpoch: 7,
-      emit: async (events) => { emitted.push(...events); },
+      emit: async (events) => {
+        emitted.push(...events);
+      },
     });
-    await svc.fsWrite({ path: "noted.txt", encoding: "utf8", content: "hi", overwrite: true, createParents: true });
+    await svc.fsWrite({
+      path: "noted.txt",
+      encoding: "utf8",
+      content: "hi",
+      overwrite: true,
+      createParents: true,
+    });
     expect(emitted).toHaveLength(1);
     expect(emitted[0]!.type).toBe("fs.changed");
-    const payload = emitted[0]!.payload as { changes: { path: string; kind: string }[]; revision: number; leaseEpoch: number };
+    const payload = emitted[0]!.payload as {
+      changes: { path: string; kind: string }[];
+      revision: number;
+      leaseEpoch: number;
+    };
     expect(payload.changes[0]!.path).toBe("noted.txt");
     expect(payload.changes[0]!.kind).toBe("modified");
     expect(payload.revision).toBe(1);
@@ -160,10 +231,26 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("fsMove renames a file and read-back follows the new path", async () => {
     const { session } = await makeBox();
     const emitted: { type: string; payload: unknown }[] = [];
-    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
-    await svc.fsWrite({ path: "old.txt", encoding: "utf8", content: "move me\n", overwrite: true, createParents: true });
+    const svc = new SandboxChannelAService({
+      session,
+      emit: async (e) => {
+        emitted.push(...e);
+      },
+    });
+    await svc.fsWrite({
+      path: "old.txt",
+      encoding: "utf8",
+      content: "move me\n",
+      overwrite: true,
+      createParents: true,
+    });
 
-    const moved = await svc.fsMove({ path: "old.txt", newPath: "new.txt", overwrite: false, createParents: true });
+    const moved = await svc.fsMove({
+      path: "old.txt",
+      newPath: "new.txt",
+      overwrite: false,
+      createParents: true,
+    });
     expect(moved.path).toBe("old.txt");
     expect(moved.newPath).toBe("new.txt");
     expect(moved.revision).toBe(2);
@@ -173,28 +260,56 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(svc.fsRead({ path: "old.txt", encoding: "utf8", maxBytes: 64 })).rejects.toThrow();
 
     // emits a deleted(old) + created(new) pair on the move.
-    const moveEvent = emitted.find((e) => (e.payload as { changes: { path: string }[] }).changes.some((c) => c.path === "new.txt"));
+    const moveEvent = emitted.find((e) =>
+      (e.payload as { changes: { path: string }[] }).changes.some((c) => c.path === "new.txt"),
+    );
     const changes = (moveEvent!.payload as { changes: { path: string; kind: string }[] }).changes;
-    expect(changes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ path: "old.txt", kind: "deleted" }),
-      expect.objectContaining({ path: "new.txt", kind: "created" }),
-    ]));
+    expect(changes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "old.txt", kind: "deleted" }),
+        expect.objectContaining({ path: "new.txt", kind: "created" }),
+      ]),
+    );
   });
 
   test("fsMove with overwrite:false onto an existing destination throws conflict", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await svc.fsWrite({ path: "a.txt", encoding: "utf8", content: "a", overwrite: true, createParents: true });
-    await svc.fsWrite({ path: "b.txt", encoding: "utf8", content: "b", overwrite: true, createParents: true });
-    await expect(svc.fsMove({ path: "a.txt", newPath: "b.txt", overwrite: false, createParents: true }))
-      .rejects.toThrow(/exists/);
+    await svc.fsWrite({
+      path: "a.txt",
+      encoding: "utf8",
+      content: "a",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsWrite({
+      path: "b.txt",
+      encoding: "utf8",
+      content: "b",
+      overwrite: true,
+      createParents: true,
+    });
+    await expect(
+      svc.fsMove({ path: "a.txt", newPath: "b.txt", overwrite: false, createParents: true }),
+    ).rejects.toThrow(/exists/);
   });
 
   test("fsMove with createParents builds missing destination dirs", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await svc.fsWrite({ path: "src.txt", encoding: "utf8", content: "x", overwrite: true, createParents: true });
-    await svc.fsMove({ path: "src.txt", newPath: "deep/nested/dst.txt", overwrite: false, createParents: true });
+    await svc.fsWrite({
+      path: "src.txt",
+      encoding: "utf8",
+      content: "x",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.fsMove({
+      path: "src.txt",
+      newPath: "deep/nested/dst.txt",
+      overwrite: false,
+      createParents: true,
+    });
     const read = await svc.fsRead({ path: "deep/nested/dst.txt", encoding: "utf8", maxBytes: 16 });
     expect(read.content).toBe("x");
   });
@@ -202,14 +317,23 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
   test("fsMove rejects path traversal on either side", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    await expect(svc.fsMove({ path: "../escape", newPath: "x.txt", overwrite: false, createParents: true })).rejects.toThrow(/traversal/);
-    await expect(svc.fsMove({ path: "x.txt", newPath: "/abs", overwrite: false, createParents: true })).rejects.toThrow(/absolute/);
+    await expect(
+      svc.fsMove({ path: "../escape", newPath: "x.txt", overwrite: false, createParents: true }),
+    ).rejects.toThrow(/traversal/);
+    await expect(
+      svc.fsMove({ path: "x.txt", newPath: "/abs", overwrite: false, createParents: true }),
+    ).rejects.toThrow(/absolute/);
   });
 
   test("fsMkdir -p creates a nested directory and emits a created(dir) change", async () => {
     const { session } = await makeBox();
     const emitted: { type: string; payload: unknown }[] = [];
-    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
+    const svc = new SandboxChannelAService({
+      session,
+      emit: async (e) => {
+        emitted.push(...e);
+      },
+    });
 
     const made = await svc.fsMkdir({ path: "fresh/dir", recursive: true });
     expect(made.path).toBe("fresh/dir");
@@ -217,12 +341,16 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
 
     const list = await svc.fsList({ path: "", depth: 3, maxEntries: 1000, includeHidden: true });
     const paths: string[] = [];
-    const walk = (n: typeof list.root): void => { paths.push(n.path); n.children?.forEach(walk); };
+    const walk = (n: typeof list.root): void => {
+      paths.push(n.path);
+      n.children?.forEach(walk);
+    };
     walk(list.root);
     expect(paths).toContain("fresh/dir");
 
     const evt = emitted.find((e) => e.type === "fs.changed")!;
-    const change = (evt.payload as { changes: { path: string; kind: string; isDir: boolean }[] }).changes[0]!;
+    const change = (evt.payload as { changes: { path: string; kind: string; isDir: boolean }[] })
+      .changes[0]!;
     expect(change).toMatchObject({ path: "fresh/dir", kind: "created", isDir: true });
   });
 
@@ -235,16 +363,47 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
 });
 
 describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
-  async function makeRepoWithStagedChange(): Promise<{ svc: SandboxChannelAService; session: LiveLocalSession }> {
+  async function makeRepoWithStagedChange(): Promise<{
+    svc: SandboxChannelAService;
+    session: LiveLocalSession;
+  }> {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
     // init a repo, commit a baseline, then make a staged change.
-    await svc.terminalExec({ command: "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false", cwd: "", timeoutMs: 20000, emitStream: false });
-    await svc.fsWrite({ path: "file.txt", encoding: "utf8", content: "line one\nline two\nline three\n", overwrite: true, createParents: true });
-    await svc.terminalExec({ command: "git add file.txt && git commit -q -m baseline", cwd: "", timeoutMs: 20000, emitStream: false });
+    await svc.terminalExec({
+      command:
+        "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false",
+      cwd: "",
+      timeoutMs: 20000,
+      emitStream: false,
+    });
+    await svc.fsWrite({
+      path: "file.txt",
+      encoding: "utf8",
+      content: "line one\nline two\nline three\n",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.terminalExec({
+      command: "git add file.txt && git commit -q -m baseline",
+      cwd: "",
+      timeoutMs: 20000,
+      emitStream: false,
+    });
     // modify + stage
-    await svc.fsWrite({ path: "file.txt", encoding: "utf8", content: "line one\nline two changed\nline three\nline four\n", overwrite: true, createParents: true });
-    await svc.terminalExec({ command: "git add file.txt", cwd: "", timeoutMs: 20000, emitStream: false });
+    await svc.fsWrite({
+      path: "file.txt",
+      encoding: "utf8",
+      content: "line one\nline two changed\nline three\nline four\n",
+      overwrite: true,
+      createParents: true,
+    });
+    await svc.terminalExec({
+      command: "git add file.txt",
+      cwd: "",
+      timeoutMs: 20000,
+      emitStream: false,
+    });
     return { svc, session };
   }
 
@@ -260,7 +419,13 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
 
   test("git diff --staged parses into structured hunks (the Pierre feed)", async () => {
     const { svc } = await makeRepoWithStagedChange();
-    const diff = await svc.gitDiff({ path: "", staged: true, pathspec: [], contextLines: 3, maxBytesPerFile: 512 * 1024 });
+    const diff = await svc.gitDiff({
+      path: "",
+      staged: true,
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: 512 * 1024,
+    });
     expect(diff.files.length).toBe(1);
     const f = diff.files[0]!;
     expect(f.path).toBe("file.txt");
@@ -269,8 +434,12 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(f.hunks.length).toBeGreaterThanOrEqual(1);
     const hunk = f.hunks[0]!;
     // the hunk carries typed add/del/context lines with gutter line numbers
-    expect(hunk.lines.some((l) => l.type === "add" && l.newNo !== null && l.oldNo === null)).toBe(true);
-    expect(hunk.lines.some((l) => l.type === "del" && l.oldNo !== null && l.newNo === null)).toBe(true);
+    expect(hunk.lines.some((l) => l.type === "add" && l.newNo !== null && l.oldNo === null)).toBe(
+      true,
+    );
+    expect(hunk.lines.some((l) => l.type === "del" && l.oldNo !== null && l.newNo === null)).toBe(
+      true,
+    );
     expect(hunk.lines.some((l) => l.type === "context")).toBe(true);
   });
 
@@ -284,7 +453,12 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
 
   test("git log returns the commit chain", async () => {
     const { svc } = await makeRepoWithStagedChange();
-    await svc.terminalExec({ command: "git commit -q -m second", cwd: "", timeoutMs: 20000, emitStream: false });
+    await svc.terminalExec({
+      command: "git commit -q -m second",
+      cwd: "",
+      timeoutMs: 20000,
+      emitStream: false,
+    });
     const log = await svc.gitLog({ path: "", ref: "HEAD", maxCount: 10, skip: 0, pathspec: [] });
     expect(log.commits.length).toBeGreaterThanOrEqual(2);
     expect(log.commits[0]!.subject).toBe("second");
@@ -297,8 +471,18 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
   test("terminal exec 'echo $DISPLAY' streams output", async () => {
     const { session } = await makeBox();
     const emitted: { type: string; payload: unknown }[] = [];
-    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
-    const out = await svc.terminalExec({ command: "echo display=$DISPLAY; echo marker_channel_a", cwd: "", timeoutMs: 10000, emitStream: true });
+    const svc = new SandboxChannelAService({
+      session,
+      emit: async (e) => {
+        emitted.push(...e);
+      },
+    });
+    const out = await svc.terminalExec({
+      command: "echo display=$DISPLAY; echo marker_channel_a",
+      cwd: "",
+      timeoutMs: 10000,
+      emitStream: true,
+    });
     expect(out.stdout).toContain("marker_channel_a");
     expect(out.exitCode).toBe(0);
     // the buffered output is also published on A1 as the firehose
@@ -308,7 +492,12 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
   test("terminal exec reports a non-zero exit code", async () => {
     const { session } = await makeBox();
     const svc = new SandboxChannelAService({ session });
-    const out = await svc.terminalExec({ command: "exit 3", cwd: "", timeoutMs: 10000, emitStream: false });
+    const out = await svc.terminalExec({
+      command: "exit 3",
+      cwd: "",
+      timeoutMs: 10000,
+      emitStream: false,
+    });
     expect(out.exitCode).toBe(3);
   });
 
@@ -353,14 +542,15 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
 // ── pure parser unit tests (no box) ─────────────────────────────────────────
 describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
   test("parsePorcelainV2 reads branch + file XY codes", () => {
-    const z = [
-      "# branch.head main",
-      "# branch.upstream origin/main",
-      "# branch.ab +2 -1",
-      "1 M. N... 100644 100644 100644 aaa bbb staged.txt",
-      "1 .M N... 100644 100644 100644 aaa bbb dirty.txt",
-      "? untracked.txt",
-    ].join(NUL) + NUL;
+    const z =
+      [
+        "# branch.head main",
+        "# branch.upstream origin/main",
+        "# branch.ab +2 -1",
+        "1 M. N... 100644 100644 100644 aaa bbb staged.txt",
+        "1 .M N... 100644 100644 100644 aaa bbb dirty.txt",
+        "? untracked.txt",
+      ].join(NUL) + NUL;
     const out = parsePorcelainV2(z);
     expect(out.isRepo).toBe(true);
     expect(out.head).toBe("main");
@@ -381,7 +571,13 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const z = ["5\t2\tfile.ts", "-\t-\timg.png", "1\t0\t", "old.ts", "new.ts"].join(NUL) + NUL;
     const out = parseNumstatZ(z);
     expect(out).toHaveLength(3);
-    expect(out[0]).toMatchObject({ additions: 5, deletions: 2, binary: false, newPath: "file.ts", oldPath: null });
+    expect(out[0]).toMatchObject({
+      additions: 5,
+      deletions: 2,
+      binary: false,
+      newPath: "file.ts",
+      oldPath: null,
+    });
     expect(out[1]).toMatchObject({ binary: true, newPath: "img.png" });
     expect(out[2]).toMatchObject({ oldPath: "old.ts", newPath: "new.ts" });
   });
@@ -414,35 +610,57 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
   });
 
   test("parseUnifiedPatch detects added/deleted file status", () => {
-    const added = ["diff --git a/n b/n", "new file mode 100644", "--- /dev/null", "+++ b/n", "@@ -0,0 +1,1 @@", "+hi"].join("\n");
+    const added = [
+      "diff --git a/n b/n",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/n",
+      "@@ -0,0 +1,1 @@",
+      "+hi",
+    ].join("\n");
     expect(parseUnifiedPatch(added).status).toBe("added");
-    const deleted = ["diff --git a/d b/d", "deleted file mode 100644", "--- a/d", "+++ /dev/null", "@@ -1,1 +0,0 @@", "-bye"].join("\n");
+    const deleted = [
+      "diff --git a/d b/d",
+      "deleted file mode 100644",
+      "--- a/d",
+      "+++ /dev/null",
+      "@@ -1,1 +0,0 @@",
+      "-bye",
+    ].join("\n");
     expect(parseUnifiedPatch(deleted).status).toBe("deleted");
   });
 
   test("stripExecBanner removes the formatExecResponse banner", () => {
-    const banner = "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nactual output here";
+    const banner =
+      "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nactual output here";
     expect(stripExecBanner(banner)).toBe("actual output here");
     expect(stripExecBanner("no banner here")).toBe("no banner here");
   });
 
   test("parseExecBannerSessionId recovers a running PTY's session id from the banner", () => {
     // A STILL-RUNNING process (an interactive shell) carries the session-id line.
-    const running = "Chunk ID: 6497fe\nWall time: 1.0360 seconds\nProcess running with session ID 7\nOutput:\nroot@modal:~# ";
+    const running =
+      "Chunk ID: 6497fe\nWall time: 1.0360 seconds\nProcess running with session ID 7\nOutput:\nroot@modal:~# ";
     expect(parseExecBannerSessionId(running)).toBe(7);
     // A finished command carries `Process exited with code N` — no session id.
-    const exited = "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOutput:\ndone";
+    const exited =
+      "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOutput:\ndone";
     expect(parseExecBannerSessionId(exited)).toBeNull();
     // A session-id-looking line in the command OUTPUT (after the marker) must NOT
     // be mistaken for the banner's id.
-    const spoof = "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\nProcess running with session ID 99";
+    const spoof =
+      "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\nProcess running with session ID 99";
     expect(parseExecBannerSessionId(spoof)).toBeNull();
     expect(parseExecBannerSessionId("no banner")).toBeNull();
   });
 
   test("isWorkspaceEscapeError classifies the provider's symlink-escape rejection", () => {
     // The Modal native-readFile guard on a symlink targeting outside /workspace.
-    expect(isWorkspaceEscapeError(new Error("Sandbox path failed remote validation: workspace escape: /tmp/pulse-abc"))).toBe(true);
+    expect(
+      isWorkspaceEscapeError(
+        new Error("Sandbox path failed remote validation: workspace escape: /tmp/pulse-abc"),
+      ),
+    ).toBe(true);
     expect(isWorkspaceEscapeError("Remote validation failed: escape detected")).toBe(true);
     // A genuine not-found is NOT an escape (must fall through to a clean 404).
     expect(isWorkspaceEscapeError(new Error("ENOENT: no such file or directory"))).toBe(false);
@@ -487,7 +705,11 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "" }, "pty-1");
     expect(opened.response.supportsInput).toBe(true);
     expect(opened.execSessionId).toBe(1); // recovered from the banner (was null before the fix)
-    const out = await svc.ptyWrite({ ptyId: "pty-1", data: "echo hi\n" }, opened.execSessionId!, "echo hi\n");
+    const out = await svc.ptyWrite(
+      { ptyId: "pty-1", data: "echo hi\n" },
+      opened.execSessionId!,
+      "echo hi\n",
+    );
     expect(out).toContain("echo hi");
   });
 
@@ -505,6 +727,8 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     };
     const svc = new SandboxChannelAService({ session });
     const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "" }, "pty-x");
-    await expect(svc.ptyWrite({ ptyId: "pty-x", data: "x\n" }, opened.execSessionId!, "x\n")).rejects.toThrow(/pty session lost/i);
+    await expect(
+      svc.ptyWrite({ ptyId: "pty-x", data: "x\n" }, opened.execSessionId!, "x\n"),
+    ).rejects.toThrow(/pty session lost/i);
   });
 });

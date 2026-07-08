@@ -63,7 +63,9 @@ afterAll(async () => {
   upstream?.close();
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
@@ -149,7 +151,10 @@ describe("prepareToolspaceMcpSurface", () => {
       selects: ["thirdparty", "files", "opengeni"],
       withActiveTurn: true,
     });
-    const surface = await prepareToolspaceMcpSurface({ deps: makeDeps(200), grant: grantFor(workspaceId, sessionId) });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId),
+    });
     expect(surface).not.toBeNull();
     const names = toolNames(surface!);
     expect(names).toContain("thirdparty__search_documents");
@@ -161,15 +166,24 @@ describe("prepareToolspaceMcpSurface", () => {
 
   test("does not dial upstreams (empty surface) when there is no active turn", async () => {
     if (!available) return;
-    const { workspaceId, sessionId } = await seedSession({ selects: ["thirdparty"], withActiveTurn: false });
-    const surface = await prepareToolspaceMcpSurface({ deps: makeDeps(200), grant: grantFor(workspaceId, sessionId) });
+    const { workspaceId, sessionId } = await seedSession({
+      selects: ["thirdparty"],
+      withActiveTurn: false,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(workspaceId, sessionId),
+    });
     expect(surface!.tools).toHaveLength(0);
     await surface!.close();
   }, 60_000);
 
   test("distinguishes no-active-turn from budget-exhausted on call", async () => {
     if (!available) return;
-    const { workspaceId, sessionId } = await seedSession({ selects: ["thirdparty"], withActiveTurn: true });
+    const { workspaceId, sessionId } = await seedSession({
+      selects: ["thirdparty"],
+      withActiveTurn: true,
+    });
     const deps = makeDeps(1);
     const grant = grantFor(workspaceId, sessionId);
     const surface = await prepareToolspaceMcpSurface({ deps, grant });
@@ -201,9 +215,20 @@ describe("prepareToolspaceMcpSurface", () => {
       toolspaceMaxCallsPerTurn: 200,
       mcpServers: [{ id: "flaky", url: server.url, cacheToolsList: false }],
     });
-    const deps = { settings, db, bus: new MemoryEventBus(), observability } as unknown as ApiRouteDeps;
-    const { workspaceId, sessionId } = await seedSession({ selects: ["flaky"], withActiveTurn: true });
-    const surface = await prepareToolspaceMcpSurface({ deps, grant: grantFor(workspaceId, sessionId) });
+    const deps = {
+      settings,
+      db,
+      bus: new MemoryEventBus(),
+      observability,
+    } as unknown as ApiRouteDeps;
+    const { workspaceId, sessionId } = await seedSession({
+      selects: ["flaky"],
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor(workspaceId, sessionId),
+    });
     const tool = surface!.tools.find((t) => t.name === "flaky__search_documents")!;
     expect(tool).toBeDefined();
 

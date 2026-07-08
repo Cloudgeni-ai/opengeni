@@ -200,7 +200,11 @@ export function ActivityDisclosure({
   const dataStatus = cancelled ? "cancelled" : failed ? "failed" : undefined;
 
   if (!hasBody) {
-    return <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>{inner}</div>;
+    return (
+      <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>
+        {inner}
+      </div>
+    );
   }
 
   return (
@@ -308,18 +312,26 @@ export function TermBlock({
     <div
       className={cn(
         "min-w-0 border-l-2 pl-3",
-        failed ? "border-og-status-failed/50" : live ? "border-og-status-running/50" : "border-og-border",
+        failed
+          ? "border-og-status-failed/50"
+          : live
+            ? "border-og-status-running/50"
+            : "border-og-border",
       )}
     >
       {showHeader ? (
         <div className="flex items-center gap-2 pb-1">
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
-            <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">{command}</span>
+            <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">
+              {command}
+            </span>
           ) : (
             <span className="flex-1" />
           )}
-          {workdir ? <span className="shrink-0 font-og-mono text-og-xs text-og-fg-subtle">{workdir}</span> : null}
+          {workdir ? (
+            <span className="shrink-0 font-og-mono text-og-xs text-og-fg-subtle">{workdir}</span>
+          ) : null}
         </div>
       ) : null}
       {empty ? (
@@ -327,7 +339,9 @@ export function TermBlock({
       ) : (
         <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5 text-og-fg-muted">
           {shown}
-          {live ? <span className="ml-px inline-block h-[1em] w-[2px] translate-y-[2px] animate-og-blink bg-og-accent align-middle" /> : null}
+          {live ? (
+            <span className="ml-px inline-block h-[1em] w-[2px] translate-y-[2px] animate-og-blink bg-og-accent align-middle" />
+          ) : null}
         </pre>
       )}
       {showMore ? (
@@ -345,7 +359,15 @@ export function TermBlock({
 
 /* --- generic payload block -------------------------------------------------- */
 
-export function PayloadBlock({ label, value, failed }: { label: string; value: unknown; failed?: boolean | undefined }) {
+export function PayloadBlock({
+  label,
+  value,
+  failed,
+}: {
+  label: string;
+  value: unknown;
+  failed?: boolean | undefined;
+}) {
   const text = typeof value === "string" ? value : stringifyPayload(value);
   if (!text || text.trim() === "") {
     return null;
@@ -354,8 +376,15 @@ export function PayloadBlock({ label, value, failed }: { label: string; value: u
   // left accent (red when the call failed, otherwise a calm neutral rule), so a
   // payload reads as detail hanging off the row, never a nested card.
   return (
-    <div className={cn("min-w-0 border-l-2 pl-3", failed ? "border-og-status-failed/50" : "border-og-border")}>
-      <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{label}</p>
+    <div
+      className={cn(
+        "min-w-0 border-l-2 pl-3",
+        failed ? "border-og-status-failed/50" : "border-og-border",
+      )}
+    >
+      <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+        {label}
+      </p>
       <pre
         className={cn(
           "max-h-64 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5",
@@ -369,7 +398,13 @@ export function PayloadBlock({ label, value, failed }: { label: string; value: u
 }
 
 /** A quiet inline note inside an expanded body (lost output, empty frame, …). */
-export function BodyNote({ children, tone }: { children: ReactNode; tone?: "error" | "muted" | undefined }) {
+export function BodyNote({
+  children,
+  tone,
+}: {
+  children: ReactNode;
+  tone?: "error" | "muted" | undefined;
+}) {
   if (tone === "error") {
     // A quiet error run marked by a 2px red accent — the same flush, frameless
     // language as the payload/output blocks, not a filled callout box.
@@ -398,7 +433,12 @@ const MEDIA_BOX = "h-7 w-[52px] shrink-0 rounded-og-xs border border-og-border";
  */
 export function MediaSkeleton() {
   return (
-    <span className={cn(MEDIA_BOX, "relative inline-flex items-center justify-center overflow-hidden bg-og-surface-2")}>
+    <span
+      className={cn(
+        MEDIA_BOX,
+        "relative inline-flex items-center justify-center overflow-hidden bg-og-surface-2",
+      )}
+    >
       <span className="absolute inset-0 animate-og-pulse bg-og-surface-3/50" />
       <CameraIcon className="relative size-3.5 text-og-fg-subtle" />
     </span>
@@ -421,7 +461,15 @@ export function MediaEmpty() {
  * Outside one it degrades to a plain, non-interactive image — never a dead
  * "Expand" button that announces an action it cannot perform.
  */
-export function Thumbnail({ src, caption, alt = "screenshot" }: { src: string; caption?: string | undefined; alt?: string }) {
+export function Thumbnail({
+  src,
+  caption,
+  alt = "screenshot",
+}: {
+  src: string;
+  caption?: string | undefined;
+  alt?: string;
+}) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   if (failed) {
@@ -473,13 +521,28 @@ export function Thumbnail({ src, caption, alt = "screenshot" }: { src: string; c
  * so it never breaks the row layout. Like {@link Thumbnail}, it degrades to a
  * plain image outside a `LightboxProvider`.
  */
-export function ScreenshotFigure({ src, caption, alt = "screenshot" }: { src: string; caption?: string | undefined; alt?: string }) {
+export function ScreenshotFigure({
+  src,
+  caption,
+  alt = "screenshot",
+}: {
+  src: string;
+  caption?: string | undefined;
+  alt?: string;
+}) {
   const lightbox = useLightboxOptional();
   const [failed, setFailed] = useState(false);
   const surface = "block w-full overflow-hidden rounded-og-md border border-og-border bg-og-bg";
   // A plain <img>, like {@link Thumbnail} — a framework-agnostic SDK has no host
   // Image component to defer to.
-  const img = <img src={src} alt={alt} onError={() => setFailed(true)} className="max-h-80 w-full object-contain" />;
+  const img = (
+    <img
+      src={src}
+      alt={alt}
+      onError={() => setFailed(true)}
+      className="max-h-80 w-full object-contain"
+    />
+  );
   return (
     <figure className="m-0 min-w-0">
       {failed ? (
@@ -487,13 +550,22 @@ export function ScreenshotFigure({ src, caption, alt = "screenshot" }: { src: st
           image unavailable
         </div>
       ) : lightbox ? (
-        <button type="button" onClick={() => lightbox.open(src, caption)} className={surface} aria-label="Expand screenshot">
+        <button
+          type="button"
+          onClick={() => lightbox.open(src, caption)}
+          className={surface}
+          aria-label="Expand screenshot"
+        >
           {img}
         </button>
       ) : (
         <div className={surface}>{img}</div>
       )}
-      {caption ? <figcaption className="mt-1.5 font-og-mono text-og-xs text-og-fg-subtle">{caption}</figcaption> : null}
+      {caption ? (
+        <figcaption className="mt-1.5 font-og-mono text-og-xs text-og-fg-subtle">
+          {caption}
+        </figcaption>
+      ) : null}
     </figure>
   );
 }

@@ -108,7 +108,12 @@ export function wrapChannelABoxWithRouting(
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
       return sandbox
-        ? { id: sandbox.id, kind: sandbox.kind, name: sandbox.name, enrollmentId: sandbox.enrollmentId }
+        ? {
+            id: sandbox.id,
+            kind: sandbox.kind,
+            name: sandbox.name,
+            enrollmentId: sandbox.enrollmentId,
+          }
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),

@@ -101,10 +101,6 @@ function leafOf(path: string): string {
 }
 
 /** Join a parent dir with a leaf name (handles the root "" parent). */
-function joinPath(parent: string, name: string): string {
-  return parent ? `${parent}/${name}` : name;
-}
-
 /** Stable sibling ordering: dirs before files, then case-insensitive by name —
  *  matches a typical depth-1 list so an optimistic insert lands where a real
  *  re-list would put it (no jump when the server reconciles). */
@@ -151,7 +147,11 @@ const GIT_STATUS_TO_TREE: Partial<Record<GitFileStatusCode, FileTreeStatus>> = {
 };
 
 /** Replace the children of `targetPath` within the tree (immutably). */
-function replaceChildren(nodes: FileTreeNode[], targetPath: string, children: FileTreeNode[]): FileTreeNode[] {
+function replaceChildren(
+  nodes: FileTreeNode[],
+  targetPath: string,
+  children: FileTreeNode[],
+): FileTreeNode[] {
   return nodes.map((node) => {
     if (node.path === targetPath) {
       return { ...node, children };
@@ -350,7 +350,10 @@ export function useSandboxFiles(
         const statusChanged = (node.status ?? undefined) !== (wantStatus ?? undefined);
         if (!childrenChanged && !statusChanged) return node;
         changed = true;
-        const next: FileTreeNode = { ...node, ...(node.children ? { children: nextChildren } : {}) };
+        const next: FileTreeNode = {
+          ...node,
+          ...(node.children ? { children: nextChildren } : {}),
+        };
         if (wantStatus) next.status = wantStatus;
         else delete next.status;
         return next;
@@ -385,7 +388,9 @@ export function useSandboxFiles(
       // in new entries WITHOUT collapsing the dirs the user already expanded (and,
       // via the identity-preserving merge, WITHOUT remounting unchanged rows — the
       // no-flicker cold→warm reconcile). On a first (empty) load this is a plain set.
-      setTree((prev) => applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)));
+      setTree((prev) =>
+        applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
+      );
       // Live data is now serving — flip the source off the capture snapshot.
       setSource("live");
     } catch (cause) {
@@ -410,7 +415,9 @@ export function useSandboxFiles(
       }
       statusRef.current = overlay;
       const children = (manifest.treeIndex.children ?? []).map(fsNodeToTree);
-      setTree((prev) => applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)));
+      setTree((prev) =>
+        applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
+      );
       setSource("capture");
       setError(null);
     },
@@ -474,7 +481,9 @@ export function useSandboxFiles(
         else
           setTree((prev) => {
             const existing = findNodeByPath(prev, path);
-            const merged = existing?.children ? mergeChildren(existing.children, children) : children;
+            const merged = existing?.children
+              ? mergeChildren(existing.children, children)
+              : children;
             return applyStatus(replaceChildren(prev, path, merged));
           });
       } catch {
@@ -493,7 +502,7 @@ export function useSandboxFiles(
   // refresh. The returned promise resolves/rejects with the op so callers (the
   // editor save, inline rename) can still await it.
   const runOptimistic = useCallback(
-    async <T,>(
+    async <T>(
       opName: string,
       apply: (nodes: FileTreeNode[]) => FileTreeNode[],
       op: () => Promise<T>,
@@ -694,7 +703,8 @@ export function useSandboxFiles(
         if (!payload || typeof payload !== "object") continue;
         // Suppress our own writes: the optimistic tree already shows them.
         if (payload.source === "write") continue;
-        if (typeof payload.revision === "number" && ownRevisionsRef.current.has(payload.revision)) continue;
+        if (typeof payload.revision === "number" && ownRevisionsRef.current.has(payload.revision))
+          continue;
         for (const change of payload.changes ?? []) {
           pendingParentsRef.current.add(parentOf(change.path));
           if (change.oldPath) pendingParentsRef.current.add(parentOf(change.oldPath));
@@ -705,13 +715,19 @@ export function useSandboxFiles(
         // A git.changed our own write triggered (commit/stage from the agent is
         // external; a checkout we caused isn't — but we don't cause git ops here,
         // so any git.changed is external) → re-tint.
-        if (payload && typeof payload === "object" && typeof payload.revision === "number"
-          && ownRevisionsRef.current.has(payload.revision)) continue;
+        if (
+          payload &&
+          typeof payload === "object" &&
+          typeof payload.revision === "number" &&
+          ownRevisionsRef.current.has(payload.revision)
+        )
+          continue;
         pendingGitRef.current = true;
       }
     }
     // Advance the high-water mark past everything we've folded.
-    for (const event of events) if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
+    for (const event of events)
+      if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
     if (!sawNew) return;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);

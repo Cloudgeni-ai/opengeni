@@ -29,13 +29,26 @@ import type { ClientConfig, ClientModel } from "@/types";
  */
 type ModelChoice = { id: string; label: string; providerLabel: string | null };
 
-function modelChoices(config: ClientConfig | null, selected: string, extraModels: ClientModel[] = []): ModelChoice[] {
+function modelChoices(
+  config: ClientConfig | null,
+  selected: string,
+  extraModels: ClientModel[] = [],
+): ModelChoice[] {
   // extraModels are workspace-scoped (e.g. a connected Codex subscription's models)
   // appended to the host's deployment list; provider grouping keeps them distinct.
   const rich = [...(config?.models ?? []), ...extraModels];
-  const choices: ModelChoice[] = rich.length > 0
-    ? rich.map((model) => ({ id: model.id, label: model.label, providerLabel: model.providerLabel }))
-    : (config?.allowedModels ?? [selected]).map((id) => ({ id, label: displayModel(id), providerLabel: null }));
+  const choices: ModelChoice[] =
+    rich.length > 0
+      ? rich.map((model) => ({
+          id: model.id,
+          label: model.label,
+          providerLabel: model.providerLabel,
+        }))
+      : (config?.allowedModels ?? [selected]).map((id) => ({
+          id,
+          label: displayModel(id),
+          providerLabel: null,
+        }));
   // Guarantee the active selection is always offered, even if the host has since
   // curated it out of the exposed list (mirrors the old `[props.model]` fallback).
   if (!choices.some((choice) => choice.id === selected)) {
@@ -73,21 +86,36 @@ export function ModelPicker(props: {
           aria-label="Model and effort"
           className="h-8 max-w-[14rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
-          <span className="truncate font-medium text-fg">{selectedModelLabel(choices, props.model)}</span>
+          <span className="truncate font-medium text-fg">
+            {selectedModelLabel(choices, props.model)}
+          </span>
           <span>{labelEffort(props.effort)}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-56 rounded-xl border-border bg-surface p-2 shadow-xl">
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">Effort</DropdownMenuLabel>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        className="w-56 rounded-xl border-border bg-surface p-2 shadow-xl"
+      >
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
+          Effort
+        </DropdownMenuLabel>
         {effortOptions.map((option) => (
-          <DropdownMenuItem key={option} onSelect={() => props.onEffortChange(option)} className="h-8 cursor-pointer rounded-md px-2 text-sm">
+          <DropdownMenuItem
+            key={option}
+            onSelect={() => props.onEffortChange(option)}
+            className="h-8 cursor-pointer rounded-md px-2 text-sm"
+          >
             <span>{labelEffort(option)}</span>
             {option === props.effort ? <CheckIcon className="ml-auto size-4" /> : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator className="my-2 bg-border" />
-        <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">Model</DropdownMenuLabel>
+        <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">
+          Model
+        </DropdownMenuLabel>
         {choices.map((choice, index) => (
           <ModelChoiceRow
             key={choice.id}
@@ -95,7 +123,10 @@ export function ModelPicker(props: {
             // Repeat a provider heading only when it changes from the row above,
             // so multi-provider lists read as grouped sections; single-provider
             // (and the flat allowedModels fallback) shows no heading at all.
-            showProviderLabel={choice.providerLabel !== null && choice.providerLabel !== choices[index - 1]?.providerLabel}
+            showProviderLabel={
+              choice.providerLabel !== null &&
+              choice.providerLabel !== choices[index - 1]?.providerLabel
+            }
             selected={choice.id === props.model}
             onSelect={() => props.onModelChange(choice.id)}
           />
@@ -118,7 +149,10 @@ function ModelChoiceRow(props: {
           {props.choice.providerLabel}
         </DropdownMenuLabel>
       ) : null}
-      <DropdownMenuItem onSelect={props.onSelect} className="h-8 cursor-pointer rounded-md px-2 text-sm">
+      <DropdownMenuItem
+        onSelect={props.onSelect}
+        className="h-8 cursor-pointer rounded-md px-2 text-sm"
+      >
         <span className="truncate">{props.choice.label}</span>
         {props.selected ? <CheckIcon className="ml-auto size-4 shrink-0" /> : null}
       </DropdownMenuItem>
@@ -166,12 +200,21 @@ export function EnabledMcpToolPicker(props: {
           className={pillClass(selectedCount > 0)}
         >
           <PlugIcon className="size-3.5" />
-          <span className="truncate">{selectedCount > 0 ? `${selectedCount} tool${selectedCount === 1 ? "" : "s"}` : "Tools"}</span>
+          <span className="truncate">
+            {selectedCount > 0 ? `${selectedCount} tool${selectedCount === 1 ? "" : "s"}` : "Tools"}
+          </span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-72 rounded-xl border-border bg-surface p-2 shadow-xl">
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">Enabled MCPs</DropdownMenuLabel>
+      <DropdownMenuContent
+        align="start"
+        side="top"
+        sideOffset={8}
+        className="w-72 rounded-xl border-border bg-surface p-2 shadow-xl"
+      >
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
+          Enabled MCPs
+        </DropdownMenuLabel>
         {props.servers.map((server) => (
           <DropdownMenuItem
             key={server.id}
@@ -183,7 +226,9 @@ export function EnabledMcpToolPicker(props: {
             className="h-9 cursor-pointer rounded-md px-2 text-sm"
           >
             <span className="min-w-0 flex-1 truncate">{server.name}</span>
-            {props.selectedIds.has(server.id) ? <CheckIcon className="ml-2 size-4 shrink-0" /> : null}
+            {props.selectedIds.has(server.id) ? (
+              <CheckIcon className="ml-2 size-4 shrink-0" />
+            ) : null}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

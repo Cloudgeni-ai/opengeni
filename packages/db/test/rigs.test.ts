@@ -51,7 +51,10 @@ async function twoWorkspacesOneAccount(): Promise<{ accountId: string; a: string
   return { accountId: account!.id, a: a!.id, b: b!.id };
 }
 
-async function insertSessionForRig(ws: { accountId: string; workspaceId: string }, rigId: string): Promise<string> {
+async function insertSessionForRig(
+  ws: { accountId: string; workspaceId: string },
+  rigId: string,
+): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into sessions (account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id, rig_id)
     values (${ws.accountId}, ${ws.workspaceId}, 'hello', 'gpt-5.5', 'none', gen_random_uuid(), ${rigId})
@@ -74,7 +77,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
@@ -123,8 +128,15 @@ describe("rig CRUD lifecycle", () => {
   test("update touches name/description only; delete removes the rig + versions", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "r1" });
-    const updated = await updateRig(db, ws.workspaceId, rig.id, { name: "r1-renamed", description: "now described" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "r1",
+    });
+    const updated = await updateRig(db, ws.workspaceId, rig.id, {
+      name: "r1-renamed",
+      description: "now described",
+    });
     expect(updated.name).toBe("r1-renamed");
     expect(updated.description).toBe("now described");
     // The active version is untouched by an update.
@@ -143,10 +155,16 @@ describe("rig version invariants", () => {
   test("createRigVersion mints strictly-monotonic versions under concurrency", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "monotonic" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "monotonic",
+    });
     // 8 concurrent mints. The per-rig row lock must serialize numbering.
     const results = await Promise.all(
-      Array.from({ length: 8 }, (_unused, i) => createRigVersion(db, ws.workspaceId, rig.id, { setupScript: `echo ${i}` })),
+      Array.from({ length: 8 }, (_unused, i) =>
+        createRigVersion(db, ws.workspaceId, rig.id, { setupScript: `echo ${i}` }),
+      ),
     );
     const versions = results.map((v) => v.version).sort((a, b) => a - b);
     // Version 1 was minted by createRig; the 8 new ones are 2..9, all distinct.
@@ -157,7 +175,11 @@ describe("rig version invariants", () => {
   test("concurrent activation ends with EXACTLY one active version", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "single-active" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "single-active",
+    });
     const v2 = await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "echo 2" });
     const v3 = await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "echo 3" });
     const v1 = (await listRigVersions(db, ws.workspaceId, rig.id)).find((v) => v.version === 1)!;
@@ -186,11 +208,21 @@ describe("rig version invariants", () => {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "immutable",
-      initialVersion: { image: "img:1", setupScript: "setup-one", checks: [{ name: "c", command: "true" }] },
+      initialVersion: {
+        image: "img:1",
+        setupScript: "setup-one",
+        checks: [{ name: "c", command: "true" }],
+      },
     });
     const v1Id = rig.activeVersion!.id;
     const before = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
-    const v2 = await createRigVersion(db, ws.workspaceId, rig.id, { image: "img:2", setupScript: "setup-two" }, { activate: true });
+    const v2 = await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { image: "img:2", setupScript: "setup-two" },
+      { activate: true },
+    );
 
     // v1 is now inactive but its CONTENT is byte-identical to before.
     const afterV1 = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
@@ -222,7 +254,11 @@ describe("rig change lifecycle", () => {
   test("create + list + get + guarded status transitions", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "changes" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "changes",
+    });
     const change = await createRigChange(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -259,16 +295,22 @@ describe("rig change lifecycle", () => {
     });
 
     // merged is terminal.
-    await expect(updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "rejected" }))
-      .rejects.toBeInstanceOf(RigChangeTransitionError);
-    await expect(updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "merged" }))
-      .rejects.toBeInstanceOf(RigChangeTransitionError);
+    await expect(
+      updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "rejected" }),
+    ).rejects.toBeInstanceOf(RigChangeTransitionError);
+    await expect(
+      updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "merged" }),
+    ).rejects.toBeInstanceOf(RigChangeTransitionError);
   });
 
   test("change promotion rejects a stale active base without minting", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "stale-base" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "stale-base",
+    });
     const baseVersionId = rig.activeVersion!.id;
     const change = await createRigChange(db, {
       accountId: ws.accountId,
@@ -279,12 +321,20 @@ describe("rig change lifecycle", () => {
       payload: { command: "touch /opt/tool" },
       proposedBy: "session:s1",
     });
-    await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "new active" }, { activate: true });
+    await createRigVersion(
+      db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "new active" },
+      { activate: true },
+    );
 
-    await expect(createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
-      expectedActiveVersionId: baseVersionId,
-      setupScript: "base plus append",
-    })).rejects.toBeInstanceOf(RigActiveVersionChangedError);
+    await expect(
+      createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
+        expectedActiveVersionId: baseVersionId,
+        setupScript: "base plus append",
+      }),
+    ).rejects.toBeInstanceOf(RigActiveVersionChangedError);
 
     const versions = await listRigVersions(db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
@@ -294,7 +344,11 @@ describe("rig change lifecycle", () => {
   test("concurrent change promotion mints exactly one version", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "one-promote" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "one-promote",
+    });
     const baseVersionId = rig.activeVersion!.id;
     const change = await createRigChange(db, {
       accountId: ws.accountId,
@@ -306,11 +360,12 @@ describe("rig change lifecycle", () => {
       proposedBy: "user:m",
     });
 
-    const promote = () => createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
-      expectedActiveVersionId: baseVersionId,
-      setupScript: "echo v2",
-      changelog: "verified edit",
-    });
+    const promote = () =>
+      createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
+        expectedActiveVersionId: baseVersionId,
+        setupScript: "echo v2",
+        changelog: "verified edit",
+      });
     const results = await Promise.allSettled([promote(), promote()]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
@@ -319,14 +374,29 @@ describe("rig change lifecycle", () => {
     expect(versions).toHaveLength(2);
     const stored = await getRigChange(db, ws.workspaceId, change.id);
     expect(stored?.status).toBe("merged");
-    expect(stored?.resultVersionId).toBe((results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{ version: { id: string } }>).value.version.id);
+    expect(stored?.resultVersionId).toBe(
+      (
+        results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{
+          version: { id: string };
+        }>
+      ).value.version.id,
+    );
   });
 
   test("list/get expose active version verification health", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const neverVerified = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "health-unknown" });
-    const verifiedRig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "health-passing", initialVersion: { setupScript: "mkdir -p /opt/health" } });
+    const neverVerified = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "health-unknown",
+    });
+    const verifiedRig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "health-passing",
+      initialVersion: { setupScript: "mkdir -p /opt/health" },
+    });
     const change = await createRigChange(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -345,22 +415,32 @@ describe("rig change lifecycle", () => {
         checkResults: [],
       },
     });
-    const promoted = await createRigVersionForChangePromotion(db, ws.workspaceId, verifiedRig.id, change.id, {
-      expectedActiveVersionId: verifiedRig.activeVersion!.id,
-      setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
-    });
+    const promoted = await createRigVersionForChangePromotion(
+      db,
+      ws.workspaceId,
+      verifiedRig.id,
+      change.id,
+      {
+        expectedActiveVersionId: verifiedRig.activeVersion!.id,
+        setupScript: "mkdir -p /opt/health\ntouch /opt/health/tool",
+      },
+    );
 
     const listed = await listRigs(db, ws.workspaceId);
     expect(listed.find((rig) => rig.id === neverVerified.id)?.activeVersionHealth).toEqual({
       checkHealth: "unknown",
       lastVerifiedAt: null,
     });
-    expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id).toBe(promoted.version.id);
+    expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersion?.id).toBe(
+      promoted.version.id,
+    );
     expect(listed.find((rig) => rig.id === verifiedRig.id)?.activeVersionHealth).toEqual({
       checkHealth: "passing",
       lastVerifiedAt: "2026-07-08T00:01:00.000Z",
     });
-    expect((await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth).toBe("passing");
+    expect(
+      (await getRig(db, ws.workspaceId, verifiedRig.id))?.activeVersionHealth?.checkHealth,
+    ).toBe("passing");
   });
 });
 
@@ -368,7 +448,11 @@ describe("rig delete guard", () => {
   test("countSessionsUsingRig reflects referencing sessions", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "referenced" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "referenced",
+    });
     expect(await countSessionsUsingRig(db, ws.workspaceId, rig.id)).toBe(0);
     await insertSessionForRig(ws, rig.id);
     expect(await countSessionsUsingRig(db, ws.workspaceId, rig.id)).toBe(1);
@@ -377,13 +461,23 @@ describe("rig delete guard", () => {
   test("deleteRigIfNoActiveSessions refuses active sessions under the rig lock", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "active-ref" });
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "active-ref",
+    });
     const sessionId = await insertSessionForRig(ws, rig.id);
-    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({ deleted: false, activeSessionCount: 1 });
+    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({
+      deleted: false,
+      activeSessionCount: 1,
+    });
     expect(await getRig(db, ws.workspaceId, rig.id)).not.toBeNull();
 
     await shared!.admin`update sessions set status = 'cancelled' where id = ${sessionId}`;
-    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({ deleted: true, activeSessionCount: 0 });
+    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({
+      deleted: true,
+      activeSessionCount: 0,
+    });
     expect(await getRig(db, ws.workspaceId, rig.id)).toBeNull();
   });
 });

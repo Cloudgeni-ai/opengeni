@@ -54,7 +54,10 @@ export type MintStreamTokenInput = {
  * envelope (`ogs_` prefix). The token is RECORDED against the holder row by the
  * caller and is NEVER appended to the data-plane URL as a query param.
  */
-export async function mintStreamToken(secret: string, input: MintStreamTokenInput): Promise<string> {
+export async function mintStreamToken(
+  secret: string,
+  input: MintStreamTokenInput,
+): Promise<string> {
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const ttlSeconds = input.ttlSeconds ?? STREAM_TOKEN_DEFAULT_TTL_SECONDS;
   const payload: StreamTokenPayloadType = StreamTokenPayload.parse({
@@ -87,4 +90,7 @@ export async function verifyStreamToken(
   return verifyStreamTokenEnvelope(secret, token, nowSeconds);
 }
 
-export { StreamTokenPayload, type StreamTokenPayload as StreamTokenPayloadType } from "@opengeni/contracts";
+export {
+  StreamTokenPayload,
+  type StreamTokenPayload as StreamTokenPayloadType,
+} from "@opengeni/contracts";

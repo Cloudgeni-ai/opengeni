@@ -19,7 +19,12 @@ describe("queueFromTurns", () => {
       fakeTurn({ id: "tie-early", position: 3, createdAt: "2026-06-12T00:01:00.000Z" }),
       fakeTurn({ id: "running", status: "running", position: 0 }),
     ];
-    expect(queueFromTurns(turns).map((turn) => turn.id)).toEqual(["a", "b", "tie-early", "tie-late"]);
+    expect(queueFromTurns(turns).map((turn) => turn.id)).toEqual([
+      "a",
+      "b",
+      "tie-early",
+      "tie-late",
+    ]);
   });
 });
 
@@ -48,13 +53,20 @@ describe("applyTurnEdit", () => {
 
 describe("applyTurnReorder", () => {
   test("assigns positions 1..n in the requested order, like the server", () => {
-    const turns = [fakeTurn({ id: "a", position: 1 }), fakeTurn({ id: "b", position: 2 }), fakeTurn({ id: "c", position: 3 })];
+    const turns = [
+      fakeTurn({ id: "a", position: 1 }),
+      fakeTurn({ id: "b", position: 2 }),
+      fakeTurn({ id: "c", position: 3 }),
+    ];
     const next = applyTurnReorder(turns, ["c", "a", "b"]);
     expect(queueFromTurns(next).map((turn) => turn.id)).toEqual(["c", "a", "b"]);
   });
 
   test("leaves non-queued and unlisted turns untouched", () => {
-    const turns = [fakeTurn({ id: "running", status: "running", position: 9 }), fakeTurn({ id: "a", position: 5 })];
+    const turns = [
+      fakeTurn({ id: "running", status: "running", position: 9 }),
+      fakeTurn({ id: "a", position: 5 }),
+    ];
     const next = applyTurnReorder(turns, ["a", "running"]);
     expect(next.find((turn) => turn.id === "running")?.position).toBe(9);
     expect(next.find((turn) => turn.id === "a")?.position).toBe(1);

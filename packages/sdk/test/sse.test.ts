@@ -4,9 +4,9 @@ import { bytesStream, collect } from "./helpers";
 
 describe("parseSseStream", () => {
   test("parses id, event, and data fields", async () => {
-    const messages = await collect(parseSseStream(bytesStream([
-      'id: 7\nevent: agent.message.delta\ndata: {"a":1}\n\n',
-    ])));
+    const messages = await collect(
+      parseSseStream(bytesStream(['id: 7\nevent: agent.message.delta\ndata: {"a":1}\n\n'])),
+    );
     expect(messages).toEqual([{ id: "7", event: "agent.message.delta", data: '{"a":1}' }]);
   });
 
@@ -31,9 +31,9 @@ describe("parseSseStream", () => {
   });
 
   test("ignores comment lines and blocks without data", async () => {
-    const messages = await collect(parseSseStream(bytesStream([
-      ": connected\n\nid: 9\n\ndata: real\n\n",
-    ])));
+    const messages = await collect(
+      parseSseStream(bytesStream([": connected\n\nid: 9\n\ndata: real\n\n"])),
+    );
     expect(messages).toEqual([{ data: "real" }]);
   });
 
@@ -43,9 +43,9 @@ describe("parseSseStream", () => {
   });
 
   test("discards a block truncated before its blank line", async () => {
-    const messages = await collect(parseSseStream(bytesStream([
-      "data: complete\n\nid: 5\ndata: {\"trunc",
-    ])));
+    const messages = await collect(
+      parseSseStream(bytesStream(['data: complete\n\nid: 5\ndata: {"trunc'])),
+    );
     expect(messages).toEqual([{ data: "complete" }]);
   });
 

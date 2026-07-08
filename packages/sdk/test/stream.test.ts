@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, OpenGeniStreamError } from "../src/errors";
-import { streamSessionEvents, type SessionEventStreamTransport, type StreamConnectionState } from "../src/stream";
+import {
+  streamSessionEvents,
+  type SessionEventStreamTransport,
+  type StreamConnectionState,
+} from "../src/stream";
 import type { SessionEvent } from "../src/types";
 import { bytesStream, collect, hangingBytesStream, makeEvent, sseBlock } from "./helpers";
 
-type Connection =
-  | { events: SessionEvent[]; hang?: boolean; raw?: string }
-  | { error: unknown };
+type Connection = { events: SessionEvent[]; hang?: boolean; raw?: string } | { error: unknown };
 
 /**
  * Scripted transport: each openStream call consumes the next connection
@@ -16,7 +18,10 @@ type Connection =
 function scriptedTransport(
   connections: Connection[],
   replayStore: SessionEvent[] = [],
-): SessionEventStreamTransport & { openedAfter: number[]; listCalls: Array<{ after: number; limit: number }> } {
+): SessionEventStreamTransport & {
+  openedAfter: number[];
+  listCalls: Array<{ after: number; limit: number }>;
+} {
   let next = 0;
   const openedAfter: number[] = [];
   const listCalls: Array<{ after: number; limit: number }> = [];
@@ -72,7 +77,10 @@ describe("streamSessionEvents", () => {
       { events: [makeEvent(3), makeEvent(4)], hang: true },
     ]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       if (event.sequence === 4) {
         controller.abort();
@@ -90,7 +98,10 @@ describe("streamSessionEvents", () => {
       { events: [makeEvent(1), makeEvent(2), makeEvent(3)], hang: true },
     ]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       if (event.sequence === 3) {
         controller.abort();
@@ -101,9 +112,12 @@ describe("streamSessionEvents", () => {
 
   test("backfills a gap inside one connection from the replay endpoint", async () => {
     const replayStore = [makeEvent(1), makeEvent(2), makeEvent(3), makeEvent(4), makeEvent(5)];
-    const transport = scriptedTransport([
-      { events: [makeEvent(1), makeEvent(5)] }, // live stream skipped 2..4
-    ], replayStore);
+    const transport = scriptedTransport(
+      [
+        { events: [makeEvent(1), makeEvent(5)] }, // live stream skipped 2..4
+      ],
+      replayStore,
+    );
     const events = await collect(streamSessionEvents(transport, { reconnect: false }));
     expect(sequences(events)).toEqual([1, 2, 3, 4, 5]);
     expect(transport.listCalls).toEqual([{ after: 1, limit: 3 }]);
@@ -112,17 +126,19 @@ describe("streamSessionEvents", () => {
   test("fails loudly when the replay endpoint skips over a missing sequence", async () => {
     // The replay endpoint has 4 and 5 but not 2 and 3: skipping ahead would
     // silently violate the gap-free guarantee, so the stream must error.
-    const transport = scriptedTransport([
-      { events: [makeEvent(1), makeEvent(5)] },
-    ], [makeEvent(1), makeEvent(4), makeEvent(5)]);
+    const transport = scriptedTransport(
+      [{ events: [makeEvent(1), makeEvent(5)] }],
+      [makeEvent(1), makeEvent(4), makeEvent(5)],
+    );
     const iterator = streamSessionEvents(transport, { reconnect: false });
     await expect(collect(iterator)).rejects.toBeInstanceOf(OpenGeniStreamError);
   });
 
   test("fails loudly when a gap cannot be backfilled", async () => {
-    const transport = scriptedTransport([
-      { events: [makeEvent(1), makeEvent(5)] },
-    ], [] /* replay store is empty: the gap is unrecoverable */);
+    const transport = scriptedTransport(
+      [{ events: [makeEvent(1), makeEvent(5)] }],
+      [] /* replay store is empty: the gap is unrecoverable */,
+    );
     const iterator = streamSessionEvents(transport, { reconnect: false });
     await expect(collect(iterator)).rejects.toBeInstanceOf(OpenGeniStreamError);
   });
@@ -136,7 +152,10 @@ describe("streamSessionEvents", () => {
       { events: [makeEvent(2)], hang: true },
     ]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       if (event.sequence === 2) {
         controller.abort();
@@ -172,7 +191,11 @@ describe("streamSessionEvents", () => {
       { events: [makeEvent(2)], hang: true },
     ]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, maxReconnectAttempts: 1, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      maxReconnectAttempts: 1,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       if (event.sequence === 2) {
         controller.abort();
@@ -185,7 +208,10 @@ describe("streamSessionEvents", () => {
     const controller = new AbortController();
     const transport = scriptedTransport([{ events: [makeEvent(1)], hang: true }]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       controller.abort();
     }
@@ -198,7 +224,10 @@ describe("streamSessionEvents", () => {
     // when the consumer aborts after seeing 1.
     const transport = scriptedTransport([{ events: [makeEvent(1), makeEvent(2), makeEvent(3)] }]);
     const seen: SessionEvent[] = [];
-    for await (const event of streamSessionEvents(transport, { ...FAST, signal: controller.signal })) {
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
       seen.push(event);
       controller.abort();
     }

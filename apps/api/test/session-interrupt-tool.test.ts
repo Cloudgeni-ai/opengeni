@@ -26,8 +26,18 @@ import * as eventsMod from "@opengeni/events";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 // ── recorded interactions of the mocked seams ────────────────────────────────
-type AppendCall = { workspaceId: string; sessionId: string; events: Array<{ type: string; payload?: unknown }> };
-type SignalCall = { accountId: string; workspaceId: string; sessionId: string; eventId: string; workflowId: string };
+type AppendCall = {
+  workspaceId: string;
+  sessionId: string;
+  events: Array<{ type: string; payload?: unknown }>;
+};
+type SignalCall = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  eventId: string;
+  workflowId: string;
+};
 
 const appendCalls: AppendCall[] = [];
 const requireSessionCalls: Array<{ workspaceId: string; sessionId: string }> = [];
@@ -48,13 +58,27 @@ beforeAll(async () => {
   // process-global, non-restoring `mock.module`.
   spyOn(dbMod, "requireSession").mockImplementation(async (_db, workspaceId, sessionId) => {
     requireSessionCalls.push({ workspaceId, sessionId });
-    return { id: sessionId, workspaceId, status: "running" } as unknown as Awaited<ReturnType<typeof dbMod.requireSession>>;
+    return { id: sessionId, workspaceId, status: "running" } as unknown as Awaited<
+      ReturnType<typeof dbMod.requireSession>
+    >;
   });
-  spyOn(eventsMod, "appendAndPublishEvents").mockImplementation(async (_db, _bus, workspaceId, sessionId, events) => {
-    appendCalls.push({ workspaceId, sessionId, events: events as AppendCall["events"] });
-    // Return a persisted-event shape carrying the id the handler must reuse.
-    return [{ id: APPENDED_EVENT_ID, workspaceId, sessionId, sequence: 1, type: events[0]?.type, payload: events[0]?.payload ?? {}, occurredAt: new Date().toISOString() }] as unknown as Awaited<ReturnType<typeof eventsMod.appendAndPublishEvents>>;
-  });
+  spyOn(eventsMod, "appendAndPublishEvents").mockImplementation(
+    async (_db, _bus, workspaceId, sessionId, events) => {
+      appendCalls.push({ workspaceId, sessionId, events: events as AppendCall["events"] });
+      // Return a persisted-event shape carrying the id the handler must reuse.
+      return [
+        {
+          id: APPENDED_EVENT_ID,
+          workspaceId,
+          sessionId,
+          sequence: 1,
+          type: events[0]?.type,
+          payload: events[0]?.payload ?? {},
+          occurredAt: new Date().toISOString(),
+        },
+      ] as unknown as Awaited<ReturnType<typeof eventsMod.appendAndPublishEvents>>;
+    },
+  );
   ({ buildOpenGeniMcpServer } = await import("../src/mcp/server"));
 });
 
@@ -105,8 +129,17 @@ function depsWithSignalSpy(): ApiRouteDeps {
 }
 
 /** The SDK stores tools in a private `_registeredTools` map keyed by name. */
-function registeredTools(server: unknown): Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }> {
-  return (server as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }> })._registeredTools;
+function registeredTools(
+  server: unknown,
+): Record<string, { handler: (args: unknown, extra: unknown) => Promise<unknown> }> {
+  return (
+    server as {
+      _registeredTools: Record<
+        string,
+        { handler: (args: unknown, extra: unknown) => Promise<unknown> }
+      >;
+    }
+  )._registeredTools;
 }
 
 describe("session_interrupt registration gating", () => {
@@ -129,12 +162,19 @@ describe("session_interrupt registration gating", () => {
 describe("session_interrupt handler", () => {
   test("mode:'steer' appends {reason:'steer'} and signals with the appended event id", async () => {
     const server = buildOpenGeniMcpServer(depsWithSignalSpy(), grantWith(["sessions:control"]));
-    await registeredTools(server)["session_interrupt"]!.handler({ sessionId: TARGET_SESSION_ID, mode: "steer" }, {});
+    await registeredTools(server)["session_interrupt"]!.handler(
+      { sessionId: TARGET_SESSION_ID, mode: "steer" },
+      {},
+    );
 
-    expect(requireSessionCalls).toEqual([{ workspaceId: WORKSPACE_ID, sessionId: TARGET_SESSION_ID }]);
+    expect(requireSessionCalls).toEqual([
+      { workspaceId: WORKSPACE_ID, sessionId: TARGET_SESSION_ID },
+    ]);
     expect(appendCalls).toHaveLength(1);
     expect(appendCalls[0]!.sessionId).toBe(TARGET_SESSION_ID);
-    expect(appendCalls[0]!.events).toEqual([{ type: "user.interrupt", payload: { reason: "steer" } }]);
+    expect(appendCalls[0]!.events).toEqual([
+      { type: "user.interrupt", payload: { reason: "steer" } },
+    ]);
 
     expect(signalCalls).toHaveLength(1);
     expect(signalCalls[0]).toMatchObject({
@@ -149,7 +189,10 @@ describe("session_interrupt handler", () => {
 
   test("default mode (stop) appends an empty payload and still signals the interrupt", async () => {
     const server = buildOpenGeniMcpServer(depsWithSignalSpy(), grantWith(["sessions:control"]));
-    await registeredTools(server)["session_interrupt"]!.handler({ sessionId: TARGET_SESSION_ID }, {});
+    await registeredTools(server)["session_interrupt"]!.handler(
+      { sessionId: TARGET_SESSION_ID },
+      {},
+    );
 
     expect(appendCalls[0]!.events).toEqual([{ type: "user.interrupt", payload: {} }]);
     expect(signalCalls).toHaveLength(1);

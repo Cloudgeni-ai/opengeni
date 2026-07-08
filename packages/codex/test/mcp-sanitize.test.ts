@@ -8,7 +8,8 @@ import {
 } from "../src/mcp-sanitize";
 
 const toolsListMsg = (tools: unknown[]) => ({ jsonrpc: "2.0", id: 2, result: { tools } });
-const toolCallMsg = (name: string) => JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: {} } });
+const toolCallMsg = (name: string) =>
+  JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: {} } });
 
 describe("ToolNameMapper", () => {
   test("sanitizes invalid chars (dots) and reverses them", () => {
@@ -105,7 +106,9 @@ describe("remapToolCallRequestBody", () => {
   });
 
   test("ignores non-tools/call messages", () => {
-    expect(remapToolCallRequestBody(JSON.stringify({ method: "tools/list" }), new ToolNameMapper())).toBeNull();
+    expect(
+      remapToolCallRequestBody(JSON.stringify({ method: "tools/list" }), new ToolNameMapper()),
+    ).toBeNull();
   });
 });
 
@@ -114,13 +117,23 @@ describe("sanitizeMcpJsonBody", () => {
     // Dropping every outputSchema stops the MCP SDK from validating each tool
     // CALL's structuredContent against it — the connectors return results that
     // don't match their own declared schemas, which otherwise -32602s the call.
-    const body = JSON.stringify(toolsListMsg([
-      { name: "a", inputSchema: { type: "object" }, outputSchema: {} },                       // empty -> drop
-      { name: "b", inputSchema: { type: "object" }, outputSchema: { type: "array" } },         // non-object -> drop
-      { name: "c", inputSchema: { type: "object" }, outputSchema: { type: "object", properties: {} } }, // valid -> drop too
-      { name: "d", inputSchema: { type: "object" }, outputSchema: { type: "object", required: ["result"] } }, // the live failure shape -> drop
-      { name: "e", inputSchema: { type: "object" } },                                          // none -> unchanged
-    ]));
+    const body = JSON.stringify(
+      toolsListMsg([
+        { name: "a", inputSchema: { type: "object" }, outputSchema: {} }, // empty -> drop
+        { name: "b", inputSchema: { type: "object" }, outputSchema: { type: "array" } }, // non-object -> drop
+        {
+          name: "c",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object", properties: {} },
+        }, // valid -> drop too
+        {
+          name: "d",
+          inputSchema: { type: "object" },
+          outputSchema: { type: "object", required: ["result"] },
+        }, // the live failure shape -> drop
+        { name: "e", inputSchema: { type: "object" } }, // none -> unchanged
+      ]),
+    );
     const tools = JSON.parse(sanitizeMcpJsonBody(body)).result.tools;
     expect(tools).toHaveLength(5); // no tool dropped
     for (const tool of tools) {
@@ -134,7 +147,8 @@ describe("sanitizeMcpJsonBody", () => {
   test("inlines a tool CALL's structuredContent into content so it reaches the model", () => {
     // The live connector shape: real data in structuredContent, bare placeholder in content.
     const call = JSON.stringify({
-      jsonrpc: "2.0", id: 7,
+      jsonrpc: "2.0",
+      id: 7,
       result: {
         content: [{ type: "text", text: "Action completed." }],
         structuredContent: { email: "jorgen.sandhaug@gmail.com", name: "Jørgen" },
@@ -145,16 +159,27 @@ describe("sanitizeMcpJsonBody", () => {
     expect(out.content).toHaveLength(2);
     expect(out.content[0]).toEqual({ type: "text", text: "Action completed." });
     expect(out.content[1].type).toBe("text");
-    expect(JSON.parse(out.content[1].text)).toEqual({ email: "jorgen.sandhaug@gmail.com", name: "Jørgen" });
+    expect(JSON.parse(out.content[1].text)).toEqual({
+      email: "jorgen.sandhaug@gmail.com",
+      name: "Jørgen",
+    });
   });
 
   test("a call result with no structuredContent is untouched", () => {
-    const call = JSON.stringify({ jsonrpc: "2.0", id: 8, result: { content: [{ type: "text", text: "hi" }] } });
+    const call = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 8,
+      result: { content: [{ type: "text", text: "hi" }] },
+    });
     expect(sanitizeMcpJsonBody(call)).toBe(JSON.stringify(JSON.parse(call)));
   });
 
   test("leaves non-tools-list messages untouched", () => {
-    const other = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "x", capabilities: {} } });
+    const other = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { protocolVersion: "x", capabilities: {} },
+    });
     expect(sanitizeMcpJsonBody(other)).toBe(JSON.stringify(JSON.parse(other)));
   });
 
@@ -166,12 +191,14 @@ describe("sanitizeMcpJsonBody", () => {
   // namespace before the dot is sanitized away.
   test("namespace sink accumulates the original connector namespace (before dot rewrite)", () => {
     const sink = new Set<string>();
-    const body = JSON.stringify(toolsListMsg([
-      { name: "github.create_issue", inputSchema: { type: "object" } },
-      { name: "github.list_repos", inputSchema: { type: "object" } },   // dedup → still one "github"
-      { name: "gmail.send", inputSchema: { type: "object" } },
-      { name: "set_session_title", inputSchema: { type: "object" } },   // un-dotted → not a connector namespace
-    ]));
+    const body = JSON.stringify(
+      toolsListMsg([
+        { name: "github.create_issue", inputSchema: { type: "object" } },
+        { name: "github.list_repos", inputSchema: { type: "object" } }, // dedup → still one "github"
+        { name: "gmail.send", inputSchema: { type: "object" } },
+        { name: "set_session_title", inputSchema: { type: "object" } }, // un-dotted → not a connector namespace
+      ]),
+    );
     const tools = JSON.parse(sanitizeMcpJsonBody(body, new ToolNameMapper(), sink)).result.tools;
     // The wire names were sanitized (dot → underscore) for the model.
     expect(tools[0].name).toBe("github_create_issue");
@@ -193,9 +220,11 @@ describe("sanitizeMcpSseBody", () => {
 
 describe("codexAppsSanitizingFetch", () => {
   test("sanitizes a POST application/json tools/list response", async () => {
-    const base = async () => new Response(JSON.stringify(toolsListMsg([{ name: "a", outputSchema: {} }])), {
-      status: 200, headers: { "content-type": "application/json" },
-    });
+    const base = async () =>
+      new Response(JSON.stringify(toolsListMsg([{ name: "a", outputSchema: {} }])), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     const res = await codexAppsSanitizingFetch(base)("https://x/ps/mcp", { method: "POST" });
     const tool = (await res.json()).result.tools[0];
     expect("outputSchema" in tool).toBe(false);
@@ -210,27 +239,38 @@ describe("codexAppsSanitizingFetch", () => {
       const payload = isList
         ? toolsListMsg([{ name: "vercel.deploy_to_vercel", inputSchema: { type: "object" } }])
         : { jsonrpc: "2.0", id: 3, result: { content: [] } };
-      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     };
     const fetchImpl = codexAppsSanitizingFetch(base as never);
     // 1. tools/list -> model sees the sanitized name
-    const listRes = await fetchImpl("https://x/ps/mcp", { method: "POST", body: JSON.stringify({ method: "tools/list" }) });
+    const listRes = await fetchImpl("https://x/ps/mcp", {
+      method: "POST",
+      body: JSON.stringify({ method: "tools/list" }),
+    });
     expect((await listRes.json()).result.tools[0].name).toBe("vercel_deploy_to_vercel");
     // 2. tools/call with the sanitized name -> the server receives the ORIGINAL
-    await fetchImpl("https://x/ps/mcp", { method: "POST", body: toolCallMsg("vercel_deploy_to_vercel") });
+    await fetchImpl("https://x/ps/mcp", {
+      method: "POST",
+      body: toolCallMsg("vercel_deploy_to_vercel"),
+    });
     const forwardedCall = JSON.parse(sent[sent.length - 1]!);
     expect(forwardedCall.params.name).toBe("vercel.deploy_to_vercel");
   });
 
   test("passes through a GET (long-lived notification SSE) untouched", async () => {
     const body = `data: ${JSON.stringify(toolsListMsg([{ name: "a", outputSchema: {} }]))}\n\n`;
-    const base = async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    const base = async () =>
+      new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
     const res = await codexAppsSanitizingFetch(base)("https://x/ps/mcp", { method: "GET" });
     expect(await res.text()).toBe(body); // not buffered/rewritten
   });
 
   test("passes non-OK responses through untouched", async () => {
-    const base = async () => new Response("nope", { status: 401, headers: { "content-type": "application/json" } });
+    const base = async () =>
+      new Response("nope", { status: 401, headers: { "content-type": "application/json" } });
     const res = await codexAppsSanitizingFetch(base)("https://x/ps/mcp", { method: "POST" });
     expect(res.status).toBe(401);
     expect(await res.text()).toBe("nope");

@@ -34,11 +34,7 @@ import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
 import type { ExposedPortEndpoint } from "../stream-port";
-import {
-  agentErrorToControlError,
-  subjectFor,
-  type ControlRpc,
-} from "./control-rpc";
+import { agentErrorToControlError, subjectFor, type ControlRpc } from "./control-rpc";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -116,7 +112,11 @@ function toMachinePath(p: string | undefined, workingDir: string): string {
  *  runtime barrel (`packages/runtime/src/index.ts`, which DOES import that root)
  *  injects it via `setSelfhostedApplyDiff` at module load. Until injected,
  *  `createEditor()` surfaces a clear error rather than a silent wrong-edit. */
-export type SelfhostedApplyDiff = (input: string, diff: string, mode?: "default" | "create") => string;
+export type SelfhostedApplyDiff = (
+  input: string,
+  diff: string,
+  mode?: "default" | "create",
+) => string;
 let injectedApplyDiff: SelfhostedApplyDiff | undefined;
 
 /** Register the SDK's `applyDiff` so `SelfhostedSession.createEditor()` can apply
@@ -128,8 +128,14 @@ export function setSelfhostedApplyDiff(fn: SelfhostedApplyDiff): void {
 /** The structural Editor surface the SDK's filesystem capability consumes (the
  *  three apply_patch operations). Mirrors `@openai/agents-core`'s `Editor`. */
 export interface SelfhostedEditor {
-  createFile(operation: { path: string; diff: string }, context?: unknown): Promise<{ output?: string } | void>;
-  updateFile(operation: { path: string; diff: string; moveTo?: string }, context?: unknown): Promise<{ output?: string } | void>;
+  createFile(
+    operation: { path: string; diff: string },
+    context?: unknown,
+  ): Promise<{ output?: string } | void>;
+  updateFile(
+    operation: { path: string; diff: string; moveTo?: string },
+    context?: unknown,
+  ): Promise<{ output?: string } | void>;
   deleteFile(operation: { path: string }, context?: unknown): Promise<{ output?: string } | void>;
 }
 
@@ -153,7 +159,10 @@ export const SELFHOSTED_DEFAULT_TIMEOUT_MS = 30_000;
  * and the token-FILE PATH to reach the tool surface. The token VALUE never rides
  * here — it is seeded to that file off-manifest over the same exec channel.
  */
-const SELFHOSTED_EXEC_ENV_ALLOWLIST = ["OPENGENI_TOOLSPACE_URL", "OPENGENI_TOOLSPACE_TOKEN_FILE"] as const;
+const SELFHOSTED_EXEC_ENV_ALLOWLIST = [
+  "OPENGENI_TOOLSPACE_URL",
+  "OPENGENI_TOOLSPACE_TOKEN_FILE",
+] as const;
 
 function selfhostedExecEnv(environment: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
@@ -292,7 +301,12 @@ export class SelfhostedSession {
    * selfhosted (resume re-addresses the machine by agentId via the lease pointer,
    * never from this SDK envelope), so its only job is to not crash the serialize.
    */
-  readonly state: { agentId: string; instanceId: string; manifest: Manifest; environment: Record<string, string> };
+  readonly state: {
+    agentId: string;
+    instanceId: string;
+    manifest: Manifest;
+    environment: Record<string, string>;
+  };
 
   constructor(deps: SelfhostedSessionDeps) {
     this.workspaceId = deps.workspaceId;
@@ -320,7 +334,11 @@ export class SelfhostedSession {
     this.state = {
       agentId: deps.agentId,
       instanceId: deps.agentId,
-      manifest: new Manifest({ root: "/workspace", entries: {}, environment: deps.environment ?? {} }),
+      manifest: new Manifest({
+        root: "/workspace",
+        entries: {},
+        environment: deps.environment ?? {},
+      }),
       // The SDK `SandboxSessionState.environment` — the run's threaded env (or `{}`).
       // The group client's end-of-turn serialize reads `state.environment` directly
       // (Object.entries), so it must be a defined object, not absent.
@@ -331,7 +349,9 @@ export class SelfhostedSession {
   /** Issue a control op, decoding the agent's reply or throwing the mapped
    *  `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
    *  timeout error from the transport). */
-  private async call(op: NonNullable<ControlRequest["op"]>): Promise<NonNullable<ControlResponse["result"]>> {
+  private async call(
+    op: NonNullable<ControlRequest["op"]>,
+  ): Promise<NonNullable<ControlResponse["result"]>> {
     const req: ControlRequest = {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
@@ -403,7 +423,10 @@ export class SelfhostedSession {
    *  and wrap them in the tool-output image shape (magic-byte sniff + path fallback,
    *  mirroring the SDK's `imageOutputFromBytes`). */
   async viewImage(args: { path: string; runAs?: string }): Promise<SelfhostedImageOutput> {
-    const bytes = await this.readFile({ path: args.path, ...(args.runAs ? { runAs: args.runAs } : {}) });
+    const bytes = await this.readFile({
+      path: args.path,
+      ...(args.runAs ? { runAs: args.runAs } : {}),
+    });
     const mediaType = sniffImageMediaType(bytes, args.path);
     if (!mediaType) {
       throw new Error(`selfhosted view_image: unsupported image format for ${args.path}`);
@@ -418,7 +441,10 @@ export class SelfhostedSession {
   }
 
   /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. */
-  async listDir(args: { path: string; runAs?: string }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>> {
+  async listDir(args: {
+    path: string;
+    runAs?: string;
+  }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>> {
     const result = await this.listFiles({ path: args.path });
     return result.fsList.entries.map((entry) => ({
       name: entry.name,
@@ -468,7 +494,10 @@ export class SelfhostedSession {
       // EMPTY base) — prefixing workingDir here too would DOUBLE it (the cwd is
       // already workingDir). A non-virtual absolute path passes through and rm
       // uses it as-is; an empty workingDir is byte-identical to before.
-      await this.exec({ cmd: `rm -rf -- ${shellQuote(toMachinePath(path, ""))}`, ...(runAs ? { runAs } : {}) });
+      await this.exec({
+        cmd: `rm -rf -- ${shellQuote(toMachinePath(path, ""))}`,
+        ...(runAs ? { runAs } : {}),
+      });
     };
     return {
       async createFile(operation) {
@@ -512,7 +541,12 @@ export class SelfhostedSession {
   }
 
   /** Write a file onto the machine (the fs surface the descriptor advertises). */
-  async writeFile(args: { path: string; content: string | Uint8Array; createParents?: boolean; append?: boolean }): Promise<number> {
+  async writeFile(args: {
+    path: string;
+    content: string | Uint8Array;
+    createParents?: boolean;
+    append?: boolean;
+  }): Promise<number> {
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
     const result = await this.call({
       $case: "fsWrite",
@@ -531,10 +565,16 @@ export class SelfhostedSession {
   }
 
   /** List a directory on the machine. */
-  async listFiles(args: { path: string; recursive?: boolean }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
+  async listFiles(args: {
+    path: string;
+    recursive?: boolean;
+  }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
     const result = await this.call({
       $case: "fsList",
-      fsList: { path: toMachinePath(args.path, this.workingDir), recursive: args.recursive ?? false },
+      fsList: {
+        path: toMachinePath(args.path, this.workingDir),
+        recursive: args.recursive ?? false,
+      },
     });
     if (result.$case !== "fsList") {
       throw new Error(`selfhosted listFiles: unexpected result ${result.$case}`);
@@ -544,7 +584,10 @@ export class SelfhostedSession {
 
   /** Stat a path on the machine. */
   async statFile(args: { path: string }): Promise<{ exists: boolean }> {
-    const result = await this.call({ $case: "fsStat", fsStat: { path: toMachinePath(args.path, this.workingDir) } });
+    const result = await this.call({
+      $case: "fsStat",
+      fsStat: { path: toMachinePath(args.path, this.workingDir) },
+    });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
     }
@@ -648,7 +691,9 @@ export class SelfhostedSession {
         desktopEnsure: { width: 0, height: 0 },
       });
       if (result.$case !== "desktopEnsure") {
-        throw new Error(`selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`);
+        throw new Error(
+          `selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`,
+        );
       }
       channel = result.desktopEnsure.channel;
     } else {
@@ -660,10 +705,19 @@ export class SelfhostedSession {
         // Open the terminal in the session workingDir (default "" ⇒ the agent's
         // workspace_root, byte-identical to before). A relative workingDir resolves
         // under workspace_root; an absolute one is used as-is by the agent.
-        ptyOpen: { command: [], cwd: this.workingDir, env: {}, cols: 0, rows: 0, term: "xterm-256color" },
+        ptyOpen: {
+          command: [],
+          cwd: this.workingDir,
+          env: {},
+          cols: 0,
+          rows: 0,
+          term: "xterm-256color",
+        },
       });
       if (result.$case !== "ptyOpen") {
-        throw new Error(`selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`);
+        throw new Error(
+          `selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`,
+        );
       }
       channel = result.ptyOpen.channel;
     }
@@ -777,13 +831,18 @@ export class SelfhostedSandboxClient {
   }
 
   /** Resume = re-address the subject. Identical to create — no provider state. */
-  async resume(state: SelfhostedSessionState | Record<string, unknown>, _options?: unknown): Promise<SelfhostedSession> {
+  async resume(
+    state: SelfhostedSessionState | Record<string, unknown>,
+    _options?: unknown,
+  ): Promise<SelfhostedSession> {
     const agentId = readAgentId(state) ?? this.requireAgentId();
     return this.bind(agentId);
   }
 
   /** Serialize a live session's state → `{agentId}` ONLY. */
-  async serializeSessionState(state: SelfhostedSessionState | { agentId?: string } | unknown): Promise<SelfhostedSessionState> {
+  async serializeSessionState(
+    state: SelfhostedSessionState | { agentId?: string } | unknown,
+  ): Promise<SelfhostedSessionState> {
     const agentId = readAgentId(state) ?? this.requireAgentId();
     return { agentId };
   }
@@ -802,7 +861,9 @@ export class SelfhostedSandboxClient {
 
   private requireAgentId(): string {
     if (!this.defaultAgentId) {
-      throw new Error("selfhosted sandbox client: no agentId bound (create()/resume() need a session state carrying agentId)");
+      throw new Error(
+        "selfhosted sandbox client: no agentId bound (create()/resume() need a session state carrying agentId)",
+      );
     }
     return this.defaultAgentId;
   }
@@ -870,8 +931,9 @@ export async function buildSelfhostedBackendSession(
 
 function readAgentId(state: unknown): string | undefined {
   if (state && typeof state === "object") {
-    const candidate = (state as { agentId?: unknown }).agentId
-      ?? ((state as { providerState?: { agentId?: unknown } }).providerState?.agentId);
+    const candidate =
+      (state as { agentId?: unknown }).agentId ??
+      (state as { providerState?: { agentId?: unknown } }).providerState?.agentId;
     if (typeof candidate === "string" && candidate.length > 0) {
       return candidate;
     }
@@ -904,24 +966,37 @@ function shellQuote(value: string): string {
  *  mirroring @openai/agents-core's `sniffImageMediaType` so `viewImage` returns the
  *  SAME media types the SDK would. Returns undefined for an unrecognized format. */
 function sniffImageMediaType(bytes: Uint8Array, path: string): string | undefined {
-  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+    return "image/png";
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
-  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return "image/gif";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38)
+    return "image/gif";
   if (
-    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
-  ) return "image/webp";
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  )
+    return "image/webp";
   if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
   if (
     (bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0x00) ||
     (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0x00 && bytes[3] === 0x2a)
-  ) return "image/tiff";
+  )
+    return "image/tiff";
   if (looksLikeSvg(bytes)) return "image/svg+xml";
   return mediaTypeFromPath(path);
 }
 
 function looksLikeSvg(bytes: Uint8Array): boolean {
-  const prefix = decoder.decode(bytes.subarray(0, Math.min(bytes.byteLength, 512))).trimStart().toLowerCase();
+  const prefix = decoder
+    .decode(bytes.subarray(0, Math.min(bytes.byteLength, 512)))
+    .trimStart()
+    .toLowerCase();
   return prefix.startsWith("<svg") || /^<\?xml[\s\S]*<svg/u.test(prefix);
 }
 

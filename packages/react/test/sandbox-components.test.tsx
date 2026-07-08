@@ -18,14 +18,25 @@ registerDom();
 function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandboxFilesResult {
   return {
     tree: [
-      { path: "src", name: "src", kind: "dir", children: [
-        { path: "src/app.ts", name: "app.ts", kind: "file", status: "modified" },
-      ] },
+      {
+        path: "src",
+        name: "src",
+        kind: "dir",
+        children: [{ path: "src/app.ts", name: "app.ts", kind: "file", status: "modified" }],
+      },
       { path: "README.md", name: "README.md", kind: "file" },
     ],
     expand: async () => {},
     expandingPaths: new Set<string>(),
-    readFile: async () => ({ path: "", encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 }),
+    readFile: async () => ({
+      path: "",
+      encoding: "utf8",
+      content: "",
+      sizeBytes: 0,
+      truncated: false,
+      isBinary: false,
+      revision: 0,
+    }),
     writeFile: async () => ({ path: "", sizeBytes: 0, revision: 0 }),
     createFile: async () => {},
     createDir: async () => {},
@@ -53,7 +64,10 @@ describe("FileBrowser", () => {
 
   test("renders a fallback when the surface errored", async () => {
     const r = await renderComponent(
-      <FileBrowser result={filesResult({ tree: [], error: new Error("boom") })} fallback="files off" />,
+      <FileBrowser
+        result={filesResult({ tree: [], error: new Error("boom") })}
+        fallback="files off"
+      />,
     );
     await flush();
     expect(r.container.textContent).toContain("files off");
@@ -61,7 +75,9 @@ describe("FileBrowser", () => {
   });
 
   test("an empty tree shows the empty state (no crash)", async () => {
-    const r = await renderComponent(<FileBrowser result={filesResult({ tree: [] })} emptyState="nothing here" />);
+    const r = await renderComponent(
+      <FileBrowser result={filesResult({ tree: [] })} emptyState="nothing here" />,
+    );
     await flush();
     expect(r.container.textContent).toContain("nothing here");
     await r.unmount();
@@ -126,7 +142,12 @@ describe("DesktopViewer", () => {
     factory: DesktopRfbFactory;
     calls: { url: string; viewOnly: boolean; scaleViewport: boolean; clipViewport: boolean }[];
   } {
-    const calls: { url: string; viewOnly: boolean; scaleViewport: boolean; clipViewport: boolean }[] = [];
+    const calls: {
+      url: string;
+      viewOnly: boolean;
+      scaleViewport: boolean;
+      clipViewport: boolean;
+    }[] = [];
     const factory: DesktopRfbFactory = (_target, url) => {
       const rfb: DesktopRfbLike = {
         viewOnly: false,
@@ -162,9 +183,20 @@ describe("DesktopViewer", () => {
   test("an un-acknowledged desktop renders the consent gate (and accept fires)", async () => {
     let accepted = false;
     const cap = fakeCapabilities({
-      DesktopStream: { ...fakeCapabilities().DesktopStream, requiresAcknowledgment: true, acknowledged: false },
+      DesktopStream: {
+        ...fakeCapabilities().DesktopStream,
+        requiresAcknowledgment: true,
+        acknowledged: false,
+      },
     }).DesktopStream;
-    const r = await renderComponent(<DesktopViewer capability={cap} onAcknowledge={() => { accepted = true; }} />);
+    const r = await renderComponent(
+      <DesktopViewer
+        capability={cap}
+        onAcknowledge={() => {
+          accepted = true;
+        }}
+      />,
+    );
     await flush();
     expect(r.container.textContent).toContain("un-redacted");
     const button = r.container.querySelector("button");

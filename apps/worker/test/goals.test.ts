@@ -26,7 +26,12 @@ describe("isSteerInterrupt", () => {
 });
 
 describe("withCodexAppsTool", () => {
-  const appsServer = { id: "codex_apps", name: "codex_apps", url: "https://chatgpt.com/backend-api/ps/mcp", cacheToolsList: false };
+  const appsServer = {
+    id: "codex_apps",
+    name: "codex_apps",
+    url: "https://chatgpt.com/backend-api/ps/mcp",
+    cacheToolsList: false,
+  };
 
   test("appends the codex_apps ToolRef when the server is configured", () => {
     const settings = testSettings({ mcpServers: [appsServer] });

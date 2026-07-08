@@ -22,10 +22,9 @@ export type MachineDockBarProps = {
  * render IDENTICALLY regardless of backend — this bar is the only backend-aware
  * chrome (the dock-parity contract: selfhosted == Modal for the surfaces).
  */
-export function MachineDockBar({ name, kind, state, sharedSessionCount, className }: MachineDockBarProps) {
+export function MachineDockBar({ name, kind, state, className }: MachineDockBarProps) {
   const Icon = kind === "selfhosted" ? LaptopIcon : CpuIcon;
   const stateBadge = MACHINE_STATE_BADGE_META[state];
-  const shared = (sharedSessionCount ?? 0) > 1;
   return (
     <div
       data-machine-dock-bar
@@ -40,13 +39,20 @@ export function MachineDockBar({ name, kind, state, sharedSessionCount, classNam
         {stateBadge ? (
           <span
             data-state-badge={state}
-            className={cn("shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium", stateBadge.badgeClassName)}
+            className={cn(
+              "shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium",
+              stateBadge.badgeClassName,
+            )}
           >
             {stateBadge.label}
           </span>
         ) : null}
       </div>
-      <ConnectionStatusPill status={connectionStatusForState(state)} size="sm" className="shrink-0" />
+      <ConnectionStatusPill
+        status={connectionStatusForState(state)}
+        size="sm"
+        className="shrink-0"
+      />
     </div>
   );
 }
@@ -63,21 +69,27 @@ export type SharedMachineDisclosureProps = {
  * dock (and reused on the desktop take-control gate) so the user knows others are
  * driving the same whole-machine lease. Render when `sharedSessionCount > 1`.
  */
-export function SharedMachineDisclosure({ sharedSessionCount, density = "compact", className }: SharedMachineDisclosureProps) {
+export function SharedMachineDisclosure({
+  sharedSessionCount,
+  density = "compact",
+  className,
+}: SharedMachineDisclosureProps) {
   const others = Math.max(0, sharedSessionCount - 1);
   return (
     <div
       data-shared-disclosure
       className={cn(
         "flex items-center gap-1.5 border-og-accent/25 bg-og-accent-soft text-og-fg-muted",
-        density === "full" ? "rounded-og-md border px-3 py-2 text-[12px]" : "border-b px-2.5 py-1 text-[11px]",
+        density === "full"
+          ? "rounded-og-md border px-3 py-2 text-[12px]"
+          : "border-b px-2.5 py-1 text-[11px]",
         className,
       )}
     >
       <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
       <span>
-        Shared — {others === 1 ? "another session is" : `${others} other sessions are`} on this machine. They see the same
-        terminal, files, and desktop.
+        Shared — {others === 1 ? "another session is" : `${others} other sessions are`} on this
+        machine. They see the same terminal, files, and desktop.
       </span>
     </div>
   );

@@ -16,9 +16,22 @@ import {
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
 } from "./lib/permissions";
-import { orgSettingsPath, parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath, workspaceSettingsPath } from "./lib/routes";
+import {
+  orgSettingsPath,
+  parseCheckoutOutcome,
+  workspaceAgentPath,
+  workspaceSessionPath,
+  workspaceSessionsPath,
+  workspaceSettingsPath,
+} from "./lib/routes";
 import { sameSessionForContext } from "./lib/session-context";
-import { buildRailForest, groupSessionsForRail, recencyGroupFor, relativeTimeLabel, visibleForestRows } from "./lib/sessions-group";
+import {
+  buildRailForest,
+  groupSessionsForRail,
+  recencyGroupFor,
+  relativeTimeLabel,
+  visibleForestRows,
+} from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
   emptySessionDraft,
@@ -63,7 +76,9 @@ import type {
 describe("workspace route helpers", () => {
   test("builds canonical workspace-scoped console URLs", () => {
     expect(workspaceSessionsPath("workspace-1")).toBe("/workspaces/workspace-1/sessions");
-    expect(workspaceSessionPath("workspace-1", "session-1")).toBe("/workspaces/workspace-1/sessions/session-1");
+    expect(workspaceSessionPath("workspace-1", "session-1")).toBe(
+      "/workspaces/workspace-1/sessions/session-1",
+    );
   });
 
   test("the legacy agent home maps onto the sessions index", () => {
@@ -87,11 +102,22 @@ describe("rail session grouping", () => {
   }
 
   test("pins running sessions above the recency buckets, newest first", () => {
-    const grouped = groupSessionsForRail([
-      railSession({ id: "old-running", status: "running", updatedAt: "2026-01-01T00:00:00.000Z" }),
-      railSession({ id: "today-idle", status: "idle", updatedAt: "2026-06-19T09:00:00.000Z" }),
-      railSession({ id: "new-running", status: "running", updatedAt: "2026-06-19T11:59:00.000Z" }),
-    ], NOW);
+    const grouped = groupSessionsForRail(
+      [
+        railSession({
+          id: "old-running",
+          status: "running",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
+        railSession({ id: "today-idle", status: "idle", updatedAt: "2026-06-19T09:00:00.000Z" }),
+        railSession({
+          id: "new-running",
+          status: "running",
+          updatedAt: "2026-06-19T11:59:00.000Z",
+        }),
+      ],
+      NOW,
+    );
 
     expect(grouped.running.map((entry) => entry.id)).toEqual(["new-running", "old-running"]);
     expect(grouped.grouped[0]?.group).toBe("today");
@@ -99,11 +125,14 @@ describe("rail session grouping", () => {
   });
 
   test("buckets non-running sessions by recency, most-recent first, dropping empty groups", () => {
-    const grouped = groupSessionsForRail([
-      railSession({ id: "today", updatedAt: "2026-06-19T08:00:00.000Z" }),
-      railSession({ id: "yesterday", updatedAt: "2026-06-18T08:00:00.000Z" }),
-      railSession({ id: "older", updatedAt: "2026-05-01T08:00:00.000Z" }),
-    ], NOW);
+    const grouped = groupSessionsForRail(
+      [
+        railSession({ id: "today", updatedAt: "2026-06-19T08:00:00.000Z" }),
+        railSession({ id: "yesterday", updatedAt: "2026-06-18T08:00:00.000Z" }),
+        railSession({ id: "older", updatedAt: "2026-05-01T08:00:00.000Z" }),
+      ],
+      NOW,
+    );
 
     expect(grouped.running).toEqual([]);
     expect(grouped.grouped.map((bucket) => bucket.group)).toEqual(["today", "yesterday", "older"]);
@@ -124,11 +153,22 @@ describe("rail session grouping", () => {
   });
 
   test("buildRailForest nests spawned children under their in-page parent", () => {
-    const forest = buildRailForest([
-      railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
-      railSession({ id: "worker", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
-      railSession({ id: "grandchild", parentSessionId: "worker", updatedAt: "2026-06-19T11:30:00.000Z" }),
-    ], NOW);
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "grandchild",
+          parentSessionId: "worker",
+          updatedAt: "2026-06-19T11:30:00.000Z",
+        }),
+      ],
+      NOW,
+    );
 
     // Only the manager is a root; worker + grandchild nest beneath it.
     const roots = forest.grouped.flatMap((bucket) => bucket.sessions);
@@ -138,37 +178,66 @@ describe("rail session grouping", () => {
   });
 
   test("buildRailForest keeps an orphan child (parent absent) at the root", () => {
-    const forest = buildRailForest([
-      railSession({ id: "orphan", parentSessionId: "not-in-page", updatedAt: "2026-06-19T10:00:00.000Z" }),
-    ], NOW);
-    expect(forest.grouped.flatMap((bucket) => bucket.sessions).map((node) => node.session.id)).toEqual(["orphan"]);
+    const forest = buildRailForest(
+      [
+        railSession({
+          id: "orphan",
+          parentSessionId: "not-in-page",
+          updatedAt: "2026-06-19T10:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(
+      forest.grouped.flatMap((bucket) => bucket.sessions).map((node) => node.session.id),
+    ).toEqual(["orphan"]);
   });
 
   test("buildRailForest keeps sessions in a parent cycle visible at the root", () => {
-    const forest = buildRailForest([
-      railSession({ id: "a", parentSessionId: "b", updatedAt: "2026-06-19T10:00:00.000Z" }),
-      railSession({ id: "b", parentSessionId: "a", updatedAt: "2026-06-19T11:00:00.000Z" }),
-    ], NOW);
+    const forest = buildRailForest(
+      [
+        railSession({ id: "a", parentSessionId: "b", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({ id: "b", parentSessionId: "a", updatedAt: "2026-06-19T11:00:00.000Z" }),
+      ],
+      NOW,
+    );
     const roots = forest.grouped.flatMap((bucket) => bucket.sessions);
     expect(roots.map((node) => node.session.id)).toEqual(["b", "a"]);
     expect(roots.flatMap((node) => node.children)).toEqual([]);
   });
 
   test("buildRailForest pins a manager whose only activity is a live child", () => {
-    const forest = buildRailForest([
-      railSession({ id: "manager", status: "idle", updatedAt: "2026-06-01T10:00:00.000Z" }),
-      railSession({ id: "worker", status: "running", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
-    ], NOW);
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", status: "idle", updatedAt: "2026-06-01T10:00:00.000Z" }),
+        railSession({
+          id: "worker",
+          status: "running",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager"]);
     expect(forest.running[0]?.hasActiveDescendant).toBe(true);
   });
 
   test("visibleForestRows expands only where the set says so", () => {
-    const forest = buildRailForest([
-      railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
-      railSession({ id: "worker", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
-    ], NOW);
-    expect(visibleForestRows(forest, new Set()).map((row) => row.node.session.id)).toEqual(["manager"]);
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(visibleForestRows(forest, new Set()).map((row) => row.node.session.id)).toEqual([
+      "manager",
+    ]);
     const expanded = visibleForestRows(forest, new Set(["manager"]));
     expect(expanded.map((row) => row.node.session.id)).toEqual(["manager", "worker"]);
     expect(expanded[1]?.depth).toBe(1);
@@ -193,14 +262,42 @@ describe("session context equality", () => {
 
 describe("organization helpers", () => {
   function ctx(patch: Partial<AccessContext> = {}): AccessContext {
-    return { mode: "managed", subjectId: "s", accountGrants: [], workspaceGrants: [], defaultAccountId: null, defaultWorkspaceId: null, ...patch };
+    return {
+      mode: "managed",
+      subjectId: "s",
+      accountGrants: [],
+      workspaceGrants: [],
+      defaultAccountId: null,
+      defaultWorkspaceId: null,
+      ...patch,
+    };
   }
   function ws(id: string, accountId: string): Workspace {
-    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, settings: {}, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
+    return {
+      id,
+      accountId,
+      name: id,
+      slug: null,
+      externalSource: null,
+      externalId: null,
+      agentInstructions: null,
+      settings: {},
+      createdAt: "2026-06-11T00:00:00.000Z",
+      updatedAt: "2026-06-11T00:00:00.000Z",
+    };
   }
 
   test("derives a label, preferring an account name in grant metadata", () => {
-    expect(orgLabel("acc-12345678abc", [{ accountId: "acc-12345678abc", subjectId: "s", permissions: [], metadata: { accountName: "Acme" } }])).toBe("Acme");
+    expect(
+      orgLabel("acc-12345678abc", [
+        {
+          accountId: "acc-12345678abc",
+          subjectId: "s",
+          permissions: [],
+          metadata: { accountName: "Acme" },
+        },
+      ]),
+    ).toBe("Acme");
     expect(orgLabel("acc-12345678abc", [])).toBe("Org acc-1234");
   });
 
@@ -215,7 +312,10 @@ describe("organization helpers", () => {
   });
 
   test("workspacesInOrg filters and sorts by name", () => {
-    const filtered = workspacesInOrg([ws("beta", "acc-a"), ws("alpha", "acc-a"), ws("other", "acc-b")], "acc-a");
+    const filtered = workspacesInOrg(
+      [ws("beta", "acc-a"), ws("alpha", "acc-a"), ws("other", "acc-b")],
+      "acc-a",
+    );
     expect(filtered.map((workspace) => workspace.name)).toEqual(["alpha", "beta"]);
   });
 });
@@ -263,7 +363,19 @@ describe("api key permission options", () => {
 
   test("offers the scopes the old hardcoded list omitted", () => {
     const offered = buildApiKeyPermissionGroups().flatMap((group) => group.permissions);
-    const previouslyMissing: Permission[] = ["variable-sets:manage", "variable-sets:use", "goals:manage", "workspace:admin", "github:manage", "workspace:create", "billing:read", "billing:manage", "members:manage", "account:read", "account:admin"];
+    const previouslyMissing: Permission[] = [
+      "variable-sets:manage",
+      "variable-sets:use",
+      "goals:manage",
+      "workspace:admin",
+      "github:manage",
+      "workspace:create",
+      "billing:read",
+      "billing:manage",
+      "members:manage",
+      "account:read",
+      "account:admin",
+    ];
     for (const permission of previouslyMissing) {
       expect(offered).toContain(permission);
     }
@@ -274,7 +386,11 @@ describe("api key permission options", () => {
   });
 
   test("non-admin grants can only delegate their own permissions", () => {
-    const delegable = delegableApiKeyPermissions(["sessions:read", "files:read", "api_keys:manage"]);
+    const delegable = delegableApiKeyPermissions([
+      "sessions:read",
+      "files:read",
+      "api_keys:manage",
+    ]);
     expect([...delegable].sort()).toEqual(["api_keys:manage", "files:read", "sessions:read"]);
     expect(delegable.has("variable-sets:manage")).toBe(false);
   });
@@ -297,11 +413,26 @@ describe("session MCP permission groups", () => {
   });
 
   test("excludes account-only scopes but keeps workspace scopes", () => {
-    const offered: string[] = buildSessionMcpPermissionGroups().flatMap((group) => group.permissions);
-    for (const accountScope of ["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create", "toolspace:call"]) {
+    const offered: string[] = buildSessionMcpPermissionGroups().flatMap(
+      (group) => group.permissions,
+    );
+    for (const accountScope of [
+      "account:read",
+      "account:admin",
+      "members:manage",
+      "billing:read",
+      "billing:manage",
+      "workspace:create",
+      "toolspace:call",
+    ]) {
       expect(offered).not.toContain(accountScope);
     }
-    for (const workspaceScope of ["sessions:create", "goals:manage", "variable-sets:use", "workspace:admin"]) {
+    for (const workspaceScope of [
+      "sessions:create",
+      "goals:manage",
+      "variable-sets:use",
+      "workspace:admin",
+    ]) {
       expect(offered).toContain(workspaceScope);
     }
   });
@@ -351,7 +482,9 @@ describe("session create draft", () => {
     };
     expect(submissionFromSessionDraft(draft).extras).toEqual({});
     const withGoal = { ...draft, goalText: "goal", goalMaxAutoContinuations: "not-a-number" };
-    expect(submissionFromSessionDraft(withGoal).extras).toEqual({ goal: { text: "goal", successCriteria: "criteria without a goal" } });
+    expect(submissionFromSessionDraft(withGoal).extras).toEqual({
+      goal: { text: "goal", successCriteria: "criteria without a goal" },
+    });
   });
 
   test("a connected machine sends targetSandboxId + workingDir, omits repos and env injection", () => {
@@ -375,7 +508,11 @@ describe("session create draft", () => {
   test("a connected machine at its root sends no workingDir", () => {
     const draft = {
       ...emptySessionDraft(),
-      compute: { kind: "machine" as const, sandboxId: "sbx-machine-2", folder: { kind: "root" as const } },
+      compute: {
+        kind: "machine" as const,
+        sandboxId: "sbx-machine-2",
+        folder: { kind: "root" as const },
+      },
     };
     const submission = submissionFromSessionDraft(draft);
     expect(submission.options).toEqual({ targetSandboxId: "sbx-machine-2", workingDir: null });
@@ -386,14 +523,18 @@ describe("session create draft", () => {
     // §3 transition rule: sandbox→machine blocks submit until a machine is chosen
     // ("choose a machine"); machine→sandbox is immediately ready again.
     expect(isSessionDraftComputeReady(emptySessionDraft())).toBe(true);
-    expect(isSessionDraftComputeReady({
-      ...emptySessionDraft(),
-      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
-    })).toBe(false);
-    expect(isSessionDraftComputeReady({
-      ...emptySessionDraft(),
-      compute: { kind: "machine", sandboxId: "sbx-1", folder: { kind: "root" } },
-    })).toBe(true);
+    expect(
+      isSessionDraftComputeReady({
+        ...emptySessionDraft(),
+        compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+      }),
+    ).toBe(false);
+    expect(
+      isSessionDraftComputeReady({
+        ...emptySessionDraft(),
+        compute: { kind: "machine", sandboxId: "sbx-1", folder: { kind: "root" } },
+      }),
+    ).toBe(true);
   });
 
   test("managed backend options exclude selfhosted and lead with the deployment default", () => {
@@ -419,17 +560,35 @@ describe("projectSessionTimeline", () => {
       event(2, "turn.started", {}),
       event(3, "agent.message.delta", { text: "I will inspect first." }),
       event(4, "agent.reasoning.delta", { text: "Checking the repository state." }),
-      event(5, "agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: "{\"cmd\":\"ls\"}" }),
+      event(5, "agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: '{"cmd":"ls"}',
+      }),
       event(6, "agent.toolCall.output", { id: "call-1", output: "ok" }),
       event(7, "agent.message.delta", { text: "The repo is ready." }),
     ];
 
     const items = projectSessionTimeline(session(), events);
 
-    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message", "reasoning", "tool-call", "agent-message"]);
-    expect(items[1]).toMatchObject({ kind: "agent-message", text: "I will inspect first.", streaming: false });
+    expect(items.map((item) => item.kind)).toEqual([
+      "user-message",
+      "agent-message",
+      "reasoning",
+      "tool-call",
+      "agent-message",
+    ]);
+    expect(items[1]).toMatchObject({
+      kind: "agent-message",
+      text: "I will inspect first.",
+      streaming: false,
+    });
     expect(items[3]).toMatchObject({ kind: "tool-call", status: "complete" });
-    expect(items[4]).toMatchObject({ kind: "agent-message", text: "The repo is ready.", streaming: true });
+    expect(items[4]).toMatchObject({
+      kind: "agent-message",
+      text: "The repo is ready.",
+      streaming: true,
+    });
   });
 
   test("renders reasoning summary text", () => {
@@ -470,7 +629,7 @@ describe("projectSessionTimeline", () => {
     ]);
 
     expect(items.find((item) => item.kind === "reasoning")).toMatchObject({ streaming: false });
-    expect(JSON.stringify(items)).not.toContain("\"running\"");
+    expect(JSON.stringify(items)).not.toContain('"running"');
   });
 
   test("keeps per-turn attachments on user messages", () => {
@@ -508,7 +667,9 @@ describe("projectSessionTimeline", () => {
     ]);
 
     expect(JSON.stringify(items)).not.toContain("RESOURCE_EXHAUSTED");
-    expect(JSON.stringify(items)).toContain("Historical failure payload hidden in the web console.");
+    expect(JSON.stringify(items)).toContain(
+      "Historical failure payload hidden in the web console.",
+    );
   });
 
   test("keeps active failure payloads visible in the main timeline projection", () => {
@@ -529,14 +690,17 @@ describe("projectSessionTimeline", () => {
     ]);
 
     expect(JSON.stringify(items)).toContain("Last turn failed");
-    expect(JSON.stringify(items)).not.toContain("Historical failure payload hidden in the web console.");
+    expect(JSON.stringify(items)).not.toContain(
+      "Historical failure payload hidden in the web console.",
+    );
   });
 
   test("redacts active provider-internal sandbox failures in the main timeline projection", () => {
     const items = projectSessionTimeline(session({ status: "running" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
-        error: "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
+        error:
+          "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
       }),
     ]);
 
@@ -549,13 +713,16 @@ describe("projectSessionTimeline", () => {
 
 describe("summarizeSessionFailure", () => {
   test("reports the latest failure reason and the re-dispatch history", () => {
-    const summary = summarizeSessionFailure([
-      event(1, "user.message", { text: "Inspect" }),
-      event(2, "turn.preempted", { turnId: "turn-1" }),
-      event(3, "turn.failed", { error: "First failure" }),
-      event(4, "turn.preempted", { turnId: "turn-2" }),
-      event(5, "turn.failed", { error: "Provider exploded" }),
-    ], "failed");
+    const summary = summarizeSessionFailure(
+      [
+        event(1, "user.message", { text: "Inspect" }),
+        event(2, "turn.preempted", { turnId: "turn-1" }),
+        event(3, "turn.failed", { error: "First failure" }),
+        event(4, "turn.preempted", { turnId: "turn-2" }),
+        event(5, "turn.failed", { error: "Provider exploded" }),
+      ],
+      "failed",
+    );
 
     expect(summary.reason).toBe("Provider exploded");
     expect(summary.failedAt).toBe(event(5, "turn.failed", {}).occurredAt);
@@ -564,11 +731,14 @@ describe("summarizeSessionFailure", () => {
   });
 
   test("redacts provider-internal failure reasons like the timeline does", () => {
-    const summary = summarizeSessionFailure([
-      event(1, "turn.failed", {
-        error: "/modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED",
-      }),
-    ], "failed");
+    const summary = summarizeSessionFailure(
+      [
+        event(1, "turn.failed", {
+          error: "/modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED",
+        }),
+      ],
+      "failed",
+    );
 
     expect(summary.reason).not.toContain("RESOURCE_EXHAUSTED");
     expect(summary.reason).toContain("Sandbox setup failed");
@@ -587,17 +757,30 @@ describe("summarizeSessionFailure", () => {
 describe("buildTools", () => {
   test("adds a selected MCP tool once", () => {
     expect(buildTools(undefined, ["opengeni"])).toEqual([{ kind: "mcp", id: "opengeni" }]);
-    expect(buildTools([{ kind: "mcp", id: "opengeni" }], ["opengeni"])).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    expect(buildTools([{ kind: "mcp", id: "opengeni" }], ["opengeni"])).toEqual([
+      { kind: "mcp", id: "opengeni" },
+    ]);
   });
 
   test("pulls in the file download helper whenever document search is selected", () => {
-    expect(buildTools(undefined, ["docs"])).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
-    expect(buildTools([{ kind: "mcp", id: "docs" }], ["docs"])).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
-    expect(buildTools([{ kind: "mcp", id: "files" }], ["docs"])).toEqual([{ kind: "mcp", id: "files" }, { kind: "mcp", id: "docs" }]);
+    expect(buildTools(undefined, ["docs"])).toEqual([
+      { kind: "mcp", id: "docs" },
+      { kind: "mcp", id: "files" },
+    ]);
+    expect(buildTools([{ kind: "mcp", id: "docs" }], ["docs"])).toEqual([
+      { kind: "mcp", id: "docs" },
+      { kind: "mcp", id: "files" },
+    ]);
+    expect(buildTools([{ kind: "mcp", id: "files" }], ["docs"])).toEqual([
+      { kind: "mcp", id: "files" },
+      { kind: "mcp", id: "docs" },
+    ]);
   });
 
   test("preserves existing tools when nothing is selected", () => {
-    expect(buildTools([{ kind: "mcp", id: "custom" }], [])).toEqual([{ kind: "mcp", id: "custom" }]);
+    expect(buildTools([{ kind: "mcp", id: "custom" }], [])).toEqual([
+      { kind: "mcp", id: "custom" },
+    ]);
   });
 
   test("combines OpenGeni with document tools", () => {
@@ -616,46 +799,85 @@ describe("buildTools", () => {
   });
 
   test("selects enabled custom MCPs by default for future agent turns", () => {
-    expect([...selectedAvailableCapabilityToolIds(new Set(["old"]), ["cap-4fetch", "cap-search"])]).toEqual(["cap-4fetch", "cap-search"]);
+    expect([
+      ...selectedAvailableCapabilityToolIds(new Set(["old"]), ["cap-4fetch", "cap-search"]),
+    ]).toEqual(["cap-4fetch", "cap-search"]);
   });
 
   test("preserves explicit custom MCP deselection across config refreshes", () => {
-    expect([...selectedAvailableCapabilityToolIds(new Set(["cap-search"]), ["cap-4fetch", "cap-search"], new Set(["cap-4fetch", "cap-search"]))]).toEqual(["cap-search"]);
-    expect([...selectedAvailableCapabilityToolIds(new Set(["cap-search"]), ["cap-4fetch", "cap-search", "cap-new"], new Set(["cap-4fetch", "cap-search"]))]).toEqual(["cap-search", "cap-new"]);
+    expect([
+      ...selectedAvailableCapabilityToolIds(
+        new Set(["cap-search"]),
+        ["cap-4fetch", "cap-search"],
+        new Set(["cap-4fetch", "cap-search"]),
+      ),
+    ]).toEqual(["cap-search"]);
+    expect([
+      ...selectedAvailableCapabilityToolIds(
+        new Set(["cap-search"]),
+        ["cap-4fetch", "cap-search", "cap-new"],
+        new Set(["cap-4fetch", "cap-search"]),
+      ),
+    ]).toEqual(["cap-search", "cap-new"]);
   });
 
   test("derives enabled runtime-ready MCPs from workspace capabilities", () => {
-    expect(enabledWorkspaceCapabilityMcpServers([
-      capabilityItem({
-        id: "mcp:ready",
-        kind: "mcp",
-        name: "Ready MCP",
-        enabled: true,
-        runtime: { available: true, mcpServerId: "cap-ready", transport: "streamable-http", notes: null },
-      }),
-      capabilityItem({
-        id: "mcp:disabled",
-        kind: "mcp",
-        name: "Disabled MCP",
-        enabled: false,
-        runtime: { available: true, mcpServerId: "cap-disabled", transport: "streamable-http", notes: null },
-      }),
-      capabilityItem({
-        id: "mcp:gated",
-        kind: "mcp",
-        name: "Gated MCP",
-        enabled: true,
-        runtime: { available: false, mcpServerId: "cap-gated", transport: "streamable-http", notes: null },
-      }),
-      capabilityItem({ id: "api:social", kind: "api", name: "Social API", enabled: true }),
-    ])).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
+    expect(
+      enabledWorkspaceCapabilityMcpServers([
+        capabilityItem({
+          id: "mcp:ready",
+          kind: "mcp",
+          name: "Ready MCP",
+          enabled: true,
+          runtime: {
+            available: true,
+            mcpServerId: "cap-ready",
+            transport: "streamable-http",
+            notes: null,
+          },
+        }),
+        capabilityItem({
+          id: "mcp:disabled",
+          kind: "mcp",
+          name: "Disabled MCP",
+          enabled: false,
+          runtime: {
+            available: true,
+            mcpServerId: "cap-disabled",
+            transport: "streamable-http",
+            notes: null,
+          },
+        }),
+        capabilityItem({
+          id: "mcp:gated",
+          kind: "mcp",
+          name: "Gated MCP",
+          enabled: true,
+          runtime: {
+            available: false,
+            mcpServerId: "cap-gated",
+            transport: "streamable-http",
+            notes: null,
+          },
+        }),
+        capabilityItem({ id: "api:social", kind: "api", name: "Social API", enabled: true }),
+      ]),
+    ).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
   });
 
   test("merges configured and workspace MCP options without duplicates", () => {
-    expect(mergeMcpServerOptions(
-      [{ id: "configured", name: "Configured" }, { id: "shared", name: "Configured Shared" }],
-      [{ id: "shared", name: "Workspace Shared" }, { id: "workspace", name: "Workspace" }],
-    )).toEqual([
+    expect(
+      mergeMcpServerOptions(
+        [
+          { id: "configured", name: "Configured" },
+          { id: "shared", name: "Configured Shared" },
+        ],
+        [
+          { id: "shared", name: "Workspace Shared" },
+          { id: "workspace", name: "Workspace" },
+        ],
+      ),
+    ).toEqual([
       { id: "configured", name: "Configured" },
       { id: "shared", name: "Configured Shared" },
       { id: "workspace", name: "Workspace" },
@@ -692,17 +914,28 @@ describe("composer reasoning-effort picker (full host enum)", () => {
     // Before the fix the guard kept the "low" placeholder for a `none` default;
     // now the default is honored verbatim, so the submitted turn carries "none".
     expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "none" }))).toBe("none");
-    expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "minimal" }))).toBe("minimal");
+    expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "minimal" }))).toBe(
+      "minimal",
+    );
     expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "high" }))).toBe("high");
   });
 
   test("the picker offers `none`/`minimal` when the host allows them, canonically ordered", () => {
     // The old `isUiReasoningEffort` filter dropped these two entirely.
-    expect(effortOptionsFor(clientConfig())).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    expect(effortOptionsFor(clientConfig())).toEqual([
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
   });
 
   test("the picker honors a narrowed host allow-list, keeping canonical order", () => {
-    expect(effortOptionsFor(clientConfig({ allowedReasoningEfforts: ["high", "none", "low"] }))).toEqual(["none", "low", "high"]);
+    expect(
+      effortOptionsFor(clientConfig({ allowedReasoningEfforts: ["high", "none", "low"] })),
+    ).toEqual(["none", "low", "high"]);
   });
 
   test("the picker falls back to the full enum when the host exposes no allow-list", () => {
@@ -710,60 +943,99 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   });
 
   test("labelEffort reads sensibly for every effort, including the previously-unrepresentable ones", () => {
-    expect(reasoningEffortOrder.map(labelEffort)).toEqual(["None", "Minimal", "Low", "Medium", "High", "Extra high"]);
+    expect(reasoningEffortOrder.map(labelEffort)).toEqual([
+      "None",
+      "Minimal",
+      "Low",
+      "Medium",
+      "High",
+      "Extra high",
+    ]);
   });
 });
 
 describe("capability catalog helpers", () => {
   test("filters by kind and search text", () => {
     const items = [
-      capabilityItem({ id: "mcp:docs", kind: "mcp", name: "Document Search", category: "knowledge", tags: ["docs"] }),
-      capabilityItem({ id: "api:social", kind: "api", name: "Social Accounts", category: "marketing", tags: ["social"] }),
+      capabilityItem({
+        id: "mcp:docs",
+        kind: "mcp",
+        name: "Document Search",
+        category: "knowledge",
+        tags: ["docs"],
+      }),
+      capabilityItem({
+        id: "api:social",
+        kind: "api",
+        name: "Social Accounts",
+        category: "marketing",
+        tags: ["social"],
+      }),
     ];
 
-    expect(filterCapabilityCatalogItems(items, "mcp", "document").map((item) => item.id)).toEqual(["mcp:docs"]);
-    expect(filterCapabilityCatalogItems(items, "all", "marketing").map((item) => item.id)).toEqual(["api:social"]);
+    expect(filterCapabilityCatalogItems(items, "mcp", "document").map((item) => item.id)).toEqual([
+      "mcp:docs",
+    ]);
+    expect(filterCapabilityCatalogItems(items, "all", "marketing").map((item) => item.id)).toEqual([
+      "api:social",
+    ]);
   });
 
   test("labels MCP probe failures as connection failures", () => {
-    expect(capabilityErrorToast(
-      new Error('API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.'),
-      "Capability update failed",
-    )).toEqual({
+    expect(
+      capabilityErrorToast(
+        new Error(
+          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+        ),
+        "Capability update failed",
+      ),
+    ).toEqual({
       title: "Connection failed",
-      description: 'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+      description:
+        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
     });
   });
 
   test("summarizes pack contents from tools and metadata", () => {
-    const summary = summarizePackContents(capabilityItem({
-      id: "pack:marketing-social-daily-analysis",
-      kind: "pack",
-      name: "Marketing social daily analysis",
-      tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "opengeni" }],
-      metadata: {
-        skill: "social-media-marketing",
-        firstPartyMcpTools: ["social_posts_recent"],
-        connectors: [{
-          id: "x",
-          name: "X",
-          authModel: "oauth2_authorization_code_pkce",
-          providers: ["x"],
-          scopes: ["tweet.read"],
-          required: false,
-        }],
-        knowledge: [{
-          id: "marketing-playbook",
-          name: "Marketing playbook",
-          description: "Brand voice and campaign context.",
-        }],
-        scheduledTaskTemplates: [{
-          id: "daily-social-analysis",
-          name: "Daily social analysis",
-          defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
-        }],
-      },
-    }));
+    const summary = summarizePackContents(
+      capabilityItem({
+        id: "pack:marketing-social-daily-analysis",
+        kind: "pack",
+        name: "Marketing social daily analysis",
+        tools: [
+          { kind: "mcp", id: "docs" },
+          { kind: "mcp", id: "opengeni" },
+        ],
+        metadata: {
+          skill: "social-media-marketing",
+          firstPartyMcpTools: ["social_posts_recent"],
+          connectors: [
+            {
+              id: "x",
+              name: "X",
+              authModel: "oauth2_authorization_code_pkce",
+              providers: ["x"],
+              scopes: ["tweet.read"],
+              required: false,
+            },
+          ],
+          knowledge: [
+            {
+              id: "marketing-playbook",
+              name: "Marketing playbook",
+              description: "Brand voice and campaign context.",
+            },
+          ],
+          scheduledTaskTemplates: [
+            {
+              id: "daily-social-analysis",
+              name: "Daily social analysis",
+              defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
+            },
+          ],
+        },
+      }),
+    );
 
     expect(summary).toMatchObject({
       hasContents: true,
@@ -772,7 +1044,13 @@ describe("capability catalog helpers", () => {
       skills: ["social-media-marketing"],
       connectors: [{ id: "x", name: "X", scopes: ["tweet.read"] }],
       knowledge: [{ id: "marketing-playbook", name: "Marketing playbook" }],
-      scheduledTaskTemplates: [{ id: "daily-social-analysis", name: "Daily social analysis", scheduleSummary: "Calendar at 09:00 UTC" }],
+      scheduledTaskTemplates: [
+        {
+          id: "daily-social-analysis",
+          name: "Daily social analysis",
+          scheduleSummary: "Calendar at 09:00 UTC",
+        },
+      ],
     });
   });
 });
@@ -805,30 +1083,55 @@ describe("scheduled task form helpers", () => {
 
     expect(form.scheduleType).toBe("calendar");
     expect(form.calendarTime).toBe("09:05");
-    expect(scheduleFromFormState(form)).toEqual({ type: "calendar", timeZone: "Europe/Oslo", hour: 9, minute: 5 });
+    expect(scheduleFromFormState(form)).toEqual({
+      type: "calendar",
+      timeZone: "Europe/Oslo",
+      hour: 9,
+      minute: 5,
+    });
   });
 
   test("initializes OpenGeni tool checkbox from existing tools", () => {
-    expect(formStateFromScheduledTask(scheduledTask({ type: "interval", everySeconds: 60 })).includeOpenGeniTool).toBe(true);
-    expect(formStateFromScheduledTask(scheduledTask(
-      { type: "interval", everySeconds: 60 },
-      { agentConfig: { ...scheduledTaskAgentConfig(), tools: [] } },
-    )).includeOpenGeniTool).toBe(false);
+    expect(
+      formStateFromScheduledTask(scheduledTask({ type: "interval", everySeconds: 60 }))
+        .includeOpenGeniTool,
+    ).toBe(true);
+    expect(
+      formStateFromScheduledTask(
+        scheduledTask(
+          { type: "interval", everySeconds: 60 },
+          { agentConfig: { ...scheduledTaskAgentConfig(), tools: [] } },
+        ),
+      ).includeOpenGeniTool,
+    ).toBe(false);
   });
 
   test("preserves existing agent config while updating prompt and OpenGeni tool", () => {
-    const resources: ResourceRef[] = [{ kind: "repository", uri: "https://github.com/example/repo.git", ref: "main", mountPath: "repos/example/repo" }];
-    const task = scheduledTask({ type: "interval", everySeconds: 60 }, {
-      agentConfig: {
-        prompt: "old",
-        resources,
-        tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "opengeni" }],
-        metadata: { owner: "ops" },
-        model: "gpt-5.5",
-        reasoningEffort: "high",
-        sandboxBackend: "docker",
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/example/repo.git",
+        ref: "main",
+        mountPath: "repos/example/repo",
       },
-    });
+    ];
+    const task = scheduledTask(
+      { type: "interval", everySeconds: 60 },
+      {
+        agentConfig: {
+          prompt: "old",
+          resources,
+          tools: [
+            { kind: "mcp", id: "docs" },
+            { kind: "mcp", id: "opengeni" },
+          ],
+          metadata: { owner: "ops" },
+          model: "gpt-5.5",
+          reasoningEffort: "high",
+          sandboxBackend: "docker",
+        },
+      },
+    );
     const form = { ...formStateFromScheduledTask(task), prompt: "new", includeOpenGeniTool: false };
 
     expect(form.resources).toEqual(resources);
@@ -844,24 +1147,36 @@ describe("scheduled task form helpers", () => {
   });
 
   test("uses form resources in saved agent config while preserving model settings", () => {
-    const task = scheduledTask({ type: "interval", everySeconds: 60 }, {
-      agentConfig: {
-        ...scheduledTaskAgentConfig(),
-        resources: [{ kind: "repository", uri: "https://github.com/example/old.git", ref: "main", mountPath: "repos/example/old" }],
-        metadata: { owner: "ops" },
-        model: "gpt-5.5",
-        reasoningEffort: "high",
-        sandboxBackend: "docker",
+    const task = scheduledTask(
+      { type: "interval", everySeconds: 60 },
+      {
+        agentConfig: {
+          ...scheduledTaskAgentConfig(),
+          resources: [
+            {
+              kind: "repository",
+              uri: "https://github.com/example/old.git",
+              ref: "main",
+              mountPath: "repos/example/old",
+            },
+          ],
+          metadata: { owner: "ops" },
+          model: "gpt-5.5",
+          reasoningEffort: "high",
+          sandboxBackend: "docker",
+        },
       },
-    });
-    const selectedResources: ResourceRef[] = [{
-      kind: "repository",
-      uri: "https://github.com/example/new.git",
-      ref: "develop",
-      mountPath: "repos/example/new",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }];
+    );
+    const selectedResources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/example/new.git",
+        ref: "develop",
+        mountPath: "repos/example/new",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ];
     const form = { ...formStateFromScheduledTask(task), resources: selectedResources };
 
     expect(agentConfigFromFormState(form, task)).toMatchObject({
@@ -878,7 +1193,12 @@ describe("scheduled task run summaries", () => {
   test("summarizes the most recent run with honest tones", () => {
     const summary = summarizeLastRun([
       taskRun({ id: "run-1", firedAt: "2026-06-10T08:00:00.000Z", status: "dispatched" }),
-      taskRun({ id: "run-2", firedAt: "2026-06-11T08:00:00.000Z", status: "failed", error: "no capacity" }),
+      taskRun({
+        id: "run-2",
+        firedAt: "2026-06-11T08:00:00.000Z",
+        status: "failed",
+        error: "no capacity",
+      }),
     ]);
     expect(summary?.run.id).toBe("run-2");
     expect(summary?.tone).toBe("failed");
@@ -915,9 +1235,12 @@ describe("GitHub repository resources", () => {
 
 describe("sanitizeEventForDisplay", () => {
   test("hides historical terminal failure payloads in the web console", () => {
-    const sanitized = sanitizeEventForDisplay(event(7, "turn.failed", {
-      error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
-    }), "cancelled");
+    const sanitized = sanitizeEventForDisplay(
+      event(7, "turn.failed", {
+        error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
+      }),
+      "cancelled",
+    );
 
     expect(JSON.stringify(sanitized.payload)).not.toContain("RESOURCE_EXHAUSTED");
     expect(sanitized.payload).toEqual({
@@ -928,30 +1251,41 @@ describe("sanitizeEventForDisplay", () => {
   });
 
   test("keeps active failure payloads available for current-run debugging", () => {
-    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
-      error: "Current run failed",
-    }), "running");
+    const active = sanitizeEventForDisplay(
+      event(7, "turn.failed", {
+        error: "Current run failed",
+      }),
+      "running",
+    );
 
     expect(active.payload).toEqual({ error: "Current run failed" });
   });
 
   test("keeps failed-session failure payloads available: failed sessions are revivable, not archived", () => {
-    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
-      error: "Last turn failed",
-    }), "failed");
+    const active = sanitizeEventForDisplay(
+      event(7, "turn.failed", {
+        error: "Last turn failed",
+      }),
+      "failed",
+    );
 
     expect(active.payload).toEqual({ error: "Last turn failed" });
   });
 
   test("redacts active provider-internal sandbox failures in debug payloads", () => {
-    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
-      error: "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
-    }), "running");
+    const active = sanitizeEventForDisplay(
+      event(7, "turn.failed", {
+        error:
+          "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
+      }),
+      "running",
+    );
 
     expect(JSON.stringify(active.payload)).not.toContain("RESOURCE_EXHAUSTED");
     expect(JSON.stringify(active.payload)).not.toContain("ModalClient");
     expect(active.payload).toEqual({
-      error: "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.",
+      error:
+        "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.",
       redacted: true,
     });
   });
@@ -1004,7 +1338,10 @@ function scheduledTaskAgentConfig(): ScheduledTask["agentConfig"] {
   };
 }
 
-function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<ScheduledTask> = {}): ScheduledTask {
+function scheduledTask(
+  schedule: ScheduledTaskScheduleSpec,
+  patch: Partial<ScheduledTask> = {},
+): ScheduledTask {
   return {
     id: "00000000-0000-4000-8000-000000000100",
     accountId: "account-1",
@@ -1062,7 +1399,9 @@ function githubRepository(patch: Partial<GitHubRepository> = {}): GitHubReposito
   };
 }
 
-function capabilityItem(patch: Partial<CapabilityCatalogItem> & Pick<CapabilityCatalogItem, "id" | "kind" | "name">): CapabilityCatalogItem {
+function capabilityItem(
+  patch: Partial<CapabilityCatalogItem> & Pick<CapabilityCatalogItem, "id" | "kind" | "name">,
+): CapabilityCatalogItem {
   return {
     source: "built_in",
     description: null,
@@ -1136,7 +1475,13 @@ describe("entitlement formatting", () => {
   });
 
   test("entries sort by name for a stable render", () => {
-    expect(entitlementEntries({ "sessions.max": 10, "models.allowed": ["gpt-5.5"], "packs.custom": true })).toEqual([
+    expect(
+      entitlementEntries({
+        "sessions.max": 10,
+        "models.allowed": ["gpt-5.5"],
+        "packs.custom": true,
+      }),
+    ).toEqual([
       { name: "models.allowed", value: "gpt-5.5" },
       { name: "packs.custom", value: "enabled" },
       { name: "sessions.max", value: "10" },
@@ -1171,12 +1516,16 @@ describe("workspace switcher helpers", () => {
   test("falls back to the default account, then any creatable grant", () => {
     const context = accessContext({
       defaultAccountId: "account-default",
-      accountGrants: [{ accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] }],
+      accountGrants: [
+        { accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] },
+      ],
     });
     expect(workspaceCreationAccountId(context, "account-other")).toBe("account-default");
 
     const indirect = accessContext({
-      accountGrants: [{ accountId: "account-3", subjectId: "subject-1", permissions: ["workspace:create"] }],
+      accountGrants: [
+        { accountId: "account-3", subjectId: "subject-1", permissions: ["workspace:create"] },
+      ],
     });
     expect(workspaceCreationAccountId(indirect, null)).toBe("account-3");
   });
@@ -1184,7 +1533,9 @@ describe("workspace switcher helpers", () => {
   test("returns null when no account grant can create — the affordance hides", () => {
     const context = accessContext({
       defaultAccountId: "account-default",
-      accountGrants: [{ accountId: "account-default", subjectId: "subject-1", permissions: ["billing:read"] }],
+      accountGrants: [
+        { accountId: "account-default", subjectId: "subject-1", permissions: ["billing:read"] },
+      ],
     });
     expect(workspaceCreationAccountId(context, null)).toBeNull();
   });
@@ -1193,8 +1544,13 @@ describe("workspace switcher helpers", () => {
     const existing = workspaceFixture({ id: "workspace-1", name: "old" });
     const renamed = workspaceFixture({ id: "workspace-1", name: "new" });
     const created = workspaceFixture({ id: "workspace-2", name: "second" });
-    expect(upsertWorkspace([existing], renamed).map((workspace) => workspace.name)).toEqual(["new"]);
-    expect(upsertWorkspace([existing], created).map((workspace) => workspace.id)).toEqual(["workspace-1", "workspace-2"]);
+    expect(upsertWorkspace([existing], renamed).map((workspace) => workspace.name)).toEqual([
+      "new",
+    ]);
+    expect(upsertWorkspace([existing], created).map((workspace) => workspace.id)).toEqual([
+      "workspace-1",
+      "workspace-2",
+    ]);
   });
 
   function workspaceFixture(patch: Partial<Workspace> & Pick<Workspace, "id" | "name">): Workspace {

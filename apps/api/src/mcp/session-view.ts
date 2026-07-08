@@ -208,7 +208,10 @@ function buildTruncationEvent(
  * head and a tail of events and drop the middle behind a marker. `events` is
  * assumed oldest-first (as `listSessionEvents` returns).
  */
-export function capEventPage(events: SessionEvent[], config: EventCapConfig = DEFAULT_EVENT_CAP): CappedEventPage {
+export function capEventPage(
+  events: SessionEvent[],
+  config: EventCapConfig = DEFAULT_EVENT_CAP,
+): CappedEventPage {
   const realLast = events[events.length - 1];
   const nextAfter = realLast ? realLast.sequence : null;
 
@@ -274,7 +277,10 @@ export function capSessionDetail<T extends { metadata?: unknown; initialMessage?
     }
   }
   if (typeof session.initialMessage === "string" && session.initialMessage.length > perFieldChars) {
-    (out as { initialMessage?: unknown }).initialMessage = clampString(session.initialMessage, perFieldChars);
+    (out as { initialMessage?: unknown }).initialMessage = clampString(
+      session.initialMessage,
+      perFieldChars,
+    );
     changed = true;
   }
   return changed ? out : session;

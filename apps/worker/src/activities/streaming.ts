@@ -51,7 +51,10 @@ export function currentActivityContext(): Context | null {
   }
 }
 
-export function startActivityHeartbeat(context: Context | null, details: Record<string, unknown>): ReturnType<typeof setInterval> | null {
+export function startActivityHeartbeat(
+  context: Context | null,
+  details: Record<string, unknown>,
+): ReturnType<typeof setInterval> | null {
   if (!context) {
     return null;
   }
@@ -64,12 +67,12 @@ export function startActivityHeartbeat(context: Context | null, details: Record<
   return timer;
 }
 
-export async function nextStreamEvent<T>(iterator: AsyncIterator<T>, context: Context | null): Promise<IteratorResult<T>> {
+export async function nextStreamEvent<T>(
+  iterator: AsyncIterator<T>,
+  context: Context | null,
+): Promise<IteratorResult<T>> {
   if (!context) {
     return await iterator.next();
   }
-  return await Promise.race([
-    iterator.next(),
-    context.cancelled,
-  ]);
+  return await Promise.race([iterator.next(), context.cancelled]);
 }

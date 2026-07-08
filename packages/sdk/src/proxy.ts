@@ -158,7 +158,7 @@ export function proxySessionEventStream(
   } else {
     signal?.addEventListener("abort", () => upstream.abort(), { once: true });
   }
-  const resolvedAfter = after instanceof Request ? resumeSequenceFromRequest(after) : after ?? 0;
+  const resolvedAfter = after instanceof Request ? resumeSequenceFromRequest(after) : (after ?? 0);
   const events = client.streamEvents(workspaceId, sessionId, {
     ...streamOptions,
     after: resolvedAfter,

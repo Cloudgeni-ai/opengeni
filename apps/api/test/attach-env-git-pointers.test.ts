@@ -36,13 +36,19 @@ const services = { db: null as never, settings, bus: null as never } as never;
 
 describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => {
   test("a GitHub-App repo session's attach env carries the stable git-auth pointers the turn declares", async () => {
-    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
-      kind: "repository",
-      uri: "https://github.com/acme/repo.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]));
+    const attachEnv = await sessionAttachEnvironment(
+      services,
+      "ws",
+      sessionWith([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/repo.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ]),
+    );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, {}),
       githubAppBotIdentity(settings),
@@ -59,13 +65,19 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
   });
 
   test("a non-GitHub brokered repo gets git auth pointers without GitHub bot identity", async () => {
-    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
-      kind: "repository",
-      uri: "https://gitlab.com/acme/repo.git",
-      ref: "main",
-      provider: "gitlab",
-      repositoryId: "gl-123",
-    }]));
+    const attachEnv = await sessionAttachEnvironment(
+      services,
+      "ws",
+      sessionWith([
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/repo.git",
+          ref: "main",
+          provider: "gitlab",
+          repositoryId: "gl-123",
+        },
+      ]),
+    );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun(settings, {}),
       null,
@@ -82,13 +94,22 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     // off the deployment default would cold-create an e2b session's box with
     // /workspace-rooted HOME/token-file/askpass while the turn declares
     // /home/user-rooted ones, the same guard-killed first turn again.
-    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
-      kind: "repository",
-      uri: "https://github.com/acme/repo.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }], "e2b"));
+    const attachEnv = await sessionAttachEnvironment(
+      services,
+      "ws",
+      sessionWith(
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/repo.git",
+            ref: "main",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+        "e2b",
+      ),
+    );
     const expected = applyGitAuthPointerEnvironment(
       stableSandboxEnvironmentForRun({ ...settings, sandboxBackend: "e2b" }, {}),
       githubAppBotIdentity(settings),
@@ -100,11 +121,17 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
   });
 
   test("a plain-URI repo (no installation ids) does not trigger the pointers — mirrors the turn's selection predicate", async () => {
-    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
-      kind: "repository",
-      uri: "https://github.com/acme/public.git",
-      ref: "main",
-    }]));
+    const attachEnv = await sessionAttachEnvironment(
+      services,
+      "ws",
+      sessionWith([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/public.git",
+          ref: "main",
+        },
+      ]),
+    );
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
   });
 });

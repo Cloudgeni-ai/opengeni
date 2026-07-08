@@ -16,22 +16,32 @@ export function isTerminalSessionStatus(value: SessionStatus): boolean {
  * initial message while the event log is still empty.
  */
 export function projectSessionTimeline(session: Session, events: SessionEvent[]): TimelineItem[] {
-  const items = buildTimeline(events.map((event) => sanitizeEventForDisplay(event, session.status)));
+  const items = buildTimeline(
+    events.map((event) => sanitizeEventForDisplay(event, session.status)),
+  );
   if (items.length === 0 && session.initialMessage) {
-    return [{
-      kind: "user-message",
-      id: `user-${session.id}`,
-      text: session.initialMessage,
-      resources: session.resources,
-      tools: session.tools,
-      occurredAt: session.createdAt,
-    }];
+    return [
+      {
+        kind: "user-message",
+        id: `user-${session.id}`,
+        text: session.initialMessage,
+        resources: session.resources,
+        tools: session.tools,
+        occurredAt: session.createdAt,
+      },
+    ];
   }
   return items;
 }
 
-export function sanitizeEventForDisplay(event: SessionEvent, sessionStatus?: SessionStatus): SessionEvent {
-  if (isTerminalSessionStatus(sessionStatus ?? "idle") && (event.type === "turn.failed" || event.type === "sandbox.operation.failed")) {
+export function sanitizeEventForDisplay(
+  event: SessionEvent,
+  sessionStatus?: SessionStatus,
+): SessionEvent {
+  if (
+    isTerminalSessionStatus(sessionStatus ?? "idle") &&
+    (event.type === "turn.failed" || event.type === "sandbox.operation.failed")
+  ) {
     return {
       ...event,
       payload: {
@@ -42,9 +52,10 @@ export function sanitizeEventForDisplay(event: SessionEvent, sessionStatus?: Ses
     };
   }
   if (event.type === "turn.failed" || event.type === "sandbox.operation.failed") {
-    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-      ? event.payload as Record<string, unknown>
-      : {};
+    const payload =
+      event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+        ? (event.payload as Record<string, unknown>)
+        : {};
     const message = failurePayloadMessage(payload);
     if (message && isProviderInternalFailure(message)) {
       return {
@@ -82,7 +93,10 @@ export type SessionFailureSummary = {
  * (run through the same provider-internal redaction as the timeline) plus
  * the re-dispatch history from worker-death recovery (`turn.preempted`).
  */
-export function summarizeSessionFailure(events: SessionEvent[], sessionStatus: SessionStatus): SessionFailureSummary {
+export function summarizeSessionFailure(
+  events: SessionEvent[],
+  sessionStatus: SessionStatus,
+): SessionFailureSummary {
   let reason: string | null = null;
   let failedAt: string | null = null;
   let redispatchCount = 0;
@@ -94,9 +108,12 @@ export function summarizeSessionFailure(events: SessionEvent[], sessionStatus: S
     if (event.type === "turn.failed") {
       failedTurnCount += 1;
       const sanitized = sanitizeEventForDisplay(event, sessionStatus);
-      const payload = sanitized.payload && typeof sanitized.payload === "object" && !Array.isArray(sanitized.payload)
-        ? sanitized.payload as Record<string, unknown>
-        : {};
+      const payload =
+        sanitized.payload &&
+        typeof sanitized.payload === "object" &&
+        !Array.isArray(sanitized.payload)
+          ? (sanitized.payload as Record<string, unknown>)
+          : {};
       reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
       failedAt = event.occurredAt;
     }
@@ -113,13 +130,19 @@ export function reasoningSummaryText(payload: unknown): string {
     return directText;
   }
   const item = (payload as { item?: unknown }).item;
-  const rawItem = item && typeof item === "object" ? (item as { rawItem?: unknown }).rawItem : undefined;
-  const content = rawItem && typeof rawItem === "object" ? (rawItem as { content?: unknown }).content : undefined;
+  const rawItem =
+    item && typeof item === "object" ? (item as { rawItem?: unknown }).rawItem : undefined;
+  const content =
+    rawItem && typeof rawItem === "object" ? (rawItem as { content?: unknown }).content : undefined;
   if (!Array.isArray(content)) {
     return "";
   }
   return content
-    .map((part) => part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")
+    .map((part) =>
+      part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string"
+        ? (part as { text: string }).text
+        : "",
+    )
     .filter(Boolean)
     .join("");
 }
@@ -149,8 +172,8 @@ function isProviderInternalFailure(message: string): boolean {
 function providerInternalFailureDisplayMessage(message: string): string {
   const normalized = message.toLowerCase();
   if (
-    normalized.includes(["resource", "_", "exhausted"].join(""))
-    || normalized.includes(["bandwidth exhausted", " or memory limit exceeded"].join(""))
+    normalized.includes(["resource", "_", "exhausted"].join("")) ||
+    normalized.includes(["bandwidth exhausted", " or memory limit exceeded"].join(""))
   ) {
     return "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.";
   }
@@ -170,12 +193,12 @@ const SANDBOX_OPERATION_LABELS: Record<string, string> = {
 /** The named op on a `sandbox.operation.*` payload, or null. */
 function sandboxOperationName(event: SessionEvent): string | null {
   if (
-    (event.type === "sandbox.operation.started"
-      || event.type === "sandbox.operation.completed"
-      || event.type === "sandbox.operation.failed")
-    && event.payload
-    && typeof event.payload === "object"
-    && !Array.isArray(event.payload)
+    (event.type === "sandbox.operation.started" ||
+      event.type === "sandbox.operation.completed" ||
+      event.type === "sandbox.operation.failed") &&
+    event.payload &&
+    typeof event.payload === "object" &&
+    !Array.isArray(event.payload)
   ) {
     const name = (event.payload as Record<string, unknown>).name;
     return typeof name === "string" ? name : null;
@@ -210,7 +233,10 @@ export function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
     }
     if (event.type === "sandbox.operation.started") {
       inFlight = true;
-    } else if (event.type === "sandbox.operation.completed" || event.type === "sandbox.operation.failed") {
+    } else if (
+      event.type === "sandbox.operation.completed" ||
+      event.type === "sandbox.operation.failed"
+    ) {
       inFlight = false;
     }
   }

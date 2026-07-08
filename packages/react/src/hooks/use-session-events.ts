@@ -1,7 +1,12 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { buildTimeline, groupTimeline, sessionStatusFromEvents, type TimelineItem } from "../timeline";
+import {
+  buildTimeline,
+  groupTimeline,
+  sessionStatusFromEvents,
+  type TimelineItem,
+} from "../timeline";
 import type { SessionClientLike } from "../client";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
@@ -47,7 +52,10 @@ const BOUNDARY_PAGE_CAP = 4;
  * batched React updates. Fresh loads default to a bounded tail window; pass
  * `replay: "full"` or a nonzero `after` for the previous full replay path.
  */
-export function useSessionEvents(sessionId: string | null | undefined, options: UseSessionEventsOptions = {}): UseSessionEventsResult {
+export function useSessionEvents(
+  sessionId: string | null | undefined,
+  options: UseSessionEventsOptions = {},
+): UseSessionEventsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = options.enabled ?? true;
   const after = options.after ?? 0;
@@ -105,7 +113,10 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
       // the next connect instead of being skipped.
       const lastInBatch = batch[batch.length - 1];
       if (lastInBatch) {
-        lastSequenceRef.current = Math.max(lastSequenceRef.current, ...batch.map(eventResumeSequence));
+        lastSequenceRef.current = Math.max(
+          lastSequenceRef.current,
+          ...batch.map(eventResumeSequence),
+        );
       }
       setEvents((existing) => [...existing, ...batch]);
     };
@@ -289,7 +300,12 @@ async function loadEventWindow(
   // pages are fetched only when the buffer holds no boundary at all (one
   // monster turn); past the cap a mid-turn top is accepted.
   let snapPages = 0;
-  while (!reachedStart && findBoundaryIndex(buffer) === -1 && snapPages < BOUNDARY_PAGE_CAP && fetches < options.maxFetches) {
+  while (
+    !reachedStart &&
+    findBoundaryIndex(buffer) === -1 &&
+    snapPages < BOUNDARY_PAGE_CAP &&
+    fetches < options.maxFetches
+  ) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -355,7 +371,11 @@ async function loadPreviousPage(
   if (requested === 0) {
     return Object.assign([], { requested });
   }
-  const page = await client.listEvents(workspaceId, sessionId, { before, limit: requested, compact: true });
+  const page = await client.listEvents(workspaceId, sessionId, {
+    before,
+    limit: requested,
+    compact: true,
+  });
   if (options.signal?.aborted) {
     throw abortError();
   }
@@ -384,7 +404,7 @@ function eventResumeSequence(event: SessionEvent): number {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
 function assertAscending(events: SessionEvent[]): void {

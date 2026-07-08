@@ -100,7 +100,9 @@ function droppedConnectorsFor(acct: CodexAccountStatus, usedConnectors: string[]
  * not cooling AND under the near-exhaustion threshold on BOTH windows.
  */
 function eligible(acct: CodexAccountStatus, nearExhaustionPct: number, now: Date): boolean {
-  return acct.status === "active" && !cooling(acct, now) && bindingUsedPct(acct) < nearExhaustionPct;
+  return (
+    acct.status === "active" && !cooling(acct, now) && bindingUsedPct(acct) < nearExhaustionPct
+  );
 }
 
 /**
@@ -246,7 +248,14 @@ export function chooseRotationActive(args: {
   // P3 (every account trivially covers → Tier 1 == all eligibles). Self-gating.
   usedConnectors?: string[];
 }): RotationDecision {
-  const { rotationStrategy, activeCredentialId, priorCredentialId, accounts, nearExhaustionPct, now } = args;
+  const {
+    rotationStrategy,
+    activeCredentialId,
+    priorCredentialId,
+    accounts,
+    nearExhaustionPct,
+    now,
+  } = args;
   const usedConnectors = args.usedConnectors ?? [];
 
   if (accounts.length === 0) {
@@ -260,11 +269,16 @@ export function chooseRotationActive(args: {
   // move, no switch event. Steady-state stays as cheap as a non-rotation turn
   // save the in-memory ranking. (Skipped for round_robin/drain which anchor on
   // the prior account, but most_remaining is the default + correctness path.)
-  const activeRow = activeCredentialId ? accounts.find((acct) => acct.id === activeCredentialId) ?? null : null;
+  const activeRow = activeCredentialId
+    ? (accounts.find((acct) => acct.id === activeCredentialId) ?? null)
+    : null;
 
   const decide = (chosen: CodexAccountStatus | undefined): RotationDecision => {
     if (!chosen) {
-      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
+      return {
+        kind: "allCapped",
+        earliestResetAt: earliestReset(accounts, nearExhaustionPct, now),
+      };
     }
     // P4: surface the dropped-connector note when the chosen account doesn't cover
     // the session's used connectors (a Tier-2/unknown failover pick). Empty ⇒ omit.
@@ -281,19 +295,27 @@ export function chooseRotationActive(args: {
     // Next eligible AFTER the prior account in list order (wrap around). When the
     // prior account isn't found, start from the head.
     if (eligibles.length === 0) {
-      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
+      return {
+        kind: "allCapped",
+        earliestResetAt: earliestReset(accounts, nearExhaustionPct, now),
+      };
     }
-    const priorIdx = priorCredentialId ? accounts.findIndex((acct) => acct.id === priorCredentialId) : -1;
-    const ordered = priorIdx >= 0
-      ? [...accounts.slice(priorIdx + 1), ...accounts.slice(0, priorIdx + 1)]
-      : accounts;
+    const priorIdx = priorCredentialId
+      ? accounts.findIndex((acct) => acct.id === priorCredentialId)
+      : -1;
+    const ordered =
+      priorIdx >= 0
+        ? [...accounts.slice(priorIdx + 1), ...accounts.slice(0, priorIdx + 1)]
+        : accounts;
     const chosen = ordered.find((acct) => eligible(acct, nearExhaustionPct, now));
     return decide(chosen);
   }
 
   if (rotationStrategy === "drain_then_next") {
     // Stay on the prior account while it is eligible (drain it), else first eligible.
-    const priorRow = priorCredentialId ? accounts.find((acct) => acct.id === priorCredentialId) : undefined;
+    const priorRow = priorCredentialId
+      ? accounts.find((acct) => acct.id === priorCredentialId)
+      : undefined;
     if (priorRow && eligible(priorRow, nearExhaustionPct, now)) {
       return decide(priorRow);
     }

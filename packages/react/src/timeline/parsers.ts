@@ -29,7 +29,8 @@ export function sandboxCommandExitCode(out: unknown): number | null {
 export function parseExecBannerSessionId(out: unknown): number | null {
   const text = String(out ?? "");
   const outputIdx = text.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? text.slice(0, outputIdx) : text.startsWith("Output:\n") ? "" : text;
+  const banner =
+    outputIdx >= 0 ? text.slice(0, outputIdx) : text.startsWith("Output:\n") ? "" : text;
   const match = banner.match(/Process running with session ID (\d+)/);
   if (!match) {
     return null;
@@ -53,7 +54,9 @@ export function stripExecBanner(out: unknown): string {
 
 /** The sandbox clamped the output (token/line truncation markers in the banner). */
 export function execTruncated(out: unknown): boolean {
-  return /Total output lines:|\.{3}\d+ tokens truncated\.{3}|\[\.{3}\d+ characters truncated/.test(String(out ?? ""));
+  return /Total output lines:|\.{3}\d+ tokens truncated\.{3}|\[\.{3}\d+ characters truncated/.test(
+    String(out ?? ""),
+  );
 }
 
 /** A `write_stdin` whose target PTY vanished (`write_stdin failed: session not found: N`). */
@@ -71,7 +74,10 @@ export function looksBinary(text: string): boolean {
  * `write_stdin` keystroke payload reads cleanly in the row title.
  */
 export function controlCaret(printable: string): string {
-  return String(printable).replace(/[\u0000-\u001f]/g, (c) => `^${String.fromCharCode(c.charCodeAt(0) + 64)}`);
+  return String(printable).replace(
+    /[\u0000-\u001f]/g,
+    (c) => `^${String.fromCharCode(c.charCodeAt(0) + 64)}`,
+  );
 }
 
 /* --- V4A apply_patch diff -> GitFileDiff ------------------------------------ */
@@ -100,7 +106,13 @@ export type ApplyPatchOperation = {
  */
 export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
   const status: GitFileDiff["status"] =
-    op.type === "create_file" ? "added" : op.type === "delete_file" ? "deleted" : op.moveTo ? "renamed" : "modified";
+    op.type === "create_file"
+      ? "added"
+      : op.type === "delete_file"
+        ? "deleted"
+        : op.moveTo
+          ? "renamed"
+          : "modified";
   const oldPath = op.moveTo ? op.path : null;
   const path = op.moveTo || op.path;
 
@@ -150,7 +162,12 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
           cur.oldLines += 1;
           deletions += 1;
         } else {
-          cur.lines.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: raw.replace(/^ /, "") });
+          cur.lines.push({
+            type: "context",
+            oldNo: oldNo++,
+            newNo: newNo++,
+            text: raw.replace(/^ /, ""),
+          });
           cur.oldLines += 1;
           cur.newLines += 1;
         }
@@ -163,7 +180,17 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
     }
   }
 
-  return { path, oldPath, status, isBinary: false, isImage: false, additions, deletions, hunks, truncated: false };
+  return {
+    path,
+    oldPath,
+    status,
+    isBinary: false,
+    isImage: false,
+    additions,
+    deletions,
+    hunks,
+    truncated: false,
+  };
 }
 
 /**
@@ -186,7 +213,8 @@ export function applyPatchOps(raw: unknown): ApplyPatchOperation[] {
  * replays that omit `raw`). Centralizes the rawType-or-name check.
  */
 export function isApplyPatch(item: { name: string; raw: unknown }): boolean {
-  const type = item.raw && typeof item.raw === "object" ? (item.raw as { type?: unknown }).type : undefined;
+  const type =
+    item.raw && typeof item.raw === "object" ? (item.raw as { type?: unknown }).type : undefined;
   return type === "apply_patch_call" || item.name === "apply_patch_call";
 }
 
@@ -249,7 +277,10 @@ export function unwrapMcpOutput(output: unknown): { text: string; isError: boole
     }
     return { text: JSON.stringify(output), isError };
   }
-  return { text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output), isError: false };
+  return {
+    text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output),
+    isError: false,
+  };
 }
 
 /* --- computer-use screenshot extraction ------------------------------------- */
@@ -322,7 +353,8 @@ export function screenshotDataUrl(out: unknown): string | null {
 /** Serialize whatever a Uint8Array became in JSON (number[], {"0":n,…} index
  *  map, or Buffer-JSON {type:"Buffer",data:[…]}) back into base64. */
 function bytesToBase64(data: unknown): string | null {
-  const isByte = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255;
+  const isByte = (n: unknown): n is number =>
+    typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255;
   let bytes: number[] | null = null;
   if (Array.isArray(data) && data.every(isByte)) {
     bytes = data;
@@ -349,7 +381,9 @@ function bytesToBase64(data: unknown): string | null {
     for (let i = 0; i < bytes.length; i += CHUNK) {
       binary += String.fromCharCode(...bytes.slice(i, i + CHUNK));
     }
-    return typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
+    return typeof btoa === "function"
+      ? btoa(binary)
+      : Buffer.from(binary, "binary").toString("base64");
   } catch {
     // A hostile/absurd payload must degrade to "no image", never crash a render.
     return null;

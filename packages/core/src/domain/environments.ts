@@ -1,10 +1,6 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { AccessGrant, VariableSet } from "@opengeni/contracts";
-import {
-  getVariableSet,
-  recordAuditEvent,
-  type Database,
-} from "@opengeni/db";
+import { getVariableSet, recordAuditEvent, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission } from "../access";
 
@@ -49,7 +45,9 @@ const reservedPrefixes = [
 
 export function assertAllowedVariableSetVariableName(name: string): void {
   if (reservedExactNames.has(name) || reservedPrefixes.some((prefix) => name.startsWith(prefix))) {
-    throw new HTTPException(422, { message: `reserved variable set variable name / reserved environment variable name: ${name}` });
+    throw new HTTPException(422, {
+      message: `reserved variable set variable name / reserved environment variable name: ${name}`,
+    });
   }
 }
 
@@ -59,7 +57,9 @@ export const assertAllowedEnvironmentVariableName = assertAllowedVariableSetVari
 export function requireVariableSetEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new HTTPException(503, { message: "variable sets require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
+    throw new HTTPException(503, {
+      message: "variable sets require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    });
   }
   return key;
 }
@@ -67,7 +67,11 @@ export function requireVariableSetEncryption(settings: Settings): Uint8Array {
 /** @deprecated use requireVariableSetEncryption */
 export const requireEnvironmentEncryption = requireVariableSetEncryption;
 
-export async function requireVariableSetForApi(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSet> {
+export async function requireVariableSetForApi(
+  db: Database,
+  workspaceId: string,
+  variableSetId: string,
+): Promise<VariableSet> {
   const variableSet = await getVariableSet(db, workspaceId, variableSetId);
   if (!variableSet) {
     throw new HTTPException(404, { message: "variableSet not found" });
@@ -102,12 +106,20 @@ export async function validateVariableSetAttachment(
   return variableSet;
 }
 
-export async function recordVariableSetAuditEvent(db: Database, input: {
-  grant: AccessGrant;
-  action: "variable_set.created" | "variable_set.updated" | "variable_set.deleted" | "variable_set.variable.set" | "variable_set.variable.deleted";
-  variableSetId: string;
-  variableName?: string;
-}): Promise<void> {
+export async function recordVariableSetAuditEvent(
+  db: Database,
+  input: {
+    grant: AccessGrant;
+    action:
+      | "variable_set.created"
+      | "variable_set.updated"
+      | "variable_set.deleted"
+      | "variable_set.variable.set"
+      | "variable_set.variable.deleted";
+    variableSetId: string;
+    variableName?: string;
+  },
+): Promise<void> {
   await recordAuditEvent(db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,

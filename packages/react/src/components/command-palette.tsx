@@ -23,7 +23,15 @@ export type CommandPaletteProps = {
  * the opengeni#46 design tokens. Full keyboard nav lives in useSlashCommands;
  * this component is presentational + aria.
  */
-export function CommandPalette({ open, items, highlight, onHighlight, onRun, argHintText, listboxId }: CommandPaletteProps) {
+export function CommandPalette({
+  open,
+  items,
+  highlight,
+  onHighlight,
+  onRun,
+  argHintText,
+  listboxId,
+}: CommandPaletteProps) {
   return (
     <AnimatePresence>
       {open ? (
@@ -61,14 +69,25 @@ export function CommandPalette({ open, items, highlight, onHighlight, onRun, arg
                   className={cn(
                     "mx-1 flex cursor-pointer items-center gap-2 rounded-og-md px-2.5 py-1.5",
                     "transition-colors duration-100",
-                    selected ? "bg-og-accent/15 text-og-fg" : "text-og-fg-muted hover:bg-og-surface-3",
+                    selected
+                      ? "bg-og-accent/15 text-og-fg"
+                      : "text-og-fg-muted hover:bg-og-surface-3",
                   )}
                 >
                   <span className="flex min-w-0 items-baseline gap-1.5">
-                    <span className={cn("font-mono text-[13px]", selected ? "text-og-accent" : "text-og-fg")}>
+                    <span
+                      className={cn(
+                        "font-mono text-[13px]",
+                        selected ? "text-og-accent" : "text-og-fg",
+                      )}
+                    >
                       /{command.name}
                     </span>
-                    {hint ? <span className="truncate font-mono text-[11px] text-og-fg-subtle">{hint}</span> : null}
+                    {hint ? (
+                      <span className="truncate font-mono text-[11px] text-og-fg-subtle">
+                        {hint}
+                      </span>
+                    ) : null}
                   </span>
                   <span className="ml-auto flex items-center gap-1.5">
                     {command.danger ? (
@@ -76,7 +95,9 @@ export function CommandPalette({ open, items, highlight, onHighlight, onRun, arg
                         danger
                       </span>
                     ) : null}
-                    <span className="truncate text-[12px] text-og-fg-subtle max-sm:hidden">{command.description}</span>
+                    <span className="truncate text-[12px] text-og-fg-subtle max-sm:hidden">
+                      {command.description}
+                    </span>
                   </span>
                 </li>
               );

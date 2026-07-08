@@ -3,8 +3,23 @@
 // unpinned sessions use), inline rename, per-account refresh/disconnect, and
 // "connect another". A connected `codex/*` model run uses the active/pinned
 // subscription instead of spending API credits.
-import type { CodexAccount, CodexAccountsResponse, CodexRotationSettings, CodexUsage, CodexUsageMap, CodexUsageWindow } from "@opengeni/sdk";
-import { ExternalLinkIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SparklesIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import type {
+  CodexAccount,
+  CodexAccountsResponse,
+  CodexRotationSettings,
+  CodexUsage,
+  CodexUsageMap,
+  CodexUsageWindow,
+} from "@opengeni/sdk";
+import {
+  ExternalLinkIcon,
+  Loader2Icon,
+  PlusIcon,
+  RefreshCwIcon,
+  SparklesIcon,
+  Trash2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -39,7 +54,15 @@ function secondsUntilReset(window: CodexUsageWindow, now: number): number | null
   return window.resetAfterSeconds;
 }
 
-export function UsageBar({ label, window, now }: { label: string; window: CodexUsageWindow | null; now: number }) {
+export function UsageBar({
+  label,
+  window,
+  now,
+}: {
+  label: string;
+  window: CodexUsageWindow | null;
+  now: number;
+}) {
   if (!window) return null;
   const pct = Math.min(100, Math.max(0, window.percent));
   const danger = pct >= 90;
@@ -55,7 +78,10 @@ export function UsageBar({ label, window, now }: { label: string; window: CodexU
         </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
-        <div className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`} style={{ width: `${pct}%` }} />
+        <div
+          className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   );
@@ -101,7 +127,8 @@ function AccountUsage({
   if (!fiveHour && !weekly) {
     return null;
   }
-  const limitReached = status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
+  const limitReached =
+    status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
   return (
     <div className="grid gap-2">
       <UsageBar label="5-hour" window={fiveHour} now={now} />
@@ -120,12 +147,20 @@ function accountDisplay(account: CodexAccount): string {
   return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
-export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+export function CodexSubscriptionsCard({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const client = useAppContext().client;
   const [data, setData] = useState<CodexAccountsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [pending, setPending] = useState<{ userCode: string; verificationUri: string } | null>(null);
+  const [pending, setPending] = useState<{ userCode: string; verificationUri: string } | null>(
+    null,
+  );
   // The row whose label is being edited + its draft value.
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
   // True while a LIVE batched usage refresh is in flight (drives the bar skeleton).
@@ -172,24 +207,29 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
   }, [client, workspaceId, refreshAccounts]);
 
   // Per-row LIVE refresh (a single account): updates just that row's usage entry.
-  const refreshAccountUsage = useCallback(async (accountId: string) => {
-    setRefreshingRow(accountId);
-    try {
-      const usage = await client.codexAccountUsage(workspaceId, accountId);
-      if (!cancelled.current) setUsageMap((prev) => ({ ...prev, [accountId]: usage }));
-    } catch {
-      /* surfaced as the row's "usage unavailable" state */
-    } finally {
-      await refreshAccounts();
-      if (!cancelled.current) setRefreshingRow(null);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+  const refreshAccountUsage = useCallback(
+    async (accountId: string) => {
+      setRefreshingRow(accountId);
+      try {
+        const usage = await client.codexAccountUsage(workspaceId, accountId);
+        if (!cancelled.current) setUsageMap((prev) => ({ ...prev, [accountId]: usage }));
+      } catch {
+        /* surfaced as the row's "usage unavailable" state */
+      } finally {
+        await refreshAccounts();
+        if (!cancelled.current) setRefreshingRow(null);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
 
   useEffect(() => {
     cancelled.current = false;
     setLoading(true);
     void refreshAccounts();
-    return () => { cancelled.current = true; };
+    return () => {
+      cancelled.current = true;
+    };
   }, [refreshAccounts]);
 
   // On mount, trigger ONE live refresh when at least one row is stale (cache TTL),
@@ -226,7 +266,11 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
           result = await client.codexConnectPoll(workspaceId, start.state);
         } catch (error) {
           setPending(null);
-          toast.error(error instanceof Error ? error.message : "Failed to verify Codex authorization. Try again.");
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : "Failed to verify Codex authorization. Try again.",
+          );
           return;
         }
         if (result.status === "connected") {
@@ -251,58 +295,79 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
     }
   }, [client, workspaceId, refreshAccounts]);
 
-  const activate = useCallback(async (accountId: string) => {
-    setBusy(true);
-    try {
-      await client.activateCodexAccount(workspaceId, accountId);
-      await refreshAccounts();
-      toast.success("Active subscription updated");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to switch active subscription");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+  const activate = useCallback(
+    async (accountId: string) => {
+      setBusy(true);
+      try {
+        await client.activateCodexAccount(workspaceId, accountId);
+        await refreshAccounts();
+        toast.success("Active subscription updated");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to switch active subscription",
+        );
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
 
   // P3: enable/disable auto-rotation or change the strategy, then re-read settings.
-  const setRotation = useCallback(async (patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationSettings["rotationStrategy"] }) => {
-    setBusy(true);
-    try {
-      await client.setCodexRotationSettings(workspaceId, patch);
-      await refreshAccounts();
-      toast.success("Rotation settings updated");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update rotation settings");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+  const setRotation = useCallback(
+    async (patch: {
+      rotationEnabled?: boolean;
+      rotationStrategy?: CodexRotationSettings["rotationStrategy"];
+    }) => {
+      setBusy(true);
+      try {
+        await client.setCodexRotationSettings(workspaceId, patch);
+        await refreshAccounts();
+        toast.success("Rotation settings updated");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to update rotation settings");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
 
-  const disconnect = useCallback(async (accountId: string) => {
-    setBusy(true);
-    try {
-      await client.disconnectCodexAccount(workspaceId, accountId);
-      await refreshAccounts();
-      toast.success("Subscription disconnected");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+  const disconnect = useCallback(
+    async (accountId: string) => {
+      setBusy(true);
+      try {
+        await client.disconnectCodexAccount(workspaceId, accountId);
+        await refreshAccounts();
+        toast.success("Subscription disconnected");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
 
-  const commitRename = useCallback(async (accountId: string, label: string) => {
-    setEditing(null);
-    setBusy(true);
-    try {
-      await client.renameCodexAccount(workspaceId, accountId, label.trim() === "" ? null : label.trim());
-      await refreshAccounts();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to rename subscription");
-    } finally {
-      setBusy(false);
-    }
-  }, [client, workspaceId, refreshAccounts]);
+  const commitRename = useCallback(
+    async (accountId: string, label: string) => {
+      setEditing(null);
+      setBusy(true);
+      try {
+        await client.renameCodexAccount(
+          workspaceId,
+          accountId,
+          label.trim() === "" ? null : label.trim(),
+        );
+        await refreshAccounts();
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to rename subscription");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [client, workspaceId, refreshAccounts],
+  );
 
   const accounts = data?.accounts ?? [];
   const activeAccountId = data?.activeAccountId ?? null;
@@ -323,12 +388,19 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
             Codex subscriptions
           </h2>
           <p className="mt-1 text-xs text-fg-muted">
-            Connect one or more ChatGPT plans to run agents on your subscription. Turns using a <span className="font-medium">Codex</span> model spend
-            your ChatGPT usage — <span className="font-medium">no API credits</span>.
+            Connect one or more ChatGPT plans to run agents on your subscription. Turns using a{" "}
+            <span className="font-medium">Codex</span> model spend your ChatGPT usage —{" "}
+            <span className="font-medium">no API credits</span>.
           </p>
         </div>
         {canManage && accounts.length > 0 && !pending ? (
-          <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => void connect()}>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void connect()}
+          >
             <PlusIcon className="size-3.5" /> Connect another subscription
           </Button>
         ) : null}
@@ -339,7 +411,9 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
           <label className="flex cursor-pointer items-center justify-between gap-3">
             <span className="text-xs">
               <span className="font-medium">Auto-rotate subscriptions</span>
-              <span className="ml-1 text-fg-subtle">— fail over to another plan when one hits its cap, never mid-turn.</span>
+              <span className="ml-1 text-fg-subtle">
+                — fail over to another plan when one hits its cap, never mid-turn.
+              </span>
             </span>
             <input
               type="checkbox"
@@ -356,7 +430,11 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                 className="h-7 bg-surface text-xs"
                 value={rotationStrategy}
                 disabled={busy}
-                onChange={(e) => void setRotation({ rotationStrategy: e.target.value as CodexRotationSettings["rotationStrategy"] })}
+                onChange={(e) =>
+                  void setRotation({
+                    rotationStrategy: e.target.value as CodexRotationSettings["rotationStrategy"],
+                  })
+                }
               >
                 <option value="most_remaining">Most remaining quota</option>
                 <option value="round_robin">Round-robin</option>
@@ -368,24 +446,41 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
       ) : null}
 
       {loading ? (
-        <div className="flex items-center gap-2 text-xs text-fg-subtle"><Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…</div>
+        <div className="flex items-center gap-2 text-xs text-fg-subtle">
+          <Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…
+        </div>
       ) : pending ? (
         <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
-          <div className="text-xs text-fg-muted">Enter this code at the OpenAI page (opened in a new tab), then leave this open:</div>
+          <div className="text-xs text-fg-muted">
+            Enter this code at the OpenAI page (opened in a new tab), then leave this open:
+          </div>
           <div className="flex items-center gap-2">
-            <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">{pending.userCode}</code>
+            <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">
+              {pending.userCode}
+            </code>
             <Button asChild type="button" variant="secondary" size="sm">
-              <a href={pending.verificationUri} target="_blank" rel="noopener noreferrer">Open auth page <ExternalLinkIcon className="size-3.5" /></a>
+              <a href={pending.verificationUri} target="_blank" rel="noopener noreferrer">
+                Open auth page <ExternalLinkIcon className="size-3.5" />
+              </a>
             </Button>
           </div>
-          <div className="flex items-center gap-2 text-xs text-fg-subtle"><Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…</div>
+          <div className="flex items-center gap-2 text-xs text-fg-subtle">
+            <Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…
+          </div>
         </div>
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-fg-subtle">Not connected. Connecting needs admin access and a ChatGPT Plus/Pro/Team plan.</p>
+          <p className="text-xs text-fg-subtle">
+            Not connected. Connecting needs admin access and a ChatGPT Plus/Pro/Team plan.
+          </p>
           {canManage ? (
             <Button type="button" size="sm" disabled={busy} onClick={() => void connect()}>
-              {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SparklesIcon className="size-3.5" />} Connect Codex
+              {busy ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <SparklesIcon className="size-3.5" />
+              )}{" "}
+              Connect Codex
             </Button>
           ) : null}
         </div>
@@ -395,16 +490,24 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
             const isActive = account.id === activeAccountId;
             const needsRelogin = account.status !== "active" && account.lastError != null;
             return (
-              <div key={account.id} className="grid gap-2 rounded-md border border-border bg-bg p-3">
+              <div
+                key={account.id}
+                className="grid gap-2 rounded-md border border-border bg-bg p-3"
+              >
                 <div className="flex items-center gap-3">
-                  <label className="flex cursor-pointer items-center" title="Used when a session isn't pinned to a specific subscription">
+                  <label
+                    className="flex cursor-pointer items-center"
+                    title="Used when a session isn't pinned to a specific subscription"
+                  >
                     <input
                       type="radio"
                       name="codex-active"
                       className="size-3.5 accent-brand"
                       checked={isActive}
                       disabled={!canManage || busy}
-                      onChange={() => { if (!isActive) void activate(account.id); }}
+                      onChange={() => {
+                        if (!isActive) void activate(account.id);
+                      }}
                     />
                   </label>
                   <div className="min-w-0 flex-1">
@@ -433,20 +536,33 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                     )}
                     <div className="mt-0.5 truncate text-xs text-fg-subtle">
                       {account.email ? `${account.email} · ` : ""}
-                      {account.status === "active" ? "Token valid" : account.status.replaceAll("_", " ")}
-                      {account.expiresAt ? ` · expires ${new Date(account.expiresAt).toLocaleString()}` : ""}
+                      {account.status === "active"
+                        ? "Token valid"
+                        : account.status.replaceAll("_", " ")}
+                      {account.expiresAt
+                        ? ` · expires ${new Date(account.expiresAt).toLocaleString()}`
+                        : ""}
                     </div>
                   </div>
                   {account.plan ? (
-                    <MetaChip dot="idle" rounded="full">{account.plan} plan</MetaChip>
+                    <MetaChip dot="idle" rounded="full">
+                      {account.plan} plan
+                    </MetaChip>
                   ) : null}
                   {(() => {
                     const coolingSecs = account.exhaustedUntil
-                      ? Math.max(0, Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000))
+                      ? Math.max(
+                          0,
+                          Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000),
+                        )
                       : 0;
                     if (coolingSecs > 0) {
                       return (
-                        <MetaChip dot="waiting" rounded="full" title="Rotated off after hitting its cap; skipped until reset">
+                        <MetaChip
+                          dot="waiting"
+                          rounded="full"
+                          title="Rotated off after hitting its cap; skipped until reset"
+                        >
                           Cooling down · {resetLabel(coolingSecs)}
                         </MetaChip>
                       );
@@ -463,7 +579,8 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                 </div>
                 {needsRelogin ? (
                   <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
-                    <TriangleAlertIcon className="size-3.5" /> {account.lastError ?? "Reconnect needed."}
+                    <TriangleAlertIcon className="size-3.5" />{" "}
+                    {account.lastError ?? "Reconnect needed."}
                   </div>
                 ) : (
                   <AccountUsage
@@ -483,9 +600,20 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                       disabled={busy || refreshingRow === account.id}
                       onClick={() => void refreshAccountUsage(account.id)}
                     >
-                      {refreshingRow === account.id ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />} Refresh
+                      {refreshingRow === account.id ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCwIcon className="size-3.5" />
+                      )}{" "}
+                      Refresh
                     </Button>
-                    <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void disconnect(account.id)}>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void disconnect(account.id)}
+                    >
                       <Trash2Icon className="size-3.5" /> Disconnect
                     </Button>
                   </div>
@@ -495,9 +623,16 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
           })}
           <p className="text-2xs text-fg-subtle">
             {rotationEnabled ? (
-              <>Auto-rotating across {accounts.length} subscriptions by <span className="font-medium">{ROTATION_STRATEGY_LABELS[rotationStrategy]}</span>. Pinned sessions stay on their pin.</>
+              <>
+                Auto-rotating across {accounts.length} subscriptions by{" "}
+                <span className="font-medium">{ROTATION_STRATEGY_LABELS[rotationStrategy]}</span>.
+                Pinned sessions stay on their pin.
+              </>
             ) : (
-              <>The <span className="font-medium">active</span> subscription runs every session that isn't pinned to a specific one.</>
+              <>
+                The <span className="font-medium">active</span> subscription runs every session that
+                isn't pinned to a specific one.
+              </>
             )}
           </p>
         </div>

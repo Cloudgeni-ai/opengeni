@@ -98,12 +98,18 @@ describe("filterCapabilityCatalogItems", () => {
   });
 
   test("query matches name, description, and tags case-insensitively", () => {
-    expect(filterCapabilityCatalogItems(items, "all", "PAYMENTS").map((entry) => entry.id)).toEqual(["b"]);
-    expect(filterCapabilityCatalogItems(items, "all", "issues").map((entry) => entry.id)).toEqual(["a"]);
+    expect(filterCapabilityCatalogItems(items, "all", "PAYMENTS").map((entry) => entry.id)).toEqual(
+      ["b"],
+    );
+    expect(filterCapabilityCatalogItems(items, "all", "issues").map((entry) => entry.id)).toEqual([
+      "a",
+    ]);
   });
 
   test("query and kind filter compose", () => {
-    expect(filterCapabilityCatalogItems(items, "skill", "summar").map((entry) => entry.id)).toEqual(["c"]);
+    expect(filterCapabilityCatalogItems(items, "skill", "summar").map((entry) => entry.id)).toEqual(
+      ["c"],
+    );
     expect(filterCapabilityCatalogItems(items, "api", "summar")).toHaveLength(0);
   });
 });
@@ -130,21 +136,36 @@ describe("human labels", () => {
 describe("capabilityConnectPlan", () => {
   test("non-MCP kinds just enable", () => {
     expect(capabilityConnectPlan(item({ kind: "skill" }))).toEqual({ mode: "enable" });
-    expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({ mode: "enable" });
+    expect(capabilityConnectPlan(item({ kind: "api", authKind: "api_key" }))).toEqual({
+      mode: "enable",
+    });
   });
 
   test("OAuth-capable MCP connects via oauth with its mcp url", () => {
-    const plan = capabilityConnectPlan(item({ kind: "mcp", authKind: "oauth2", providerDomain: "linear.app", mcpUrl: "https://mcp.linear.app/sse" }));
-    expect(plan).toEqual({ mode: "oauth", providerDomain: "linear.app", mcpUrl: "https://mcp.linear.app/sse" });
+    const plan = capabilityConnectPlan(
+      item({
+        kind: "mcp",
+        authKind: "oauth2",
+        providerDomain: "linear.app",
+        mcpUrl: "https://mcp.linear.app/sse",
+      }),
+    );
+    expect(plan).toEqual({
+      mode: "oauth",
+      providerDomain: "linear.app",
+      mcpUrl: "https://mcp.linear.app/sse",
+    });
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
-    const plan = capabilityConnectPlan(item({
-      kind: "mcp",
-      authKind: "api_key",
-      providerDomain: "api.supabase.com",
-      metadata: { requiredHeaders: ["Authorization", "X-Region-Key"] },
-    }));
+    const plan = capabilityConnectPlan(
+      item({
+        kind: "mcp",
+        authKind: "api_key",
+        providerDomain: "api.supabase.com",
+        metadata: { requiredHeaders: ["Authorization", "X-Region-Key"] },
+      }),
+    );
     expect(plan.mode).toBe("api_key");
     if (plan.mode !== "api_key") return;
     expect(plan.providerDomain).toBe("api.supabase.com");
@@ -155,36 +176,55 @@ describe("capabilityConnectPlan", () => {
   });
 
   test("all-caps header names are sentence-cased, short acronyms keep caps", () => {
-    const plan = capabilityConnectPlan(item({
-      kind: "mcp",
-      authKind: "api_key",
-      providerDomain: "datadoghq.com",
-      metadata: { requiredHeaders: ["DD-APPLICATION-KEY"] },
-    }));
+    const plan = capabilityConnectPlan(
+      item({
+        kind: "mcp",
+        authKind: "api_key",
+        providerDomain: "datadoghq.com",
+        metadata: { requiredHeaders: ["DD-APPLICATION-KEY"] },
+      }),
+    );
     expect(plan.mode).toBe("api_key");
     if (plan.mode !== "api_key") return;
-    expect(plan.fields).toEqual([
-      { name: "DD-APPLICATION-KEY", label: "DD Application Key" },
-    ]);
+    expect(plan.fields).toEqual([{ name: "DD-APPLICATION-KEY", label: "DD Application Key" }]);
   });
 
   test("MCP with no auth signal just enables", () => {
-    expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "none" }))).toEqual({ mode: "enable" });
-    expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "unknown" }))).toEqual({ mode: "enable" });
+    expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "none" }))).toEqual({
+      mode: "enable",
+    });
+    expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "unknown" }))).toEqual({
+      mode: "enable",
+    });
   });
 
   test("credentialed MCP with no requiredHeaders still offers the api-key form (imported catalog rows)", () => {
     // Imported rows carry authKind api_key but no requiredHeaders in metadata; they
     // must NOT dead-end on Enable → 422, they get the generic single-field form.
-    const byKind = capabilityConnectPlan(item({ kind: "mcp", authKind: "api_key", providerDomain: "supabase.com" }));
-    expect(byKind).toEqual({ mode: "api_key", providerDomain: "supabase.com", fields: [{ name: "Authorization", label: "API key" }] });
+    const byKind = capabilityConnectPlan(
+      item({ kind: "mcp", authKind: "api_key", providerDomain: "supabase.com" }),
+    );
+    expect(byKind).toEqual({
+      mode: "api_key",
+      providerDomain: "supabase.com",
+      fields: [{ name: "Authorization", label: "API key" }],
+    });
     // Manually-created credentialed items carry authModel credential_ref instead.
-    const byModel = capabilityConnectPlan(item({ kind: "mcp", authKind: "unknown", authModel: "credential_ref", providerDomain: "acme.com" }));
+    const byModel = capabilityConnectPlan(
+      item({
+        kind: "mcp",
+        authKind: "unknown",
+        authModel: "credential_ref",
+        providerDomain: "acme.com",
+      }),
+    );
     expect(byModel.mode).toBe("api_key");
   });
 
   test("provider domain falls back to the mcp url host", () => {
-    const plan = capabilityConnectPlan(item({ kind: "mcp", authKind: "oauth2", mcpUrl: "https://mcp.notion.com/mcp" }));
+    const plan = capabilityConnectPlan(
+      item({ kind: "mcp", authKind: "oauth2", mcpUrl: "https://mcp.notion.com/mcp" }),
+    );
     if (plan.mode !== "oauth") throw new Error("expected oauth");
     expect(plan.providerDomain).toBe("mcp.notion.com");
   });
@@ -193,14 +233,24 @@ describe("capabilityConnectPlan", () => {
 describe("capabilityAuthHint", () => {
   test("reflects the connect plan", () => {
     expect(capabilityAuthHint(item({ kind: "mcp", authKind: "oauth2" }))).toBe("OAuth");
-    expect(capabilityAuthHint(item({ kind: "mcp", authKind: "api_key", metadata: { requiredHeaders: ["X-API-Key"] } }))).toBe("API key");
+    expect(
+      capabilityAuthHint(
+        item({ kind: "mcp", authKind: "api_key", metadata: { requiredHeaders: ["X-API-Key"] } }),
+      ),
+    ).toBe("API key");
     expect(capabilityAuthHint(item({ kind: "skill" }))).toBeNull();
   });
 });
 
 describe("isMissingCredentialsError", () => {
   test("matches the raw enable 422 and no unrelated errors", () => {
-    expect(isMissingCredentialsError(new Error("API 422: MCP capability 'supabase' requires credentials; pass them in the enable request 'headers' field"))).toBe(true);
+    expect(
+      isMissingCredentialsError(
+        new Error(
+          "API 422: MCP capability 'supabase' requires credentials; pass them in the enable request 'headers' field",
+        ),
+      ),
+    ).toBe(true);
     expect(isMissingCredentialsError(new Error("API 500: internal error"))).toBe(false);
   });
 });
@@ -211,14 +261,44 @@ describe("capabilityFormError", () => {
   });
 
   test("only MCP servers require an endpoint URL", () => {
-    expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "" })).toBe("Enter the MCP server URL.");
-    expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "notaurl" })).toBe("Enter a valid URL, including https://.");
-    expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "https://mcp.example.com" })).toBeNull();
+    expect(
+      capabilityFormError({ ...emptyCapabilityForm(), kind: "mcp", name: "X", endpointUrl: "" }),
+    ).toBe("Enter the MCP server URL.");
+    expect(
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "mcp",
+        name: "X",
+        endpointUrl: "notaurl",
+      }),
+    ).toBe("Enter a valid URL, including https://.");
+    expect(
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "mcp",
+        name: "X",
+        endpointUrl: "https://mcp.example.com",
+      }),
+    ).toBeNull();
   });
 
   test("non-MCP kinds never ask for a URL", () => {
-    expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "skill", name: "Summarize", endpointUrl: "" })).toBeNull();
-    expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "api", name: "Weather", endpointUrl: "" })).toBeNull();
+    expect(
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "skill",
+        name: "Summarize",
+        endpointUrl: "",
+      }),
+    ).toBeNull();
+    expect(
+      capabilityFormError({
+        ...emptyCapabilityForm(),
+        kind: "api",
+        name: "Weather",
+        endpointUrl: "",
+      }),
+    ).toBeNull();
   });
 });
 
@@ -233,13 +313,19 @@ describe("oauthResumeAction", () => {
   });
 
   test("an enabled item whose returned connection matches its ref is a reconnect", () => {
-    const enabled = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    const enabled = item({
+      enabled: true,
+      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+    });
     expect(oauthResumeAction(enabled, "conn-1")).toBe("reconnect");
   });
 
   test("an enabled item whose old row was gone (new connection id) re-enables to repoint it", () => {
     // The stored ref points at a deleted connection; OAuth minted "conn-2".
-    const enabled = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    const enabled = item({
+      enabled: true,
+      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+    });
     expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
 
@@ -264,13 +350,17 @@ describe("connectionHealth", () => {
   test("no connection ref (headers-enabled or credential-free) is healthy 'none'", () => {
     // Headers-enabled and credential-free installations carry connectionRef null;
     // there is no connection to report on, so this must never read as broken.
-    expect(connectionHealth(item({ enabled: true, connectionRef: null }), [], true)).toEqual({ state: "none" });
+    expect(connectionHealth(item({ enabled: true, connectionRef: null }), [], true)).toEqual({
+      state: "none",
+    });
   });
 
   test("ref present but connections NOT loaded is 'unverified', never attention", () => {
     // A failed listConnections (e.g. the grant lacks connections:read) passes an
     // empty array with loaded=false — a healthy integration must not go amber.
-    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), [], false)).toEqual({ state: "unverified" });
+    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), [], false)).toEqual({
+      state: "unverified",
+    });
   });
 
   test("ref pointing at an active row is connected", () => {
@@ -296,32 +386,66 @@ describe("connectionHealth", () => {
 
   test("matches by id, not domain — a same-domain row with a different id is not a match", () => {
     const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
-    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({ state: "attention", connection: null });
+    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({
+      state: "attention",
+      connection: null,
+    });
   });
 });
 
 describe("capabilityReconnectPlan", () => {
-  const inactive = { state: "attention", connection: connection({ id: "conn-1", status: "revoked" }) } as const;
+  const inactive = {
+    state: "attention",
+    connection: connection({ id: "conn-1", status: "revoked" }),
+  } as const;
   const deleted = { state: "attention", connection: null } as const;
 
   test("offers api_key repair from connectionRef.kind even when the catalog plan drifted to 'enable'", () => {
     // Enabled item, live api_key connectionRef, inactive connection, but the
     // catalog no longer declares auth (plan would be "enable"). Reconnect must
     // still be offered, chosen from the ref's kind — not the stale plan.
-    const drifted = item({ enabled: true, kind: "api", authKind: null, connectionRef: { connectionId: "conn-1", providerDomain: "api.supabase.com", kind: "api_key" } });
-    expect(capabilityReconnectPlan(drifted, inactive)).toEqual({ kind: "api_key", connectionId: "conn-1" });
+    const drifted = item({
+      enabled: true,
+      kind: "api",
+      authKind: null,
+      connectionRef: {
+        connectionId: "conn-1",
+        providerDomain: "api.supabase.com",
+        kind: "api_key",
+      },
+    });
+    expect(capabilityReconnectPlan(drifted, inactive)).toEqual({
+      kind: "api_key",
+      connectionId: "conn-1",
+    });
   });
 
   test("oauth2 ref → oauth reconnect; a deleted row carries a null connectionId", () => {
-    const oauthItem = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
-    expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({ kind: "oauth", connectionId: null });
+    const oauthItem = item({
+      enabled: true,
+      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+    });
+    expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({
+      kind: "oauth",
+      connectionId: null,
+    });
   });
 
   test("nothing to repair when healthy, unverified, or without a ref", () => {
-    const withRef = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "api_key" } });
-    expect(capabilityReconnectPlan(withRef, { state: "connected", connection: connection({ id: "conn-1" }) })).toBeNull();
+    const withRef = item({
+      enabled: true,
+      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "api_key" },
+    });
+    expect(
+      capabilityReconnectPlan(withRef, {
+        state: "connected",
+        connection: connection({ id: "conn-1" }),
+      }),
+    ).toBeNull();
     expect(capabilityReconnectPlan(withRef, { state: "unverified" })).toBeNull();
-    expect(capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted)).toBeNull();
+    expect(
+      capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted),
+    ).toBeNull();
   });
 });
 
@@ -330,9 +454,26 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     // Sheet opened on an enabled, connection-backed item; then the item was
     // disabled elsewhere (strip disable + refresh) so the catalog row for the same
     // id now reads enabled:false with no ref. The sheet must render THAT row.
-    const enabledSnapshot = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
-    const selected = { id: "cap-1", registry: false, snapshotFallback: false, snapshot: enabledSnapshot };
-    const disabledLive = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: false, connectionRef: null });
+    const enabledSnapshot = item({
+      id: "cap-1",
+      kind: "mcp",
+      authKind: "oauth2",
+      enabled: true,
+      connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" },
+    });
+    const selected = {
+      id: "cap-1",
+      registry: false,
+      snapshotFallback: false,
+      snapshot: enabledSnapshot,
+    };
+    const disabledLive = item({
+      id: "cap-1",
+      kind: "mcp",
+      authKind: "oauth2",
+      enabled: false,
+      connectionRef: null,
+    });
 
     const live = resolveSheetItem(selected, [disabledLive]);
     expect(live).toBe(disabledLive);
@@ -346,7 +487,9 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
 
   test("falls back to the snapshot for a registry item not yet in the catalog", () => {
     const snap = item({ id: "reg-1", source: "public_registry" });
-    expect(resolveSheetItem({ id: "reg-1", registry: true, snapshotFallback: true, snapshot: snap }, [])).toBe(snap);
+    expect(
+      resolveSheetItem({ id: "reg-1", registry: true, snapshotFallback: true, snapshot: snap }, []),
+    ).toBe(snap);
   });
 
   test("falls back to the snapshot for a just-created item not yet in items (survives a failed refresh)", () => {
@@ -354,12 +497,22 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     // fails the id isn't in `items`, but snapshotFallback keeps the connect sheet
     // open on the snapshot instead of the ghost-guard closing it.
     const snap = item({ id: "new-1" });
-    expect(resolveSheetItem({ id: "new-1", registry: false, snapshotFallback: true, snapshot: snap }, [])).toBe(snap);
+    expect(
+      resolveSheetItem(
+        { id: "new-1", registry: false, snapshotFallback: true, snapshot: snap },
+        [],
+      ),
+    ).toBe(snap);
   });
 
   test("a live-bound selection absent from the catalog resolves to null (sheet closes)", () => {
     const snap = item({ id: "gone", enabled: true });
-    expect(resolveSheetItem({ id: "gone", registry: false, snapshotFallback: false, snapshot: snap }, [])).toBeNull();
+    expect(
+      resolveSheetItem(
+        { id: "gone", registry: false, snapshotFallback: false, snapshot: snap },
+        [],
+      ),
+    ).toBeNull();
   });
 
   test("null selection resolves to null", () => {
@@ -386,8 +539,17 @@ describe("workspaceConnectionForDomain", () => {
 
 describe("connectionToReuseForApiKey", () => {
   test("reuses the installation's own connection ref first", () => {
-    const cap = item({ enabled: true, connectionRef: { connectionId: "ref-conn", providerDomain: "api.supabase.com", kind: "api_key" } });
-    const conns = [connection({ id: "other", providerDomain: "api.supabase.com", subjectId: null })];
+    const cap = item({
+      enabled: true,
+      connectionRef: {
+        connectionId: "ref-conn",
+        providerDomain: "api.supabase.com",
+        kind: "api_key",
+      },
+    });
+    const conns = [
+      connection({ id: "other", providerDomain: "api.supabase.com", subjectId: null }),
+    ];
     expect(connectionToReuseForApiKey(cap, conns, "api.supabase.com")).toBe("ref-conn");
   });
 
@@ -395,12 +557,16 @@ describe("connectionToReuseForApiKey", () => {
     // No ref yet (the enable half of a prior create-then-enable failed), but the
     // connection created on the first attempt is still on the workspace.
     const cap = item({ enabled: false, connectionRef: null });
-    const conns = [connection({ id: "existing", providerDomain: "api.supabase.com", subjectId: null })];
+    const conns = [
+      connection({ id: "existing", providerDomain: "api.supabase.com", subjectId: null }),
+    ];
     expect(connectionToReuseForApiKey(cap, conns, "API.Supabase.com")).toBe("existing");
   });
 
   test("returns null when nothing exists to reuse (a fresh connection is minted)", () => {
-    expect(connectionToReuseForApiKey(item({ connectionRef: null }), [], "api.supabase.com")).toBeNull();
+    expect(
+      connectionToReuseForApiKey(item({ connectionRef: null }), [], "api.supabase.com"),
+    ).toBeNull();
   });
 });
 

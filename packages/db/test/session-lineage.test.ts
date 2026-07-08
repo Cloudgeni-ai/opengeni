@@ -48,7 +48,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -57,20 +59,44 @@ describe("session lineage", () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const root = await createSession(db, {
-      accountId, workspaceId, initialMessage: "root", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "root",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
     });
     const child = await createSession(db, {
-      accountId, workspaceId, initialMessage: "child", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
       parentSessionId: root.id,
     });
     const grandchild = await createSession(db, {
-      accountId, workspaceId, initialMessage: "grandchild", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "grandchild",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
       parentSessionId: child.id,
     });
 
-    expect((await listSessions(db, workspaceId, { parentSessionId: null })).map((s) => s.id)).toEqual([root.id]);
-    expect((await listSessions(db, workspaceId, { parentSessionId: root.id })).map((s) => s.id)).toEqual([child.id]);
-    expect((await listSessions(db, workspaceId, { parentSessionId: child.id })).map((s) => s.id)).toEqual([grandchild.id]);
+    expect(
+      (await listSessions(db, workspaceId, { parentSessionId: null })).map((s) => s.id),
+    ).toEqual([root.id]);
+    expect(
+      (await listSessions(db, workspaceId, { parentSessionId: root.id })).map((s) => s.id),
+    ).toEqual([child.id]);
+    expect(
+      (await listSessions(db, workspaceId, { parentSessionId: child.id })).map((s) => s.id),
+    ).toEqual([grandchild.id]);
   }, 60_000);
 
   test("getSessionLineage returns root-first ancestors and nested workspace-scoped descendants", async () => {
@@ -78,18 +104,42 @@ describe("session lineage", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const other = await freshWorkspace();
     const root = await createSession(db, {
-      accountId, workspaceId, initialMessage: "root", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "root",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
     });
     const child = await createSession(db, {
-      accountId, workspaceId, initialMessage: "child", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
       parentSessionId: root.id,
     });
     const sibling = await createSession(db, {
-      accountId, workspaceId, initialMessage: "sibling", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "sibling",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
       parentSessionId: root.id,
     });
     const grandchild = await createSession(db, {
-      accountId, workspaceId, initialMessage: "grandchild", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "grandchild",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
       parentSessionId: child.id,
     });
     await createSession(db, {
@@ -110,7 +160,9 @@ describe("session lineage", () => {
 
     const rootLineage = await getSessionLineage(db, workspaceId, root.id);
     expect(rootLineage?.ancestors).toEqual([]);
-    expect(rootLineage?.children.map((n) => n.session.id).sort()).toEqual([child.id, sibling.id].sort());
+    expect(rootLineage?.children.map((n) => n.session.id).sort()).toEqual(
+      [child.id, sibling.id].sort(),
+    );
     const childNode = rootLineage?.children.find((n) => n.session.id === child.id);
     expect(childNode?.children.map((n) => n.session.id)).toEqual([grandchild.id]);
     expect(rootLineage?.truncated).toBe(false);
@@ -120,7 +172,13 @@ describe("session lineage", () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const root = await createSession(db, {
-      accountId, workspaceId, initialMessage: "root", resources: [], metadata: {}, model: "gpt", sandboxBackend: "none",
+      accountId,
+      workspaceId,
+      initialMessage: "root",
+      resources: [],
+      metadata: {},
+      model: "gpt",
+      sandboxBackend: "none",
     });
     for (let i = 0; i < 201; i += 1) {
       await createSession(db, {

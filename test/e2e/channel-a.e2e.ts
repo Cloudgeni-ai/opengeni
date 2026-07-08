@@ -13,7 +13,15 @@
 //   - the routes are served API-direct (the result is the HTTP response).
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { buildSandboxImage, freePort, startProcess, startTestServices, type StartedProcess, type TestServices, waitFor } from "@opengeni/testing";
+import {
+  buildSandboxImage,
+  freePort,
+  startProcess,
+  startTestServices,
+  type StartedProcess,
+  type TestServices,
+  waitFor,
+} from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 let apiPort = 0;
@@ -34,12 +42,19 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     api = await startProcess(["bun", "apps/api/src/index.ts"], {
       cwd: repoRoot,
       env,
-      ready: async () => (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
+      ready: async () =>
+        (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
       timeoutMs: 45_000,
     });
     workspaceId = await discoverWorkspaceId();
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], { cwd: repoRoot, env });
-    await waitFor(() => worker.logs().includes("test worker listening"), { timeoutMs: 90_000, describe: () => worker.logs() });
+    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+      cwd: repoRoot,
+      env,
+    });
+    await waitFor(() => worker.logs().includes("test worker listening"), {
+      timeoutMs: 90_000,
+      describe: () => worker.logs(),
+    });
 
     // Create a session on a real Docker box; wait until idle so the box is warm
     // and the lease materialized. The scripted model writes a file (so the box's
@@ -47,14 +62,24 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     const create = await fetch(apiPath("/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "set up channel-a fixture", sandboxBackend: "docker" }),
+      body: JSON.stringify({
+        initialMessage: "set up channel-a fixture",
+        sandboxBackend: "docker",
+      }),
     });
     expect(create.status).toBe(202);
-    sessionId = (await create.json() as { id: string }).id;
-    await waitFor(async () => {
-      const events = await sessionEvents(sessionId);
-      return events.some((e) => e.type === "session.status.changed" && (e.payload as { status?: string }).status === "idle");
-    }, { timeoutMs: 180_000 });
+    sessionId = ((await create.json()) as { id: string }).id;
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(sessionId);
+        return events.some(
+          (e) =>
+            e.type === "session.status.changed" &&
+            (e.payload as { status?: string }).status === "idle",
+        );
+      },
+      { timeoutMs: 180_000 },
+    );
   }, 360_000);
 
   afterAll(async () => {
@@ -64,15 +89,18 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
   }, 60_000);
 
   test("fs.write then fs.read round-trips text API-direct", async () => {
-    const write = await channelA("/fs/write", { path: "channel-a.txt", content: "hello from channel-a\n" });
+    const write = await channelA("/fs/write", {
+      path: "channel-a.txt",
+      content: "hello from channel-a\n",
+    });
     expect(write.status).toBe(200);
-    const wb = await write.json() as { path: string; sizeBytes: number; revision: number };
+    const wb = (await write.json()) as { path: string; sizeBytes: number; revision: number };
     expect(wb.path).toBe("channel-a.txt");
     expect(wb.revision).toBeGreaterThanOrEqual(1);
 
     const read = await channelA("/fs/read", { path: "channel-a.txt" });
     expect(read.status).toBe(200);
-    const rb = await read.json() as { content: string; encoding: string; isBinary: boolean };
+    const rb = (await read.json()) as { content: string; encoding: string; isBinary: boolean };
     expect(rb.content).toBe("hello from channel-a\n");
     expect(rb.encoding).toBe("utf8");
     expect(rb.isBinary).toBe(false);
@@ -80,10 +108,14 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
 
   test("fs.write then fs.read round-trips a binary file (base64)", async () => {
     const bytes = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe]);
-    const write = await channelA("/fs/write", { path: "blob.bin", encoding: "base64", content: bytes.toString("base64") });
+    const write = await channelA("/fs/write", {
+      path: "blob.bin",
+      encoding: "base64",
+      content: bytes.toString("base64"),
+    });
     expect(write.status).toBe(200);
     const read = await channelA("/fs/read", { path: "blob.bin", encoding: "base64" });
-    const rb = await read.json() as { content: string; isBinary: boolean };
+    const rb = (await read.json()) as { content: string; isBinary: boolean };
     expect(rb.isBinary).toBe(true);
     expect(Buffer.from(rb.content, "base64").equals(bytes)).toBe(true);
   }, 60_000);
@@ -93,9 +125,17 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
     await channelA("/fs/write", { path: "tree/sub/b.txt", content: "b" });
     const list = await channelA("/fs/list", { path: "tree", depth: 3 });
     expect(list.status).toBe(200);
-    const body = await list.json() as { root: { path: string; children?: { path: string; type: string; children?: unknown[] }[] } };
+    const body = (await list.json()) as {
+      root: { path: string; children?: { path: string; type: string; children?: unknown[] }[] };
+    };
     const paths: string[] = [];
-    const walk = (n: { path: string; children?: { path: string; type: string; children?: unknown[] }[] }): void => { paths.push(n.path); n.children?.forEach((ch) => walk(ch as never)); };
+    const walk = (n: {
+      path: string;
+      children?: { path: string; type: string; children?: unknown[] }[];
+    }): void => {
+      paths.push(n.path);
+      n.children?.forEach((ch) => walk(ch as never));
+    };
     walk(body.root as never);
     expect(paths).toContain("tree/a.txt");
     expect(paths).toContain("tree/sub");
@@ -104,21 +144,40 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
 
   test("git status + diff on a staged change parse into structured hunks", async () => {
     // Build a repo with a staged modification via terminal exec + fs.write.
-    await channelA("/terminal/exec", { command: "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false", cwd: "repo" });
+    await channelA("/terminal/exec", {
+      command:
+        "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false",
+      cwd: "repo",
+    });
     await channelA("/fs/write", { path: "repo/code.txt", content: "alpha\nbeta\ngamma\n" });
-    await channelA("/terminal/exec", { command: "git add code.txt && git commit -q -m base", cwd: "repo" });
-    await channelA("/fs/write", { path: "repo/code.txt", content: "alpha\nbeta CHANGED\ngamma\ndelta\n" });
+    await channelA("/terminal/exec", {
+      command: "git add code.txt && git commit -q -m base",
+      cwd: "repo",
+    });
+    await channelA("/fs/write", {
+      path: "repo/code.txt",
+      content: "alpha\nbeta CHANGED\ngamma\ndelta\n",
+    });
     await channelA("/terminal/exec", { command: "git add code.txt", cwd: "repo" });
 
     const status = await channelA("/git/status", { path: "repo" });
     expect(status.status).toBe(200);
-    const sb = await status.json() as { isRepo: boolean; files: { path: string; index: string | null }[] };
+    const sb = (await status.json()) as {
+      isRepo: boolean;
+      files: { path: string; index: string | null }[];
+    };
     expect(sb.isRepo).toBe(true);
     expect(sb.files.some((f) => f.path === "code.txt" && f.index === "modified")).toBe(true);
 
     const diff = await channelA("/git/diff", { path: "repo", staged: true });
     expect(diff.status).toBe(200);
-    const db = await diff.json() as { files: { path: string; hunks: { lines: { type: string; oldNo: number | null; newNo: number | null }[] }[]; additions: number }[] };
+    const db = (await diff.json()) as {
+      files: {
+        path: string;
+        hunks: { lines: { type: string; oldNo: number | null; newNo: number | null }[] }[];
+        additions: number;
+      }[];
+    };
     const file = db.files.find((f) => f.path === "code.txt");
     expect(file).toBeDefined();
     expect(file!.additions).toBeGreaterThan(0);
@@ -129,27 +188,41 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
   }, 120_000);
 
   test("terminal exec 'echo $DISPLAY' streams output + a sandbox.command.output.delta", async () => {
-    const res = await channelA("/terminal/exec", { command: "echo display=$DISPLAY; echo channel_a_terminal_marker", cwd: "" });
+    const res = await channelA("/terminal/exec", {
+      command: "echo display=$DISPLAY; echo channel_a_terminal_marker",
+      cwd: "",
+    });
     expect(res.status).toBe(200);
-    const rb = await res.json() as { stdout: string; exitCode: number };
+    const rb = (await res.json()) as { stdout: string; exitCode: number };
     expect(rb.stdout).toContain("channel_a_terminal_marker");
     expect(rb.exitCode).toBe(0);
     // the buffered output is also published on A1 (the firehose) so other viewers see it.
-    await waitFor(async () => {
-      const events = await sessionEvents(sessionId);
-      return events.some((e) => e.type === "sandbox.command.output.delta" && JSON.stringify(e.payload ?? {}).includes("channel_a_terminal_marker"));
-    }, { timeoutMs: 20_000 });
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(sessionId);
+        return events.some(
+          (e) =>
+            e.type === "sandbox.command.output.delta" &&
+            JSON.stringify(e.payload ?? {}).includes("channel_a_terminal_marker"),
+        );
+      },
+      { timeoutMs: 20_000 },
+    );
   }, 60_000);
 
   test("400 on a malformed body; 404 on a missing session", async () => {
     // fs.read requires a `path` — an empty body is a 400 (explicit, not a 500).
     const bad = await fetch(apiPath(`/sessions/${sessionId}/fs/read`), {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
     });
     expect(bad.status).toBe(400);
 
     const missing = await fetch(apiPath(`/sessions/00000000-0000-4000-8000-0000000000ff/fs/list`), {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "" }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "" }),
     });
     expect(missing.status).toBe(404);
   }, 30_000);
@@ -166,13 +239,13 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
 async function sessionEvents(sessionId: string): Promise<{ type: string; payload: unknown }[]> {
   const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=400`));
   expect(response.ok).toBe(true);
-  return await response.json() as { type: string; payload: unknown }[];
+  return (await response.json()) as { type: string; payload: unknown }[];
 }
 
 async function discoverWorkspaceId(): Promise<string> {
   const response = await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`);
   expect(response.ok).toBe(true);
-  const context = await response.json() as { defaultWorkspaceId?: string };
+  const context = (await response.json()) as { defaultWorkspaceId?: string };
   expect(typeof context.defaultWorkspaceId).toBe("string");
   return context.defaultWorkspaceId!;
 }

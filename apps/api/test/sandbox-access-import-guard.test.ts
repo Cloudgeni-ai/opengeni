@@ -30,7 +30,8 @@ function importSpecifiersOf(source: string): string[] {
   const specifiers: string[] = [];
   // static `import ... from "x"` / `export ... from "x"` / bare `import "x"` /
   // dynamic `import("x")` — string-literal module specifiers.
-  const re = /(?:import|export)\b[^;]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
+  const re =
+    /(?:import|export)\b[^;]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(source)) !== null) {
     specifiers.push((match[1] ?? match[2] ?? match[3])!);

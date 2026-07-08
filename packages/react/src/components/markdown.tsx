@@ -26,7 +26,10 @@ export type MarkdownProps = {
 
 const components: Components = {
   h1: ({ children, ...props }) => (
-    <h1 className="mt-5 mb-2.5 text-xl font-semibold tracking-tight text-og-fg first:mt-0" {...props}>
+    <h1
+      className="mt-5 mb-2.5 text-xl font-semibold tracking-tight text-og-fg first:mt-0"
+      {...props}
+    >
       {children}
     </h1>
   ),
@@ -36,12 +39,18 @@ const components: Components = {
     </h2>
   ),
   h3: ({ children, ...props }) => (
-    <h3 className="mt-4 mb-1.5 text-og-md font-semibold tracking-tight text-og-fg first:mt-0" {...props}>
+    <h3
+      className="mt-4 mb-1.5 text-og-md font-semibold tracking-tight text-og-fg first:mt-0"
+      {...props}
+    >
       {children}
     </h3>
   ),
   h4: ({ children, ...props }) => (
-    <h4 className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0" {...props}>
+    <h4
+      className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0"
+      {...props}
+    >
       {children}
     </h4>
   ),
@@ -71,12 +80,18 @@ const components: Components = {
     </a>
   ),
   ul: ({ children, ...props }) => (
-    <ul className="my-2.5 ml-5 flex list-disc flex-col gap-1 marker:text-og-fg-subtle first:mt-0 last:mb-0" {...props}>
+    <ul
+      className="my-2.5 ml-5 flex list-disc flex-col gap-1 marker:text-og-fg-subtle first:mt-0 last:mb-0"
+      {...props}
+    >
       {children}
     </ul>
   ),
   ol: ({ children, ...props }) => (
-    <ol className="my-2.5 ml-5 flex list-decimal flex-col gap-1 marker:text-og-fg-subtle first:mt-0 last:mb-0" {...props}>
+    <ol
+      className="my-2.5 ml-5 flex list-decimal flex-col gap-1 marker:text-og-fg-subtle first:mt-0 last:mb-0"
+      {...props}
+    >
       {children}
     </ol>
   ),
@@ -84,7 +99,10 @@ const components: Components = {
   // negative margin pull the checkbox back to the bullet column so it aligns
   // with the text.
   li: ({ children, ...props }) => (
-    <li className="leading-7 marker:text-og-fg-subtle [&>ul]:my-1 [&>ol]:my-1 [&:has(>input)]:list-none [&:has(>input)]:-ml-5" {...props}>
+    <li
+      className="leading-7 marker:text-og-fg-subtle [&>ul]:my-1 [&>ol]:my-1 [&:has(>input)]:list-none [&:has(>input)]:-ml-5"
+      {...props}
+    >
       {children}
     </li>
   ),
@@ -142,16 +160,28 @@ const components: Components = {
     </thead>
   ),
   th: ({ children, ...props }) => (
-    <th className="border-b border-og-border px-3 py-1.5 text-left font-medium text-og-fg" {...props}>
+    <th
+      className="border-b border-og-border px-3 py-1.5 text-left font-medium text-og-fg"
+      {...props}
+    >
       {children}
     </th>
   ),
   td: ({ children, ...props }) => (
-    <td className="border-b border-og-border px-3 py-1.5 align-top text-og-fg-muted [tr:last-child>&]:border-b-0" {...props}>
+    <td
+      className="border-b border-og-border px-3 py-1.5 align-top text-og-fg-muted [tr:last-child>&]:border-b-0"
+      {...props}
+    >
       {children}
     </td>
   ),
-  img: ({ alt, ...props }) => <img alt={alt ?? ""} className="my-3 max-w-full rounded-og-md border border-og-border" {...props} />,
+  img: ({ alt, ...props }) => (
+    <img
+      alt={alt ?? ""}
+      className="my-3 max-w-full rounded-og-md border border-og-border"
+      {...props}
+    />
+  ),
 };
 
 function MarkdownImpl({ children, className }: MarkdownProps) {

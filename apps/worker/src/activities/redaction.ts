@@ -34,7 +34,9 @@ export function createSecretRedactor(secrets: SecretForRedaction[]): (payload: u
       return payload.map(redact);
     }
     if (isPlainObject(payload)) {
-      return Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, redact(value)]));
+      return Object.fromEntries(
+        Object.entries(payload).map(([key, value]) => [key, redact(value)]),
+      );
     }
     return payload;
   };

@@ -43,7 +43,9 @@ export class TerminalServerError extends Error {
 
   constructor(exitCode: number, output: string) {
     const stage = exitCode === 14 ? "ttyd" : "unknown";
-    super(`terminal server failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`);
+    super(
+      `terminal server failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`,
+    );
     this.name = "TerminalServerError";
     this.exitCode = exitCode;
     this.stage = stage;
@@ -70,8 +72,16 @@ type ExecResultLike = {
   exitCode?: number | null;
 };
 type ExecCapableSession = {
-  exec?: (args: { cmd: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike>;
-  execCommand?: (args: { cmd: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
+  exec?: (args: {
+    cmd: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<ExecResultLike>;
+  execCommand?: (args: {
+    cmd: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
 };
 
 export type EnsureTerminalServerOptions = {
@@ -198,6 +208,10 @@ export async function tearDownTerminalServer(session: unknown): Promise<void> {
     return;
   }
   if (typeof s?.execCommand === "function") {
-    await s.execCommand({ cmd: "opengeni-terminal-down", yieldTimeMs: 10_000, maxOutputTokens: 4_000 });
+    await s.execCommand({
+      cmd: "opengeni-terminal-down",
+      yieldTimeMs: 10_000,
+      maxOutputTokens: 4_000,
+    });
   }
 }

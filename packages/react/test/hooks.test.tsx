@@ -22,7 +22,11 @@ import { useWorkspaces } from "../src/hooks/use-workspaces";
 
 registerDom();
 
-function makeEvent(sequence: number, type: string, payload: Record<string, unknown> = {}): SessionEvent {
+function makeEvent(
+  sequence: number,
+  type: string,
+  payload: Record<string, unknown> = {},
+): SessionEvent {
   return {
     id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE_ID,
@@ -62,7 +66,11 @@ describe("useTurnQueue", () => {
       listTurns: async () => [queued],
       updateQueuedTurn: async (_ws, _session, turnId, update) => {
         updateCalls.push({ turnId, prompt: update.prompt });
-        return { ...queued, prompt: update.prompt ?? queued.prompt, updatedAt: "2026-06-12T01:00:00.000Z" };
+        return {
+          ...queued,
+          prompt: update.prompt ?? queued.prompt,
+          updatedAt: "2026-06-12T01:00:00.000Z",
+        };
       },
     });
     const hook = await renderHook(
@@ -156,7 +164,8 @@ describe("useTurnQueue", () => {
       },
     });
     const hook = await renderHook(
-      (events: SessionEvent[]) => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      (events: SessionEvent[]) =>
+        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
       [] as SessionEvent[],
     );
     await flush();
@@ -166,7 +175,11 @@ describe("useTurnQueue", () => {
     await flush(200);
     expect(listCalls).toBe(1);
     // A burst of turn events coalesces into one refetch.
-    await hook.rerender([makeEvent(1, "agent.message.delta"), makeEvent(2, "turn.queued"), makeEvent(3, "turn.updated")]);
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "turn.queued"),
+      makeEvent(3, "turn.updated"),
+    ]);
     await flush(250);
     expect(listCalls).toBe(2);
     expect(hook.result.current.queue[0]?.id).toBe("turn-2");
@@ -229,7 +242,8 @@ describe("useSessionLineage", () => {
       },
     });
     const hook = await renderHook(
-      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      (events: SessionEvent[]) =>
+        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
       [] as SessionEvent[],
     );
     await flush();
@@ -237,7 +251,10 @@ describe("useSessionLineage", () => {
     await hook.rerender([makeEvent(1, "agent.message.delta")]);
     await flush(200);
     expect(reads).toBe(1);
-    await hook.rerender([makeEvent(1, "agent.message.delta"), makeEvent(2, "session.status.changed")]);
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "session.status.changed"),
+    ]);
     await flush(250);
     expect(reads).toBe(2);
     expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
@@ -257,15 +274,14 @@ describe("useSessionLineage", () => {
       },
     });
     const hook = await renderHook(
-      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      (events: SessionEvent[]) =>
+        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
       [] as SessionEvent[],
     );
     await flush();
     expect(reads).toBe(1);
 
-    await hook.rerender([
-      makeEvent(1, "agent.toolCall.created", { name: "session_create" }),
-    ]);
+    await hook.rerender([makeEvent(1, "agent.toolCall.created", { name: "session_create" })]);
     await flush(50);
     expect(reads).toBe(2);
     expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
@@ -334,7 +350,10 @@ describe("useGoal", () => {
       getGoal: async () => fakeGoal(),
       updateGoal: async (_ws, _session, request) => {
         calls.push({ status: request.status, rationale: request.rationale });
-        return fakeGoal({ status: request.status === "paused" ? "paused" : "active", pausedReason: request.status === "paused" ? "api" : null });
+        return fakeGoal({
+          status: request.status === "paused" ? "paused" : "active",
+          pausedReason: request.status === "paused" ? "api" : null,
+        });
       },
     });
     const hook = await renderHook(
@@ -414,7 +433,8 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      (events: SessionEvent[]) => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
       [] as SessionEvent[],
     );
     await flush();
@@ -440,7 +460,8 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      (sessionId: string) => useGoal(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      (sessionId: string) =>
+        useGoal(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
       initialSessionId,
     );
     await flush();
@@ -547,11 +568,12 @@ describe("useComposer file-only send", () => {
   test("canSend lights up with a ready resource even when the draft is empty", async () => {
     const client = fakeClient({ sendMessage: async () => makeEvent(1, "user.message") });
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, {
-        client,
-        workspaceId: WORKSPACE_ID,
-        sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
-      }),
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
       undefined,
     );
     // Empty draft, but a resource is attached → sendable.
@@ -591,11 +613,12 @@ describe("useComposer file-only send", () => {
       },
     });
     const hook = await renderHook(
-      () => useComposer(SESSION_ID, {
-        client,
-        workspaceId: WORKSPACE_ID,
-        sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
-      }),
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
       undefined,
     );
     // Empty draft (no explicit text) — the send path must still go through.
@@ -654,9 +677,14 @@ describe("useEnvironments", () => {
     await flush();
     expect(hook.result.current.environments).toEqual([]);
     await flushing(async () => {
-      await hook.result.current.create({ name: "staging", variables: [{ name: "EXAMPLE_TOKEN", value: "v" }] });
+      await hook.result.current.create({
+        name: "staging",
+        variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
+      });
     });
-    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual(["staging"]);
+    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
+      "staging",
+    ]);
     await flushing(async () => {
       await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
       await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
@@ -700,10 +728,7 @@ describe("usePacks", () => {
         return { ...installation, packId, metadata: request?.metadata ?? {} };
       },
     });
-    const hook = await renderHook(
-      () => usePacks({ client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
+    const hook = await renderHook(() => usePacks({ client, workspaceId: WORKSPACE_ID }), undefined);
     await flush();
     expect(hook.result.current.packs.map((pack) => pack.id)).toEqual(["autonomous-devops"]);
     expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
@@ -747,7 +772,12 @@ describe("useBillingUsage", () => {
       getBillingUsage: async (options) => {
         seen.push(options);
         return {
-          balance: { accountId: "acc-1", balanceMicros: 12_000_000, currency: "usd" as const, updatedAt: "" },
+          balance: {
+            accountId: "acc-1",
+            balanceMicros: 12_000_000,
+            currency: "usd" as const,
+            updatedAt: "",
+          },
           usage: [{ id: "u1" } as never],
         };
       },
@@ -775,7 +805,13 @@ describe("useAvailableModels", () => {
           defaultModel: "gpt-5.5",
           allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
           models: [
-            { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+            {
+              id: "gpt-5.5",
+              label: "gpt-5.5",
+              provider: "openai",
+              providerLabel: "OpenAI",
+              api: "responses",
+            },
             {
               id: "accounts/fireworks/models/glm-5p2",
               label: "GLM 5.2",
@@ -799,7 +835,10 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.defaultModel).toBe("gpt-5.5");
     expect(hook.result.current.models.map((model) => model.label)).toEqual(["gpt-5.5", "GLM 5.2"]);
-    expect(hook.result.current.models.map((model) => model.providerLabel)).toEqual(["OpenAI", "Fireworks AI"]);
+    expect(hook.result.current.models.map((model) => model.providerLabel)).toEqual([
+      "OpenAI",
+      "Fireworks AI",
+    ]);
     await hook.unmount();
   });
 

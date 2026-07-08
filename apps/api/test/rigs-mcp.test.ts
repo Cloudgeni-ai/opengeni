@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, createRig, getRigChange, listRigChanges, type DbClient } from "@opengeni/db";
-import { acquireSharedTestDatabase, MemoryEventBus, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import { bootstrapWorkspace, createDb, createRig, getRigChange, type DbClient } from "@opengeni/db";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
@@ -55,7 +60,11 @@ describe("rig MCP tools", () => {
 
     const listed = await callMcpTool<{ rigs: Array<{ id: string }> }>(server, "rig_list", {});
     expect(listed.rigs.some((candidate) => candidate.id === rig.id)).toBe(true);
-    const got = await callMcpTool<{ rig: { id: string }; versions: unknown[]; changes: unknown[] }>(server, "rig_get", { rigId: rig.id });
+    const got = await callMcpTool<{ rig: { id: string }; versions: unknown[]; changes: unknown[] }>(
+      server,
+      "rig_get",
+      { rigId: rig.id },
+    );
     expect(got.rig.id).toBe(rig.id);
     expect(got.versions.length).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(got.changes)).toBe(true);
@@ -73,18 +82,23 @@ describe("rig MCP tools", () => {
       initialVersion: { setupScript: "mkdir -p /opt/mcp", changelog: "v1" },
     });
     const server = buildOpenGeniMcpServer(deps(workflow), grant(["rigs:use"], { sessionId }));
-    const proposed = await callMcpTool<{ change: { id: string; status: string }; verificationStarted: boolean }>(server, "rig_propose_change", {
+    const proposed = await callMcpTool<{
+      change: { id: string; status: string };
+      verificationStarted: boolean;
+    }>(server, "rig_propose_change", {
       rigId: rig.id,
       command: "touch /opt/mcp/tool",
       note: "mcp proposal",
     });
     expect(proposed.change.status).toBe("verifying");
     expect(proposed.verificationStarted).toBe(true);
-    expect(workflow.rigVerifications).toEqual([{
-      workspaceId,
-      changeId: proposed.change.id,
-      workflowId: `rig-verification-change-${proposed.change.id}-attempt-1`,
-    }]);
+    expect(workflow.rigVerifications).toEqual([
+      {
+        workspaceId,
+        changeId: proposed.change.id,
+        workflowId: `rig-verification-change-${proposed.change.id}-attempt-1`,
+      },
+    ]);
     const stored = await getRigChange(client.db, workspaceId, proposed.change.id);
     expect(stored?.kind).toBe("setup_append");
     expect(stored?.proposedBy).toBe(`session:${sessionId}`);
@@ -94,8 +108,12 @@ describe("rig MCP tools", () => {
     if (!available) return;
     const server = buildOpenGeniMcpServer(deps(new FakeWorkflowClient()), grant(["rigs:use"]));
     expect(toolNames(server)).not.toContain("rig_promote");
-    await expect(callMcpTool(server, "rig_promote", { rigId: crypto.randomUUID(), changeId: crypto.randomUUID() }))
-      .rejects.toThrow("MCP tool not registered");
+    await expect(
+      callMcpTool(server, "rig_promote", {
+        rigId: crypto.randomUUID(),
+        changeId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("MCP tool not registered");
   });
 });
 
@@ -128,11 +146,24 @@ function grant(permissions: Permission[], metadata: Record<string, unknown> = {}
 }
 
 function toolNames(server: unknown): string[] {
-  return Object.keys((server as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {}).sort();
+  return Object.keys(
+    (server as { _registeredTools?: Record<string, unknown> })._registeredTools ?? {},
+  ).sort();
 }
 
-async function callMcpTool<T = unknown>(server: unknown, name: string, args: Record<string, unknown>): Promise<T> {
-  const tool = (server as { _registeredTools?: Record<string, { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }> })._registeredTools?.[name];
+async function callMcpTool<T = unknown>(
+  server: unknown,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  const tool = (
+    server as {
+      _registeredTools?: Record<
+        string,
+        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+      >;
+    }
+  )._registeredTools?.[name];
   if (!tool) {
     throw new Error(`MCP tool not registered: ${name}`);
   }

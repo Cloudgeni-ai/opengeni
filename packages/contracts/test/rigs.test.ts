@@ -25,9 +25,13 @@ describe("rig contracts", () => {
     expect(parsed.defaultVariableSetIds).toEqual([]);
     expect(CreateRigRequest.safeParse({ name: "" }).success).toBe(false);
     // A malformed check shape is rejected up front.
-    expect(CreateRigRequest.safeParse({ name: "dev", checks: [{ name: "x" }] }).success).toBe(false);
+    expect(CreateRigRequest.safeParse({ name: "dev", checks: [{ name: "x" }] }).success).toBe(
+      false,
+    );
     // Non-uuid default variable set ids are rejected.
-    expect(CreateRigRequest.safeParse({ name: "dev", defaultVariableSetIds: ["not-a-uuid"] }).success).toBe(false);
+    expect(
+      CreateRigRequest.safeParse({ name: "dev", defaultVariableSetIds: ["not-a-uuid"] }).success,
+    ).toBe(false);
   });
 
   test("UpdateRigRequest accepts a nullable description and partial fields", () => {
@@ -38,17 +42,37 @@ describe("rig contracts", () => {
 
   test("ProposeRigChangeRequest is a kind-discriminated union", () => {
     expect(RigChangeKind.options).toEqual(["setup_append", "definition_edit"]);
-    expect(ProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: { command: "apt-get install -y jq" } }).success).toBe(true);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "setup_append",
+        payload: { command: "apt-get install -y jq" },
+      }).success,
+    ).toBe(true);
     // setup_append requires a command.
-    expect(ProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success).toBe(false);
+    expect(ProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success).toBe(
+      false,
+    );
     // definition_edit accepts a partial next-version content.
-    expect(ProposeRigChangeRequest.safeParse({ kind: "definition_edit", payload: { image: "ubuntu:24.10", changelog: "bump" } }).success).toBe(true);
+    expect(
+      ProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { image: "ubuntu:24.10", changelog: "bump" },
+      }).success,
+    ).toBe(true);
     // Unknown kind is rejected by the union.
-    expect(ProposeRigChangeRequest.safeParse({ kind: "delete_everything", payload: {} }).success).toBe(false);
+    expect(
+      ProposeRigChangeRequest.safeParse({ kind: "delete_everything", payload: {} }).success,
+    ).toBe(false);
   });
 
   test("RigChangeStatus enumerates the full lifecycle", () => {
-    expect([...RigChangeStatus.options].sort()).toEqual(["failed", "merged", "proposed", "rejected", "verifying"]);
+    expect([...RigChangeStatus.options].sort()).toEqual([
+      "failed",
+      "merged",
+      "proposed",
+      "rejected",
+      "verifying",
+    ]);
   });
 
   test("Rig / RigVersion / RigChange parse representative rows", () => {
@@ -83,7 +107,12 @@ describe("rig contracts", () => {
     };
     expect(Rig.safeParse(rig).success).toBe(true);
     expect(Rig.safeParse({ ...rig, activeVersion: null }).success).toBe(true);
-    expect(Rig.safeParse({ ...rig, activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: "2026-07-08T00:00:00.000Z" } }).success).toBe(true);
+    expect(
+      Rig.safeParse({
+        ...rig,
+        activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: "2026-07-08T00:00:00.000Z" },
+      }).success,
+    ).toBe(true);
 
     const change = {
       id: "55555555-5555-4555-8555-555555555555",

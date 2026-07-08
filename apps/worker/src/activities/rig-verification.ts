@@ -4,7 +4,17 @@ import {
   classifyRigVerificationOutcome,
   promoteSetupAppendChange,
 } from "@opengeni/core";
-import { beginRigChangeVerificationAttempt, getRig, getRigChange, getRigVersionById, sanitizeEventPayload, sanitizeEventString, sanitizeMemoryText, updateRigChangeStatus, type Database } from "@opengeni/db";
+import {
+  beginRigChangeVerificationAttempt,
+  getRig,
+  getRigChange,
+  getRigVersionById,
+  sanitizeEventPayload,
+  sanitizeEventString,
+  sanitizeMemoryText,
+  updateRigChangeStatus,
+  type Database,
+} from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
   runRigSetupHook,
@@ -61,7 +71,12 @@ async function terminateThrowaway(established: EstablishedSandboxSession | null)
     await client.delete(established.sessionState).catch(() => undefined);
     return;
   }
-  const session = established.session as { terminate?: () => Promise<unknown>; kill?: () => Promise<unknown>; close?: () => Promise<unknown>; closed?: boolean };
+  const session = established.session as {
+    terminate?: () => Promise<unknown>;
+    kill?: () => Promise<unknown>;
+    close?: () => Promise<unknown>;
+    closed?: boolean;
+  };
   if (session.terminate) {
     await session.terminate().catch(() => undefined);
   } else if (session.kill) {
@@ -71,7 +86,11 @@ async function terminateThrowaway(established: EstablishedSandboxSession | null)
   }
 }
 
-async function runCommand(session: CommandSession, command: string, timeoutMs: number): Promise<CommandResult> {
+async function runCommand(
+  session: CommandSession,
+  command: string,
+  timeoutMs: number,
+): Promise<CommandResult> {
   const args = {
     cmd: command,
     workdir: "/workspace",
@@ -83,7 +102,9 @@ async function runCommand(session: CommandSession, command: string, timeoutMs: n
     ? await session.exec(args)
     : session.execCommand
       ? await session.execCommand(args)
-      : (() => { throw new Error("Sandbox session does not support command execution"); })();
+      : (() => {
+          throw new Error("Sandbox session does not support command execution");
+        })();
   return {
     exitCode: sandboxCommandExitCode(result),
     output: scrubVerificationOutput(tail(sandboxCommandOutput(result))),
@@ -113,15 +134,28 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
   return {
     ...baseVersion,
     image: payload.image === undefined ? baseVersion.image : (payload.image as string | null),
-    setupScript: payload.setupScript === undefined ? baseVersion.setupScript : (payload.setupScript as string | null),
-    checks: Array.isArray(payload.checks) ? payload.checks as RigVersion["checks"] : baseVersion.checks,
-    credentialHooks: Array.isArray(payload.credentialHooks) ? payload.credentialHooks as string[] : baseVersion.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds) ? payload.defaultVariableSetIds as string[] : baseVersion.defaultVariableSetIds,
+    setupScript:
+      payload.setupScript === undefined
+        ? baseVersion.setupScript
+        : (payload.setupScript as string | null),
+    checks: Array.isArray(payload.checks)
+      ? (payload.checks as RigVersion["checks"])
+      : baseVersion.checks,
+    credentialHooks: Array.isArray(payload.credentialHooks)
+      ? (payload.credentialHooks as string[])
+      : baseVersion.credentialHooks,
+    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
+      ? (payload.defaultVariableSetIds as string[])
+      : baseVersion.defaultVariableSetIds,
     changelog: typeof payload.changelog === "string" ? payload.changelog : baseVersion.changelog,
   };
 }
 
-async function loadChangeTarget(db: Database, workspaceId: string, changeId: string): Promise<{ rig: Rig; baseVersion: RigVersion; change: RigChange }> {
+async function loadChangeTarget(
+  db: Database,
+  workspaceId: string,
+  changeId: string,
+): Promise<{ rig: Rig; baseVersion: RigVersion; change: RigChange }> {
   const change = await getRigChange(db, workspaceId, changeId);
   if (!change) {
     throw new Error(`Rig change not found: ${changeId}`);
@@ -140,7 +174,11 @@ async function loadChangeTarget(db: Database, workspaceId: string, changeId: str
   return { rig, baseVersion, change };
 }
 
-async function loadVersionTarget(db: Database, workspaceId: string, versionId: string): Promise<{ rig: Rig; version: RigVersion }> {
+async function loadVersionTarget(
+  db: Database,
+  workspaceId: string,
+  versionId: string,
+): Promise<{ rig: Rig; version: RigVersion }> {
   const version = await getRigVersionById(db, workspaceId, versionId);
   if (!version) {
     throw new Error(`Rig version not found: ${versionId}`);
@@ -156,11 +194,23 @@ export function createRigVerificationActivities(services: () => Promise<Activity
   return {
     verifyRigChange: async (input: { workspaceId: string; changeId: string }) => {
       const { settings, db } = await services();
-      const { rig, baseVersion, change } = await loadChangeTarget(db, input.workspaceId, input.changeId);
+      const { rig, baseVersion, change } = await loadChangeTarget(
+        db,
+        input.workspaceId,
+        input.changeId,
+      );
       const grant = systemGrant(rig);
       const startedAt = new Date().toISOString();
-      await beginRigChangeVerificationAttempt(db, input.workspaceId, change.id, { startedAt, allowAlreadyVerifying: true });
-      await recordRigAuditEvent(db, { grant, action: "rig.verification.started", rigId: rig.id, metadata: { changeId: change.id } });
+      await beginRigChangeVerificationAttempt(db, input.workspaceId, change.id, {
+        startedAt,
+        allowAlreadyVerifying: true,
+      });
+      await recordRigAuditEvent(db, {
+        grant,
+        action: "rig.verification.started",
+        rigId: rig.id,
+        metadata: { changeId: change.id },
+      });
 
       let established: EstablishedSandboxSession | null = null;
       const verification: Record<string, unknown> = { startedAt, checkResults: [] };
@@ -187,8 +237,12 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         }
         const command = setupAppendCommand(change);
         if (command) {
-          const commandResult = await runCommand(established.session as CommandSession, command, settings.rigSetupTimeoutMs);
-            verification.commandResult = commandResult;
+          const commandResult = await runCommand(
+            established.session as CommandSession,
+            command,
+            settings.rigSetupTimeoutMs,
+          );
+          verification.commandResult = commandResult;
           if (commandResult.exitCode !== 0) {
             verification.finishedAt = new Date().toISOString();
             verification.passed = false;
@@ -196,15 +250,33 @@ export function createRigVerificationActivities(services: () => Promise<Activity
               status: "rejected",
               verification: scrubVerificationPayload(verification),
             });
-            await recordRigAuditEvent(db, { grant, action: "rig.verification.failed", rigId: rig.id, metadata: { changeId: change.id, status: "rejected" } });
-            await recordRigAuditEvent(db, { grant, action: "rig.change.rejected", rigId: rig.id, metadata: { changeId: change.id } });
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.verification.failed",
+              rigId: rig.id,
+              metadata: { changeId: change.id, status: "rejected" },
+            });
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.change.rejected",
+              rigId: rig.id,
+              metadata: { changeId: change.id },
+            });
             return updated;
           }
         }
         const checkResults = [];
         for (const check of candidateVersion.checks) {
-          const result = await runCommand(established.session as CommandSession, check.command, settings.rigSetupTimeoutMs);
-          checkResults.push({ name: check.name, command: scrubVerificationOutput(check.command), ...result });
+          const result = await runCommand(
+            established.session as CommandSession,
+            check.command,
+            settings.rigSetupTimeoutMs,
+          );
+          checkResults.push({
+            name: check.name,
+            command: scrubVerificationOutput(check.command),
+            ...result,
+          });
         }
         verification.checkResults = checkResults;
         const passed = checkResults.every((result) => result.exitCode === 0);
@@ -217,9 +289,20 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           // `verifying` keeps beginRigChangeVerificationAttempt blocking a
           // concurrent /verify — resetting to `proposed` would reopen that race
           // (a second run could reject a change whose first verification passed).
-          await updateRigChangeStatus(db, input.workspaceId, change.id, { status: "verifying", verification: scrubVerificationPayload(verification) });
-          const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, { ...change, verification });
-          await recordRigAuditEvent(db, { grant, action: "rig.verification.passed", rigId: rig.id, metadata: { changeId: change.id } });
+          await updateRigChangeStatus(db, input.workspaceId, change.id, {
+            status: "verifying",
+            verification: scrubVerificationPayload(verification),
+          });
+          const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, {
+            ...change,
+            verification,
+          });
+          await recordRigAuditEvent(db, {
+            grant,
+            action: "rig.verification.passed",
+            rigId: rig.id,
+            metadata: { changeId: change.id },
+          });
           return merged;
         }
         const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
@@ -233,19 +316,36 @@ export function createRigVerificationActivities(services: () => Promise<Activity
           metadata: { changeId: change.id, status: classified.status },
         });
         if (!passed) {
-          await recordRigAuditEvent(db, { grant, action: "rig.change.rejected", rigId: rig.id, metadata: { changeId: change.id } });
+          await recordRigAuditEvent(db, {
+            grant,
+            action: "rig.change.rejected",
+            rigId: rig.id,
+            metadata: { changeId: change.id },
+          });
         }
         return updated;
       } catch (error) {
         verification.finishedAt = new Date().toISOString();
         verification.passed = false;
-        verification.error = scrubVerificationOutput(error instanceof Error ? error.message : String(error));
+        verification.error = scrubVerificationOutput(
+          error instanceof Error ? error.message : String(error),
+        );
         const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
           status: "failed",
           verification: scrubVerificationPayload(verification),
         });
-        await recordRigAuditEvent(db, { grant, action: "rig.verification.failed", rigId: rig.id, metadata: { changeId: change.id, status: "failed" } });
-        await recordRigAuditEvent(db, { grant, action: "rig.change.failed", rigId: rig.id, metadata: { changeId: change.id } });
+        await recordRigAuditEvent(db, {
+          grant,
+          action: "rig.verification.failed",
+          rigId: rig.id,
+          metadata: { changeId: change.id, status: "failed" },
+        });
+        await recordRigAuditEvent(db, {
+          grant,
+          action: "rig.change.failed",
+          rigId: rig.id,
+          metadata: { changeId: change.id },
+        });
         return updated;
       } finally {
         await terminateThrowaway(established);
@@ -257,7 +357,12 @@ export function createRigVerificationActivities(services: () => Promise<Activity
       const { rig, version } = await loadVersionTarget(db, input.workspaceId, input.versionId);
       const grant = systemGrant(rig);
       const startedAt = new Date().toISOString();
-      await recordRigAuditEvent(db, { grant, action: "rig.verification.started", rigId: rig.id, metadata: { versionId: version.id } });
+      await recordRigAuditEvent(db, {
+        grant,
+        action: "rig.verification.started",
+        rigId: rig.id,
+        metadata: { versionId: version.id },
+      });
       let established: EstablishedSandboxSession | null = null;
       try {
         const runSettings = settingsWithRigImage(settings, version.image);
@@ -280,14 +385,28 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         }
         const checkResults = [];
         for (const check of version.checks) {
-          checkResults.push({ name: check.name, command: scrubVerificationOutput(check.command), ...(await runCommand(established.session as CommandSession, check.command, settings.rigSetupTimeoutMs)) });
+          checkResults.push({
+            name: check.name,
+            command: scrubVerificationOutput(check.command),
+            ...(await runCommand(
+              established.session as CommandSession,
+              check.command,
+              settings.rigSetupTimeoutMs,
+            )),
+          });
         }
         const passed = checkResults.every((result) => result.exitCode === 0);
         await recordRigAuditEvent(db, {
           grant,
           action: passed ? "rig.verification.passed" : "rig.verification.failed",
           rigId: rig.id,
-          metadata: scrubVerificationPayload({ versionId: version.id, startedAt, finishedAt: new Date().toISOString(), passed, checkResults }),
+          metadata: scrubVerificationPayload({
+            versionId: version.id,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            passed,
+            checkResults,
+          }),
         });
         return { versionId: version.id, passed, checkResults };
       } catch (error) {
@@ -295,12 +414,21 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         // rig.verification.failed so activeVersionHealth reflects the failed
         // re-run instead of staying stale, symmetric to verifyRigChange. Then
         // rethrow so the Temporal activity still surfaces the failure.
-        const detail = tail(scrubVerificationOutput(error instanceof Error ? error.message : String(error)), 4096);
+        const detail = tail(
+          scrubVerificationOutput(error instanceof Error ? error.message : String(error)),
+          4096,
+        );
         await recordRigAuditEvent(db, {
           grant,
           action: "rig.verification.failed",
           rigId: rig.id,
-          metadata: scrubVerificationPayload({ versionId: version.id, startedAt, finishedAt: new Date().toISOString(), passed: false, error: detail }),
+          metadata: scrubVerificationPayload({
+            versionId: version.id,
+            startedAt,
+            finishedAt: new Date().toISOString(),
+            passed: false,
+            error: detail,
+          }),
         });
         throw error;
       } finally {

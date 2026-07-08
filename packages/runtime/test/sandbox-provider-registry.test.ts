@@ -68,7 +68,9 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       expect(client).toBeDefined();
       // The SDK client reports the descriptor's backendId (== the enum key for
       // every backend except local, whose SDK client.backendId is "unix_local").
-      expect((client as { backendId?: unknown }).backendId).toBe(CAPABILITY_DESCRIPTORS[backend].backendId);
+      expect((client as { backendId?: unknown }).backendId).toBe(
+        CAPABILITY_DESCRIPTORS[backend].backendId,
+      );
     });
   }
 
@@ -79,7 +81,10 @@ describe("createSandboxClient — per-backend matrix construction", () => {
       modalTokenSecret: "tok-secret",
       modalAppName: "my-app",
     });
-    const client = createSandboxClient(settings) as { backendId: string; options?: Record<string, unknown> };
+    const client = createSandboxClient(settings) as {
+      backendId: string;
+      options?: Record<string, unknown>;
+    };
     expect(client.backendId).toBe("modal");
     expect(client.options?.appName).toBe("my-app");
     expect(client.options?.tokenId).toBe("tok-id");
@@ -132,7 +137,14 @@ describe("createSandboxClient — per-backend matrix construction", () => {
   });
 
   test("each credentialed backend fails fast without its required creds", () => {
-    for (const backend of ["daytona", "runloop", "e2b", "blaxel", "cloudflare", "vercel"] as const) {
+    for (const backend of [
+      "daytona",
+      "runloop",
+      "e2b",
+      "blaxel",
+      "cloudflare",
+      "vercel",
+    ] as const) {
       const settings = testSettings({ sandboxBackend: backend });
       expect(() => createSandboxClient(settings)).toThrow(SandboxConfigError);
     }
@@ -211,8 +223,12 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
       expect(caps.DesktopStream).toBeDefined();
       expect(caps.Recording).toBeDefined();
       // reason is null-or-string, never undefined/absent.
-      expect(caps.FileSystem.reason === null || typeof caps.FileSystem.reason === "string").toBe(true);
-      expect(caps.DesktopStream.reason === null || typeof caps.DesktopStream.reason === "string").toBe(true);
+      expect(caps.FileSystem.reason === null || typeof caps.FileSystem.reason === "string").toBe(
+        true,
+      );
+      expect(
+        caps.DesktopStream.reason === null || typeof caps.DesktopStream.reason === "string",
+      ).toBe(true);
       expect(caps.leaseEpoch).toBe(3);
     }
   });
@@ -357,7 +373,9 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
 
   test("FileSystem.root matches the descriptor workspaceRoot", () => {
     expect(negotiateCapabilities({ ...base, backend: "e2b" }).FileSystem.root).toBe("/home/user");
-    expect(negotiateCapabilities({ ...base, backend: "vercel" }).FileSystem.root).toBe("/vercel/sandbox");
+    expect(negotiateCapabilities({ ...base, backend: "vercel" }).FileSystem.root).toBe(
+      "/vercel/sandbox",
+    );
   });
 
   test("selectBackend returns the descriptor for the backend", () => {

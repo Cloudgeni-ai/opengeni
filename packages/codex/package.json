@@ -3,6 +3,15 @@
   "version": "0.2.1",
   "description": "ChatGPT/Codex subscription auth + transport: device-code login, token refresh, and the Responses-backend fetch. Pure HTTP + transforms; no database dependency.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/codex"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",
@@ -18,16 +27,9 @@
       "default": "./src/constants.ts"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
-  },
-  "engines": {
-    "node": ">=18"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit",
@@ -41,9 +43,7 @@
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/codex"
+  "engines": {
+    "node": ">=18"
   }
 }

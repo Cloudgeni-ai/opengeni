@@ -50,7 +50,10 @@ export const AGENT_HELLO_SUBJECT = "agent.*.*.hello";
  * expected tail token. Returns null for a subject that does not match the shape
  * (defensive — the subscription pattern already constrains it).
  */
-function parseAgentSubject(subject: string, tail: "events" | "hello"): { workspaceId: string; agentId: string } | null {
+function parseAgentSubject(
+  subject: string,
+  tail: "events" | "hello",
+): { workspaceId: string; agentId: string } | null {
   const parts = subject.split(".");
   if (parts.length !== 4 || parts[0] !== "agent" || parts[3] !== tail) {
     return null;
@@ -59,12 +62,16 @@ function parseAgentSubject(subject: string, tail: "events" | "hello"): { workspa
 }
 
 /** Parse `agent.<ws>.<id>.events` → `{ workspaceId, agentId }` (heartbeat plane). */
-export function parseAgentEventSubject(subject: string): { workspaceId: string; agentId: string } | null {
+export function parseAgentEventSubject(
+  subject: string,
+): { workspaceId: string; agentId: string } | null {
   return parseAgentSubject(subject, "events");
 }
 
 /** Parse `agent.<ws>.<id>.hello` → `{ workspaceId, agentId }` (connect plane). */
-export function parseAgentHelloSubject(subject: string): { workspaceId: string; agentId: string } | null {
+export function parseAgentHelloSubject(
+  subject: string,
+): { workspaceId: string; agentId: string } | null {
   return parseAgentSubject(subject, "hello");
 }
 
@@ -96,7 +103,10 @@ export function wireSampleToDbSample(wire: MetricsSample): MachineMetricsSample 
     contention: wire.runQueue,
     // The sample carries its own wall-clock stamp (epoch ms); fall back to now on
     // a missing/zero stamp so a series row is never NULL-dated.
-    sampledAt: wire.sampledAtMs && Number(wire.sampledAtMs) > 0 ? new Date(Number(wire.sampledAtMs)) : new Date(),
+    sampledAt:
+      wire.sampledAtMs && Number(wire.sampledAtMs) > 0
+        ? new Date(Number(wire.sampledAtMs))
+        : new Date(),
   };
 }
 
@@ -165,7 +175,11 @@ export async function handleAgentEventPayload(
     return; // a heartbeat without a sample → liveness already touched elsewhere.
   }
   try {
-    await ingestHeartbeat(db, { workspaceId: ids.workspaceId, agentId: ids.agentId, sample: metrics });
+    await ingestHeartbeat(db, {
+      workspaceId: ids.workspaceId,
+      agentId: ids.agentId,
+      sample: metrics,
+    });
   } catch (error) {
     observability?.warn?.("Failed to ingest a machine metrics heartbeat", {
       subject,
@@ -239,7 +253,12 @@ export function helloDesktopUnavailableReason(hello: Hello): string | null {
  */
 export async function refreshEnrollmentDisplay(
   db: Database,
-  input: { workspaceId: string; agentId: string; hasDisplay: boolean; desktopUnavailableReason?: string | null },
+  input: {
+    workspaceId: string;
+    agentId: string;
+    hasDisplay: boolean;
+    desktopUnavailableReason?: string | null;
+  },
 ): Promise<{ updated: boolean }> {
   const desktopUnavailableReason = input.desktopUnavailableReason ?? null;
   const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);

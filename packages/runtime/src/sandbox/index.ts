@@ -20,7 +20,11 @@
 
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
-import { DESKTOP_STREAM_PORT, TERMINAL_STREAM_PORT, type SandboxBackend } from "@opengeni/contracts";
+import {
+  DESKTOP_STREAM_PORT,
+  TERMINAL_STREAM_PORT,
+  type SandboxBackend,
+} from "@opengeni/contracts";
 import type {
   SandboxClient,
   SandboxSessionLike,
@@ -219,7 +223,11 @@ export {
   type SelfhostedLivenessState,
   type SelfhostedEnrollment,
 } from "./selfhosted/capabilities";
-export { MockAgentResponder, type MockAgentResponderOptions, type MockExecHandler } from "./selfhosted/testing";
+export {
+  MockAgentResponder,
+  type MockAgentResponderOptions,
+  type MockExecHandler,
+} from "./selfhosted/testing";
 
 // The hot-swap routing proxy (M7): ONE stable session-shaped object the SDK binds
 // to, which re-reads the per-session active pointer per op and dispatches to the
@@ -252,8 +260,15 @@ export {
  * ports on demand (modal/runloop/e2b pre-declare; blaxel resolves on demand).
  * Existing modal/docker/local construction is behavior-preserved.
  */
-export function createSandboxClient(settings: Settings, environment = collectSandboxEnvironment(settings)): unknown {
-  return createSandboxClientForBackend(settings.sandboxBackend as SandboxBackend, settings, environment);
+export function createSandboxClient(
+  settings: Settings,
+  environment = collectSandboxEnvironment(settings),
+): unknown {
+  return createSandboxClientForBackend(
+    settings.sandboxBackend as SandboxBackend,
+    settings,
+    environment,
+  );
 }
 
 /**
@@ -287,10 +302,10 @@ export function createSandboxClientForBackend(
   // on-demand → must pre-declare). blaxel is on-demand → skipped here.
   const desktop = registration.descriptor.capabilities.DesktopStream;
   if (
-    desktop.available
-    && settings.sandboxDesktopEnabled
-    && !registration.descriptor.portExposure.supportsOnDemandPorts
-    && !exposedPorts.includes(DESKTOP_STREAM_PORT)
+    desktop.available &&
+    settings.sandboxDesktopEnabled &&
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(DESKTOP_STREAM_PORT)
   ) {
     exposedPorts.push(DESKTOP_STREAM_PORT);
   }
@@ -299,10 +314,10 @@ export function createSandboxClientForBackend(
   // at construction for resolveExposedPort(7681) to succeed later on a fresh box.
   // Same condition as the 6080 merge (a desktop-capable image bakes ttyd too).
   if (
-    desktop.available
-    && settings.sandboxDesktopEnabled
-    && !registration.descriptor.portExposure.supportsOnDemandPorts
-    && !exposedPorts.includes(TERMINAL_STREAM_PORT)
+    desktop.available &&
+    settings.sandboxDesktopEnabled &&
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(TERMINAL_STREAM_PORT)
   ) {
     exposedPorts.push(TERMINAL_STREAM_PORT);
   }
@@ -328,14 +343,48 @@ function withDockerNetwork(client: SandboxClient, network: string | undefined): 
   };
   return {
     backendId: client.backendId,
-    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
-    ...(client.create ? { create: async (...args: any[]) => await wrapSession(await (client.create as any)(...args)) } : {}),
-    ...(client.resume ? { resume: async (state: SandboxSessionState) => await wrapSession(await client.resume!(state)) } : {}),
-    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
-    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
-    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
-    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
-    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) =>
+            await wrapSession(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) =>
+            await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
   };
 }
 
@@ -351,7 +400,9 @@ async function connectDockerNetwork(network: string, containerId: string): Promi
   if (stderr.includes("already exists")) {
     return;
   }
-  throw new Error(`Failed to connect Docker sandbox container to network ${network}: ${stderr.trim()}`);
+  throw new Error(
+    `Failed to connect Docker sandbox container to network ${network}: ${stderr.trim()}`,
+  );
 }
 
 /**
@@ -364,14 +415,15 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
   if (!sandboxState) {
     return null;
   }
-  const entry = sandboxState.sessionsByAgent?.[sandboxState.currentAgentKey]
-    ?? (sandboxState.currentAgentKey && sandboxState.sessionState
+  const entry =
+    sandboxState.sessionsByAgent?.[sandboxState.currentAgentKey] ??
+    (sandboxState.currentAgentKey && sandboxState.sessionState
       ? {
-        backendId: sandboxState.backendId,
-        currentAgentKey: sandboxState.currentAgentKey,
-        currentAgentName: sandboxState.currentAgentName,
-        sessionState: sandboxState.sessionState,
-      }
+          backendId: sandboxState.backendId,
+          currentAgentKey: sandboxState.currentAgentKey,
+          currentAgentName: sandboxState.currentAgentName,
+          sessionState: sandboxState.sessionState,
+        }
       : null);
   if (!entry || !entry.sessionState) {
     return null;
@@ -384,7 +436,10 @@ export function sandboxStateEntryFromRunState(state: unknown): Record<string, un
  * sandbox session state from a stored entry (as produced by
  * sandboxStateEntryFromRunState) instead of from a RunState blob.
  */
-export async function restoredSandboxSessionStateFromEntry(entry: Record<string, unknown>, client: unknown): Promise<SandboxSessionState | undefined> {
+export async function restoredSandboxSessionStateFromEntry(
+  entry: Record<string, unknown>,
+  client: unknown,
+): Promise<SandboxSessionState | undefined> {
   if (!client || !entry || typeof entry !== "object" || !("sessionState" in entry)) {
     return undefined;
   }
@@ -409,7 +464,9 @@ export async function restoredSandboxSessionStateFromEntry(entry: Record<string,
  * and the SDK's deserializeSessionState must NOT receive it (it is an opaque
  * runtime-level field, not provider state).
  */
-export function readWorkspaceArchiveFromEnvelopeSessionState(sessionState: unknown): Uint8Array | undefined {
+export function readWorkspaceArchiveFromEnvelopeSessionState(
+  sessionState: unknown,
+): Uint8Array | undefined {
   if (!sessionState || typeof sessionState !== "object") {
     return undefined;
   }
@@ -433,7 +490,9 @@ function readWorkspaceArchivePairFromEnvelopeSessionState(sessionState: unknown)
   }
   const state = sessionState as { workspaceArchivePrev?: unknown };
   const current = readWorkspaceArchiveFromEnvelopeSessionState(sessionState);
-  const previous = readWorkspaceArchiveFromEnvelopeSessionState({ workspaceArchive: state.workspaceArchivePrev });
+  const previous = readWorkspaceArchiveFromEnvelopeSessionState({
+    workspaceArchive: state.workspaceArchivePrev,
+  });
   return {
     ...(current ? { current } : {}),
     ...(previous ? { previous } : {}),
@@ -489,7 +548,10 @@ export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
  * A tar archive (no snapshot id) is a no-op. Returns the deleted snapshot id (or
  * undefined when nothing was deleted) for observability.
  */
-export async function deletePriorPersistedSnapshot(session: unknown, priorArchiveBase64: string | null | undefined): Promise<string | undefined> {
+export async function deletePriorPersistedSnapshot(
+  session: unknown,
+  priorArchiveBase64: string | null | undefined,
+): Promise<string | undefined> {
   if (!priorArchiveBase64) {
     return undefined;
   }
@@ -503,7 +565,8 @@ export async function deletePriorPersistedSnapshot(session: unknown, priorArchiv
   if (!snapshotId) {
     return undefined;
   }
-  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } }).modal;
+  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } })
+    .modal;
   const del = modal?.images?.delete;
   if (typeof del !== "function") {
     return undefined;
@@ -516,12 +579,17 @@ export async function deletePriorPersistedSnapshot(session: unknown, priorArchiv
   }
 }
 
-export async function deserializeSandboxSessionStateEnvelope(client: SandboxClient, envelope: unknown): Promise<SandboxSessionState | undefined> {
+export async function deserializeSandboxSessionStateEnvelope(
+  client: SandboxClient,
+  envelope: unknown,
+): Promise<SandboxSessionState | undefined> {
   if (!envelope || typeof envelope !== "object") {
     return undefined;
   }
   if (!client.deserializeSessionState) {
-    throw new Error("Sandbox client must implement deserializeSessionState() to resume RunState sandbox state");
+    throw new Error(
+      "Sandbox client must implement deserializeSessionState() to resume RunState sandbox state",
+    );
   }
   const state = envelope as {
     providerState?: Record<string, unknown>;
@@ -536,8 +604,12 @@ export async function deserializeSandboxSessionStateEnvelope(client: SandboxClie
     ...(state.providerState ?? {}),
     manifest: state.manifest,
     ...(state.snapshot !== undefined ? { snapshot: state.snapshot } : {}),
-    ...(state.snapshotFingerprint !== undefined ? { snapshotFingerprint: state.snapshotFingerprint } : {}),
-    ...(state.snapshotFingerprintVersion !== undefined ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion } : {}),
+    ...(state.snapshotFingerprint !== undefined
+      ? { snapshotFingerprint: state.snapshotFingerprint }
+      : {}),
+    ...(state.snapshotFingerprintVersion !== undefined
+      ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion }
+      : {}),
     workspaceReady: state.workspaceReady,
     ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
   });
@@ -616,14 +688,22 @@ export function isProviderSandboxNotFoundError(backendId: string, error: unknown
   if (!error) {
     return false;
   }
-  const status = (error as { status?: unknown; statusCode?: unknown }).status
-    ?? (error as { statusCode?: unknown }).statusCode;
+  const status =
+    (error as { status?: unknown; statusCode?: unknown }).status ??
+    (error as { statusCode?: unknown }).statusCode;
   if (status === 404) {
     return true;
   }
-  const name = typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const code = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-  const message = error instanceof Error ? error.message : typeof error === "string" ? error : String((error as { message?: unknown })?.message ?? "");
+  const name =
+    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
+  const code =
+    typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : String((error as { message?: unknown })?.message ?? "");
   const haystack = `${name} ${code} ${message}`.toLowerCase();
   // Provider-agnostic "gone" markers (Modal: "sandbox … not found" / terminated;
   // e2b/daytona/runloop: "not found" / "no longer running" / "terminated" /
@@ -645,7 +725,11 @@ export function isProviderSandboxNotFoundError(backendId: string, error: unknown
   ];
   // A "running"/"already exists" resume-conflict is explicitly NOT NotFound — the
   // box is alive; recreating would double-spawn.
-  if (haystack.includes("already running") || haystack.includes("still running") || haystack.includes("already exists")) {
+  if (
+    haystack.includes("already running") ||
+    haystack.includes("still running") ||
+    haystack.includes("already exists")
+  ) {
     return false;
   }
   return goneMarkers.some((marker) => haystack.includes(marker));
@@ -653,18 +737,35 @@ export function isProviderSandboxNotFoundError(backendId: string, error: unknown
 
 function readInstanceId(session: unknown): string {
   const state = (session as { state?: Record<string, unknown> }).state ?? {};
-  const candidate = state.sandboxId ?? state.instanceId ?? state.id ?? state.hostId ?? state.containerId;
+  const candidate =
+    state.sandboxId ?? state.instanceId ?? state.id ?? state.hostId ?? state.containerId;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : "";
 }
 
-async function terminateCreatedSandbox(client: ResumeCapableClient, session: unknown, sessionState: unknown): Promise<void> {
+async function terminateCreatedSandbox(
+  client: ResumeCapableClient,
+  session: unknown,
+  sessionState: unknown,
+): Promise<void> {
   const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
   if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
-    try { await clientWithDelete.delete(sessionState); } catch { /* best-effort */ }
+    try {
+      await clientWithDelete.delete(sessionState);
+    } catch {
+      /* best-effort */
+    }
     return;
   }
-  const sess = session as { close?: () => Promise<unknown>; terminate?: () => Promise<unknown>; kill?: () => Promise<unknown> };
-  try { await (sess.terminate ?? sess.kill ?? sess.close)?.(); } catch { /* best-effort */ }
+  const sess = session as {
+    close?: () => Promise<unknown>;
+    terminate?: () => Promise<unknown>;
+    kill?: () => Promise<unknown>;
+  };
+  try {
+    await (sess.terminate ?? sess.kill ?? sess.close)?.();
+  } catch {
+    /* best-effort */
+  }
 }
 
 /**
@@ -692,12 +793,19 @@ export async function establishSandboxSessionFromEnvelope(
     metrics?: RuntimeMetricsHooks;
   },
 ): Promise<EstablishedSandboxSession> {
-  const envelopeBackend = typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
-  const backend = (opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend));
+  const envelopeBackend =
+    typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
+  const backend =
+    opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
-  const client = createSandboxClientForBackend(backend, settings, environment) as ResumeCapableClient | undefined;
+  const client = createSandboxClientForBackend(backend, settings, environment) as
+    | ResumeCapableClient
+    | undefined;
   if (!client) {
-    throw new SandboxConfigError(backend, `Cannot establish a sandbox session for backend "${backend}" (no client; sandboxBackend=none?)`);
+    throw new SandboxConfigError(
+      backend,
+      `Cannot establish a sandbox session for backend "${backend}" (no client; sandboxBackend=none?)`,
+    );
   }
   if (!client.create) {
     throw new SandboxConfigError(backend, `Sandbox backend "${backend}" does not support create()`);
@@ -719,7 +827,10 @@ export async function establishSandboxSessionFromEnvelope(
   // The serialized provider state the box was last persisted as. The envelope
   // shape is the per-turn `_sandbox` entry; its `sessionState` is the provider
   // payload deserializeSandboxSessionStateEnvelope re-hydrates.
-  const envelopeSessionState = envelope && typeof envelope === "object" ? (envelope as { sessionState?: unknown }).sessionState : undefined;
+  const envelopeSessionState =
+    envelope && typeof envelope === "object"
+      ? (envelope as { sessionState?: unknown }).sessionState
+      : undefined;
 
   // The persisted /workspace snapshot the reaper folded onto the lease envelope
   // (sandbox-file-persistence). Present on a re-warm whose box was drain-persisted:
@@ -736,7 +847,10 @@ export async function establishSandboxSessionFromEnvelope(
   // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
   // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
   // cold-restore branch (b) below.
-  const coldRestore = async (resumeFallbackState?: unknown, skipWorkspaceHydrate = false): Promise<EstablishedSandboxSession> => {
+  const coldRestore = async (
+    resumeFallbackState?: unknown,
+    skipWorkspaceHydrate = false,
+  ): Promise<EstablishedSandboxSession> => {
     const createStarted = Date.now();
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
     try {
@@ -769,7 +883,8 @@ export async function establishSandboxSessionFromEnvelope(
     // empty workspace.
     let hydrationApplied = false;
     if (!skipWorkspaceHydrate && (workspaceArchive || workspaceArchives.previous)) {
-      const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
+      const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
+        .hydrateWorkspace;
       if (typeof hydrate === "function") {
         let hydrated = false;
         for (const candidate of [
@@ -784,13 +899,17 @@ export async function establishSandboxSessionFromEnvelope(
             // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
             // the placeholder), so the instanceId must be re-read AFTER.
             await hydrate.call(restored, candidate.archive);
-            console.info(`[sandbox] cold-restore hydrated workspace from ${candidate.label} archive`);
+            console.info(
+              `[sandbox] cold-restore hydrated workspace from ${candidate.label} archive`,
+            );
             hydrated = true;
             break;
           } catch (hydrateError) {
             console.warn(
               `[sandbox] cold-restore failed to hydrate workspace from ${candidate.label} archive${
-                candidate.label === "current" && workspaceArchives.previous ? "; trying previous archive" : ""
+                candidate.label === "current" && workspaceArchives.previous
+                  ? "; trying previous archive"
+                  : ""
               }`,
               hydrateError,
             );
@@ -832,7 +951,7 @@ export async function establishSandboxSessionFromEnvelope(
       sessionState: restoredState ?? resumeFallbackState,
       instanceId: readInstanceId(restored),
       backendId: client.backendId,
-      origin: hydrationApplied ? "restored" as const : "created" as const,
+      origin: hydrationApplied ? ("restored" as const) : ("created" as const),
     };
   };
 
@@ -843,30 +962,49 @@ export async function establishSandboxSessionFromEnvelope(
   // NotFound, so it would propagate instead of cold-restoring. Gate the resume
   // branch on a present sandbox identity so an archive-only envelope falls straight
   // through to the cold-restore+hydrate path (b).
-  const envelopeProviderState = envelopeSessionState && typeof envelopeSessionState === "object"
-    ? (envelopeSessionState as { providerState?: Record<string, unknown> }).providerState
-    : undefined;
+  const envelopeProviderState =
+    envelopeSessionState && typeof envelopeSessionState === "object"
+      ? (envelopeSessionState as { providerState?: Record<string, unknown> }).providerState
+      : undefined;
   const hasResumableInstance = Boolean(
-    envelopeProviderState
-    && typeof envelopeProviderState === "object"
-    && (envelopeProviderState.sandboxId
-      || envelopeProviderState.instanceId
-      || envelopeProviderState.id
-      || envelopeProviderState.containerId),
+    envelopeProviderState &&
+    typeof envelopeProviderState === "object" &&
+    (envelopeProviderState.sandboxId ||
+      envelopeProviderState.instanceId ||
+      envelopeProviderState.id ||
+      envelopeProviderState.containerId),
   );
 
   // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
-  if (hasResumableInstance && envelopeSessionState && client.resume && client.deserializeSessionState) {
+  if (
+    hasResumableInstance &&
+    envelopeSessionState &&
+    client.resume &&
+    client.deserializeSessionState
+  ) {
     let resumedState: unknown;
     try {
-      resumedState = await deserializeSandboxSessionStateEnvelope(client as unknown as SandboxClient, envelopeSessionState);
+      resumedState = await deserializeSandboxSessionStateEnvelope(
+        client as unknown as SandboxClient,
+        envelopeSessionState,
+      );
     } catch (error) {
-      throw new SandboxConfigError(backend, `Failed to deserialize sandbox resume envelope for backend "${backend}": ${error instanceof Error ? error.message : String(error)}`);
+      throw new SandboxConfigError(
+        backend,
+        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (resumedState !== undefined) {
       try {
         const session = await client.resume(resumedState);
-        return { client, session, sessionState: resumedState, instanceId: readInstanceId(session), backendId: client.backendId, origin: "resumed" };
+        return {
+          client,
+          session,
+          sessionState: resumedState,
+          instanceId: readInstanceId(session),
+          backendId: client.backendId,
+          origin: "resumed",
+        };
       } catch (error) {
         // ONLY a provider NotFound (box gone) licenses a cold-restore. Anything
         // else (transient/auth/network/resume-conflict) propagates: the caller

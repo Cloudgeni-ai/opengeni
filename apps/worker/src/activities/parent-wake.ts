@@ -1,6 +1,11 @@
 import type { Settings } from "@opengeni/config";
 import type { Session, SessionGoal } from "@opengeni/contracts";
-import { getSession, getSessionGoal, wakeParentSessionForChildCompletion, type Database } from "@opengeni/db";
+import {
+  getSession,
+  getSessionGoal,
+  wakeParentSessionForChildCompletion,
+  type Database,
+} from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { ActivityServices, WakeSessionWorkflowSignal } from "./types";
 
@@ -86,34 +91,48 @@ export async function notifyParentOfChildTerminal(
   }
 }
 
-function childCompletionPayload(child: Session, goal: SessionGoal | null, terminalStatus: "idle" | "failed"): Record<string, unknown> {
+function childCompletionPayload(
+  child: Session,
+  goal: SessionGoal | null,
+  terminalStatus: "idle" | "failed",
+): Record<string, unknown> {
   return {
     childSessionId: child.id,
     status: terminalStatus,
     ...(goal
       ? {
-        goal: {
-          status: goal.status,
-          text: goal.text,
-          ...(goal.evidence ? { evidence: goal.evidence } : {}),
-          ...(goal.rationale ? { rationale: goal.rationale } : {}),
-          ...(goal.pausedReason ? { pausedReason: goal.pausedReason } : {}),
-        },
-      }
+          goal: {
+            status: goal.status,
+            text: goal.text,
+            ...(goal.evidence ? { evidence: goal.evidence } : {}),
+            ...(goal.rationale ? { rationale: goal.rationale } : {}),
+            ...(goal.pausedReason ? { pausedReason: goal.pausedReason } : {}),
+          },
+        }
       : {}),
   };
 }
 
-function childCompletionWakeText(child: Session, goal: SessionGoal | null, terminalStatus: "idle" | "failed"): string {
+function childCompletionWakeText(
+  child: Session,
+  goal: SessionGoal | null,
+  terminalStatus: "idle" | "failed",
+): string {
   const lines: string[] = [];
   if (terminalStatus === "failed") {
     lines.push(`A worker session you spawned has FAILED. Worker session id: ${child.id}.`);
   } else if (goal?.status === "completed") {
-    lines.push(`A worker session you spawned has COMPLETED its goal. Worker session id: ${child.id}.`);
+    lines.push(
+      `A worker session you spawned has COMPLETED its goal. Worker session id: ${child.id}.`,
+    );
   } else if (goal?.status === "paused") {
-    lines.push(`A worker session you spawned has PAUSED its goal and gone idle. Worker session id: ${child.id}.`);
+    lines.push(
+      `A worker session you spawned has PAUSED its goal and gone idle. Worker session id: ${child.id}.`,
+    );
   } else {
-    lines.push(`A worker session you spawned has finished its work and gone idle. Worker session id: ${child.id}.`);
+    lines.push(
+      `A worker session you spawned has finished its work and gone idle. Worker session id: ${child.id}.`,
+    );
   }
   if (goal) {
     lines.push(`Worker goal: ${goal.text}`);
@@ -124,6 +143,8 @@ function childCompletionWakeText(child: Session, goal: SessionGoal | null, termi
       lines.push(`Pause rationale: ${goal.rationale}`);
     }
   }
-  lines.push("Read the worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting this worker, resume it now.");
+  lines.push(
+    "Read the worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting this worker, resume it now.",
+  );
   return lines.join("\n");
 }

@@ -70,7 +70,11 @@ if (restore && stripDevDependencies) {
  * Translate a single `workspace:` spec to a concrete range using pnpm/bun rules.
  * Returns the original string unchanged if it is not a workspace spec.
  */
-function resolveWorkspaceSpec(depName: string, spec: string, versions: Map<string, string>): string {
+function resolveWorkspaceSpec(
+  depName: string,
+  spec: string,
+  versions: Map<string, string>,
+): string {
   if (!spec.startsWith("workspace:")) {
     return spec;
   }
@@ -108,7 +112,11 @@ for (const { dir: pkgDir } of publishableWorkspacePackages()) {
     for (const [depName, spec] of Object.entries(deps)) {
       if (restore) {
         // Put the workspace protocol back on @opengeni/* deps (local proving).
-        if (workspaceNames.has(depName) && depName.startsWith("@opengeni/") && !spec.startsWith("workspace:")) {
+        if (
+          workspaceNames.has(depName) &&
+          depName.startsWith("@opengeni/") &&
+          !spec.startsWith("workspace:")
+        ) {
           deps[depName] = "workspace:*";
           pkgChanged = true;
           changed += 1;
@@ -129,7 +137,9 @@ for (const { dir: pkgDir } of publishableWorkspacePackages()) {
     delete pkg.devDependencies;
     pkgChanged = true;
     changed += 1;
-    process.stdout.write(`  ${pkg.name ?? pkgDir}: removed devDependencies from publish manifest\n`);
+    process.stdout.write(
+      `  ${pkg.name ?? pkgDir}: removed devDependencies from publish manifest\n`,
+    );
   }
 
   if (pkgChanged) {
@@ -140,9 +150,13 @@ for (const { dir: pkgDir } of publishableWorkspacePackages()) {
 }
 
 if (restore) {
-  process.stdout.write(`rewrite-workspace-deps: restored ${changed} @opengeni/* dep(s) to workspace:*.\n`);
+  process.stdout.write(
+    `rewrite-workspace-deps: restored ${changed} @opengeni/* dep(s) to workspace:*.\n`,
+  );
 } else if (changed === 0) {
-  process.stdout.write("rewrite-workspace-deps: no workspace: specs found in publishable packages (already concrete).\n");
+  process.stdout.write(
+    "rewrite-workspace-deps: no workspace: specs found in publishable packages (already concrete).\n",
+  );
 } else {
   process.stdout.write(`rewrite-workspace-deps: applied ${changed} publish manifest rewrite(s).\n`);
 }

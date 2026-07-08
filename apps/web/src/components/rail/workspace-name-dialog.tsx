@@ -51,9 +51,15 @@ export function WorkspaceNameDialog(props: {
             />
           </div>
           <DialogFooter className="mt-4">
-            <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>Cancel</Button>
+            <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
+              Cancel
+            </Button>
             <Button type="submit" disabled={props.busy || !props.name.trim()}>
-              {props.busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
+              {props.busy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <CheckIcon className="size-4" />
+              )}
               {creating ? "Create workspace" : "Rename"}
             </Button>
           </DialogFooter>

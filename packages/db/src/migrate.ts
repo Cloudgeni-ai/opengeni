@@ -42,7 +42,9 @@ function assertIdentifier(name: string, value: string): string {
  * binding never regresses.
  */
 export async function migrate(
-  databaseUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ?? process.env.OPENGENI_DATABASE_URL ?? DEFAULT_DATABASE_URL,
+  databaseUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
+    process.env.OPENGENI_DATABASE_URL ??
+    DEFAULT_DATABASE_URL,
   schema: string | undefined = process.env.OPENGENI_DB_SCHEMA?.trim() || undefined,
 ): Promise<void> {
   const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -61,7 +63,9 @@ export async function migrate(
       await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "opengeni_private"`);
       await sql.unsafe(`SET search_path = "${schema}", "opengeni_private", "public"`);
     }
-    await sql.unsafe(`CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`);
+    await sql.unsafe(
+      `CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
+    );
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
     for (const file of files) {

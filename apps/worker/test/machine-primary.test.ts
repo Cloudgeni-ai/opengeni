@@ -40,7 +40,12 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
     // skipped entirely — no network, no GH_TOKEN — and the STABLE base env is
     // returned. The machine uses its own git creds; exec routes over NATS.
     // TOKEN-BROKER (B1): sandboxEnvironmentForRun returns { environment, gitToken }.
-    const { environment: env, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource()], {}, { skipGitHubToken: true });
+    const { environment: env, gitToken } = await sandboxEnvironmentForRun(
+      settings,
+      [repoResource()],
+      {},
+      { skipGitHubToken: true },
+    );
     expect(gitToken).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
@@ -65,7 +70,12 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
   test("no repo attached: skip flag is a no-op (the base env either way)", async () => {
     const settings = cloudSettings();
     const withSkip = await sandboxEnvironmentForRun(settings, [], {}, { skipGitHubToken: true });
-    const withoutSkip = await sandboxEnvironmentForRun(settings, [], {}, { skipGitHubToken: false });
+    const withoutSkip = await sandboxEnvironmentForRun(
+      settings,
+      [],
+      {},
+      { skipGitHubToken: false },
+    );
     expect(withSkip).toEqual(withoutSkip);
     expect(withSkip.environment.GH_TOKEN).toBeUndefined();
     expect(withSkip.gitToken).toBeUndefined();
@@ -74,7 +84,9 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
 
 describe("warm-rate keyed off the EFFECTIVE backend (selfhosted bills zero)", () => {
   test("selfhosted resolves to 0 even when a cloud (modal) rate is configured", () => {
-    const settings = testSettings({ sandboxWarmRateMicrosPerSecondJson: JSON.stringify({ modal: 50 }) });
+    const settings = testSettings({
+      sandboxWarmRateMicrosPerSecondJson: JSON.stringify({ modal: 50 }),
+    });
     // A machine-primary turn keys the warm meter off "selfhosted" (the effective
     // backend), which has no configured rate → 0. Keying off the home backend
     // ("modal", 50) would bill cloud seconds for a box that does not exist.
@@ -93,7 +105,13 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
       // db is never touched on this path (no lease here); bus undefined ⇒ the control
       // RPC is offline-until-bound, and resume() is a pure subject re-address (no NATS).
       { db: null as never, settings: settings(), bus: undefined },
-      { workspaceId: "ws-1", agentId: "enr_1", epoch: 4, environment: env, workingDir: "/home/jorge/repo" },
+      {
+        workspaceId: "ws-1",
+        agentId: "enr_1",
+        epoch: 4,
+        environment: env,
+        workingDir: "/home/jorge/repo",
+      },
     );
 
     // NO Modal box: the established backend is the machine itself.
@@ -103,13 +121,15 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
     // round-trips {agentId}); never a Modal SandboxClient.
     expect((established.client as { backendId?: string }).backendId).toBe("selfhosted");
 
-    const state = (established.session as {
-      state: {
-        agentId: string;
-        environment: Record<string, string>;
-        manifest: { root: string; resolveEnvironment(): Promise<Record<string, string>> };
-      };
-    }).state;
+    const state = (
+      established.session as {
+        state: {
+          agentId: string;
+          environment: Record<string, string>;
+          manifest: { root: string; resolveEnvironment(): Promise<Record<string, string>> };
+        };
+      }
+    ).state;
     expect(state.agentId).toBe("enr_1");
     // Env threaded onto BOTH the SDK state env AND the manifest env → the SDK's
     // per-turn provided-session env delta is empty (no "cannot change manifest
@@ -124,7 +144,9 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
       { db: null as never, settings: settings(), bus: undefined },
       { workspaceId: "ws-1", agentId: "enr_xyz", epoch: 1, environment: {}, workingDir: null },
     );
-    const serialized = await (established.session as { serializeSessionState(): Promise<{ agentId: string }> }).serializeSessionState();
+    const serialized = await (
+      established.session as { serializeSessionState(): Promise<{ agentId: string }> }
+    ).serializeSessionState();
     expect(serialized).toEqual({ agentId: "enr_xyz" });
   });
 });

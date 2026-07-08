@@ -25,10 +25,15 @@ export type UseAvailableModelsResult = {
  * provider-grouped `models` plus the `defaultModel` the picker should preselect.
  * Deployment-scoped, so it only needs the client (no workspace).
  */
-export function useAvailableModels(options: UseAvailableModelsOptions = {}): UseAvailableModelsResult {
+export function useAvailableModels(
+  options: UseAvailableModelsOptions = {},
+): UseAvailableModelsResult {
   const client = useOpenGeniClient(options);
   const load = useCallback(async () => await client.getClientConfig(), [client]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   return {
     models: state.data?.models ?? [],
     defaultModel: state.data?.defaultModel ?? null,

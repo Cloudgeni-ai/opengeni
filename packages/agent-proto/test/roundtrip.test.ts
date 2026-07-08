@@ -25,16 +25,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  ControlRequest,
-  ControlResponse,
-  Hello,
-} from "../src/index";
-import {
-  canonicalControlRequest,
-  canonicalControlResponse,
-  canonicalHello,
-} from "./corpus";
+import { ControlRequest, ControlResponse, Hello } from "../src/index";
+import { canonicalControlRequest, canonicalControlResponse, canonicalHello } from "./corpus";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // packages/agent-proto/test -> repo root -> agent/tests/fixtures
@@ -86,12 +78,8 @@ writeFileSync(
 
 describe("wire-protocol cross-stack round-trip", () => {
   test("self round-trip (TS encode -> TS decode)", () => {
-    expect(ControlResponse.decode(encoded.control_response)).toEqual(
-      canonicalControlResponse(),
-    );
-    expect(ControlRequest.decode(encoded.control_request)).toEqual(
-      canonicalControlRequest(),
-    );
+    expect(ControlResponse.decode(encoded.control_response)).toEqual(canonicalControlResponse());
+    expect(ControlRequest.decode(encoded.control_request)).toEqual(canonicalControlRequest());
     expect(Hello.decode(encoded.hello)).toEqual(canonicalHello());
   });
 
@@ -102,12 +90,8 @@ describe("wire-protocol cross-stack round-trip", () => {
         "agent/tests/fixtures/rust_encoded.txt missing — run agent/scripts/roundtrip.sh",
       );
     }
-    expect(ControlResponse.decode(rust.control_response!)).toEqual(
-      canonicalControlResponse(),
-    );
-    expect(ControlRequest.decode(rust.control_request!)).toEqual(
-      canonicalControlRequest(),
-    );
+    expect(ControlResponse.decode(rust.control_response!)).toEqual(canonicalControlResponse());
+    expect(ControlRequest.decode(rust.control_request!)).toEqual(canonicalControlRequest());
     expect(Hello.decode(rust.hello!)).toEqual(canonicalHello());
   });
 

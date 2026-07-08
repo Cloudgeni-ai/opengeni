@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { bootstrapWorkspace, createDb, createSession, listSessionEvents } from "@opengeni/db";
 import { appendAndPublishEvents, createNatsEventBus, type EventBus } from "@opengeni/events";
-import { expectContiguousSequences, startTestServices, waitFor, type TestServices } from "@opengeni/testing";
+import {
+  expectContiguousSequences,
+  startTestServices,
+  waitFor,
+  type TestServices,
+} from "@opengeni/testing";
 import type { AccessGrant, SessionEvent } from "@opengeni/contracts";
 
 describe("NATS integration", () => {
@@ -35,8 +40,12 @@ describe("NATS integration", () => {
     });
     const seenA: SessionEvent[] = [];
     const seenB: SessionEvent[] = [];
-    const unsubA = await bus.subscribe(grant.workspaceId, session.id, (events) => seenA.push(...events));
-    const unsubB = await bus.subscribe(grant.workspaceId, session.id, (events) => seenB.push(...events));
+    const unsubA = await bus.subscribe(grant.workspaceId, session.id, (events) =>
+      seenA.push(...events),
+    );
+    const unsubB = await bus.subscribe(grant.workspaceId, session.id, (events) =>
+      seenB.push(...events),
+    );
 
     const appended = await appendAndPublishEvents(dbClient.db, bus, grant.workspaceId, session.id, [
       { type: "session.created" },
@@ -62,7 +71,9 @@ describe("NATS integration", () => {
       sandboxBackend: "none",
     });
     const live: SessionEvent[] = [];
-    const unsubscribe = await bus.subscribe(grant.workspaceId, session.id, (events) => live.push(...events));
+    const unsubscribe = await bus.subscribe(grant.workspaceId, session.id, (events) =>
+      live.push(...events),
+    );
     await appendAndPublishEvents(dbClient.db, bus, grant.workspaceId, session.id, [
       { type: "session.created" },
     ]);
@@ -74,8 +85,16 @@ describe("NATS integration", () => {
       { type: "session.status.changed", payload: { status: "idle" } },
     ]);
 
-    const replay = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, live[0]!.sequence);
-    expect(replay.map((event) => event.type)).toEqual(["agent.message.delta", "session.status.changed"]);
+    const replay = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      live[0]!.sequence,
+    );
+    expect(replay.map((event) => event.type)).toEqual([
+      "agent.message.delta",
+      "session.status.changed",
+    ]);
     expectContiguousSequences([...live, ...replay]);
   });
 });

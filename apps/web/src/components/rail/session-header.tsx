@@ -16,8 +16,11 @@ import type { ReactNode } from "react";
 import { ConnectionPill } from "@/components/common";
 import { SpawnedByBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
-import { SESSION_TITLE_MAX_LENGTH, sessionDisplayTitle, useInlineRename } from "@/lib/session-rename";
-import { cn } from "@/lib/utils";
+import {
+  SESSION_TITLE_MAX_LENGTH,
+  sessionDisplayTitle,
+  useInlineRename,
+} from "@/lib/session-rename";
 import type { Session } from "@/types";
 
 export function SessionHeader({
@@ -72,7 +75,10 @@ export function SessionHeader({
         <div className="flex min-w-0 items-center gap-2 text-2xs leading-4 text-fg-subtle">
           <span className="shrink-0 font-medium text-fg-muted">
             {session.model}
-            <span className="font-normal text-fg-subtle"> · {String(session.metadata.reasoningEffort ?? "low")}</span>
+            <span className="font-normal text-fg-subtle">
+              {" "}
+              · {String(session.metadata.reasoningEffort ?? "low")}
+            </span>
           </span>
           {sandboxSlot}
           {codexSlot}
@@ -83,7 +89,13 @@ export function SessionHeader({
         <ConnectionPill state={connectionState} />
         <SessionStatusBadge status={status} />
         {keyAuthRequired ? (
-          <Button type="button" variant="ghost" size="icon-sm" onClick={onForgetAccessKey} aria-label="Clear access key">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            onClick={onForgetAccessKey}
+            aria-label="Clear access key"
+          >
             <LockIcon className="size-4" />
           </Button>
         ) : null}

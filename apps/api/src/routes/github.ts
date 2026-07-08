@@ -1,8 +1,5 @@
 import { GitHubAppManifestCreate } from "@opengeni/contracts";
-import {
-  listGitHubInstallationIdsForWorkspace,
-  upsertGitHubInstallation,
-} from "@opengeni/db";
+import { listGitHubInstallationIdsForWorkspace, upsertGitHubInstallation } from "@opengeni/db";
 import {
   buildGitHubAppManifest,
   convertGitHubAppManifest,
@@ -29,7 +26,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 const githubStateCookie = "opengeni_github_state";
 
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { db, settings, githubStateSecret } = deps;
+  const { settings, githubStateSecret } = deps;
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -46,7 +43,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       appId: settings.githubAppId ?? null,
       clientId: settings.githubClientId ?? null,
       appSlug: slug,
-      installUrl: slug ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}` : null,
+      installUrl: slug
+        ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`
+        : null,
       missing,
     });
   });
@@ -70,10 +69,17 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const slug = settings.githubAppSlug?.trim();
     if (!slug) {
-      throw new HTTPException(409, { message: JSON.stringify({ message: "GitHub App is not configured", missing: githubAppMissingSettings(settings) }) });
+      throw new HTTPException(409, {
+        message: JSON.stringify({
+          message: "GitHub App is not configured",
+          missing: githubAppMissingSettings(settings),
+        }),
+      });
     }
     setGitHubStateCookie(c, deps, state);
-    return c.redirect(`https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`);
+    return c.redirect(
+      `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/github/repositories", async (c) => {
@@ -83,9 +89,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
+        throw new HTTPException(409, {
+          message: JSON.stringify({ message: error.message, missing: error.missing }),
+        });
       }
-      throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
+      throw new HTTPException(502, {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
@@ -96,9 +106,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
+        throw new HTTPException(409, {
+          message: JSON.stringify({ message: error.message, missing: error.missing }),
+        });
       }
-      throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
+      throw new HTTPException(502, {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 
@@ -106,7 +120,10 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
     const payload = GitHubAppManifestCreate.parse(await c.req.json());
-    const baseUrl = (settings.githubAppManifestBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
+    const baseUrl = (settings.githubAppManifestBaseUrl ?? new URL(c.req.url).origin).replace(
+      /\/+$/,
+      "",
+    );
     const state = createSignedState(githubStateSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -122,7 +139,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     const organization = payload.organization?.trim();
     return c.json({
-      actionUrl: organization ? organizationAppManifestUrl(organization, state) : personalAppManifestUrl(state),
+      actionUrl: organization
+        ? organizationAppManifestUrl(organization, state)
+        : personalAppManifestUrl(state),
       state,
       manifest,
     });
@@ -141,7 +160,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       const conversion = await convertGitHubAppManifest(code);
       const envLines = envLinesFromGitHubManifestConversion(conversion);
       const slug = String(conversion.slug ?? "");
-      const installUrl = slug ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}` : "";
+      const installUrl = slug
+        ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`
+        : "";
       setGitHubStateCookie(c, deps, state);
       return c.html(githubSuccessHtml(envLines, installUrl));
     } catch (error) {
@@ -159,13 +180,19 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "missing GitHub installation state" });
     }
     const statePayload = readSignedState(state, githubStateSecret);
-    if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string") {
+    if (
+      !statePayload ||
+      typeof statePayload.accountId !== "string" ||
+      typeof statePayload.workspaceId !== "string"
+    ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
     requireGitHubStateCookie(c, state);
     const grant = await requireAccessGrant(c, deps, statePayload.workspaceId, "github:manage");
     if (grant.accountId !== statePayload.accountId) {
-      throw new HTTPException(403, { message: "GitHub installation state does not match this workspace" });
+      throw new HTTPException(403, {
+        message: "GitHub installation state does not match this workspace",
+      });
     }
     if (setupAction === "request" && !installationIdRaw) {
       return c.html(githubSetupPendingHtml());
@@ -177,20 +204,31 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!code) {
       const clientId = settings.githubClientId?.trim();
       if (!clientId) {
-        throw new HTTPException(409, { message: JSON.stringify({ message: "GitHub App is not configured", missing: ["OPENGENI_GITHUB_CLIENT_ID"] }) });
+        throw new HTTPException(409, {
+          message: JSON.stringify({
+            message: "GitHub App is not configured",
+            missing: ["OPENGENI_GITHUB_CLIENT_ID"],
+          }),
+        });
       }
       const oauthState = createSignedState(githubStateSecret, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         installationId,
       });
-      const baseUrl = (settings.githubAppManifestBaseUrl ?? settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
+      const baseUrl = (
+        settings.githubAppManifestBaseUrl ??
+        settings.publicBaseUrl ??
+        new URL(c.req.url).origin
+      ).replace(/\/+$/, "");
       setGitHubStateCookie(c, deps, oauthState);
-      return c.redirect(githubOAuthAuthorizeUrl({
-        clientId,
-        state: oauthState,
-        redirectUri: `${baseUrl}/v1/github/oauth/callback`,
-      }));
+      return c.redirect(
+        githubOAuthAuthorizeUrl({
+          clientId,
+          state: oauthState,
+          redirectUri: `${baseUrl}/v1/github/oauth/callback`,
+        }),
+      );
     }
     return await completeGitHubInstallationBinding(deps, c, {
       code,
@@ -213,7 +251,12 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const statePayload = readSignedState(state, githubStateSecret);
     const installationId = parsePositiveInteger(String(statePayload?.installationId ?? ""));
-    if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string" || installationId === null) {
+    if (
+      !statePayload ||
+      typeof statePayload.accountId !== "string" ||
+      typeof statePayload.workspaceId !== "string" ||
+      installationId === null
+    ) {
       throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
     }
     requireGitHubStateCookie(c, state);
@@ -240,12 +283,19 @@ async function completeGitHubInstallationBinding(
   }
   const grant = await requireAccessGrant(c, deps, input.statePayload.workspaceId, "github:manage");
   if (grant.accountId !== input.statePayload.accountId) {
-    throw new HTTPException(403, { message: "GitHub installation state does not match this workspace" });
+    throw new HTTPException(403, {
+      message: "GitHub installation state does not match this workspace",
+    });
   }
   try {
-    const installation = await verifyGitHubInstallationAccessForUser(settings, { code: input.code, installationId: input.installationId });
+    const installation = await verifyGitHubInstallationAccessForUser(settings, {
+      code: input.code,
+      installationId: input.installationId,
+    });
     if (!installation) {
-      throw new HTTPException(404, { message: "GitHub App installation was not found for this app" });
+      throw new HTTPException(404, {
+        message: "GitHub App installation was not found for this app",
+      });
     }
     if (installation.suspended) {
       throw new HTTPException(409, { message: "GitHub App installation is suspended" });
@@ -259,16 +309,25 @@ async function completeGitHubInstallationBinding(
     });
     const returnUrl = openGeniReturnUrl(settings, c, input.statePayload.workspaceId);
     deleteCookie(c, githubStateCookie, { path: "/v1/github" });
-    return c.html(githubSetupSuccessHtml(installation.accountLogin ?? `installation ${input.installationId}`, returnUrl));
-    } catch (error) {
-      if (error instanceof HTTPException) {
-        throw error;
-      }
-      if (error instanceof GitHubAppConfigurationError) {
-        throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
-      }
-      throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
+    return c.html(
+      githubSetupSuccessHtml(
+        installation.accountLogin ?? `installation ${input.installationId}`,
+        returnUrl,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof HTTPException) {
+      throw error;
     }
+    if (error instanceof GitHubAppConfigurationError) {
+      throw new HTTPException(409, {
+        message: JSON.stringify({ message: error.message, missing: error.missing }),
+      });
+    }
+    throw new HTTPException(502, {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): void {
@@ -283,14 +342,18 @@ function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): vo
 
 function requireGitHubStateCookie(c: Context, state: string): void {
   if (getCookie(c, githubStateCookie) !== state) {
-    throw new HTTPException(400, { message: "invalid or expired GitHub installation browser state" });
+    throw new HTTPException(400, {
+      message: "invalid or expired GitHub installation browser state",
+    });
   }
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
-  return deps.settings.publicBaseUrl?.startsWith("https://")
-    || c.req.header("x-forwarded-proto") === "https"
-    || new URL(c.req.url).protocol === "https:";
+  return (
+    deps.settings.publicBaseUrl?.startsWith("https://") ||
+    c.req.header("x-forwarded-proto") === "https" ||
+    new URL(c.req.url).protocol === "https:"
+  );
 }
 
 export async function listWorkspaceGitHubRepositories(deps: ApiRouteDeps, workspaceId: string) {
@@ -301,7 +364,9 @@ export async function listWorkspaceGitHubRepositories(deps: ApiRouteDeps, worksp
 function githubSuccessHtml(envLines: string[], installUrl: string): string {
   const envText = envLines.join("\n");
   const escaped = escapeHtml(envText);
-  const install = installUrl ? `<a class="button secondary" href="${escapeHtml(installUrl)}">Install on repositories</a>` : "";
+  const install = installUrl
+    ? `<a class="button secondary" href="${escapeHtml(installUrl)}">Install on repositories</a>`
+    : "";
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Created</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(760px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.env-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 8px}.env-header h2{margin:0;font-size:13px;line-height:1.2;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa}pre{white-space:pre-wrap;word-break:break-word;max-height:380px;overflow:auto;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.5}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.button,button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;text-decoration:none;cursor:pointer}.button.secondary{background:transparent;color:#fafafa}.button.secondary:hover,button.secondary:hover{background:#27272a}button:disabled{cursor:not-allowed;opacity:.7}</style></head><body><main><h1>GitHub App created</h1><p>Add these values to .env, then restart API and worker.</p><div class="env-header"><h2>Environment variables</h2><button id="copy-env" type="button">Copy env</button></div><pre id="env-lines">${escaped}</pre><div class="actions">${install}</div><script>(()=>{const button=document.getElementById("copy-env");const env=document.getElementById("env-lines");async function copyText(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const area=document.createElement("textarea");area.value=text;area.setAttribute("readonly","");area.style.position="fixed";area.style.inset="-9999px";document.body.append(area);area.select();document.execCommand("copy");area.remove();}button?.addEventListener("click",async()=>{try{await copyText(env?.textContent||"");button.textContent="Copied";setTimeout(()=>button.textContent="Copy env",1600);}catch{button.textContent="Copy failed";setTimeout(()=>button.textContent="Copy env",2200);}});})();</script></main></body></html>`;
 }
 
@@ -322,16 +387,24 @@ function parsePositiveInteger(value: string | undefined | null): number | null {
 }
 
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[char] ?? char));
+  return value.replace(
+    /[&<>"']/g,
+    (char) =>
+      ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[char] ?? char,
+  );
 }
 
-function openGeniReturnUrl(settings: ApiRouteDeps["settings"], c: Context, workspaceId: string | undefined): string {
+function openGeniReturnUrl(
+  settings: ApiRouteDeps["settings"],
+  c: Context,
+  workspaceId: string | undefined,
+): string {
   const base = (settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
   const url = new URL(base || new URL(c.req.url).origin);
   if (workspaceId) {

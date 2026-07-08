@@ -31,7 +31,10 @@ export const CAPTURE_SIGNED_URL_TTL_SECONDS = 300;
 // inject an in-memory map without standing up S3/minio.
 export type CaptureStoragePort = {
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array } | null>;
-  createGetUrl: (args: { key: string; expiresInSeconds?: number }) => Promise<{ url: string; expiresAt: Date }>;
+  createGetUrl: (args: {
+    key: string;
+    expiresInSeconds?: number;
+  }) => Promise<{ url: string; expiresAt: Date }>;
 };
 
 function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; expiresAt: string } {
@@ -55,12 +58,16 @@ async function loadManifest(
   try {
     json = JSON.parse(new TextDecoder().decode(blob.bytes));
   } catch {
-    console.warn(`workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`);
+    console.warn(
+      `workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`,
+    );
     return null;
   }
   const parsed = WorkspaceCaptureManifest.safeParse(json);
   if (!parsed.success) {
-    console.warn(`workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+    console.warn(
+      `workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`,
+    );
     return null;
   }
   return { manifest: parsed.data, byteLength: blob.bytes.byteLength };
@@ -83,7 +90,9 @@ export async function serveWorkspaceCapture(
   if (!stats.success) {
     // A row with malformed stats (or a synthetic/partial row) degrades to the
     // cold-fallback state rather than 500.
-    console.warn(`workspace capture read — row stats failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+    console.warn(
+      `workspace capture read — row stats failed schema validation (session=${row.sessionId} rev=${row.revision})`,
+    );
     return { available: false };
   }
   const meta = {
@@ -106,18 +115,33 @@ export async function serveWorkspaceCapture(
     try {
       json = JSON.parse(new TextDecoder().decode(blob.bytes));
     } catch {
-      console.warn(`workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`);
+      console.warn(
+        `workspace capture read — manifest blob is not valid JSON (session=${row.sessionId} rev=${row.revision})`,
+      );
       return { available: false };
     }
     const manifest = WorkspaceCaptureManifest.safeParse(json);
     if (!manifest.success) {
-      console.warn(`workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`);
+      console.warn(
+        `workspace capture read — manifest failed schema validation (session=${row.sessionId} rev=${row.revision})`,
+      );
       return { available: false };
     }
-    return GetWorkspaceCaptureResponse.parse({ ...meta, manifest: manifest.data, manifestUrl: null });
+    return GetWorkspaceCaptureResponse.parse({
+      ...meta,
+      manifest: manifest.data,
+      manifestUrl: null,
+    });
   }
-  const signed = await storage.createGetUrl({ key: row.manifestKey, expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS });
-  return GetWorkspaceCaptureResponse.parse({ ...meta, manifest: null, manifestUrl: signedUrl(signed) });
+  const signed = await storage.createGetUrl({
+    key: row.manifestKey,
+    expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
+  });
+  return GetWorkspaceCaptureResponse.parse({
+    ...meta,
+    manifest: null,
+    manifestUrl: signedUrl(signed),
+  });
 }
 
 /**
@@ -158,13 +182,23 @@ export async function serveWorkspaceCaptureFile(
   };
   if (file.tooLarge || !file.contentRef) {
     // Marker: content was not captured (guard tripped) or the blob is unavailable.
-    return GetWorkspaceCaptureFileResponse.parse({ ...base, encoding: null, content: null, contentUrl: null });
+    return GetWorkspaceCaptureFileResponse.parse({
+      ...base,
+      encoding: null,
+      content: null,
+      contentUrl: null,
+    });
   }
   if (file.sizeBytes <= CAPTURE_INLINE_FILE_MAX_BYTES) {
     const blob = await storage.getObjectBytes(file.contentRef);
     if (!blob) {
       // After-image GC'd out from under us → return the marker (client opens live).
-      return GetWorkspaceCaptureFileResponse.parse({ ...base, encoding: null, content: null, contentUrl: null });
+      return GetWorkspaceCaptureFileResponse.parse({
+        ...base,
+        encoding: null,
+        content: null,
+        contentUrl: null,
+      });
     }
     const encoding = file.isBinary ? "base64" : "utf8";
     const content = file.isBinary
@@ -172,6 +206,14 @@ export async function serveWorkspaceCaptureFile(
       : new TextDecoder().decode(blob.bytes);
     return GetWorkspaceCaptureFileResponse.parse({ ...base, encoding, content, contentUrl: null });
   }
-  const signed = await storage.createGetUrl({ key: file.contentRef, expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS });
-  return GetWorkspaceCaptureFileResponse.parse({ ...base, encoding: null, content: null, contentUrl: signedUrl(signed) });
+  const signed = await storage.createGetUrl({
+    key: file.contentRef,
+    expiresInSeconds: CAPTURE_SIGNED_URL_TTL_SECONDS,
+  });
+  return GetWorkspaceCaptureFileResponse.parse({
+    ...base,
+    encoding: null,
+    content: null,
+    contentUrl: signedUrl(signed),
+  });
 }

@@ -20,7 +20,13 @@ function eventAttributes(attributes: Record<string, unknown> | undefined): Attri
 }
 
 function eventAttributeValue(value: unknown): AttributeValue {
-  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
     return value;
   }
   try {

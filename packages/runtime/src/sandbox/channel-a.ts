@@ -39,7 +39,6 @@ import type {
   GitChangedPayload,
   GitCommit,
   GitDiffHunk,
-  GitDiffLine,
   GitDiffRequest,
   GitDiffResponse,
   GitFileDiff,
@@ -90,27 +89,50 @@ export type ChannelAEditor = {
 export type ChannelASession = {
   exec?(args: ChannelAExecArgs): Promise<ChannelAExecResult>;
   execCommand?(args: ChannelAExecArgs): Promise<string>;
-  readFile?(args: { path: string; runAs?: string; maxBytes?: number }): Promise<string | Uint8Array>;
-  writeStdin?(args: { sessionId: number; chars?: string; yieldTimeMs?: number; maxOutputTokens?: number }): Promise<string>;
+  readFile?(args: {
+    path: string;
+    runAs?: string;
+    maxBytes?: number;
+  }): Promise<string | Uint8Array>;
+  writeStdin?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
 
 // ── Errors mapped to HTTP status at the route. ───────────────────────────────
 export class ChannelAValidationError extends Error {
-  constructor(message: string) { super(message); this.name = "ChannelAValidationError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAValidationError";
+  }
 }
 export class ChannelAConflictError extends Error {
-  constructor(message: string) { super(message); this.name = "ChannelAConflictError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAConflictError";
+  }
 }
 export class ChannelANotFoundError extends Error {
-  constructor(message: string) { super(message); this.name = "ChannelANotFoundError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelANotFoundError";
+  }
 }
 export class ChannelAUnsupportedError extends Error {
-  constructor(message: string) { super(message); this.name = "ChannelAUnsupportedError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAUnsupportedError";
+  }
 }
 
-export type ChannelAEmitter = (events: { type: SessionEventType; payload: unknown }[]) => Promise<void>;
+export type ChannelAEmitter = (
+  events: { type: SessionEventType; payload: unknown }[],
+) => Promise<void>;
 
 export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
@@ -160,7 +182,11 @@ export class SandboxChannelAService {
     const hasExec = Boolean(s.exec || s.execCommand);
     const hasFs = Boolean(s.readFile && (s.exec || s.execCommand || s.createEditor));
     return {
-      FileSystem: { available: hasFs, readOnly: !(s.exec || s.createEditor), root: this.workspaceRoot },
+      FileSystem: {
+        available: hasFs,
+        readOnly: !(s.exec || s.createEditor),
+        root: this.workspaceRoot,
+      },
       Terminal: {
         events: hasExec,
         exec: hasExec,
@@ -175,7 +201,13 @@ export class SandboxChannelAService {
   // (the local/docker sessions return raw output); falls back to execCommand +
   // a banner strip (last resort; banner-truncation can mangle, so exec is always
   // preferred). Throws ChannelAUnsupportedError when neither exists.
-  private async run(args: ChannelAExecArgs): Promise<{ stdout: string; stderr: string; exitCode: number | null; sessionId?: number; wallTimeSeconds: number }> {
+  private async run(args: ChannelAExecArgs): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+    sessionId?: number;
+    wallTimeSeconds: number;
+  }> {
     const withRunAs = this.runAs ? { ...args, runAs: this.runAs } : args;
     if (this.session.exec) {
       const r = await this.session.exec(withRunAs);
@@ -220,7 +252,10 @@ export class SandboxChannelAService {
     const depthArg = Math.max(1, req.depth);
     const hidden = req.includeHidden ? "" : ` -not -path '*/.*'`;
     const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -printf '%y\\t%s\\t%T@\\t%m\\t%p\\0' 2>/dev/null`;
-    let { stdout } = await this.run({ cmd: `bash -lc ${shellQuote(gnuFind)}`, workdir: this.workspaceRoot || undefined });
+    let { stdout } = await this.run({
+      cmd: `bash -lc ${shellQuote(gnuFind)}`,
+      workdir: this.workspaceRoot || undefined,
+    });
     if (!stdout) {
       const portableFind = [
         `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -print0 2>/dev/null | while IFS= read -r -d '' p; do`,
@@ -230,7 +265,10 @@ export class SandboxChannelAService {
         `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
         `done`,
       ].join(" ");
-      ({ stdout } = await this.run({ cmd: `bash -lc ${shellQuote(portableFind)}`, workdir: this.workspaceRoot || undefined }));
+      ({ stdout } = await this.run({
+        cmd: `bash -lc ${shellQuote(portableFind)}`,
+        workdir: this.workspaceRoot || undefined,
+      }));
     }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
@@ -250,7 +288,10 @@ export class SandboxChannelAService {
     let count = 0;
     let truncated = false;
     for (const entry of entries) {
-      if (count >= req.maxEntries) { truncated = true; break; }
+      if (count >= req.maxEntries) {
+        truncated = true;
+        break;
+      }
       const parts = entry.split("\t");
       if (parts.length < 5) continue;
       const [typeChar, sizeStr, mtimeStr, modeStr, ...pathParts] = parts;
@@ -289,7 +330,11 @@ export class SandboxChannelAService {
     }
     let raw: string | Uint8Array;
     try {
-      raw = await this.session.readFile({ path: this.joinRoot(path), maxBytes: req.maxBytes, ...(this.runAs ? { runAs: this.runAs } : {}) });
+      raw = await this.session.readFile({
+        path: this.joinRoot(path),
+        maxBytes: req.maxBytes,
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+      });
     } catch (error) {
       // The provider's native readFile applies a REMOTE workspace-escape guard:
       // a SYMLINK whose target resolves outside /workspace (e.g.
@@ -303,7 +348,9 @@ export class SandboxChannelAService {
       if (isWorkspaceEscapeError(error)) {
         return await this.fsReadViaExec(path, req);
       }
-      throw new ChannelANotFoundError(`file not found: ${path} (${error instanceof Error ? error.message : String(error)})`);
+      throw new ChannelANotFoundError(
+        `file not found: ${path} (${error instanceof Error ? error.message : String(error)})`,
+      );
     }
     const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
     return this.shapeRead(path, bytes, req);
@@ -315,7 +362,9 @@ export class SandboxChannelAService {
    *  node itself is in-workspace). `base64 <path>` follows the symlink. */
   private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
     const abs = this.joinRoot(path);
-    const { stdout, exitCode } = await this.run({ cmd: `base64 ${shellQuote(abs)} 2>/dev/null | head -c ${Math.ceil(req.maxBytes * 1.4)}` });
+    const { stdout, exitCode } = await this.run({
+      cmd: `base64 ${shellQuote(abs)} 2>/dev/null | head -c ${Math.ceil(req.maxBytes * 1.4)}`,
+    });
     if (exitCode !== null && exitCode !== 0 && stdout === "") {
       // The target may be a dangling symlink or a link to a directory; surface a
       // clean, typed not-found rather than a raw provider validation error.
@@ -344,7 +393,10 @@ export class SandboxChannelAService {
   async fsWrite(req: FsWriteRequest): Promise<FsWriteResponse> {
     const path = assertSafeRelPath(req.path);
     const abs = this.joinRoot(path);
-    const bytes = req.encoding === "base64" ? Buffer.from(req.content, "base64") : Buffer.from(req.content, "utf8");
+    const bytes =
+      req.encoding === "base64"
+        ? Buffer.from(req.content, "base64")
+        : Buffer.from(req.content, "utf8");
 
     if (!req.overwrite) {
       const { exitCode } = await this.run({ cmd: `test -e ${shellQuote(abs)}` });
@@ -369,13 +421,21 @@ export class SandboxChannelAService {
       // text payload (binary cannot go through apply-patch).
       if (req.encoding !== "base64" && this.session.createEditor) {
         const ok = await this.tryEditorWrite(abs, req.content);
-        if (!ok) throw new ChannelAValidationError(`failed to write ${path}: ${stderr || `exit ${exitCode}`}`);
+        if (!ok)
+          throw new ChannelAValidationError(
+            `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
+          );
       } else {
-        throw new ChannelAValidationError(`failed to write ${path}: ${stderr || `exit ${exitCode}`}`);
+        throw new ChannelAValidationError(
+          `failed to write ${path}: ${stderr || `exit ${exitCode}`}`,
+        );
       }
     }
     this.revision++;
-    await this.emitFsChanged([{ path, kind: "modified", isDir: false, sizeBytes: bytes.byteLength }], "write");
+    await this.emitFsChanged(
+      [{ path, kind: "modified", isDir: false, sizeBytes: bytes.byteLength }],
+      "write",
+    );
     return { path, sizeBytes: bytes.byteLength, revision: this.revision };
   }
 
@@ -384,7 +444,10 @@ export class SandboxChannelAService {
     if (!editor?.createFile) return false;
     try {
       // The apply-patch op shape — a whole-file "create" diff (last-writer-wins).
-      const diff = content.split("\n").map((line) => `+${line}`).join("\n");
+      const diff = content
+        .split("\n")
+        .map((line) => `+${line}`)
+        .join("\n");
       await editor.createFile({ type: "create_file", path: absPath, diff });
       return true;
     } catch {
@@ -398,7 +461,9 @@ export class SandboxChannelAService {
     const flag = req.recursive ? "-rf" : "-f";
     const { exitCode, stderr } = await this.run({ cmd: `rm ${flag} ${shellQuote(abs)}` });
     if (exitCode !== null && exitCode !== 0) {
-      throw new ChannelAValidationError(`failed to delete ${path}: ${stderr || `exit ${exitCode}`}`);
+      throw new ChannelAValidationError(
+        `failed to delete ${path}: ${stderr || `exit ${exitCode}`}`,
+      );
     }
     this.revision++;
     await this.emitFsChanged([{ path, kind: "deleted", isDir: false, sizeBytes: null }], "write");
@@ -428,7 +493,9 @@ export class SandboxChannelAService {
       cmd: `mv ${flag}${shellQuote(abs)} ${shellQuote(newAbs)}`,
     });
     if (exitCode !== null && exitCode !== 0) {
-      throw new ChannelAValidationError(`failed to move ${path} -> ${newPath}: ${stderr || `exit ${exitCode}`}`);
+      throw new ChannelAValidationError(
+        `failed to move ${path} -> ${newPath}: ${stderr || `exit ${exitCode}`}`,
+      );
     }
     this.revision++;
     await this.emitFsChanged(
@@ -460,11 +527,26 @@ export class SandboxChannelAService {
 
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
     const repo = this.repoWorkdir(req.path);
-    const inside = await this.run({ cmd: "git rev-parse --is-inside-work-tree 2>/dev/null", workdir: repo });
+    const inside = await this.run({
+      cmd: "git rev-parse --is-inside-work-tree 2>/dev/null",
+      workdir: repo,
+    });
     if (inside.stdout.trim() !== "true") {
-      return { isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: this.revision };
+      return {
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: this.revision,
+      };
     }
-    const { stdout } = await this.run({ cmd: "git status --porcelain=v2 --branch -z", workdir: repo });
+    const { stdout } = await this.run({
+      cmd: "git status --porcelain=v2 --branch -z",
+      workdir: repo,
+    });
     return { ...parsePorcelainV2(stdout), revision: this.revision };
   }
 
@@ -480,7 +562,10 @@ export class SandboxChannelAService {
 
     // Pass 1: numstat (stats + binary detection). -z gives NUL-separated fields;
     // a rename emits old\0new for that record's path fields.
-    const numstat = await this.run({ cmd: `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(), workdir: repo });
+    const numstat = await this.run({
+      cmd: `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
+      workdir: repo,
+    });
     const stats = parseNumstatZ(numstat.stdout);
 
     const files: GitFileDiff[] = [];
@@ -507,7 +592,9 @@ export class SandboxChannelAService {
         workdir: repo,
       });
       const oversized = Buffer.byteLength(patch.stdout, "utf8") > req.maxBytesPerFile;
-      const parsed = oversized ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode } : parseUnifiedPatch(patch.stdout);
+      const parsed = oversized
+        ? { hunks: [] as GitDiffHunk[], status: "modified" as GitFileStatusCode }
+        : parseUnifiedPatch(patch.stdout);
       files.push({
         path: target,
         oldPath: stat.oldPath,
@@ -534,7 +621,10 @@ export class SandboxChannelAService {
     if (exitCode !== null && exitCode !== 0) {
       return { commits: [], hasMore: false };
     }
-    const records = stdout.split(RS).map((r) => r.replace(/^\n/, "")).filter((r) => r.trim().length > 0);
+    const records = stdout
+      .split(RS)
+      .map((r) => r.replace(/^\n/, ""))
+      .filter((r) => r.trim().length > 0);
     const commits: GitCommit[] = [];
     for (const rec of records.slice(0, req.maxCount)) {
       const f = rec.split(US);
@@ -572,22 +662,48 @@ export class SandboxChannelAService {
       return {
         commit: null,
         files: [],
-        blob: { content: encoding === "base64" ? clamped.toString("base64") : clamped.toString("utf8"), encoding, sizeBytes: clamped.byteLength, truncated },
+        blob: {
+          content: encoding === "base64" ? clamped.toString("base64") : clamped.toString("utf8"),
+          encoding,
+          sizeBytes: clamped.byteLength,
+          truncated,
+        },
         revision: this.revision,
       };
     }
     // Commit mode: metadata + diff vs first parent.
-    const log = await this.gitLog({ path: req.path, ref: req.ref, maxCount: 1, skip: 0, pathspec: [] });
+    const log = await this.gitLog({
+      path: req.path,
+      ref: req.ref,
+      maxCount: 1,
+      skip: 0,
+      pathspec: [],
+    });
     const commit = log.commits[0] ?? null;
-    const diff = await this.gitDiff({ path: req.path, staged: false, fromRef: `${req.ref}^`, toRef: req.ref, pathspec: [], contextLines: 3, maxBytesPerFile: req.maxBytesPerFile });
+    const diff = await this.gitDiff({
+      path: req.path,
+      staged: false,
+      fromRef: `${req.ref}^`,
+      toRef: req.ref,
+      pathspec: [],
+      contextLines: 3,
+      maxBytesPerFile: req.maxBytesPerFile,
+    });
     return { commit, files: diff.files, blob: null, revision: this.revision };
   }
 
   /** Detect repo roots within the workspace (for the Git.repos capability). */
   async detectRepos(): Promise<string[]> {
     try {
-      const { stdout } = await this.run({ cmd: `find . -maxdepth 3 -name .git -type d 2>/dev/null`, workdir: this.workspaceRoot || undefined });
-      return stdout.split("\n").map((l) => l.trim()).filter(Boolean).map((g) => dirnameAbs(stripDotSlash(g, "")) || "");
+      const { stdout } = await this.run({
+        cmd: `find . -maxdepth 3 -name .git -type d 2>/dev/null`,
+        workdir: this.workspaceRoot || undefined,
+      });
+      return stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map((g) => dirnameAbs(stripDotSlash(g, "")) || "");
     } catch {
       return [];
     }
@@ -609,8 +725,16 @@ export class SandboxChannelAService {
     if (req.emitStream && (r.stdout || r.stderr)) {
       const events: { type: SessionEventType; payload: unknown }[] = [];
       const commandId = crypto.randomUUID();
-      if (r.stdout) events.push({ type: "sandbox.command.output.delta", payload: { stream: "stdout", chunk: r.stdout, commandId, seq: 0 } });
-      if (r.stderr) events.push({ type: "sandbox.command.output.delta", payload: { stream: "stderr", chunk: r.stderr, commandId, seq: 1 } });
+      if (r.stdout)
+        events.push({
+          type: "sandbox.command.output.delta",
+          payload: { stream: "stdout", chunk: r.stdout, commandId, seq: 0 },
+        });
+      if (r.stderr)
+        events.push({
+          type: "sandbox.command.output.delta",
+          payload: { stream: "stderr", chunk: r.stderr, commandId, seq: 1 },
+        });
       await this.emitEvents(events);
     }
     return {
@@ -627,7 +751,15 @@ export class SandboxChannelAService {
    *  writeStdin can drive it. Returns the supportsInput gate (false when the
    *  backend has no writeStdin). The caller emits terminal.pty.started after it
    *  persists the row. */
-  async ptyOpen(req: PtyOpenRequest, ptyId: string): Promise<{ response: PtyOpenResponse; execSessionId: number | null; shell: string; initialOutput: string }> {
+  async ptyOpen(
+    req: PtyOpenRequest,
+    ptyId: string,
+  ): Promise<{
+    response: PtyOpenResponse;
+    execSessionId: number | null;
+    shell: string;
+    initialOutput: string;
+  }> {
     const supportsInput = Boolean(this.session.supportsPty?.() && this.session.writeStdin);
     const shell = req.shell ?? "/bin/bash";
     const r = await this.run({
@@ -652,7 +784,11 @@ export class SandboxChannelAService {
     if (!this.session.writeStdin) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await this.session.writeStdin({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 });
+    const out = await this.session.writeStdin({
+      sessionId: execSessionId,
+      chars: data,
+      yieldTimeMs: 250,
+    });
     // The Modal exec surface reports a vanished exec-session as a NON-throwing
     // string ("write_stdin failed: session not found: N") that we used to stream
     // verbatim into the terminal. That happens when the persisted exec-session no
@@ -672,7 +808,11 @@ export class SandboxChannelAService {
   async ptyResize(req: PtyResizeRequest, execSessionId: number): Promise<void> {
     if (!this.session.writeStdin) return;
     // Send a stty in-band on the same pty session.
-    await this.session.writeStdin({ sessionId: execSessionId, chars: `stty cols ${req.cols} rows ${req.rows}\n`, yieldTimeMs: 50 });
+    await this.session.writeStdin({
+      sessionId: execSessionId,
+      chars: `stty cols ${req.cols} rows ${req.rows}\n`,
+      yieldTimeMs: 50,
+    });
   }
 
   /** Close an open PTY: write exit/EOF. The caller marks the row closed + emits
@@ -690,7 +830,9 @@ export class SandboxChannelAService {
   // ──────────────────────────── helpers ──────────────────────────────────────
 
   /** The current FS revision (for the caller to persist/seed). */
-  currentRevision(): number { return this.revision; }
+  currentRevision(): number {
+    return this.revision;
+  }
 
   private joinRoot(rel: string): string {
     if (!this.workspaceRoot) return rel === "" ? "." : rel;
@@ -705,11 +847,23 @@ export class SandboxChannelAService {
 
   private async emitEvents(events: { type: SessionEventType; payload: unknown }[]): Promise<void> {
     if (!this.emit || events.length === 0) return;
-    try { await this.emit(events); } catch { /* durable spine retries; not fatal */ }
+    try {
+      await this.emit(events);
+    } catch {
+      /* durable spine retries; not fatal */
+    }
   }
 
-  private async emitFsChanged(changes: FsChangedPayload["changes"], source: FsChangedPayload["source"]): Promise<void> {
-    const payload: FsChangedPayload = { changes, source, revision: this.revision, leaseEpoch: this.leaseEpoch };
+  private async emitFsChanged(
+    changes: FsChangedPayload["changes"],
+    source: FsChangedPayload["source"],
+  ): Promise<void> {
+    const payload: FsChangedPayload = {
+      changes,
+      source,
+      revision: this.revision,
+      leaseEpoch: this.leaseEpoch,
+    };
     await this.emitEvents([{ type: "fs.changed", payload }]);
   }
 
@@ -754,7 +908,10 @@ export function stripExecBanner(raw: string): string {
 export function isWorkspaceEscapeError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error ?? "");
   const lower = msg.toLowerCase();
-  return lower.includes("workspace escape") || (lower.includes("remote validation") && lower.includes("escape"));
+  return (
+    lower.includes("workspace escape") ||
+    (lower.includes("remote validation") && lower.includes("escape"))
+  );
 }
 
 // Detect the Modal "the exec-session you're writing to no longer exists" banner.
@@ -771,7 +928,9 @@ export function isExecSessionLostBanner(out: string, execSessionId: number): boo
   if (!lower.includes("session not found")) return false;
   // When the id is present require it to match ours; when absent, the generic
   // "session not found" still classifies (it is never legitimate stdout here).
-  return lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower);
+  return (
+    lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower)
+  );
 }
 
 // Recover the numeric exec-session id the SDK embeds in a formatExecResponse
@@ -808,7 +967,8 @@ export function assertSafeRelPath(p: string): string {
   const norm = normalizeRelPath(p);
   if (norm === "") throw new ChannelAValidationError("path is required");
   if (p.startsWith("/")) throw new ChannelAValidationError(`absolute paths are not allowed: ${p}`);
-  if (norm.split("/").some((seg) => seg === "..")) throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
+  if (norm.split("/").some((seg) => seg === ".."))
+    throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
   return norm;
 }
 
@@ -896,12 +1056,18 @@ export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision">
     if (rec === "") continue;
     if (rec.startsWith("# branch.head ")) {
       const v = rec.slice("# branch.head ".length);
-      if (v === "(detached)") { detached = true; head = null; } else head = v;
+      if (v === "(detached)") {
+        detached = true;
+        head = null;
+      } else head = v;
     } else if (rec.startsWith("# branch.upstream ")) {
       upstream = rec.slice("# branch.upstream ".length);
     } else if (rec.startsWith("# branch.ab ")) {
       const m = rec.slice("# branch.ab ".length).match(/\+(\d+)\s+-(\d+)/);
-      if (m) { ahead = Number(m[1]); behind = Number(m[2]); }
+      if (m) {
+        ahead = Number(m[1]);
+        behind = Number(m[2]);
+      }
     } else if (rec.startsWith("1 ")) {
       // 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
       const fields = rec.split(" ");
@@ -919,11 +1085,29 @@ export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision">
     } else if (rec.startsWith("u ")) {
       const fields = rec.split(" ");
       const path = fields.slice(10).join(" ");
-      files.push({ path, oldPath: null, index: "conflicted", worktree: "conflicted", isConflicted: true });
+      files.push({
+        path,
+        oldPath: null,
+        index: "conflicted",
+        worktree: "conflicted",
+        isConflicted: true,
+      });
     } else if (rec.startsWith("? ")) {
-      files.push({ path: rec.slice(2), oldPath: null, index: null, worktree: "untracked", isConflicted: false });
+      files.push({
+        path: rec.slice(2),
+        oldPath: null,
+        index: null,
+        worktree: "untracked",
+        isConflicted: false,
+      });
     } else if (rec.startsWith("! ")) {
-      files.push({ path: rec.slice(2), oldPath: null, index: null, worktree: "ignored", isConflicted: false });
+      files.push({
+        path: rec.slice(2),
+        oldPath: null,
+        index: null,
+        worktree: "ignored",
+        isConflicted: false,
+      });
     }
   }
   return { isRepo: true, head, detached, upstream, ahead, behind, files };
@@ -931,15 +1115,24 @@ export function parsePorcelainV2(z: string): Omit<GitStatusResponse, "revision">
 
 function xyCode(c: string): GitFileStatusCode | null {
   switch (c) {
-    case "A": return "added";
-    case "M": return "modified";
-    case "D": return "deleted";
-    case "R": return "renamed";
-    case "C": return "copied";
-    case "T": return "typechange";
-    case "U": return "conflicted";
-    case ".": return null;
-    default: return null;
+    case "A":
+      return "added";
+    case "M":
+      return "modified";
+    case "D":
+      return "deleted";
+    case "R":
+      return "renamed";
+    case "C":
+      return "copied";
+    case "T":
+      return "typechange";
+    case "U":
+      return "conflicted";
+    case ".":
+      return null;
+    default:
+      return null;
   }
 }
 
@@ -956,17 +1149,29 @@ function statusFromXY(xy: string, path: string, oldPath: string | null): GitFile
 }
 
 // ── numstat -z parser (additions/deletions/binary + rename old\0new) ─────────
-export type NumstatEntry = { additions: number; deletions: number; binary: boolean; oldPath: string | null; newPath: string };
+export type NumstatEntry = {
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  oldPath: string | null;
+  newPath: string;
+};
 export function parseNumstatZ(z: string): NumstatEntry[] {
   const fields = z.split(NUL);
   const out: NumstatEntry[] = [];
   let i = 0;
   while (i < fields.length) {
     const head = fields[i]!;
-    if (head === "") { i++; continue; }
+    if (head === "") {
+      i++;
+      continue;
+    }
     // "<add>\t<del>\t<path>" OR for a rename "<add>\t<del>\t" then old\0new follow.
     const m = head.match(/^(\d+|-)\t(\d+|-)\t(.*)$/s);
-    if (!m) { i++; continue; }
+    if (!m) {
+      i++;
+      continue;
+    }
     const addStr = m[1]!;
     const delStr = m[2]!;
     const pathPart = m[3]!;
@@ -975,10 +1180,22 @@ export function parseNumstatZ(z: string): NumstatEntry[] {
       // rename: the next two NUL fields are old, new
       const oldPath = fields[i + 1] ?? null;
       const newPath = fields[i + 2] ?? "";
-      out.push({ additions: binary ? 0 : Number(addStr), deletions: binary ? 0 : Number(delStr), binary, oldPath, newPath });
+      out.push({
+        additions: binary ? 0 : Number(addStr),
+        deletions: binary ? 0 : Number(delStr),
+        binary,
+        oldPath,
+        newPath,
+      });
       i += 3;
     } else {
-      out.push({ additions: binary ? 0 : Number(addStr), deletions: binary ? 0 : Number(delStr), binary, oldPath: null, newPath: pathPart });
+      out.push({
+        additions: binary ? 0 : Number(addStr),
+        deletions: binary ? 0 : Number(delStr),
+        binary,
+        oldPath: null,
+        newPath: pathPart,
+      });
       i++;
     }
   }
@@ -986,7 +1203,10 @@ export function parseNumstatZ(z: string): NumstatEntry[] {
 }
 
 // ── unified-diff parser -> GitDiffHunk[] (the Pierre-diff shape) ─────────────
-export function parseUnifiedPatch(patch: string): { hunks: GitDiffHunk[]; status: GitFileStatusCode } {
+export function parseUnifiedPatch(patch: string): {
+  hunks: GitDiffHunk[];
+  status: GitFileStatusCode;
+} {
   const lines = patch.split("\n");
   const hunks: GitDiffHunk[] = [];
   let status: GitFileStatusCode = "modified";
@@ -1004,7 +1224,14 @@ export function parseUnifiedPatch(patch: string): { hunks: GitDiffHunk[]; status
         const oldLines = m[2] !== undefined ? Number(m[2]) : 1;
         const newStart = Number(m[3]);
         const newLines = m[4] !== undefined ? Number(m[4]) : 1;
-        current = { oldStart, oldLines, newStart, newLines, header: (m[5] ?? "").trim(), lines: [] };
+        current = {
+          oldStart,
+          oldLines,
+          newStart,
+          newLines,
+          header: (m[5] ?? "").trim(),
+          lines: [],
+        };
         hunks.push(current);
         oldNo = oldStart;
         newNo = newStart;

@@ -123,7 +123,10 @@ export type ResumedTurnSandbox = {
 export class SandboxWarmingTimeoutError extends Error {
   readonly code = "sandbox_warming_timeout";
 
-  constructor(public readonly backend: string, public readonly timeoutMs: number) {
+  constructor(
+    public readonly backend: string,
+    public readonly timeoutMs: number,
+  ) {
     super(
       `Sandbox backend "${backend}" capacity or creation timed out after ${Math.ceil(timeoutMs / 1000)}s while warming the sandbox lease. Please try again; if this persists, sandbox capacity may be exhausted.`,
     );
@@ -146,7 +149,10 @@ class SnapshotTimeoutError extends Error {
   }
 }
 
-export async function waitForWarmSnapshot(snapshot: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+export async function waitForWarmSnapshot(
+  snapshot: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
@@ -172,7 +178,9 @@ export async function waitForWarmSnapshot(snapshot: Promise<unknown>, timeoutMs:
   }
 }
 
-async function terminateEstablishedSandbox(established: EstablishedSandboxSession | null): Promise<boolean> {
+async function terminateEstablishedSandbox(
+  established: EstablishedSandboxSession | null,
+): Promise<boolean> {
   if (!established) {
     return true;
   }
@@ -218,7 +226,10 @@ function asSandboxWarmingError(error: unknown, backend: string, timeoutMs: numbe
     : error;
 }
 
-function recordSandboxWarmingTimeout(metrics: RuntimeMetricsHooks | undefined, error: unknown): void {
+function recordSandboxWarmingTimeout(
+  metrics: RuntimeMetricsHooks | undefined,
+  error: unknown,
+): void {
   if (!(error instanceof SandboxWarmingTimeoutError)) {
     return;
   }
@@ -229,10 +240,13 @@ function recordSandboxWarmingTimeout(metrics: RuntimeMetricsHooks | undefined, e
   }
 }
 
-function workspaceArchiveFromEnvelope(envelope: Record<string, unknown> | null | undefined): string | null {
-  const sessionState = envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
-    ? envelope.sessionState as Record<string, unknown>
-    : null;
+function workspaceArchiveFromEnvelope(
+  envelope: Record<string, unknown> | null | undefined,
+): string | null {
+  const sessionState =
+    envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
   const archive = sessionState?.workspaceArchive;
   return typeof archive === "string" && archive.length > 0 ? archive : null;
 }
@@ -245,9 +259,10 @@ function preserveWorkspaceArchiveOnInterimResumeState(
   if (!archive) {
     return resumeState;
   }
-  const existingSessionState = resumeState && typeof resumeState.sessionState === "object" && resumeState.sessionState !== null
-    ? resumeState.sessionState as Record<string, unknown>
-    : {};
+  const existingSessionState =
+    resumeState && typeof resumeState.sessionState === "object" && resumeState.sessionState !== null
+      ? (resumeState.sessionState as Record<string, unknown>)
+      : {};
   return {
     ...(resumeState ?? {}),
     ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
@@ -303,10 +318,14 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (!lease || lease.leaseEpoch !== leaseEpoch || lease.liveness !== "warm") {
       return false;
     }
-    const sessionState = lease.resumeState && typeof lease.resumeState === "object"
-      ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
-      : undefined;
-    const priorAtRaw = sessionState && typeof sessionState === "object" ? sessionState.workspaceArchiveAt : undefined;
+    const sessionState =
+      lease.resumeState && typeof lease.resumeState === "object"
+        ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
+        : undefined;
+    const priorAtRaw =
+      sessionState && typeof sessionState === "object"
+        ? sessionState.workspaceArchiveAt
+        : undefined;
     const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
     if (Number.isFinite(priorAtMs) && Date.now() - priorAtMs < intervalMs) {
       return false;
@@ -520,7 +539,8 @@ export async function resumeBoxForTurn(
       // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
       // and never saw the turn's live box. Fall back to the session envelope only
       // when the client cannot serialize live state.
-      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
+      const resumeEnvelope =
+        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -563,7 +583,11 @@ export async function resumeBoxForTurn(
         });
       }
       await release();
-      const warmingError = asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+      const warmingError = asSandboxWarmingError(
+        error,
+        ids.backend,
+        settings.sandboxWarmingTimeoutMs,
+      );
       recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
       throw warmingError;
     }
@@ -606,7 +630,11 @@ export async function resumeBoxForTurn(
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
-    const warmingError = asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+    const warmingError = asSandboxWarmingError(
+      error,
+      ids.backend,
+      settings.sandboxWarmingTimeoutMs,
+    );
     recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
     throw warmingError;
   }

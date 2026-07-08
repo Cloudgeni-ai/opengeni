@@ -33,14 +33,22 @@ type BindableCap = {
 };
 
 /** Bind a stub sandbox session + a Responses-style model the way SandboxAgent does, return the emitted apply_patch tool's `type`. */
-function filesystemApplyPatchToolType(options: Parameters<typeof buildAgentCapabilities>[2]): string | undefined {
+function filesystemApplyPatchToolType(
+  options: Parameters<typeof buildAgentCapabilities>[2],
+): string | undefined {
   const caps = buildAgentCapabilities(testSettings({ sandboxBackend: "docker" }), [], options);
-  const filesystemCap = caps.find((cap) => (cap as { type?: unknown }).type === "filesystem") as unknown as BindableCap;
+  const filesystemCap = caps.find(
+    (cap) => (cap as { type?: unknown }).type === "filesystem",
+  ) as unknown as BindableCap;
   // filesystem.tools() only needs createEditor() (truthy) at build time; viewImage
   // is referenced lazily by the view_image tool's execute, never invoked here.
   const stubSession = { createEditor: () => ({}), viewImage: async () => "img" };
   // MUST use the chain's return value (the cloned+bound instance), exactly as the SDK does.
-  const bound = filesystemCap.clone().bind(stubSession).bindRunAs(undefined).bindModel("gpt-5.5", new OpenAIResponsesModel());
+  const bound = filesystemCap
+    .clone()
+    .bind(stubSession)
+    .bindRunAs(undefined)
+    .bindModel("gpt-5.5", new OpenAIResponsesModel());
   return bound.tools().find((tool) => tool.name === "apply_patch")?.type;
 }
 

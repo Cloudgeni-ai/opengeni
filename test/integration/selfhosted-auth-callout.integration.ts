@@ -57,7 +57,11 @@ const AGENT_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 /** Mint an `oge_` enrollment bearer (the agent's NATS connect auth-token). */
-async function bearerFor(workspaceId: string, agentId: string, expSeconds?: number): Promise<string> {
+async function bearerFor(
+  workspaceId: string,
+  agentId: string,
+  expSeconds?: number,
+): Promise<string> {
   const exp = expSeconds ?? Math.floor(Date.now() / 1000) + 3600;
   return signEnrollmentBearer(SIGNING_SECRET, {
     workspaceId,
@@ -192,7 +196,9 @@ authorization {
   }
   if (!up) {
     proc.kill();
-    const err = await Bun.file(logPath).text().catch(() => "");
+    const err = await Bun.file(logPath)
+      .text()
+      .catch(() => "");
     await rm(configDir, { recursive: true, force: true });
     throw new Error(`nats-server (auth_callout) did not become ready:\n${err}`);
   }
@@ -200,7 +206,10 @@ authorization {
   return {
     url,
     configDir,
-    serverLog: () => Bun.file(logPath).text().catch(() => ""),
+    serverLog: () =>
+      Bun.file(logPath)
+        .text()
+        .catch(() => ""),
     stop: async () => {
       proc.kill();
       await proc.exited.catch(() => undefined);
@@ -283,7 +292,9 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
         // Surface the server's reason to make a failure diagnosable.
         const log = await nats.serverLog();
         const tail = log.split("\n").slice(-15).join("\n");
-        throw new Error(`round-trip failed: ${String(e)}\n--- nats-server log tail ---\n${tail}`);
+        throw new Error(`round-trip failed: ${String(e)}\n--- nats-server log tail ---\n${tail}`, {
+          cause: e,
+        });
       }
       expect(new TextDecoder().decode(reply.data)).toBe("pong-from-agent-A");
     } finally {
@@ -340,10 +351,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
 
       // THE assertion: A's connection is NOT permitted on B's subtree. Either a
       // permissions violation was surfaced, or the cross-tenant request failed.
-      const denied =
-        violations.length > 0 ||
-        reqErr !== undefined ||
-        subErr !== undefined;
+      const denied = violations.length > 0 || reqErr !== undefined || subErr !== undefined;
       expect(denied).toBe(true);
     } finally {
       await agent.close().catch(() => undefined);
@@ -354,7 +362,11 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
   test("(3) ISOLATION: an invalid bearer is denied connection", async () => {
     let err: unknown;
     try {
-      const c = await connect({ servers: nats.url, token: "oge_not.a.valid.bearer", timeout: 5_000 });
+      const c = await connect({
+        servers: nats.url,
+        token: "oge_not.a.valid.bearer",
+        timeout: 5_000,
+      });
       await c.close();
     } catch (e) {
       err = e;

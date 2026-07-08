@@ -39,7 +39,10 @@ function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 
       // The PAINTABLE-FRAME gate: bring-up SUCCEEDED (marker printed) but scrot never
       // produced a non-empty frame, so both markers are present and the script exits 14.
       const marker = `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`;
-      return { exitCode: 14, output: `${marker}\nOPENGENI_DESKTOP_NOT_PAINTING scrot empty after warmup` };
+      return {
+        exitCode: 14,
+        output: `${marker}\nOPENGENI_DESKTOP_NOT_PAINTING scrot empty after warmup`,
+      };
     }
     if (opts.failStage) {
       const msg =
@@ -55,7 +58,10 @@ function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 
       up = true;
     }
     // marker is printed on every successful invocation (idempotent re-run too).
-    return { exitCode: 0, output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96` };
+    return {
+      exitCode: 0,
+      output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+    };
   };
 
   const session: Record<string, unknown> = {};
@@ -63,7 +69,13 @@ function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 
     session.exec = async ({ cmd }: { cmd: string }) => {
       calls.push(cmd);
       const r = runUp();
-      return { output: r.output, stdout: r.output, stderr: "", exitCode: r.exitCode, wallTimeSeconds: 0.1 };
+      return {
+        output: r.output,
+        stdout: r.output,
+        stderr: "",
+        exitCode: r.exitCode,
+        wallTimeSeconds: 0.1,
+      };
     };
   } else {
     session.execCommand = async ({ cmd }: { cmd: string }) => {
@@ -72,7 +84,13 @@ function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 
     };
   }
 
-  return { session, calls, get launches() { return launches; } };
+  return {
+    session,
+    calls,
+    get launches() {
+      return launches;
+    },
+  };
 }
 
 describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake box)", () => {
@@ -97,7 +115,10 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
   });
 
   test("(2) buildDisplayStackScript is the exact command a real box runs (custom geometry/port)", () => {
-    const cmd = buildDisplayStackScript({ geometry: { width: 1920, height: 1080, dpi: 120 }, port: 7090 });
+    const cmd = buildDisplayStackScript({
+      geometry: { width: 1920, height: 1080, dpi: 120 },
+      port: 7090,
+    });
     expect(cmd).toContain("flock");
     expect(cmd).toContain("opengeni-desktop-up");
     expect(cmd).toContain("DESKTOP_W=1920 DESKTOP_H=1080 DESKTOP_DPI=120 STREAM_PORT=7090");

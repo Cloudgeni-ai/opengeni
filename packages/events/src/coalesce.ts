@@ -25,20 +25,21 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     }
     coalesced.push({
       ...run.first,
-      payload: run.first.type === "sandbox.command.output.delta"
-        // Sandbox output keeps its CANONICAL field (`chunk` — the terminal and
-        // projection read it) plus the stream/commandId identity of the run.
-        ? {
-            chunk: run.text,
-            coalescedUntil: run.lastSequence,
-            ...(run.sandboxStream !== undefined ? { stream: run.sandboxStream } : {}),
-            ...(run.sandboxCommandId !== undefined ? { commandId: run.sandboxCommandId } : {}),
-            ...(run.sandboxName !== undefined ? { name: run.sandboxName } : {}),
-          }
-        : {
-            text: run.text,
-            coalescedUntil: run.lastSequence,
-          },
+      payload:
+        run.first.type === "sandbox.command.output.delta"
+          ? // Sandbox output keeps its CANONICAL field (`chunk` — the terminal and
+            // projection read it) plus the stream/commandId identity of the run.
+            {
+              chunk: run.text,
+              coalescedUntil: run.lastSequence,
+              ...(run.sandboxStream !== undefined ? { stream: run.sandboxStream } : {}),
+              ...(run.sandboxCommandId !== undefined ? { commandId: run.sandboxCommandId } : {}),
+              ...(run.sandboxName !== undefined ? { name: run.sandboxName } : {}),
+            }
+          : {
+              text: run.text,
+              coalescedUntil: run.lastSequence,
+            },
     });
     run = null;
   };
@@ -55,10 +56,10 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     const sandboxStream = isSandbox ? sandboxDeltaString(event.payload, "stream") : undefined;
     const sandboxCommandId = isSandbox ? sandboxDeltaString(event.payload, "commandId") : undefined;
     if (
-      run
-      && sameDeltaRun(run.first, event, run.sandboxName, sandboxName)
-      && run.sandboxStream === sandboxStream
-      && run.sandboxCommandId === sandboxCommandId
+      run &&
+      sameDeltaRun(run.first, event, run.sandboxName, sandboxName) &&
+      run.sandboxStream === sandboxStream &&
+      run.sandboxCommandId === sandboxCommandId
     ) {
       run.text += deltaText(event);
       run.lastSequence = event.sequence;
@@ -145,5 +146,5 @@ function sandboxDeltaString(payload: unknown, key: "stream" | "commandId"): stri
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }

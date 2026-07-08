@@ -3,20 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "description": "Self-hostable managed agent service for long-running infrastructure work.",
+  "homepage": "https://github.com/Cloudgeni-ai/opengeni#readme",
+  "bugs": {
+    "url": "https://github.com/Cloudgeni-ai/opengeni/issues"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git"
   },
-  "bugs": {
-    "url": "https://github.com/Cloudgeni-ai/opengeni/issues"
-  },
-  "homepage": "https://github.com/Cloudgeni-ai/opengeni#readme",
-  "type": "module",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
     "dev": "bash scripts/dev-stack.sh",
     "dev:stack": "bash scripts/dev-stack.sh",
@@ -29,6 +29,9 @@
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
     "typecheck": "bun scripts/typecheck.ts",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "test": "bun test",
     "test:unit": "bun test",
     "test:integration": "bun test --timeout 30000 ./test/integration/api.integration.ts && bun test --timeout 30000 ./test/integration/db.integration.ts && bun test --timeout 30000 ./test/integration/nats.integration.ts && bun test --timeout 30000 ./test/integration/selfhosted-control-transport.integration.ts && bun test --timeout 120000 ./test/integration/selfhosted-auth-callout.integration.ts && bun test --timeout 30000 ./test/integration/workspace-isolation.integration.ts && bun test --timeout 30000 ./test/integration/temporal-workflow.integration.ts && bun test --timeout 30000 ./test/integration/worker-activity.integration.ts && bun test --timeout 30000 ./test/integration/worker-restart.integration.ts",
@@ -57,6 +60,17 @@
     "check:workspace-billing": "bun run typecheck && bun test && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
     "prep": "bun run check:full"
   },
+  "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/view": "^6.43.1",
+    "@pierre/trees": "1.0.0-beta.4",
+    "@uiw/react-codemirror": "^4.25.10"
+  },
   "devDependencies": {
     "@changesets/cli": "^2.27.11",
     "@opengeni/agent-proto": "workspace:*",
@@ -78,18 +92,9 @@
     "@temporalio/worker": "^1.17.0",
     "@types/bun": "^1.3.4",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "oxfmt": "0.58.0",
+    "oxlint": "1.73.0",
     "playwright": "^1.57.0",
     "typescript": "^6.0.3"
-  },
-  "dependencies": {
-    "@codemirror/lang-css": "^6.3.1",
-    "@codemirror/lang-html": "^6.4.11",
-    "@codemirror/lang-javascript": "^6.2.5",
-    "@codemirror/lang-json": "^6.0.2",
-    "@codemirror/lang-markdown": "^6.5.0",
-    "@codemirror/lang-python": "^6.2.1",
-    "@codemirror/view": "^6.43.1",
-    "@pierre/trees": "1.0.0-beta.4",
-    "@uiw/react-codemirror": "^4.25.10"
   }
 }

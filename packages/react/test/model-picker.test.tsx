@@ -28,8 +28,20 @@ afterEach(async () => {
 });
 
 const MODELS: ClientModel[] = [
-  { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
-  { id: "gpt-5.4", label: "gpt-5.4", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+  {
+    id: "gpt-5.5",
+    label: "gpt-5.5",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    api: "responses",
+  },
+  {
+    id: "gpt-5.4",
+    label: "gpt-5.4",
+    provider: "openai",
+    providerLabel: "OpenAI",
+    api: "responses",
+  },
   {
     id: "accounts/fireworks/models/glm-5p2",
     label: "GLM 5.2",
@@ -78,20 +90,27 @@ describe("ModelPicker", () => {
     const groups = [...select.querySelectorAll("optgroup")];
     expect(groups.map((group) => group.label)).toEqual(["OpenAI", "Fireworks AI"]);
     // OpenAI group holds its two models; Fireworks group holds GLM 5.2.
-    expect([...groups[0]!.querySelectorAll("option")].map((option) => option.textContent)).toEqual(["gpt-5.5", "gpt-5.4"]);
+    expect([...groups[0]!.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "gpt-5.5",
+      "gpt-5.4",
+    ]);
     expect([...groups[1]!.querySelectorAll("option")].map((option) => option.value)).toEqual([
       "accounts/fireworks/models/glm-5p2",
     ]);
   });
 
   test("reflects the controlled value", async () => {
-    const container = await mount(<ModelPicker models={MODELS} value="gpt-5.4" onChange={() => {}} />);
+    const container = await mount(
+      <ModelPicker models={MODELS} value="gpt-5.4" onChange={() => {}} />,
+    );
     expect(picker(container)!.value).toBe("gpt-5.4");
   });
 
   test("calls onChange with the chosen model id", async () => {
     const chosen: string[] = [];
-    const container = await mount(<ModelPicker models={MODELS} value="gpt-5.5" onChange={(id) => chosen.push(id)} />);
+    const container = await mount(
+      <ModelPicker models={MODELS} value="gpt-5.5" onChange={(id) => chosen.push(id)} />,
+    );
     const select = picker(container)!;
     await act(async () => {
       select.value = "accounts/fireworks/models/glm-5p2";
@@ -114,7 +133,12 @@ describe("ChatComposer model picker", () => {
 
   test("renders the picker in the footer when models is present", async () => {
     const container = await mount(
-      <ChatComposer composer={makeComposer()} models={MODELS} selectedModel="gpt-5.5" onSelectModel={() => {}} />,
+      <ChatComposer
+        composer={makeComposer()}
+        models={MODELS}
+        selectedModel="gpt-5.5"
+        onSelectModel={() => {}}
+      />,
     );
     expect(picker(container)).toBeTruthy();
     expect(picker(container)!.value).toBe("gpt-5.5");

@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { testSettings, MemoryEventBus, acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  AgentEvent,
-  ControlRequest,
-  ControlResponse,
-} from "@opengeni/agent-proto";
+  testSettings,
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { AgentEvent, ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   createDb,
@@ -58,7 +59,11 @@ const settings = testSettings({
 
 /** A MemoryEventBus whose responder answers ping → online for the agent subject
  *  (online=false registers no responder → offline). */
-function busWithAgent(opts: { workspaceId: string; agentId: string; online: boolean }): MemoryEventBus {
+function busWithAgent(opts: {
+  workspaceId: string;
+  agentId: string;
+  online: boolean;
+}): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
     return bus;
@@ -66,9 +71,16 @@ function busWithAgent(opts: { workspaceId: string; agentId: string; online: bool
   bus.subscribeRequests(subjectFor(opts.workspaceId, opts.agentId), (payload) => {
     const req = ControlRequest.decode(payload);
     const op = req.op;
-    const res: ControlResponse = op?.$case === "ping"
-      ? { requestId: req.requestId, result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } } }
-      : { requestId: req.requestId, error: { code: 0, message: "unsupported", retryable: false, detail: {} } };
+    const res: ControlResponse =
+      op?.$case === "ping"
+        ? {
+            requestId: req.requestId,
+            result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+          }
+        : {
+            requestId: req.requestId,
+            error: { code: 0, message: "unsupported", retryable: false, detail: {} },
+          };
     return ControlResponse.encode(res).finish();
   });
   return bus;
@@ -76,7 +88,12 @@ function busWithAgent(opts: { workspaceId: string; agentId: string; online: bool
 
 /** Build + emit a heartbeat AgentEvent carrying a metrics sample, driving the
  *  in-process ingestion consumer (started by createApp). */
-async function emitHeartbeat(bus: MemoryEventBus, workspaceId: string, agentId: string, cpuPct: number): Promise<void> {
+async function emitHeartbeat(
+  bus: MemoryEventBus,
+  workspaceId: string,
+  agentId: string,
+  cpuPct: number,
+): Promise<void> {
   const event = AgentEvent.encode({
     agentId,
     event: {
@@ -89,9 +106,13 @@ async function emitHeartbeat(bus: MemoryEventBus, workspaceId: string, agentId: 
         metrics: {
           sampledAtMs: String(Date.now()),
           cpuPercent: cpuPct,
-          load1: 0.5, load5: 0.4, load15: 0.3,
-          memUsedBytes: "1024", memTotalBytes: "4096",
-          diskUsedBytes: "2048", diskTotalBytes: "8192",
+          load1: 0.5,
+          load5: 0.4,
+          load15: 0.3,
+          memUsedBytes: "1024",
+          memTotalBytes: "4096",
+          diskUsedBytes: "2048",
+          diskTotalBytes: "8192",
           runQueue: 1,
           gpus: [],
         },
@@ -104,8 +125,12 @@ async function emitHeartbeat(bus: MemoryEventBus, workspaceId: string, agentId: 
 function appFor(bus: MemoryEventBus, overrides: Partial<AppDependencies> = {}) {
   const noop = async () => {};
   const workflowClient = {
-    signalUserMessage: noop, wakeSessionWorkflow: noop, signalApprovalDecision: noop,
-    signalInterrupt: noop, syncScheduledTask: noop, deleteScheduledTaskSchedule: noop,
+    signalUserMessage: noop,
+    wakeSessionWorkflow: noop,
+    signalApprovalDecision: noop,
+    signalInterrupt: noop,
+    syncScheduledTask: noop,
+    deleteScheduledTaskSchedule: noop,
     triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
   const deps: AppDependencies = {
@@ -126,15 +151,27 @@ function appFor(bus: MemoryEventBus, overrides: Partial<AppDependencies> = {}) {
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
-async function bearer(accountId: string, workspaceId: string, permissions: Permission[]): Promise<string> {
+async function bearer(
+  accountId: string,
+  workspaceId: string,
+  permissions: Permission[],
+): Promise<string> {
   return await signDelegatedAccessToken(DELEGATION_SECRET, {
-    accountId, workspaceId, subjectId: "user-m10", subjectLabel: "M10 User",
-    permissions, exp: Math.floor(Date.now() / 1000) + 3600,
+    accountId,
+    workspaceId,
+    subjectId: "user-m10",
+    subjectLabel: "M10 User",
+    permissions,
+    exp: Math.floor(Date.now() / 1000) + 3600,
   });
 }
 
@@ -160,7 +197,9 @@ afterEach(() => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -168,19 +207,31 @@ type SeedOpts = { online?: boolean; hasDisplay?: boolean; allowScreenControl?: b
 async function seed(opts: SeedOpts = {}) {
   const { accountId, workspaceId } = await freshWorkspace();
   const session = await createSession(db, {
-    accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
-    model: "gpt-test", sandboxBackend: "modal",
+    accountId,
+    workspaceId,
+    initialMessage: "hi",
+    resources: [],
+    metadata: {},
+    model: "gpt-test",
+    sandboxBackend: "modal",
   });
   const enrollment = await createEnrollment(db, {
-    accountId, workspaceId, pubkey: `ed25519:${crypto.randomUUID()}`,
+    accountId,
+    workspaceId,
+    pubkey: `ed25519:${crypto.randomUUID()}`,
     exposure: "whole-machine",
     hasDisplay: opts.hasDisplay ?? true,
     allowScreenControl: opts.allowScreenControl ?? true,
-    os: "linux", arch: "x86_64",
+    os: "linux",
+    arch: "x86_64",
   });
   await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
   const sandbox = await createSandbox(db, {
-    accountId, workspaceId, kind: "selfhosted", name: "my-laptop", enrollmentId: enrollment.id,
+    accountId,
+    workspaceId,
+    kind: "selfhosted",
+    name: "my-laptop",
+    enrollmentId: enrollment.id,
   });
   const bus = busWithAgent({ workspaceId, agentId: enrollment.id, online: opts.online ?? true });
   return { accountId, workspaceId, session, enrollment, sandbox, bus };
@@ -197,11 +248,23 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     await emitHeartbeat(bus, workspaceId, enrollment.id, 42.5);
 
     // Workspace dashboard (no session): just the enrolled machine, null active.
-    const wsRes = await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } });
+    const wsRes = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+      headers: { authorization: auth },
+    });
     expect(wsRes.status).toBe(200);
-    const wsBody = await wsRes.json() as {
-      activeSandboxId: string | null; activeEpoch: number;
-      machines: Array<{ sandboxId: string; isSessionGroup: boolean; kind: string; state: string; metrics: { cpuPct: number } | null; sharedSessionCount: number; hasDisplay: boolean; allowScreenControl: boolean }>;
+    const wsBody = (await wsRes.json()) as {
+      activeSandboxId: string | null;
+      activeEpoch: number;
+      machines: Array<{
+        sandboxId: string;
+        isSessionGroup: boolean;
+        kind: string;
+        state: string;
+        metrics: { cpuPct: number } | null;
+        sharedSessionCount: number;
+        hasDisplay: boolean;
+        allowScreenControl: boolean;
+      }>;
     };
     expect(wsBody.activeSandboxId).toBeNull();
     expect(wsBody.activeEpoch).toBe(0);
@@ -217,9 +280,19 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(machine.metrics!.cpuPct).toBe(42.5);
 
     // In-session view: the synthetic Modal group box is prepended.
-    const sessRes = await app.request(`/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`, { headers: { authorization: auth } });
+    const sessRes = await app.request(
+      `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
+      { headers: { authorization: auth } },
+    );
     expect(sessRes.status).toBe(200);
-    const sessBody = await sessRes.json() as { machines: Array<{ isSessionGroup: boolean; kind: string; active: boolean; sandboxId: string }> };
+    const sessBody = (await sessRes.json()) as {
+      machines: Array<{
+        isSessionGroup: boolean;
+        kind: string;
+        active: boolean;
+        sandboxId: string;
+      }>;
+    };
     const group = sessBody.machines.find((m) => m.isSessionGroup);
     expect(group).toBeDefined();
     expect(group!.kind).toBe("modal");
@@ -235,10 +308,17 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     // compute + read-only viewing work; only INPUT is withheld (surfaced via the
     // separate allowScreenControl field, not by degrading the machine state).
     {
-      const { accountId, workspaceId, bus } = await seed({ allowScreenControl: false, hasDisplay: true });
+      const { accountId, workspaceId, bus } = await seed({
+        allowScreenControl: false,
+        hasDisplay: true,
+      });
       const app = appFor(bus);
       const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
-      const body = await (await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).json() as { machines: Array<{ state: string; allowScreenControl: boolean }> };
+      const body = (await (
+        await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        })
+      ).json()) as { machines: Array<{ state: string; allowScreenControl: boolean }> };
       expect(body.machines[0]!.state).toBe("online");
       expect(body.machines[0]!.allowScreenControl).toBe(false);
     }
@@ -249,15 +329,26 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       await admin`update enrollments set last_seen_at = null where id = ${enrollment.id}`;
       const app = appFor(bus);
       const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
-      const body = await (await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).json() as { machines: Array<{ state: string; metrics: unknown }> };
+      const body = (await (
+        await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        })
+      ).json()) as { machines: Array<{ state: string; metrics: unknown }> };
       expect(body.machines[0]!.state).toBe("offline");
     }
     // display_unavailable: online + consented but headless (no display).
     {
-      const { accountId, workspaceId, bus } = await seed({ hasDisplay: false, allowScreenControl: true });
+      const { accountId, workspaceId, bus } = await seed({
+        hasDisplay: false,
+        allowScreenControl: true,
+      });
       const app = appFor(bus);
       const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
-      const body = await (await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).json() as { machines: Array<{ state: string }> };
+      const body = (await (
+        await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        })
+      ).json()) as { machines: Array<{ state: string }> };
       expect(body.machines[0]!.state).toBe("display_unavailable");
     }
   }, 120_000);
@@ -273,14 +364,20 @@ describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
     // Two heartbeats: the first seeds a series row; the dashboard reads it back.
     await emitHeartbeat(bus, workspaceId, enrollment.id, 11);
 
-    const res = await app.request(`/v1/workspaces/${workspaceId}/machines/${enrollment.id}/metrics/series?window=1h`, { headers: { authorization: auth } });
+    const res = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/metrics/series?window=1h`,
+      { headers: { authorization: auth } },
+    );
     expect(res.status).toBe(200);
-    const body = await res.json() as { samples: Array<{ cpuPct: number; sampledAt: string }> };
+    const body = (await res.json()) as { samples: Array<{ cpuPct: number; sampledAt: string }> };
     expect(body.samples.length).toBeGreaterThanOrEqual(1);
     expect(body.samples[0]!.cpuPct).toBe(11);
 
     // Unknown machine id → 404 (not an empty series).
-    const unknown = await app.request(`/v1/workspaces/${workspaceId}/machines/${crypto.randomUUID()}/metrics/series`, { headers: { authorization: auth } });
+    const unknown = await app.request(
+      `/v1/workspaces/${workspaceId}/machines/${crypto.randomUUID()}/metrics/series`,
+      { headers: { authorization: auth } },
+    );
     expect(unknown.status).toBe(404);
   }, 90_000);
 });
@@ -293,14 +390,33 @@ describe("M10 flag gate + authz", () => {
     // Flag OFF → 404 (invisible).
     const offApp = appFor(bus, { settings: { ...settings, sandboxSelfhostedEnabled: false } });
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
-    expect((await offApp.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).status).toBe(404);
-    expect((await offApp.request(`/v1/workspaces/${workspaceId}/machines/${enrollment.id}/metrics/series`, { headers: { authorization: auth } })).status).toBe(404);
+    expect(
+      (
+        await offApp.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await offApp.request(
+          `/v1/workspaces/${workspaceId}/machines/${enrollment.id}/metrics/series`,
+          { headers: { authorization: auth } },
+        )
+      ).status,
+    ).toBe(404);
 
     // Cross-workspace: a bearer for a DIFFERENT workspace cannot read this one (403).
     const other = await freshWorkspace();
     const onApp = appFor(bus);
     const crossAuth = `Bearer ${await bearer(other.accountId, other.workspaceId, ["enrollments:read"])}`;
-    expect((await onApp.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: crossAuth } })).status).toBe(403);
+    expect(
+      (
+        await onApp.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: crossAuth },
+        })
+      ).status,
+    ).toBe(403);
 
     // No bearer at all → 401.
     expect((await onApp.request(`/v1/workspaces/${workspaceId}/machines`)).status).toBe(401);

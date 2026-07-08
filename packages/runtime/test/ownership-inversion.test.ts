@@ -75,7 +75,11 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(existsSync(root)).toBe(true);
 
     const model = new ScriptedModel([
-      { output: [functionCall("exec_command", { cmd: "echo KEYSTONE_P12 > /workspace/marker.txt" })] },
+      {
+        output: [
+          functionCall("exec_command", { cmd: "echo KEYSTONE_P12 > /workspace/marker.txt" }),
+        ],
+      },
       { output: [assistantMessage("done")] },
     ]);
     const agent = buildOpenGeniAgent(settings, [], { model });
@@ -96,11 +100,13 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     await result.completed;
 
     // ── KEYSTONE ASSERTIONS ──
-    expect(liveSession.closed).toBe(false);          // never closed
-    expect(existsSync(root)).toBe(true);             // close() would rm -rf it
-    const marker = await liveSession.readFile({ path: "/workspace/marker.txt" })
-      .then((b) => Buffer.from(b).toString().trim(), () => "<missing>");
-    expect(marker).toBe("KEYSTONE_P12");             // the tool hit OUR box
+    expect(liveSession.closed).toBe(false); // never closed
+    expect(existsSync(root)).toBe(true); // close() would rm -rf it
+    const marker = await liveSession.readFile({ path: "/workspace/marker.txt" }).then(
+      (b) => Buffer.from(b).toString().trim(),
+      () => "<missing>",
+    );
+    expect(marker).toBe("KEYSTONE_P12"); // the tool hit OUR box
   });
 
   test("CONTROL: an OWNED (sessionState-resumed) session IS reaped on a normal finish", async () => {
@@ -118,7 +124,9 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     const seed = await client.create({});
     const ownedRoot = seed.state.workspaceRootPath;
     await seed.exec({ cmd: "echo OWNED > /workspace/owned.txt" });
-    const ownedState = await client.serializeSessionState((seed as unknown as { state: unknown }).state);
+    const ownedState = await client.serializeSessionState(
+      (seed as unknown as { state: unknown }).state,
+    );
     expect(existsSync(ownedRoot)).toBe(true);
 
     const model = new ScriptedModel([{ output: [assistantMessage("owned done")] }]);
@@ -135,7 +143,7 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       sandbox: { client: client as never, sessionState: ownedState as never },
     });
 
-    expect(existsSync(ownedRoot)).toBe(false);   // the OWNED resumed session was reaped
+    expect(existsSync(ownedRoot)).toBe(false); // the OWNED resumed session was reaped
   });
 });
 
@@ -185,7 +193,10 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     // The agent's declared manifest (what the SDK compares the box against).
     const agentManifest = buildManifest(settings, [], sandboxEnvironment);
     const agentEnv = Object.fromEntries(
-      Object.entries(agentManifest.environment).map(([k, v]) => [k, (v as { value?: string }).value]),
+      Object.entries(agentManifest.environment).map(([k, v]) => [
+        k,
+        (v as { value?: string }).value,
+      ]),
     );
 
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
@@ -194,7 +205,11 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
       environment: sandboxEnvironment,
     });
     try {
-      const boxManifest = (established.session as { state: { manifest: { environment: Record<string, { value?: string }> } } }).state.manifest;
+      const boxManifest = (
+        established.session as {
+          state: { manifest: { environment: Record<string, { value?: string }> } };
+        }
+      ).state.manifest;
       const boxEnv = Object.fromEntries(
         Object.entries(boxManifest.environment).map(([k, v]) => [k, v.value]),
       );
@@ -206,7 +221,9 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
       }
       // And the box declares the same manifest root the agent does (the root-delta
       // guard also fires on a mismatch).
-      expect((boxManifest as unknown as { root: string }).root).toBe((agentManifest as unknown as { root: string }).root);
+      expect((boxManifest as unknown as { root: string }).root).toBe(
+        (agentManifest as unknown as { root: string }).root,
+      );
     } finally {
       await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
     }
@@ -220,16 +237,30 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
   });
 
   test("box-gone phrasing -> NotFound", () => {
-    expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(true);
-    expect(isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running"))).toBe(true);
-    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(true);
-    expect(isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" })).toBe(true);
+    expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
+      true,
+    );
+    expect(
+      isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
+    ).toBe(true);
+    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
+      true,
+    );
+    expect(
+      isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
+    ).toBe(true);
   });
 
   test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {
-    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox already running"))).toBe(false);
-    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox is still running"))).toBe(false);
-    expect(isProviderSandboxNotFoundError("modal", new Error("503 service unavailable"))).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox already running"))).toBe(
+      false,
+    );
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox is still running"))).toBe(
+      false,
+    );
+    expect(isProviderSandboxNotFoundError("modal", new Error("503 service unavailable"))).toBe(
+      false,
+    );
     expect(isProviderSandboxNotFoundError("modal", new Error("network timeout"))).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", { status: 500 })).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", null)).toBe(false);

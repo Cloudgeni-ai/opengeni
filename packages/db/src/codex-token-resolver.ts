@@ -123,16 +123,25 @@ export function buildCodexTokenResolver(
         if (current && current.status === "active") {
           return snapshot(current);
         }
-        throw new CodexReloginRequired("Codex credential changed during token refresh; reconnect required.");
+        throw new CodexReloginRequired(
+          "Codex credential changed during token refresh; reconnect required.",
+        );
       }
-      return { accessToken: tokens.access_token, chatgptAccountId: cred.chatgptAccountId, isFedramp: cred.isFedramp };
+      return {
+        accessToken: tokens.access_token,
+        chatgptAccountId: cred.chatgptAccountId,
+        isFedramp: cred.isFedramp,
+      };
     } catch (error) {
       if (error instanceof CodexReloginRequired) {
         // Stamp needs_relogin ONLY if the row we refreshed is STILL current
         // (compare-and-set on the loaded id+version). A relogin triggered by the
         // OLD token family must never stamp needs_relogin onto a freshly
         // reconnected credential.
-        await deps.setStatus(db, workspaceId, "needs_relogin", error.message, { id: cred.id, version: cred.version });
+        await deps.setStatus(db, workspaceId, "needs_relogin", error.message, {
+          id: cred.id,
+          version: cred.version,
+        });
       }
       throw error;
     }

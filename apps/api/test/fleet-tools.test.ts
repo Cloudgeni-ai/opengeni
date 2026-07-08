@@ -17,12 +17,13 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { testSettings, MemoryEventBus, acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  ControlRequest,
-  ControlResponse,
-  ErrorCode,
-} from "@opengeni/agent-proto";
+  testSettings,
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   createDb,
   createEnrollment,
@@ -59,7 +60,12 @@ const settings = testSettings({
  *  answers ping/exec/fsRead/fsWrite from an in-memory FS — an in-process stand-in
  *  for a real enrolled agent over NATS. `online=false` registers NO responder
  *  (the subject 503s → offline). */
-function busWithAgent(opts: { workspaceId: string; agentId: string; online: boolean; hostname?: string }): MemoryEventBus {
+function busWithAgent(opts: {
+  workspaceId: string;
+  agentId: string;
+  online: boolean;
+  hostname?: string;
+}): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
     return bus;
@@ -71,21 +77,61 @@ function busWithAgent(opts: { workspaceId: string; agentId: string; online: bool
     const op = req.op;
     let res: ControlResponse;
     if (op?.$case === "ping") {
-      res = { requestId: req.requestId, result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } } };
+      res = {
+        requestId: req.requestId,
+        result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+      };
     } else if (op?.$case === "exec") {
       const joined = op.exec.command.join(" ");
       const stdout = /HOSTNAME|hostname/.test(joined) ? (opts.hostname ?? "the-machine") : joined;
-      res = { requestId: req.requestId, result: { $case: "exec", exec: { exitCode: 0, stdout: enc.encode(`${stdout}\n`), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" } } };
+      res = {
+        requestId: req.requestId,
+        result: {
+          $case: "exec",
+          exec: {
+            exitCode: 0,
+            stdout: enc.encode(`${stdout}\n`),
+            stderr: new Uint8Array(0),
+            timedOut: false,
+            durationMs: "1",
+          },
+        },
+      };
     } else if (op?.$case === "fsWrite") {
       files.set(op.fsWrite.path, op.fsWrite.content);
-      res = { requestId: req.requestId, result: { $case: "fsWrite", fsWrite: { bytesWritten: String(op.fsWrite.content.length) } } };
+      res = {
+        requestId: req.requestId,
+        result: { $case: "fsWrite", fsWrite: { bytesWritten: String(op.fsWrite.content.length) } },
+      };
     } else if (op?.$case === "fsRead") {
       const bytes = files.get(op.fsRead.path);
       res = bytes
-        ? { requestId: req.requestId, result: { $case: "fsRead", fsRead: { content: bytes, totalSize: String(bytes.length) } } }
-        : { requestId: req.requestId, error: { code: ErrorCode.ERROR_CODE_NOT_FOUND, message: "no such file", retryable: false, detail: {} } };
+        ? {
+            requestId: req.requestId,
+            result: {
+              $case: "fsRead",
+              fsRead: { content: bytes, totalSize: String(bytes.length) },
+            },
+          }
+        : {
+            requestId: req.requestId,
+            error: {
+              code: ErrorCode.ERROR_CODE_NOT_FOUND,
+              message: "no such file",
+              retryable: false,
+              detail: {},
+            },
+          };
     } else {
-      res = { requestId: req.requestId, error: { code: ErrorCode.ERROR_CODE_UNSUPPORTED, message: "unsupported", retryable: false, detail: {} } };
+      res = {
+        requestId: req.requestId,
+        error: {
+          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+          message: "unsupported",
+          retryable: false,
+          detail: {},
+        },
+      };
     }
     return ControlResponse.encode(res).finish();
   });
@@ -93,8 +139,12 @@ function busWithAgent(opts: { workspaceId: string; agentId: string; online: bool
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -141,7 +191,12 @@ async function seedFleet(opts: { online?: boolean; hostname?: string } = {}) {
   const services: FleetServices = {
     db,
     settings,
-    bus: busWithAgent({ workspaceId, agentId: enrollment.id, online: opts.online ?? true, hostname: opts.hostname }) as never,
+    bus: busWithAgent({
+      workspaceId,
+      agentId: enrollment.id,
+      online: opts.online ?? true,
+      hostname: opts.hostname,
+    }) as never,
   };
   return { ctx, services, session, enrollment, sandbox, accountId, workspaceId };
 }
@@ -162,7 +217,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -264,7 +321,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const { ctx, services, sandbox } = await seedFleet({ hostname: "runon-vm" });
     const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
 
-    const exec = await runOnSandbox(services, ctx, sandbox.id, { kind: "exec", cmd: "echo $HOSTNAME" });
+    const exec = await runOnSandbox(services, ctx, sandbox.id, {
+      kind: "exec",
+      cmd: "echo $HOSTNAME",
+    });
     expect(exec.ok).toBe(true);
     expect(exec.stdout?.trim()).toBe("runon-vm");
 
@@ -274,9 +334,16 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(after.activeEpoch).toBe(before.activeEpoch);
 
     // run_on write -> read round-trips on the machine.
-    const wrote = await runOnSandbox(services, ctx, sandbox.id, { kind: "write", path: "/tmp/marker", content: "hello" });
+    const wrote = await runOnSandbox(services, ctx, sandbox.id, {
+      kind: "write",
+      path: "/tmp/marker",
+      content: "hello",
+    });
     expect(wrote.ok).toBe(true);
-    const read = await runOnSandbox(services, ctx, sandbox.id, { kind: "read", path: "/tmp/marker" });
+    const read = await runOnSandbox(services, ctx, sandbox.id, {
+      kind: "read",
+      path: "/tmp/marker",
+    });
     expect(read.ok).toBe(true);
     expect(read.content).toBe("hello");
   }, 60_000);

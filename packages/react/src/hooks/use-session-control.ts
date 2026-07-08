@@ -38,13 +38,18 @@ export function useSessionControl(
         return null;
       }
       return await interruptMutation.run(() =>
-        client.interrupt(workspaceId, sessionId, reason !== undefined ? { reason } : {}));
+        client.interrupt(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
+      );
     },
     [client, workspaceId, sessionId, interruptMutation.run],
   );
 
   const decide = useCallback(
-    async (approvalId: string, decision: "approve" | "reject", message?: string): Promise<SessionEvent | null> => {
+    async (
+      approvalId: string,
+      decision: "approve" | "reject",
+      message?: string,
+    ): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
       }
@@ -53,7 +58,8 @@ export function useSessionControl(
           approvalId,
           decision,
           ...(message !== undefined ? { message } : {}),
-        }));
+        }),
+      );
     },
     [client, workspaceId, sessionId, approvalMutation.run],
   );

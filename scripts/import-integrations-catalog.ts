@@ -15,7 +15,8 @@ import {
 import { createObjectStorage, type ObjectStorage } from "../packages/storage/src/index";
 
 const SOURCE = "integrations.sh";
-const MIT_ATTRIBUTION = "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
+const MIT_ATTRIBUTION =
+  "Seed catalog metadata imported from integrations.sh / UsefulSoftwareCo integrationsdotsh (MIT License, Copyright (c) 2026 Rhys Sullivan).";
 const MAX_LOGO_BYTES = 512 * 1024;
 
 export const deadDemoDomains = new Set([
@@ -40,11 +41,26 @@ export const deadDemoDomains = new Set([
 ]);
 
 export const suspiciousSurfaceUrls = new Map([
-  ["activepieces.com\nhttps://www.activepieces.com/.well-known/mcp/server-card.json", "server-card JSON URL needs manual confirmation before enablement"],
-  ["netatmo.com\nhttps://www.netatmo.com/.well-known/mcp/server-card.json", "server-card JSON URL needs manual confirmation before enablement"],
-  ["doordash.com\nhttps://openapi.doordash.com/mcp/consumer", "consumer API URL needs manual confirmation before enablement"],
-  ["natwest.com\nhttps://openapi.natwest.com/mortgages/v1/mcp-server-mortgages/mcp", "banking API URL needs manual confirmation before enablement"],
-  ["smartbear.com\nhttps://swagger.mcp.smartbear.com/mcp", "SmartBear Swagger endpoint needs manual confirmation before enablement"],
+  [
+    "activepieces.com\nhttps://www.activepieces.com/.well-known/mcp/server-card.json",
+    "server-card JSON URL needs manual confirmation before enablement",
+  ],
+  [
+    "netatmo.com\nhttps://www.netatmo.com/.well-known/mcp/server-card.json",
+    "server-card JSON URL needs manual confirmation before enablement",
+  ],
+  [
+    "doordash.com\nhttps://openapi.doordash.com/mcp/consumer",
+    "consumer API URL needs manual confirmation before enablement",
+  ],
+  [
+    "natwest.com\nhttps://openapi.natwest.com/mortgages/v1/mcp-server-mortgages/mcp",
+    "banking API URL needs manual confirmation before enablement",
+  ],
+  [
+    "smartbear.com\nhttps://swagger.mcp.smartbear.com/mcp",
+    "SmartBear Swagger endpoint needs manual confirmation before enablement",
+  ],
 ]);
 
 type UnknownRecord = Record<string, unknown>;
@@ -104,20 +120,30 @@ export async function readSnapshotFile(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-export async function writeCleanCatalogSnapshot(path: string, snapshot: unknown): Promise<NormalizedCatalogSnapshot> {
+export async function writeCleanCatalogSnapshot(
+  path: string,
+  snapshot: unknown,
+): Promise<NormalizedCatalogSnapshot> {
   const normalized = normalizeCatalogSnapshot(snapshot);
-  await writeFile(path, `${JSON.stringify({
-    generatedAt: normalized.generatedAt,
-    source: SOURCE,
-    cleanedAt: new Date().toISOString(),
-    cleaning: normalized.cleaning,
-    importRows: normalized.rows,
-    skipped: normalized.skipped,
-    quarantined: normalized.quarantined.map((item) => ({
-      row: item.row,
-      reason: item.reason,
-    })),
-  }, null, 2)}\n`);
+  await writeFile(
+    path,
+    `${JSON.stringify(
+      {
+        generatedAt: normalized.generatedAt,
+        source: SOURCE,
+        cleanedAt: new Date().toISOString(),
+        cleaning: normalized.cleaning,
+        importRows: normalized.rows,
+        skipped: normalized.skipped,
+        quarantined: normalized.quarantined.map((item) => ({
+          row: item.row,
+          reason: item.reason,
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
   return normalized;
 }
 
@@ -175,7 +201,10 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: provenance === "detected" ? "verified" : "community",
       provenance,
-      logoSourceUrl: stringValue(candidate.logoAsset) ?? stringValue(candidate.logoSourceUrl) ?? `https://integrations.sh/logo/${domain}`,
+      logoSourceUrl:
+        stringValue(candidate.logoAsset) ??
+        stringValue(candidate.logoSourceUrl) ??
+        `https://integrations.sh/logo/${domain}`,
     };
     const suspiciousReason = suspiciousSurfaceUrls.get(key);
     if (suspiciousReason) {
@@ -195,8 +224,11 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
     skipped.push({ domain: loser.domain, mcpUrl: loser.mcpUrl, reason: "duplicate_domain_name" });
   }
 
-  const rows = [...candidatesByDomainName.values()].sort((left, right) =>
-    left.domain.localeCompare(right.domain) || left.name.localeCompare(right.name) || left.mcpUrl.localeCompare(right.mcpUrl)
+  const rows = [...candidatesByDomainName.values()].sort(
+    (left, right) =>
+      left.domain.localeCompare(right.domain) ||
+      left.name.localeCompare(right.name) ||
+      left.mcpUrl.localeCompare(right.mcpUrl),
   );
 
   return {
@@ -225,7 +257,9 @@ export async function importIntegrationsCatalog(input: {
 }): Promise<ImportCatalogResult> {
   const normalized = normalizeCatalogSnapshot(input.snapshot);
   if (normalized.rows.length === 0) {
-    throw new Error("catalog import produced zero importable rows; aborting before DB writes to avoid marking registry entries stale");
+    throw new Error(
+      "catalog import produced zero importable rows; aborting before DB writes to avoid marking registry entries stale",
+    );
   }
   const batch = await createImportBatch(input.db, {
     source: SOURCE,
@@ -263,16 +297,23 @@ export async function importIntegrationsCatalog(input: {
         });
       }
     }
-    await upsertRegistryCapabilityCatalogItem(input.db, catalogRowToDbInput(row, {
-      importBatchId: batch.id,
-      logoAssetPath,
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      input.db,
+      catalogRowToDbInput(row, {
+        importBatchId: batch.id,
+        logoAssetPath,
+      }),
+    );
   }
 
-  const staleCount = await markStaleRegistryCatalogItems(input.db, normalized.rows.map((row) => ({
-    providerDomain: row.domain,
-    mcpUrl: row.mcpUrl,
-  })), batch.id);
+  const staleCount = await markStaleRegistryCatalogItems(
+    input.db,
+    normalized.rows.map((row) => ({
+      providerDomain: row.domain,
+      mcpUrl: row.mcpUrl,
+    })),
+    batch.id,
+  );
   const finalBatch = await updateImportBatchCounts(input.db, batch.id, {
     importedCount: normalized.rows.length,
     skippedCount: normalized.skipped.length,
@@ -305,10 +346,13 @@ export async function importIntegrationsCatalog(input: {
   };
 }
 
-export function catalogRowToDbInput(row: CatalogIntegrationRow, input: {
-  importBatchId: string;
-  logoAssetPath?: string | null;
-}): RegistryCapabilityCatalogItemInput {
+export function catalogRowToDbInput(
+  row: CatalogIntegrationRow,
+  input: {
+    importBatchId: string;
+    logoAssetPath?: string | null;
+  },
+): RegistryCapabilityCatalogItemInput {
   return {
     id: catalogCapabilityId(row.domain, row.mcpUrl),
     providerDomain: row.domain,
@@ -332,10 +376,13 @@ export function catalogRowToDbInput(row: CatalogIntegrationRow, input: {
   };
 }
 
-export async function storeLogoForRow(row: CatalogIntegrationRow, input: {
-  storage: LogoStorage | null;
-  fetchImpl: LogoFetch;
-}): Promise<LogoStorageResult> {
+export async function storeLogoForRow(
+  row: CatalogIntegrationRow,
+  input: {
+    storage: LogoStorage | null;
+    fetchImpl: LogoFetch;
+  },
+): Promise<LogoStorageResult> {
   const sourceUrl = row.logoSourceUrl ?? `https://integrations.sh/logo/${row.domain}`;
   if (!input.storage) {
     return { ok: false, sourceUrl, reason: "object_storage_unavailable" };
@@ -344,7 +391,11 @@ export async function storeLogoForRow(row: CatalogIntegrationRow, input: {
   try {
     response = await input.fetchImpl(sourceUrl);
   } catch (error) {
-    return { ok: false, sourceUrl, reason: `fetch_failed:${error instanceof Error ? error.message : String(error)}` };
+    return {
+      ok: false,
+      sourceUrl,
+      reason: `fetch_failed:${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   if (!response.ok) {
     return { ok: false, sourceUrl, reason: `http_status:${response.status}` };
@@ -384,7 +435,9 @@ function rawSurfaceRows(root: UnknownRecord | null): UnknownRecord[] {
   if (!root) {
     return [];
   }
-  const flatEntries = arrayValue(root.api ?? root.catalog ?? root.flatCatalog ?? root.entries ?? root.data).filter(isRecord);
+  const flatEntries = arrayValue(
+    root.api ?? root.catalog ?? root.flatCatalog ?? root.entries ?? root.data,
+  ).filter(isRecord);
   const surfaceDocs = surfaceDocEntries(root.surfaceDocs ?? root.surfaces ?? root.domains);
   const flatByDomain = new Map<string, UnknownRecord>();
   for (const entry of flatEntries) {
@@ -412,7 +465,10 @@ function rawSurfaceRows(root: UnknownRecord | null): UnknownRecord[] {
         scopesHint: scopesHintForSurface(surfaceRecord),
         credentialFacts,
         provenance: asRecord(surfaceRecord.basis)?.via ?? surfaceRecord.provenance,
-        logoAsset: stringValue(flat?.icon) ?? stringValue(surfaceRecord.icon) ?? `https://integrations.sh/logo/${domain}`,
+        logoAsset:
+          stringValue(flat?.icon) ??
+          stringValue(surfaceRecord.icon) ??
+          `https://integrations.sh/logo/${domain}`,
       });
     }
   }
@@ -446,20 +502,25 @@ function surfaceArray(doc: UnknownRecord): unknown[] {
   return surfaces ? [surfaces] : [];
 }
 
-function credentialFactsForSurface(surface: UnknownRecord, credentials: UnknownRecord): Array<Record<string, unknown>> {
+function credentialFactsForSurface(
+  surface: UnknownRecord,
+  credentials: UnknownRecord,
+): Array<Record<string, unknown>> {
   const ids = referencedCredentialIds(surface);
   return ids.flatMap((id): Array<Record<string, unknown>> => {
     const credential = asRecord(credentials[id]);
     if (!credential) {
       return [];
     }
-    return [{
-      id,
-      type: stringValue(credential.type) ?? "unknown",
-      generateUrl: stringValue(credential.generateUrl) ?? null,
-      setup: stringValue(credential.setup) ?? null,
-      fields: asRecord(credential.fields),
-    }];
+    return [
+      {
+        id,
+        type: stringValue(credential.type) ?? "unknown",
+        generateUrl: stringValue(credential.generateUrl) ?? null,
+        setup: stringValue(credential.setup) ?? null,
+        fields: asRecord(credential.fields),
+      },
+    ];
   });
 }
 
@@ -501,7 +562,10 @@ function scopesHintForSurface(surface: UnknownRecord): string[] {
   return [...scopes];
 }
 
-function deriveAuthKind(surface: UnknownRecord, credentialFacts: Array<Record<string, unknown>>): CatalogAuthKind {
+function deriveAuthKind(
+  surface: UnknownRecord,
+  credentialFacts: Array<Record<string, unknown>>,
+): CatalogAuthKind {
   const status = stringValue(asRecord(surface.auth)?.status)?.toLowerCase();
   if (status === "none") {
     return "none";
@@ -512,7 +576,9 @@ function deriveAuthKind(surface: UnknownRecord, credentialFacts: Array<Record<st
   if (status && ["api_key", "bearer", "basic"].includes(status)) {
     return "api_key";
   }
-  const types = credentialFacts.map((fact) => stringValue(fact.type)?.toLowerCase()).filter((type): type is string => !!type);
+  const types = credentialFacts
+    .map((fact) => stringValue(fact.type)?.toLowerCase())
+    .filter((type): type is string => !!type);
   if (types.some((type) => ["oauth2", "oauth2_cc", "oauth1"].includes(type))) {
     return "oauth2";
   }
@@ -522,7 +588,9 @@ function deriveAuthKind(surface: UnknownRecord, credentialFacts: Array<Record<st
   return "unknown";
 }
 
-function importableMcpUrl(value: string | null | undefined): { ok: true } | { ok: false; reason: string } {
+function importableMcpUrl(
+  value: string | null | undefined,
+): { ok: true } | { ok: false; reason: string } {
   if (!value) {
     return { ok: false, reason: "missing_url" };
   }
@@ -542,7 +610,9 @@ function importableMcpUrl(value: string | null | undefined): { ok: true } | { ok
 
 function normalizeTransport(value: unknown): "streamable-http" | null {
   const transports = Array.isArray(value) ? value : [value];
-  return transports.some((transport) => stringValue(transport) === "streamable-http") ? "streamable-http" : null;
+  return transports.some((transport) => stringValue(transport) === "streamable-http")
+    ? "streamable-http"
+    : null;
 }
 
 function normalizeDomain(value: unknown): string | null {
@@ -552,7 +622,9 @@ function normalizeDomain(value: unknown): string | null {
 
 function normalizeAuthKind(value: unknown): CatalogAuthKind {
   const raw = stringValue(value);
-  return raw === "oauth2" || raw === "api_key" || raw === "none" || raw === "unknown" ? raw : "unknown";
+  return raw === "oauth2" || raw === "api_key" || raw === "none" || raw === "unknown"
+    ? raw
+    : "unknown";
 }
 
 function normalizeProvenance(value: unknown): string {
@@ -564,7 +636,10 @@ function normalizeNameForDedupe(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function bestCatalogRow(left: CatalogIntegrationRow, right: CatalogIntegrationRow): CatalogIntegrationRow {
+function bestCatalogRow(
+  left: CatalogIntegrationRow,
+  right: CatalogIntegrationRow,
+): CatalogIntegrationRow {
   const leftScore = catalogRowQualityScore(left);
   const rightScore = catalogRowQualityScore(right);
   if (rightScore !== leftScore) {
@@ -626,11 +701,22 @@ function extensionForContentType(contentType: string): string {
 }
 
 function safePathSegment(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9.-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9.-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "unknown"
+  );
 }
 
 function slugify(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "integration";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64) || "integration"
+  );
 }
 
 function shortHash(value: string): string {
@@ -643,7 +729,9 @@ function stringValue(value: unknown): string | null {
 
 function stringArray(value: unknown): string[] {
   if (Array.isArray(value)) {
-    return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+    return value
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim());
   }
   if (typeof value === "string" && value.trim()) {
     return [value.trim()];
@@ -679,12 +767,19 @@ function stripControlCharacters(value: unknown, counter: { count: number }): unk
     return value.map((item) => stripControlCharacters(item, counter));
   }
   if (isRecord(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stripControlCharacters(item, counter)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, stripControlCharacters(item, counter)]),
+    );
   }
   return value;
 }
 
-function parseArgs(argv: string[]): { snapshotPath: string; dryRun: boolean; skipLogos: boolean; snapshotRef?: string } {
+function parseArgs(argv: string[]): {
+  snapshotPath: string;
+  dryRun: boolean;
+  skipLogos: boolean;
+  snapshotRef?: string;
+} {
   let snapshotPath = "";
   let dryRun = false;
   let skipLogos = false;
@@ -715,7 +810,9 @@ function parseArgs(argv: string[]): { snapshotPath: string; dryRun: boolean; ski
 }
 
 function printUsage(): void {
-  console.log("Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--snapshot-ref <label>]");
+  console.log(
+    "Usage: bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json> [--dry-run] [--skip-logos] [--snapshot-ref <label>]",
+  );
 }
 
 if (import.meta.main) {
@@ -723,15 +820,21 @@ if (import.meta.main) {
   const snapshot = await readSnapshotFile(args.snapshotPath);
   const normalized = normalizeCatalogSnapshot(snapshot);
   if (args.dryRun) {
-    console.log(JSON.stringify({
-      generatedAt: normalized.generatedAt,
-      before: normalized.cleaning.inputRows,
-      after: normalized.cleaning.outputRows,
-      importable: normalized.rows.length,
-      skipped: normalized.skipped.length,
-      quarantined: normalized.quarantined.length,
-      cleaning: normalized.cleaning,
-    }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          generatedAt: normalized.generatedAt,
+          before: normalized.cleaning.inputRows,
+          after: normalized.cleaning.outputRows,
+          importable: normalized.rows.length,
+          skipped: normalized.skipped.length,
+          quarantined: normalized.quarantined.length,
+          cleaning: normalized.cleaning,
+        },
+        null,
+        2,
+      ),
+    );
     process.exit(0);
   }
   const settings = getSettings();
@@ -749,17 +852,23 @@ if (import.meta.main) {
       storage,
       storeLogos: !args.skipLogos,
     });
-    console.log(JSON.stringify({
-      batchId: result.batch.id,
-      before: normalized.cleaning.inputRows,
-      after: normalized.cleaning.outputRows,
-      imported: result.importedCount,
-      skipped: result.skippedCount,
-      quarantined: result.quarantinedCount,
-      stale: result.staleCount,
-      logoFailures: result.logoFailureCount,
-      cleaning: normalized.cleaning,
-    }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          batchId: result.batch.id,
+          before: normalized.cleaning.inputRows,
+          after: normalized.cleaning.outputRows,
+          imported: result.importedCount,
+          skipped: result.skippedCount,
+          quarantined: result.quarantinedCount,
+          stale: result.staleCount,
+          logoFailures: result.logoFailureCount,
+          cleaning: normalized.cleaning,
+        },
+        null,
+        2,
+      ),
+    );
   } finally {
     await dbClient.close();
   }

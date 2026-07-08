@@ -105,7 +105,11 @@ describe("negotiateCapabilities — the minted pixel cell folds in ONLY behind t
   });
 
   test("NOT acknowledged -> the minted cell is DROPPED (no live url leaks before consent)", () => {
-    const caps = negotiateCapabilities({ ...warmAcked, desktopAcknowledged: false, desktopStream: minted });
+    const caps = negotiateCapabilities({
+      ...warmAcked,
+      desktopAcknowledged: false,
+      desktopStream: minted,
+    });
     expect(caps.DesktopStream.url).toBeNull();
     expect(caps.DesktopStream.token).toBeNull();
     expect(caps.DesktopStream.expiresAt).toBeNull();
@@ -130,7 +134,11 @@ describe("negotiateCapabilities — the minted pixel cell folds in ONLY behind t
   });
 
   test("degraded (no secret) -> the minted cell is dropped (transport null)", () => {
-    const caps = negotiateCapabilities({ ...warmAcked, streamTokenSecretAvailable: false, desktopStream: minted });
+    const caps = negotiateCapabilities({
+      ...warmAcked,
+      streamTokenSecretAvailable: false,
+      desktopStream: minted,
+    });
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.url).toBeNull();
   });

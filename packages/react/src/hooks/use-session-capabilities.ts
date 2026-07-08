@@ -120,7 +120,9 @@ function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean 
 function terminalAttachable(cell: SessionCapabilities["Terminal"]): boolean {
   if (cell.transport === null) {
     // No terminal at all unless the only blocker is a transient cold state.
-    return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
+    return (
+      cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null
+    );
   }
   // Already pty-ws (warm) is fine to (re)attach; sse-events is the cold state the
   // attach upgrades. Either way it's attachable.
@@ -164,7 +166,9 @@ export function useSessionCapabilities(
   const [capabilities, setCapabilities] = useState<SessionCapabilities | null>(null);
   const [state, setState] = useState<SessionCapabilitiesState>("idle");
   const [error, setError] = useState<Error | null>(null);
-  const [acknowledgmentRequired, setAcknowledgmentRequired] = useState<"unredacted" | "shared" | null>(null);
+  const [acknowledgmentRequired, setAcknowledgmentRequired] = useState<
+    "unredacted" | "shared" | null
+  >(null);
   const [viewerCapReached, setViewerCapReached] = useState(false);
   const [viewerId, setViewerId] = useState<string | null>(null);
   // Bumped to force a fresh negotiation cycle.
@@ -208,7 +212,8 @@ export function useSessionCapabilities(
 
     const startHeartbeat = (caps: SessionCapabilities) => {
       if (!localViewerId || heartbeatTimer !== null) return;
-      const intervalMs = caps.viewerHeartbeatIntervalMs > 0 ? caps.viewerHeartbeatIntervalMs : 30_000;
+      const intervalMs =
+        caps.viewerHeartbeatIntervalMs > 0 ? caps.viewerHeartbeatIntervalMs : 30_000;
       heartbeatTimer = setInterval(() => {
         if (cancelled || !localViewerId) return;
         void client
@@ -222,7 +227,10 @@ export function useSessionCapabilities(
           })
           .catch((cause) => {
             if (cancelled) return;
-            if (cause instanceof OpenGeniApiError && (cause.status === 409 || cause.status === 410)) {
+            if (
+              cause instanceof OpenGeniApiError &&
+              (cause.status === 409 || cause.status === 410)
+            ) {
               renegotiate();
             }
           });
@@ -299,7 +307,9 @@ export function useSessionCapabilities(
             // un-redacted pixel plane (which carries the consent gate); a
             // terminal-only attach (`desktop:false`) warms the box + mints the
             // pty-ws terminal cell WITHOUT tripping the desktop consent 409.
-            const holder = await client.attachViewer(workspaceId, sessionId, { desktop: wantDesktopAttach });
+            const holder = await client.attachViewer(workspaceId, sessionId, {
+              desktop: wantDesktopAttach,
+            });
             if (cancelled) return;
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
@@ -414,7 +424,18 @@ export function useSessionCapabilities(
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, workspaceId, sessionId, enabled, attachDesktop, attachTerminal, attachFiles, warmingPollMs, warmingDeadlineMs, nonce]);
+  }, [
+    client,
+    workspaceId,
+    sessionId,
+    enabled,
+    attachDesktop,
+    attachTerminal,
+    attachFiles,
+    warmingPollMs,
+    warmingDeadlineMs,
+    nonce,
+  ]);
 
   // ── Fold stream.url.rotated from the live event log (no round trip) ──────────
   const events = options.events;

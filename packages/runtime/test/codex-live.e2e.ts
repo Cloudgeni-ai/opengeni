@@ -26,14 +26,22 @@ import { buildModelInstance, buildProviderClient } from "../src/index";
 
 function loadAuth(): { token: CodexTokenSnapshot; plan: string | null } | null {
   try {
-    const p = process.env.CODEX_HOME ? join(process.env.CODEX_HOME, "auth.json") : join(homedir(), ".codex", "auth.json");
-    const j = JSON.parse(readFileSync(p, "utf8")) as { tokens?: { access_token?: string; id_token?: string; account_id?: string } };
+    const p = process.env.CODEX_HOME
+      ? join(process.env.CODEX_HOME, "auth.json")
+      : join(homedir(), ".codex", "auth.json");
+    const j = JSON.parse(readFileSync(p, "utf8")) as {
+      tokens?: { access_token?: string; id_token?: string; account_id?: string };
+    };
     const accessToken = j.tokens?.access_token ?? "";
     const exp = accessTokenExpiry(accessToken);
     if (!accessToken || !exp || exp.getTime() <= Date.now()) return null;
     const id = parseIdToken(j.tokens?.id_token ?? "");
     return {
-      token: { accessToken, chatgptAccountId: id.chatgptAccountId ?? j.tokens?.account_id ?? null, isFedramp: id.isFedramp },
+      token: {
+        accessToken,
+        chatgptAccountId: id.chatgptAccountId ?? j.tokens?.account_id ?? null,
+        isFedramp: id.isFedramp,
+      },
       plan: id.planType,
     };
   } catch {
@@ -62,7 +70,11 @@ describe("codex subscription live E2E (requires a valid ~/.codex/auth.json)", ()
     const settings = testSettings({ codexSubscriptionEnabled: true });
     const client = buildProviderClient(provider, settings);
     const model = buildModelInstance(provider, client, "codex/gpt-5.5"); // namespaced; fetch strips the prefix
-    const agent = new Agent({ name: "CodexLiveCheck", instructions: "You are a helpful assistant.", model });
+    const agent = new Agent({
+      name: "CodexLiveCheck",
+      instructions: "You are a helpful assistant.",
+      model,
+    });
 
     const ctx: CodexRequestContext = {
       clientVersion: CODEX_CLIENT_VERSION,
@@ -71,7 +83,9 @@ describe("codex subscription live E2E (requires a valid ~/.codex/auth.json)", ()
       resolveModel: buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS, "gpt-5.5"),
     };
 
-    const result = await codexRequestStorage.run(ctx, () => run(agent, "Reply with exactly: codex-e2e-ok", { maxTurns: 1 }));
+    const result = await codexRequestStorage.run(ctx, () =>
+      run(agent, "Reply with exactly: codex-e2e-ok", { maxTurns: 1 }),
+    );
     const text = String(result.finalOutput ?? "");
     console.log(`[codex-live] non-streaming finalOutput=${JSON.stringify(text)}`);
     expect(text.toLowerCase()).toContain("codex-e2e-ok");
@@ -79,7 +93,10 @@ describe("codex subscription live E2E (requires a valid ~/.codex/auth.json)", ()
     // Streaming path (what production's runStream uses): raw SSE passthrough to
     // the SDK's own stream parser. This is the path real agent turns take.
     const streamed = await codexRequestStorage.run(ctx, async () => {
-      const s = await run(agent, "Reply with exactly: codex-stream-ok", { stream: true, maxTurns: 1 });
+      const s = await run(agent, "Reply with exactly: codex-stream-ok", {
+        stream: true,
+        maxTurns: 1,
+      });
       await s.completed;
       return s;
     });

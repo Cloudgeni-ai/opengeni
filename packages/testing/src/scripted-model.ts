@@ -69,7 +69,10 @@ export function assistantMessage(text: string, id = crypto.randomUUID()): AgentO
   } as AgentOutputItem;
 }
 
-export function shellCall(commands: string[], callId = `shell-${crypto.randomUUID()}`): AgentOutputItem {
+export function shellCall(
+  commands: string[],
+  callId = `shell-${crypto.randomUUID()}`,
+): AgentOutputItem {
   return {
     id: callId,
     type: "shell_call",
@@ -83,7 +86,11 @@ export function shellCall(commands: string[], callId = `shell-${crypto.randomUUI
   } as AgentOutputItem;
 }
 
-export function functionCall(name: string, args: unknown, callId = `fn-${crypto.randomUUID()}`): AgentOutputItem {
+export function functionCall(
+  name: string,
+  args: unknown,
+  callId = `fn-${crypto.randomUUID()}`,
+): AgentOutputItem {
   return {
     id: callId,
     type: "function_call",

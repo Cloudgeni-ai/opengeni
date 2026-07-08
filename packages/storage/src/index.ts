@@ -3,7 +3,6 @@ import type { FileAsset } from "@opengeni/contracts";
 import {
   BlobSASPermissions,
   BlobServiceClient,
-  BlockBlobClient,
   generateBlobSASQueryParameters,
   StorageSharedKeyCredential,
   type BlobDownloadResponseParsed,
@@ -18,7 +17,11 @@ import {
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { Storage as GcsClient, type GetSignedUrlConfig, type StorageOptions } from "@google-cloud/storage";
+import {
+  Storage as GcsClient,
+  type GetSignedUrlConfig,
+  type StorageOptions,
+} from "@google-cloud/storage";
 
 export const MAX_SINGLE_PUT_SIZE_BYTES = 5_000_000_000;
 export const UPLOAD_URL_TTL_SECONDS = 15 * 60;
@@ -34,8 +37,16 @@ export type ObjectStorage = {
   bucket: string;
   backend: "s3-compatible" | "aws-s3" | "azure-blob" | "gcs";
   maxSinglePutSizeBytes: number;
-  createPutUrl: (args: { key: string; contentType: string; sha256?: string | null; expiresInSeconds?: number }) => Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
-  createGetUrl: (args: { key: string; expiresInSeconds?: number }) => Promise<{ url: string; expiresAt: Date }>;
+  createPutUrl: (args: {
+    key: string;
+    contentType: string;
+    sha256?: string | null;
+    expiresInSeconds?: number;
+  }) => Promise<{ url: string; requiredHeaders: Record<string, string>; expiresAt: Date }>;
+  createGetUrl: (args: {
+    key: string;
+    expiresInSeconds?: number;
+  }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
   /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
@@ -49,7 +60,12 @@ export type ObjectStorage = {
    * public `objectStorageEndpoint` with no in-cluster route) would otherwise 401.
    * Browser uploads keep using `createPutUrl`; this is the trusted-server twin.
    */
-  putObject: (args: { key: string; contentType: string; body: Uint8Array; sha256?: string | null }) => Promise<void>;
+  putObject: (args: {
+    key: string;
+    contentType: string;
+    body: Uint8Array;
+    sha256?: string | null;
+  }) => Promise<void>;
   /**
    * SERVER-SIDE authenticated delete of a single object by raw storage key.
    * Idempotent: a missing key is a no-op (S3/GCS/Azure delete-by-key does not
@@ -72,7 +88,12 @@ export function createObjectStorage(settings: Settings): ObjectStorage | null {
 }
 
 function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | null {
-  if (settings.objectStorageBackend === "s3-compatible" && (!settings.objectStorageEndpoint || !settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)) {
+  if (
+    settings.objectStorageBackend === "s3-compatible" &&
+    (!settings.objectStorageEndpoint ||
+      !settings.objectStorageAccessKeyId ||
+      !settings.objectStorageSecretAccessKey)
+  ) {
     return null;
   }
   const clientConfig: S3ClientConfig = {
@@ -80,10 +101,14 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     forcePathStyle: settings.objectStorageForcePathStyle,
     requestChecksumCalculation: "WHEN_REQUIRED",
     ...(settings.objectStorageEndpoint ? { endpoint: settings.objectStorageEndpoint } : {}),
-    ...(settings.objectStorageAccessKeyId && settings.objectStorageSecretAccessKey ? { credentials: {
-      accessKeyId: settings.objectStorageAccessKeyId,
-      secretAccessKey: settings.objectStorageSecretAccessKey,
-    } } : {}),
+    ...(settings.objectStorageAccessKeyId && settings.objectStorageSecretAccessKey
+      ? {
+          credentials: {
+            accessKeyId: settings.objectStorageAccessKeyId,
+            secretAccessKey: settings.objectStorageSecretAccessKey,
+          },
+        }
+      : {}),
   };
   const client = new S3Client(clientConfig);
   return {
@@ -110,10 +135,14 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     async createGetUrl(args) {
       const expiresIn = args.expiresInSeconds ?? DOWNLOAD_URL_TTL_SECONDS;
       return {
-        url: await getSignedUrl(client, new GetObjectCommand({
-          Bucket: settings.objectStorageBucket,
-          Key: args.key,
-        }), { expiresIn }),
+        url: await getSignedUrl(
+          client,
+          new GetObjectCommand({
+            Bucket: settings.objectStorageBucket,
+            Key: args.key,
+          }),
+          { expiresIn },
+        ),
         expiresAt: new Date(Date.now() + expiresIn * 1000),
       };
     },
@@ -122,19 +151,23 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       // A presigned URL buys nothing here — the worker already holds the creds — and
       // on a split public/internal endpoint topology the presigned URL points at the
       // PUBLIC host (no MinIO route → 401). This sends bytes straight to the backend.
-      await client.send(new PutObjectCommand({
-        Bucket: settings.objectStorageBucket,
-        Key: args.key,
-        ContentType: args.contentType,
-        Body: args.body,
-        Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
-      }));
+      await client.send(
+        new PutObjectCommand({
+          Bucket: settings.objectStorageBucket,
+          Key: args.key,
+          ContentType: args.contentType,
+          Body: args.body,
+          Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
+        }),
+      );
     },
     async headFile(file) {
-      const head = await client.send(new HeadObjectCommand({
-        Bucket: file.bucket,
-        Key: file.objectKey,
-      }));
+      const head = await client.send(
+        new HeadObjectCommand({
+          Bucket: file.bucket,
+          Key: file.objectKey,
+        }),
+      );
       return objectHead({
         contentLength: head.ContentLength,
         contentType: head.ContentType,
@@ -142,18 +175,22 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
       });
     },
     async getFileBytes(file) {
-      const result = await client.send(new GetObjectCommand({
-        Bucket: file.bucket,
-        Key: file.objectKey,
-      }));
+      const result = await client.send(
+        new GetObjectCommand({
+          Bucket: file.bucket,
+          Key: file.objectKey,
+        }),
+      );
       return await s3BodyToBytes(result.Body, file.objectKey);
     },
     async getObjectBytes(key) {
       try {
-        const result = await client.send(new GetObjectCommand({
-          Bucket: settings.objectStorageBucket,
-          Key: key,
-        }));
+        const result = await client.send(
+          new GetObjectCommand({
+            Bucket: settings.objectStorageBucket,
+            Key: key,
+          }),
+        );
         const bytes = await s3BodyToBytes(result.Body, key);
         return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
       } catch (error) {
@@ -165,10 +202,12 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
     },
     async deleteObject(key) {
       // S3 DeleteObject is idempotent — deleting an absent key returns 204.
-      await client.send(new DeleteObjectCommand({
-        Bucket: settings.objectStorageBucket,
-        Key: key,
-      }));
+      await client.send(
+        new DeleteObjectCommand({
+          Bucket: settings.objectStorageBucket,
+          Key: key,
+        }),
+      );
     },
   };
 }
@@ -196,7 +235,10 @@ function isS3NotFound(error: unknown): boolean {
   if (name === "NoSuchKey" || name === "NotFound") {
     return true;
   }
-  const metadata = "$metadata" in error ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata : undefined;
+  const metadata =
+    "$metadata" in error
+      ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata
+      : undefined;
   return metadata?.httpStatusCode === 404;
 }
 
@@ -295,13 +337,16 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       const expiresIn = args.expiresInSeconds ?? UPLOAD_URL_TTL_SECONDS;
       const expiresAt = new Date(Date.now() + expiresIn * 1000);
       const blobClient = containerClient.getBlockBlobClient(args.key);
-      const sas = generateBlobSASQueryParameters({
-        containerName: settings.objectStorageBucket,
-        blobName: args.key,
-        permissions: BlobSASPermissions.parse("cw"),
-        expiresOn: expiresAt,
-        contentType: args.contentType,
-      }, sharedKey).toString();
+      const sas = generateBlobSASQueryParameters(
+        {
+          containerName: settings.objectStorageBucket,
+          blobName: args.key,
+          permissions: BlobSASPermissions.parse("cw"),
+          expiresOn: expiresAt,
+          contentType: args.contentType,
+        },
+        sharedKey,
+      ).toString();
       return {
         url: `${blobClient.url}?${sas}`,
         requiredHeaders: {
@@ -316,12 +361,15 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       const expiresIn = args.expiresInSeconds ?? DOWNLOAD_URL_TTL_SECONDS;
       const expiresAt = new Date(Date.now() + expiresIn * 1000);
       const blobClient = containerClient.getBlobClient(args.key);
-      const sas = generateBlobSASQueryParameters({
-        containerName: settings.objectStorageBucket,
-        blobName: args.key,
-        permissions: BlobSASPermissions.parse("r"),
-        expiresOn: expiresAt,
-      }, sharedKey).toString();
+      const sas = generateBlobSASQueryParameters(
+        {
+          containerName: settings.objectStorageBucket,
+          blobName: args.key,
+          permissions: BlobSASPermissions.parse("r"),
+          expiresOn: expiresAt,
+        },
+        sharedKey,
+      ).toString();
       return {
         url: `${blobClient.url}?${sas}`,
         expiresAt,
@@ -337,10 +385,14 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       });
     },
     async headFile(file) {
-      return azureHeadToObjectHead(await containerClient.getBlobClient(file.objectKey).getProperties());
+      return azureHeadToObjectHead(
+        await containerClient.getBlobClient(file.objectKey).getProperties(),
+      );
     },
     async getFileBytes(file) {
-      return await azureDownloadToBytes(await containerClient.getBlobClient(file.objectKey).download());
+      return await azureDownloadToBytes(
+        await containerClient.getBlobClient(file.objectKey).download(),
+      );
     },
     async getObjectBytes(key) {
       try {
@@ -362,7 +414,11 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
 }
 
 function isAzureNotFound(error: unknown): boolean {
-  return Boolean(error) && typeof error === "object" && (error as { statusCode?: unknown }).statusCode === 404;
+  return (
+    Boolean(error) &&
+    typeof error === "object" &&
+    (error as { statusCode?: unknown }).statusCode === 404
+  );
 }
 
 function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredential {
@@ -371,12 +427,17 @@ function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredentia
     if (parsed.AccountName && parsed.AccountKey) {
       return new StorageSharedKeyCredential(parsed.AccountName, parsed.AccountKey);
     }
-    throw new Error("Azure Blob connection string must include AccountName and AccountKey to create presigned URLs");
+    throw new Error(
+      "Azure Blob connection string must include AccountName and AccountKey to create presigned URLs",
+    );
   }
   if (!settings.objectStorageAzureAccountName || !settings.objectStorageAzureAccountKey) {
     throw new Error("Azure Blob storage requires account name and account key");
   }
-  return new StorageSharedKeyCredential(settings.objectStorageAzureAccountName, settings.objectStorageAzureAccountKey);
+  return new StorageSharedKeyCredential(
+    settings.objectStorageAzureAccountName,
+    settings.objectStorageAzureAccountKey,
+  );
 }
 
 function azureBlobServiceUrl(settings: Settings): string {
@@ -390,20 +451,29 @@ function azureBlobServiceUrl(settings: Settings): string {
 }
 
 function parseConnectionString(value: string): Record<string, string> {
-  return Object.fromEntries(value.split(";")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const index = part.indexOf("=");
-      return index === -1 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
-    }));
+  return Object.fromEntries(
+    value
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        return index === -1 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
+      }),
+  );
 }
 
 function gcsClientOptions(settings: Settings): StorageOptions {
   const options: StorageOptions = {
-    ...(settings.objectStorageGcsProjectId ? { projectId: settings.objectStorageGcsProjectId } : {}),
-    ...(settings.objectStorageGcsKeyFilename ? { keyFilename: settings.objectStorageGcsKeyFilename } : {}),
-    ...(settings.objectStorageGcsApiEndpoint ? { apiEndpoint: settings.objectStorageGcsApiEndpoint } : {}),
+    ...(settings.objectStorageGcsProjectId
+      ? { projectId: settings.objectStorageGcsProjectId }
+      : {}),
+    ...(settings.objectStorageGcsKeyFilename
+      ? { keyFilename: settings.objectStorageGcsKeyFilename }
+      : {}),
+    ...(settings.objectStorageGcsApiEndpoint
+      ? { apiEndpoint: settings.objectStorageGcsApiEndpoint }
+      : {}),
   };
   if (settings.objectStorageGcsCredentialsJson) {
     options.credentials = parseGcsCredentials(settings.objectStorageGcsCredentialsJson);
@@ -430,13 +500,16 @@ function parseContentLength(value: string | number | undefined): number | undefi
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function stringMetadata(value: Record<string, string | number | boolean | null> | undefined): Record<string, string> | undefined {
+function stringMetadata(
+  value: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string> | undefined {
   if (!value) {
     return undefined;
   }
   return Object.fromEntries(
-    Object.entries(value)
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    Object.entries(value).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
   );
 }
 
@@ -453,7 +526,9 @@ async function azureDownloadToBytes(download: BlobDownloadResponseParsed): Promi
     throw new Error("Azure Blob download response did not include a readable body");
   }
   const chunks: Uint8Array[] = [];
-  for await (const chunk of download.readableStreamBody as AsyncIterable<Uint8Array | Buffer | string>) {
+  for await (const chunk of download.readableStreamBody as AsyncIterable<
+    Uint8Array | Buffer | string
+  >) {
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks);

@@ -67,12 +67,26 @@ describe("worker restart resilience", () => {
     const model = new ScriptedModel([
       // Model call 1: completes and triggers a side-effectful MCP tool call,
       // so the turn has checkpointed progress before the restart.
-      { id: "restart-call-1", output: [functionCall("docs__search_documents", { query: "current state" }, "call-restart-1")] },
+      {
+        id: "restart-call-1",
+        output: [
+          functionCall("docs__search_documents", { query: "current state" }, "call-restart-1"),
+        ],
+      },
       // Model call 2: streams far longer than the test; the worker shuts down
       // while this response is in flight, so it is the lost model step.
-      { id: "restart-call-2", chunks: Array.from({ length: 10_000 }, () => "tick "), delayMs: 50, outputText: "never finished" },
+      {
+        id: "restart-call-2",
+        chunks: Array.from({ length: 10_000 }, () => "tick "),
+        delayMs: 50,
+        outputText: "never finished",
+      },
       // Model call 3: the resumed attempt's response on the second worker.
-      { id: "restart-call-3", outputText: "resumed and finished", chunks: ["resumed ", "and ", "finished"] },
+      {
+        id: "restart-call-3",
+        outputText: "resumed and finished",
+        chunks: ["resumed ", "and ", "finished"],
+      },
     ]);
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -80,13 +94,15 @@ describe("worker restart resilience", () => {
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
       sessionHistorySource: "items",
-      mcpServers: [{
-        id: "docs",
-        name: "Document Search",
-        url: mcp.url,
-        allowedTools: ["search_documents"],
-        cacheToolsList: false,
-      }],
+      mcpServers: [
+        {
+          id: "docs",
+          name: "Document Search",
+          url: mcp.url,
+          allowedTools: ["search_documents"],
+          cacheToolsList: false,
+        },
+      ],
     });
     const activities = createActivities({
       settings,
@@ -136,7 +152,10 @@ describe("worker restart resilience", () => {
     // Wait until the side effect ran, its progress was checkpointed to items,
     // and the second (slow) model call is in flight — then pull the plug.
     await waitFor(() => mcp.calls.length === 1);
-    await waitFor(async () => (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0);
+    await waitFor(
+      async () =>
+        (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
+    );
     await waitFor(() => model.calls === 2);
     firstWorker.shutdown();
     await firstRun;
@@ -147,7 +166,13 @@ describe("worker restart resilience", () => {
     expect(preempted?.status).toBe("queued");
     const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["queued"]);
-    const eventsAfterShutdown = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+    const eventsAfterShutdown = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      0,
+      200,
+    );
     expect(eventsAfterShutdown.some((event) => event.type === "turn.preempted")).toBe(true);
     expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
 
@@ -172,13 +197,21 @@ describe("worker restart resilience", () => {
     // The resumed attempt entered through the resume notice with the first
     // attempt's conversation truth threaded in...
     expect(model.calls).toBe(3);
-    const resumeRequest = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    const resumeRequest = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
     expect(resumeRequest).toContain("do the work");
     expect(resumeRequest).toContain("call-restart-1");
     expect(resumeRequest).toContain(WORKER_SHUTDOWN_RESUME_TEXT.split("\n")[0]);
     // ...and did not blindly replay the already-executed side effect.
     expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
-    expect(events.some((event) => event.type === "agent.message.completed" && JSON.stringify(event.payload).includes("resumed and finished"))).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "agent.message.completed" &&
+          JSON.stringify(event.payload).includes("resumed and finished"),
+      ),
+    ).toBe(true);
   }, 180_000);
 
   test("graceful worker shutdown before the turn starts requeues it untouched and a healthy worker runs it", async () => {
@@ -277,10 +310,18 @@ describe("worker restart resilience", () => {
     const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["queued"]);
     expect(turnsAfterShutdown[0]?.triggerEventId).toBe(trigger!.id);
-    const eventsAfterShutdown = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+    const eventsAfterShutdown = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      0,
+      200,
+    );
     const earlyPreemption = eventsAfterShutdown.find((event) => event.type === "turn.preempted");
     expect(earlyPreemption).toBeDefined();
-    expect((earlyPreemption?.payload as { resumeWithNotice?: boolean }).resumeWithNotice).toBe(false);
+    expect((earlyPreemption?.payload as { resumeWithNotice?: boolean }).resumeWithNotice).toBe(
+      false,
+    );
     expect(eventsAfterShutdown.some((event) => event.type === "turn.started")).toBe(false);
     expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
     expect(model.calls).toBe(0);
@@ -305,10 +346,18 @@ describe("worker restart resilience", () => {
     expect(latestStatus(events)).toBe("idle");
     // The rerun entered through the original trigger, not a resume notice.
     expect(model.calls).toBe(1);
-    const rerunRequest = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    const rerunRequest = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
     expect(rerunRequest).toContain("do the early work");
     expect(rerunRequest).not.toContain(WORKER_SHUTDOWN_RESUME_TEXT.split("\n")[0]);
-    expect(events.some((event) => event.type === "agent.message.completed" && JSON.stringify(event.payload).includes("did the work"))).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "agent.message.completed" &&
+          JSON.stringify(event.payload).includes("did the work"),
+      ),
+    ).toBe(true);
   }, 180_000);
 
   test("a failed session accepts a new user message and revives from stored items", async () => {
@@ -320,7 +369,11 @@ describe("worker restart resilience", () => {
       // Turn 2 blows up with a non-retryable agent error: the session fails.
       { id: "revive-call-2", error: new Error("agent exploded mid-turn") },
       // Turn 3 is the revival turn, running from stored items.
-      { id: "revive-call-3", outputText: "revived and answered", chunks: ["revived ", "and ", "answered"] },
+      {
+        id: "revive-call-3",
+        outputText: "revived and answered",
+        chunks: ["revived ", "and ", "answered"],
+      },
     ]);
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -374,7 +427,13 @@ describe("worker restart resilience", () => {
           taskQueue,
           workflowId: input.workflowId,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
-          args: [{ accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId }],
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            },
+          ],
           signal: "queueChanged",
         });
       },
@@ -384,18 +443,19 @@ describe("worker restart resilience", () => {
       deleteScheduledTaskSchedule: async () => undefined,
       triggerScheduledTask: async () => undefined,
     };
-    const sendUserMessage = async (text: string) => await postUserMessageTurn({
-      db: dbClient.db,
-      bus,
-      workflowClient,
-      settings,
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text,
-      resources: [],
-      tools: [],
-    });
+    const sendUserMessage = async (text: string) =>
+      await postUserMessageTurn({
+        db: dbClient.db,
+        bus,
+        workflowClient,
+        settings,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        text,
+        resources: [],
+        tools: [],
+      });
 
     const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const run = worker.run();
@@ -403,13 +463,21 @@ describe("worker restart resilience", () => {
       await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId,
-        args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+        args: [
+          { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+        ],
       });
-      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle");
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle",
+      );
 
       // Turn 2 fails the session for real.
       await sendUserMessage("do the next thing");
-      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "failed");
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "failed",
+      );
       const turnsAfterFailure = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
       expect(turnsAfterFailure.map((turn) => turn.status)).toEqual(["completed", "failed"]);
 
@@ -417,7 +485,10 @@ describe("worker restart resilience", () => {
       // to queued, and a fresh workflow run executes the turn from stored
       // conversation truth.
       await sendUserMessage("are you still there?");
-      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle");
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle",
+      );
     } finally {
       worker.shutdown();
       await run;
@@ -428,15 +499,28 @@ describe("worker restart resilience", () => {
     expect(model.calls).toBe(3);
     // The revival turn was built from stored items: turn 1's conversation
     // truth is threaded in alongside the new user message.
-    const revivalRequest = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    const revivalRequest = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
     expect(revivalRequest).toContain("first answer");
     expect(revivalRequest).toContain("are you still there?");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
     const statuses = events
       .filter((event) => event.type === "session.status.changed")
       .map((event) => (event.payload as { status?: string }).status);
-    expect(statuses.slice(statuses.lastIndexOf("failed"))).toEqual(["failed", "queued", "running", "idle"]);
-    expect(events.some((event) => event.type === "agent.message.completed" && JSON.stringify(event.payload).includes("revived and answered"))).toBe(true);
+    expect(statuses.slice(statuses.lastIndexOf("failed"))).toEqual([
+      "failed",
+      "queued",
+      "running",
+      "idle",
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "agent.message.completed" &&
+          JSON.stringify(event.payload).includes("revived and answered"),
+      ),
+    ).toBe(true);
   }, 180_000);
 
   async function testGrant(): Promise<AccessGrant> {

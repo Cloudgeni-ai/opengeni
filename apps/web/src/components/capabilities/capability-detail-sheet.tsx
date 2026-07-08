@@ -32,7 +32,12 @@ export type ConnectAction =
   // connectionId is the existing row to reuse, or null when the row was deleted
   // (reconnect then mints a fresh connection and re-enables with its ref).
   | { type: "reconnect_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
-  | { type: "reconnect_api_key"; item: CapabilityCatalogItem; connectionId: string | null; headers: Record<string, string> }
+  | {
+      type: "reconnect_api_key";
+      item: CapabilityCatalogItem;
+      connectionId: string | null;
+      headers: Record<string, string>;
+    }
   | { type: "disable"; item: CapabilityCatalogItem };
 
 export function CapabilityDetailSheet({
@@ -101,7 +106,8 @@ function DetailBody({
   const reconnect = capabilityReconnectPlan(item, health);
   // When the catalog no longer supplies requiredHeaders, fall back to one generic
   // "API key" field so an api-key reconnect still has something to submit.
-  const reconnectFields = plan.mode === "api_key" && plan.fields.length > 0 ? plan.fields : [GENERIC_API_KEY_FIELD];
+  const reconnectFields =
+    plan.mode === "api_key" && plan.fields.length > 0 ? plan.fields : [GENERIC_API_KEY_FIELD];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -122,7 +128,9 @@ function DetailBody({
       {/* Scrollable body */}
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
         {item.stale ? (
-          <Notice tone="muted">No longer listed in the public registry. Existing installations keep working.</Notice>
+          <Notice tone="muted">
+            No longer listed in the public registry. Existing installations keep working.
+          </Notice>
         ) : null}
 
         {item.description ? (
@@ -140,7 +148,9 @@ function DetailBody({
         <dl className="grid gap-2.5 text-xs">
           <MetaRow label="Source">{capabilitySourceLabel(item.source)}</MetaRow>
           {item.homepageUrl ? (
-            <MetaRow label="Homepage"><ExternalMetaLink href={item.homepageUrl} /></MetaRow>
+            <MetaRow label="Homepage">
+              <ExternalMetaLink href={item.homepageUrl} />
+            </MetaRow>
           ) : null}
           {item.endpointUrl ? (
             <MetaRow label="Endpoint">
@@ -155,91 +165,113 @@ function DetailBody({
         <div className="space-y-3 border-t border-border pt-5">
           {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
 
-        {item.enabled ? (
-          <div className="space-y-3">
-            <ConnectionStatus health={health} />
-            {/* Reconnect is the primary repair action when the connection broke;
+          {item.enabled ? (
+            <div className="space-y-3">
+              <ConnectionStatus health={health} />
+              {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
-            {reconnect ? (
-              reconnect.kind === "oauth" ? (
+              {reconnect ? (
+                reconnect.kind === "oauth" ? (
+                  <Button
+                    type="button"
+                    className="w-full"
+                    disabled={busy}
+                    onClick={() =>
+                      onAction({
+                        type: "reconnect_oauth",
+                        item,
+                        connectionId: reconnect.connectionId,
+                      })
+                    }
+                  >
+                    {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                    Reconnect {item.name}
+                  </Button>
+                ) : reconnecting ? (
+                  <CredentialForm
+                    fields={reconnectFields}
+                    itemName={item.name}
+                    keyPageUrl={keyPageUrl}
+                    submitLabel="Reconnect"
+                    submitIcon={<RefreshCwIcon />}
+                    busy={busy}
+                    onSubmit={(next) =>
+                      onAction({
+                        type: "reconnect_api_key",
+                        item,
+                        connectionId: reconnect.connectionId,
+                        headers: next,
+                      })
+                    }
+                  />
+                ) : (
+                  <Button
+                    type="button"
+                    className="w-full"
+                    disabled={busy}
+                    onClick={() => setReconnecting(true)}
+                  >
+                    <RefreshCwIcon />
+                    Reconnect {item.name}
+                  </Button>
+                )
+              ) : null}
+              {canDisable ? (
                 <Button
                   type="button"
-                  className="w-full"
+                  variant="outline"
+                  className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed"
                   disabled={busy}
-                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: reconnect.connectionId })}
+                  onClick={() => onAction({ type: "disable", item })}
                 >
-                  {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
-                  Reconnect {item.name}
+                  {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+                  Disable
                 </Button>
-              ) : reconnecting ? (
-                <CredentialForm
-                  fields={reconnectFields}
-                  itemName={item.name}
-                  keyPageUrl={keyPageUrl}
-                  submitLabel="Reconnect"
-                  submitIcon={<RefreshCwIcon />}
-                  busy={busy}
-                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: reconnect.connectionId, headers: next })}
-                />
               ) : (
-                <Button type="button" className="w-full" disabled={busy} onClick={() => setReconnecting(true)}>
-                  <RefreshCwIcon />
-                  Reconnect {item.name}
-                </Button>
-              )
-            ) : null}
-            {canDisable ? (
+                <p className="text-center text-xs text-fg-subtle">Built in — always available.</p>
+              )}
+            </div>
+          ) : plan.mode === "api_key" ? (
+            <CredentialForm
+              fields={plan.fields}
+              itemName={item.name}
+              keyPageUrl={keyPageUrl}
+              submitLabel={`Connect ${item.name}`}
+              submitIcon={<PlugIcon />}
+              busy={busy}
+              onSubmit={(next) => onAction({ type: "api_key", item, headers: next })}
+            />
+          ) : plan.mode === "oauth" ? (
+            <div className="space-y-2">
               <Button
                 type="button"
-                variant="outline"
-                className="w-full text-status-failed hover:bg-status-failed/10 hover:text-status-failed"
+                className="w-full"
                 disabled={busy}
-                onClick={() => onAction({ type: "disable", item })}
+                onClick={() => onAction({ type: "oauth", item })}
               >
-                {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
-                Disable
+                {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
+                Connect {item.name}
               </Button>
-            ) : (
-              <p className="text-center text-xs text-fg-subtle">Built in — always available.</p>
-            )}
-          </div>
-        ) : plan.mode === "api_key" ? (
-          <CredentialForm
-            fields={plan.fields}
-            itemName={item.name}
-            keyPageUrl={keyPageUrl}
-            submitLabel={`Connect ${item.name}`}
-            submitIcon={<PlugIcon />}
-            busy={busy}
-            onSubmit={(next) => onAction({ type: "api_key", item, headers: next })}
-          />
-        ) : plan.mode === "oauth" ? (
-          <div className="space-y-2">
+              <p className="text-center text-xs text-fg-subtle">
+                You'll authorize {item.name} in a new step, then return here.
+              </p>
+            </div>
+          ) : (
             <Button
               type="button"
               className="w-full"
-              disabled={busy}
-              onClick={() => onAction({ type: "oauth", item })}
+              disabled={busy || (item.kind === "mcp" && !item.runtime.available)}
+              title={
+                item.kind === "mcp" && !item.runtime.available
+                  ? (item.runtime.notes ?? undefined)
+                  : undefined
+              }
+              onClick={() => onAction({ type: "enable", item })}
             >
               {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              Connect {item.name}
+              {item.kind === "mcp" || item.kind === "pack" ? "Enable" : "Track"}
             </Button>
-            <p className="text-center text-xs text-fg-subtle">
-              You'll authorize {item.name} in a new step, then return here.
-            </p>
-          </div>
-        ) : (
-          <Button
-            type="button"
-            className="w-full"
-            disabled={busy || (item.kind === "mcp" && !item.runtime.available)}
-            title={item.kind === "mcp" && !item.runtime.available ? item.runtime.notes ?? undefined : undefined}
-            onClick={() => onAction({ type: "enable", item })}
-          >
-            {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-            {item.kind === "mcp" || item.kind === "pack" ? "Enable" : "Track"}
-          </Button>
-        )}
+          )}
         </div>
       </div>
     </div>
@@ -279,13 +311,17 @@ function CredentialForm({
     >
       {fields.map((field) => (
         <div key={field.name} className="space-y-1.5">
-          <Label htmlFor={`cred-${field.name}`} className="text-xs text-fg-muted">{field.label}</Label>
+          <Label htmlFor={`cred-${field.name}`} className="text-xs text-fg-muted">
+            {field.label}
+          </Label>
           <Input
             id={`cred-${field.name}`}
             type="password"
             autoComplete="off"
             value={headers[field.name] ?? ""}
-            onChange={(event) => setHeaders((current) => ({ ...current, [field.name]: event.target.value }))}
+            onChange={(event) =>
+              setHeaders((current) => ({ ...current, [field.name]: event.target.value }))
+            }
             placeholder={`Paste your ${field.label}`}
           />
         </div>
@@ -301,7 +337,9 @@ function CredentialForm({
           <ExternalLinkIcon className="size-3" />
         </a>
       ) : (
-        <p className="text-xs text-fg-subtle">Stored encrypted and used only to reach {itemName}.</p>
+        <p className="text-xs text-fg-subtle">
+          Stored encrypted and used only to reach {itemName}.
+        </p>
       )}
       <Button type="submit" className="w-full" disabled={busy || !ready}>
         {busy ? <Loader2Icon className="animate-spin" /> : submitIcon}
@@ -327,8 +365,15 @@ function ConnectionStatus({ health }: { health: ConnectionHealth }) {
   const attention = health.state === "attention";
   return (
     <div className="space-y-1">
-      <div className={cn("flex items-center gap-2 text-sm", attention ? "text-status-waiting" : "text-status-idle")}>
-        <span className={cn("size-2 rounded-full", attention ? "bg-status-waiting" : "bg-status-idle")} />
+      <div
+        className={cn(
+          "flex items-center gap-2 text-sm",
+          attention ? "text-status-waiting" : "text-status-idle",
+        )}
+      >
+        <span
+          className={cn("size-2 rounded-full", attention ? "bg-status-waiting" : "bg-status-idle")}
+        />
         {attention ? "Needs attention" : "Connected"}
       </div>
       <p className="text-xs text-fg-subtle">

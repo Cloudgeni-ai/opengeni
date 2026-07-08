@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createToolRegistry, rawTypeOf, type ToolRegistryEntry, type ToolRenderer } from "../src/timeline";
+import {
+  createToolRegistry,
+  rawTypeOf,
+  type ToolRegistryEntry,
+  type ToolRenderer,
+} from "../src/timeline";
 import type { ToolCallItem } from "../src/timeline";
 
 /* ----------------------------------------------------------------------------
@@ -50,13 +55,17 @@ describe("createToolRegistry resolution order", () => {
 
   test("1. raw.type wins as the most specific match", () => {
     // name also matches a base entry, but raw.type takes precedence.
-    expect(registry.resolve(item({ name: "exec_command", raw: { type: "apply_patch_call" } }))).toBe(ByRawType);
+    expect(
+      registry.resolve(item({ name: "exec_command", raw: { type: "apply_patch_call" } })),
+    ).toBe(ByRawType);
   });
 
   test("2. tool name matches when no raw.type entry applies", () => {
     expect(registry.resolve(item({ name: "exec_command", raw: undefined }))).toBe(ByName);
     // raw.type present but unregistered -> fall through to the name match.
-    expect(registry.resolve(item({ name: "exec_command", raw: { type: "unregistered_type" } }))).toBe(ByName);
+    expect(
+      registry.resolve(item({ name: "exec_command", raw: { type: "unregistered_type" } })),
+    ).toBe(ByName);
   });
 
   test("3. generic fallback for an unmatched tool", () => {

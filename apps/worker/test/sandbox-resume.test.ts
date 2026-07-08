@@ -32,7 +32,11 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
 import { resumeBoxForTurn, SandboxWarmingTimeoutError } from "../src/sandbox-resume";
 
 let available = true;
@@ -55,7 +59,11 @@ function settingsFor(ownershipEnabled: boolean) {
   });
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -68,13 +76,25 @@ async function readRow(workspaceId: string, groupId: string) {
     select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id, resume_backend_id, image
     from sandbox_leases
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
-  return r as {
-    liveness: string; refcount: number; turn_holders: number; viewer_holders: number;
-    lease_epoch: number; instance_id: string | null; resume_backend_id: string | null; image: string | null;
-  } | undefined;
+  return r as
+    | {
+        liveness: string;
+        refcount: number;
+        turn_holders: number;
+        viewer_holders: number;
+        lease_epoch: number;
+        instance_id: string | null;
+        resume_backend_id: string | null;
+        image: string | null;
+      }
+    | undefined;
 }
 
-async function holderCount(workspaceId: string, groupId: string, holderId: string): Promise<number> {
+async function holderCount(
+  workspaceId: string,
+  groupId: string,
+  holderId: string,
+): Promise<number> {
   const [r] = await admin<{ n: number }[]>`
     select count(*)::int as n from sandbox_lease_holders h
     join sandbox_leases l on l.id = h.lease_id
@@ -107,7 +127,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -128,7 +150,15 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
 
     const resumed = await resumeBoxForTurn(
       { db, settings },
-      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: sandboxEnvironment },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+        os: "linux",
+        environment: sandboxEnvironment,
+      },
       "turn",
       "activity-1",
     );
@@ -140,9 +170,11 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
 
       // The box was created with the threaded environment on its manifest, so the
       // SDK's provided-session manifest apply finds an empty environment delta.
-      const boxManifestEnv = (resumed.established.session as {
-        state: { manifest: { environment: Record<string, { value?: string }> } };
-      }).state.manifest.environment;
+      const boxManifestEnv = (
+        resumed.established.session as {
+          state: { manifest: { environment: Record<string, { value?: string }> } };
+        }
+      ).state.manifest.environment;
       for (const [key, value] of Object.entries(sandboxEnvironment)) {
         expect(boxManifestEnv[key]?.value).toBe(value);
       }
@@ -216,8 +248,13 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
 
     // The legit holder's heartbeat at the LIVE epoch succeeds.
     const okBefore = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "activity-live", leaseTtlMs: settings.sandboxLeaseTtlMs, expectedEpoch: liveEpoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "activity-live",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+      expectedEpoch: liveEpoch,
     });
     expect(okBefore).toBe(true);
 
@@ -229,14 +266,23 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await admin`delete from sandbox_lease_holders
                 where lease_id = (select id from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId})`;
     const reacquire = await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "activity-new", backend: "local", leaseTtlMs: settings.sandboxLeaseTtlMs,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "activity-new",
+      backend: "local",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
     });
     expect(reacquire.role).toBe("spawner");
     const commit = await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      expectedEpoch: reacquire.lease.leaseEpoch, instanceId: "box-new",
-      resumeBackendId: "unix_local", leaseTtlMs: settings.sandboxLeaseTtlMs,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: reacquire.lease.leaseEpoch,
+      instanceId: "box-new",
+      resumeBackendId: "unix_local",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
     });
     expect(commit.committed).toBe(true);
     const newEpoch = commit.lease!.leaseEpoch;
@@ -246,15 +292,25 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // re-established epoch fenced the dead handle/URL. (The holder row may still
     // exist, but the lease-epoch CAS rejects the TTL refresh.)
     const okAfter = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "activity-new", leaseTtlMs: settings.sandboxLeaseTtlMs, expectedEpoch: liveEpoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "activity-new",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+      expectedEpoch: liveEpoch,
     });
     expect(okAfter).toBe(false);
 
     // A heartbeat at the CURRENT epoch still works (liveness proof).
     const okCurrent = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "activity-new", leaseTtlMs: settings.sandboxLeaseTtlMs, expectedEpoch: newEpoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "activity-new",
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+      expectedEpoch: newEpoch,
     });
     expect(okCurrent).toBe(true);
 
@@ -282,7 +338,14 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await expect(
       resumeBoxForTurn(
         { db, settings },
-        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
         "turn",
         "activity-timeout",
       ),
@@ -291,7 +354,14 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await expect(
       resumeBoxForTurn(
         { db, settings },
-        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
         "turn",
         "activity-timeout-message",
       ),
@@ -338,7 +408,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // sends the interpolated value as a text parameter; ::text::jsonb casts it
     // server-side so postgres parses it as a jsonb object, not a scalar string).
     const archiveEnvelopeJson = JSON.stringify(archiveOnlyEnvelope);
-    await admin.unsafe(`
+    await admin.unsafe(
+      `
       insert into sandbox_leases (
         account_id, workspace_id, sandbox_group_id, liveness, refcount,
         turn_holders, viewer_holders, backend, lease_epoch,
@@ -348,7 +419,9 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         'local', 5, 'unix_local',
         $4::text::jsonb,
         now() + interval '60s'
-      )`, [accountId, workspaceId, groupId, archiveEnvelopeJson]);
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
 
     // resumeBoxForTurn must win the cold->warming CAS (spawner) and use the
     // LEASE's resume_state (the archive-only envelope) as the spawnEnvelope
@@ -362,7 +435,14 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     try {
       resumed = await resumeBoxForTurn(
         { db, settings },
-        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
         "turn",
         "activity-f3",
       );
@@ -412,7 +492,16 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const resumed = await resumeBoxForTurn(
       { db, settings },
-      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-A" },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+        os: "linux",
+        environment: { HOME: "/workspace" },
+        image: "img-A",
+      },
       "turn",
       "activity-1",
     );
@@ -433,7 +522,16 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // A first turn warms the box on img-A and STAYS holding it (do not release).
     const keeper = await resumeBoxForTurn(
       { db, settings },
-      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-A" },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+        os: "linux",
+        environment: { HOME: "/workspace" },
+        image: "img-A",
+      },
       "turn",
       "keeper",
     );
@@ -444,7 +542,16 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       await expect(
         resumeBoxForTurn(
           { db, settings },
-          { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-B" },
+          {
+            accountId,
+            workspaceId,
+            sandboxGroupId: groupId,
+            sessionId: groupId,
+            backend: "local",
+            os: "linux",
+            environment: { HOME: "/workspace" },
+            image: "img-B",
+          },
           "turn",
           "newcomer",
         ),

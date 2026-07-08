@@ -78,7 +78,11 @@ export async function pollDeviceCode(
   });
   if (res.ok) {
     const body = (await res.json()) as { authorization_code: string; code_verifier: string };
-    return { status: "authorized", authorizationCode: body.authorization_code, codeVerifier: body.code_verifier };
+    return {
+      status: "authorized",
+      authorizationCode: body.authorization_code,
+      codeVerifier: body.code_verifier,
+    };
   }
   if (res.status === 403 || res.status === 404) {
     return { status: "pending" };
@@ -106,6 +110,14 @@ export async function exchangeDeviceCode(
   if (!res.ok) {
     throw new CodexDeviceError(`device code exchange failed with status ${res.status}`);
   }
-  const body = (await res.json()) as { id_token: string; access_token: string; refresh_token: string };
-  return { idToken: body.id_token, accessToken: body.access_token, refreshToken: body.refresh_token };
+  const body = (await res.json()) as {
+    id_token: string;
+    access_token: string;
+    refresh_token: string;
+  };
+  return {
+    idToken: body.id_token,
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token,
+  };
 }

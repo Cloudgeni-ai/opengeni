@@ -32,7 +32,11 @@ import type { ScheduledTask, Session, WorkspaceVariableSet } from "@/types";
 export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const variableSets = useVariableSets();
   // Attachment views: which sessions and scheduled tasks carry each variableSet.
-  const { sessions, loading: sessionsLoading, error: sessionsError } = useWorkspaceSessions({ limit: 100 });
+  const {
+    sessions,
+    loading: sessionsLoading,
+    error: sessionsError,
+  } = useWorkspaceSessions({ limit: 100 });
   const { tasks, loading: tasksLoading, error: tasksError } = useScheduledTasks();
   // Fail closed: never delete a variable set while its attachment set is
   // unknown (initial load or a failed read) — a false-empty attachment view
@@ -47,7 +51,11 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   const [createDescription, setCreateDescription] = useState("");
   // Honest list state: a failed load renders as an error with retry, never as
   // the "No variable sets yet…" empty state.
-  const variableSetsView = listViewState({ loading: variableSets.loading, error: variableSets.error, count: variableSets.variableSets.length });
+  const variableSetsView = listViewState({
+    loading: variableSets.loading,
+    error: variableSets.error,
+    count: variableSets.variableSets.length,
+  });
 
   async function createVariableSet() {
     const name = createName.trim();
@@ -65,7 +73,9 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       setCreateDescription("");
       toast.success("Variable set created");
     } else if (variableSets.mutationError) {
-      toast.error("Failed to create variableSet", { description: variableSets.mutationError.message });
+      toast.error("Failed to create variableSet", {
+        description: variableSets.mutationError.message,
+      });
     }
   }
 
@@ -75,33 +85,69 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
         icon={<BoxIcon className="size-4" />}
         title="Variable sets"
         description="Named secret sets injected into the sandbox as environment variables at session start. Values are write-only: set or rotate them here; nothing ever reads them back."
-        actions={(
+        actions={
           <>
-            <Button type="button" variant="ghost" size="sm" onClick={() => void variableSets.refresh()} disabled={variableSets.loading} className="h-9">
-              <RefreshCwIcon className={variableSets.loading ? "size-3.5 animate-spin" : "size-3.5"} />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void variableSets.refresh()}
+              disabled={variableSets.loading}
+              className="h-9"
+            >
+              <RefreshCwIcon
+                className={variableSets.loading ? "size-3.5 animate-spin" : "size-3.5"}
+              />
               Refresh
             </Button>
-            <Button type="button" size="sm" onClick={() => setCreateOpen((open) => !open)} className="h-9">
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => setCreateOpen((open) => !open)}
+              className="h-9"
+            >
               <PlusIcon className="size-3.5" />
               New variable set
             </Button>
           </>
-        )}
+        }
       />
 
       {createOpen ? (
         <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
           <div className="grid gap-1.5">
             <Label htmlFor="variableSet-name">Name</Label>
-            <Input id="variableSet-name" value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="staging-aws" className="h-9" autoFocus />
+            <Input
+              id="variableSet-name"
+              value={createName}
+              onChange={(event) => setCreateName(event.target.value)}
+              placeholder="staging-aws"
+              className="h-9"
+              autoFocus
+            />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="variableSet-description">Description</Label>
-            <Input id="variableSet-description" value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="What these credentials reach" className="h-9" />
+            <Input
+              id="variableSet-description"
+              value={createDescription}
+              onChange={(event) => setCreateDescription(event.target.value)}
+              placeholder="What these credentials reach"
+              className="h-9"
+            />
           </div>
           <div className="flex items-end">
-            <Button type="button" disabled={variableSets.mutating || !createName.trim()} onClick={() => void createVariableSet()} className="h-9">
-              {variableSets.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+            <Button
+              type="button"
+              disabled={variableSets.mutating || !createName.trim()}
+              onClick={() => void createVariableSet()}
+              className="h-9"
+            >
+              {variableSets.mutating ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <CheckIcon className="size-3.5" />
+              )}
               Create
             </Button>
           </div>
@@ -125,18 +171,22 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
             ))}
           </>
         ) : variableSetsView === "error" ? (
-          <LoadErrorState title="Couldn't load variable sets" error={variableSets.error} onRetry={() => void variableSets.refresh()} />
+          <LoadErrorState
+            title="Couldn't load variable sets"
+            error={variableSets.error}
+            onRetry={() => void variableSets.refresh()}
+          />
         ) : variableSetsView === "empty" ? (
           <EmptyState
             icon={<BoxIcon className="size-4" />}
             title="No variable sets yet"
             description="Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts."
-            action={(
+            action={
               <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
                 <PlusIcon className="size-3.5" />
                 New variable set
               </Button>
-            )}
+            }
           />
         ) : (
           variableSets.variableSets.map((variableSet) => (
@@ -144,7 +194,9 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               key={variableSet.id}
               workspaceId={workspaceId}
               variableSet={variableSet}
-              attachedSessions={sessions.filter((session) => session.variableSetId === variableSet.id)}
+              attachedSessions={sessions.filter(
+                (session) => session.variableSetId === variableSet.id,
+              )}
               attachedTasks={tasks.filter((task) => task.variableSetId === variableSet.id)}
               attachmentsUnknown={attachmentsUnknown}
               mutating={variableSets.mutating}
@@ -164,11 +216,16 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
         {variableSets.mutationError ? (
           <Notice
             tone="failed"
-            action={(
-              <Button type="button" variant="ghost" size="xs" onClick={variableSets.clearMutationError}>
+            action={
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={variableSets.clearMutationError}
+              >
                 Dismiss
               </Button>
-            )}
+            }
           >
             {variableSets.mutationError.message}
           </Notice>
@@ -185,7 +242,10 @@ function VariableSetCard(props: {
   attachedTasks: ScheduledTask[];
   attachmentsUnknown: boolean;
   mutating: boolean;
-  onUpdate: (patch: { name?: string; description?: string | null }) => Promise<WorkspaceVariableSet | null>;
+  onUpdate: (patch: {
+    name?: string;
+    description?: string | null;
+  }) => Promise<WorkspaceVariableSet | null>;
   onDelete: () => Promise<boolean>;
   onSetVariable: (name: string, value: string) => Promise<unknown>;
   onDeleteVariable: (name: string) => Promise<boolean>;
@@ -253,8 +313,19 @@ function VariableSetCard(props: {
       <div className="flex min-w-0 items-start justify-between gap-3">
         {editing ? (
           <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
-            <Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} aria-label="Variable set name" className="h-8 text-sm" />
-            <Input value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} placeholder="Description" aria-label="Variable set description" className="h-8 text-sm" />
+            <Input
+              value={nameDraft}
+              onChange={(event) => setNameDraft(event.target.value)}
+              aria-label="Variable set name"
+              className="h-8 text-sm"
+            />
+            <Input
+              value={descriptionDraft}
+              onChange={(event) => setDescriptionDraft(event.target.value)}
+              placeholder="Description"
+              aria-label="Variable set description"
+              className="h-8 text-sm"
+            />
           </div>
         ) : (
           <div className="min-w-0">
@@ -263,26 +334,47 @@ function VariableSetCard(props: {
               {variableSet.description ?? "No description"}
             </div>
             <div className="mt-1 text-2xs text-fg-subtle">
-              {variableSet.variables.length} variable{variableSet.variables.length === 1 ? "" : "s"} · updated {formatTimestamp(variableSet.updatedAt)}
+              {variableSet.variables.length} variable{variableSet.variables.length === 1 ? "" : "s"}{" "}
+              · updated {formatTimestamp(variableSet.updatedAt)}
             </div>
           </div>
         )}
         <div className="flex shrink-0 items-center gap-1.5">
           {editing ? (
             <>
-              <Button type="button" variant="ghost" size="sm" className="h-8" onClick={() => setEditing(false)}>Cancel</Button>
-              <Button type="button" size="sm" className="h-8" disabled={props.mutating} onClick={() => void saveDetails()}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8"
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                className="h-8"
+                disabled={props.mutating}
+                onClick={() => void saveDetails()}
+              >
                 <CheckIcon className="size-3.5" />
                 Save
               </Button>
             </>
           ) : (
             <>
-              <Button type="button" variant="ghost" size="icon-sm" aria-label="Edit variable set" onClick={() => {
-                setNameDraft(variableSet.name);
-                setDescriptionDraft(variableSet.description ?? "");
-                setEditing(true);
-              }}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Edit variable set"
+                onClick={() => {
+                  setNameDraft(variableSet.name);
+                  setDescriptionDraft(variableSet.description ?? "");
+                  setEditing(true);
+                }}
+              >
                 <PencilIcon className="size-3.5" />
               </Button>
               <Button
@@ -304,17 +396,25 @@ function VariableSetCard(props: {
 
       <div className="mt-3 space-y-1.5">
         {variableSet.variables.length === 0 ? (
-          <p className="text-xs text-fg-subtle">No variables yet — add one below to inject it into the sandbox.</p>
+          <p className="text-xs text-fg-subtle">
+            No variables yet — add one below to inject it into the sandbox.
+          </p>
         ) : (
           variableSet.variables.map((variable) => (
-            <div key={variable.name} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
+            <div
+              key={variable.name}
+              className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
+            >
               <div className="flex min-w-0 items-center gap-2">
                 <KeyRoundIcon className="size-3 shrink-0 text-fg-subtle" />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs">{variable.name}</span>
                 <span className="shrink-0 text-2xs text-fg-subtle">
                   v{variable.version} · {formatTimestamp(variable.updatedAt)}
                 </span>
-                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle" title="Values are write-only and never returned by the API">
+                <span
+                  className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
+                  title="Values are write-only and never returned by the API"
+                >
                   ••••••
                 </span>
                 <Button
@@ -324,7 +424,9 @@ function VariableSetCard(props: {
                   className="h-6 shrink-0 text-2xs"
                   disabled={props.mutating}
                   onClick={() => {
-                    setRotatingName((current) => current === variable.name ? null : variable.name);
+                    setRotatingName((current) =>
+                      current === variable.name ? null : variable.name,
+                    );
                     setRotateValue("");
                   }}
                 >
@@ -353,7 +455,13 @@ function VariableSetCard(props: {
                     className="h-8 flex-1 text-xs"
                     autoFocus
                   />
-                  <Button type="button" size="sm" className="h-8" disabled={props.mutating || !rotateValue} onClick={() => void rotateVariable(variable.name)}>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8"
+                    disabled={props.mutating || !rotateValue}
+                    onClick={() => void rotateVariable(variable.name)}
+                  >
                     <CheckIcon className="size-3.5" />
                     Set
                   </Button>
@@ -380,7 +488,14 @@ function VariableSetCard(props: {
           aria-label="New variable value"
           className="h-8 text-xs"
         />
-        <Button type="button" variant="secondary" size="sm" className="h-8" disabled={props.mutating || !variableName.trim() || !variableValue} onClick={() => void addVariable()}>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          className="h-8"
+          disabled={props.mutating || !variableName.trim() || !variableValue}
+          onClick={() => void addVariable()}
+        >
           <PlusIcon className="size-3.5" />
           Set variable
         </Button>

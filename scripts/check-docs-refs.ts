@@ -20,17 +20,23 @@ const sourceRoots = [
 
 const recordMarker = "<!-- docs-refs: record -->";
 const ignoreMarker = "<!-- docs-refs: ignore -->";
-const pathReferencePattern = /^(?:apps|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
+const pathReferencePattern =
+  /^(?:apps|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
 const packageReferencePattern = /@opengeni\/[a-z0-9-]+/g;
 const inlineCodePattern = /`([^`\n]+)`/g;
 const skippedPathFragments = ["*", "<", ">", "{", "$", "..."];
 const externalPackageAllowlist = new Set<string>();
 
-const [files, workspacePackages] = await Promise.all([listFiles(sourceRoots), listWorkspacePackages()]);
+const [files, workspacePackages] = await Promise.all([
+  listFiles(sourceRoots),
+  listWorkspacePackages(),
+]);
 const findings: Finding[] = [];
 
 for (const file of files.filter(isCurrentTierDoc)) {
-  const text = await Bun.file(file).text().catch(() => "");
+  const text = await Bun.file(file)
+    .text()
+    .catch(() => "");
   if (!text || hasRecordMarker(text)) {
     continue;
   }
@@ -53,15 +59,27 @@ async function listWorkspacePackages(): Promise<Set<string>> {
     if (!/^(?:apps|packages)\/[^/]+\/package\.json$/.test(file)) {
       continue;
     }
-    const manifest = await Bun.file(file).json().catch(() => null);
-    if (manifest && typeof manifest === "object" && "name" in manifest && typeof manifest.name === "string") {
+    const manifest = await Bun.file(file)
+      .json()
+      .catch(() => null);
+    if (
+      manifest &&
+      typeof manifest === "object" &&
+      "name" in manifest &&
+      typeof manifest.name === "string"
+    ) {
       names.add(manifest.name);
     }
   }
   return names;
 }
 
-function checkReferences(file: string, text: string, workspacePackages: Set<string>, out: Finding[]): void {
+function checkReferences(
+  file: string,
+  text: string,
+  workspacePackages: Set<string>,
+  out: Finding[],
+): void {
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -74,7 +92,11 @@ function checkReferences(file: string, text: string, workspacePackages: Set<stri
     for (const rawToken of extractInlineCodeTokens(line)) {
       const token = rawToken.trim();
       const normalizedPath = normalizePathReference(token);
-      if (normalizedPath && shouldCheckPathReference(normalizedPath) && !existsSync(normalizedPath)) {
+      if (
+        normalizedPath &&
+        shouldCheckPathReference(normalizedPath) &&
+        !existsSync(normalizedPath)
+      ) {
         addFinding(out, seen, {
           file,
           line: lineNumber,
@@ -148,7 +170,11 @@ function addFinding(out: Finding[], seen: Set<string>, finding: Finding): void {
 
 function isCurrentTierDoc(file: string): boolean {
   const normalized = file.replace(/\\/g, "/");
-  if (normalized.startsWith(".changeset/") || normalized.startsWith("docs/design/") || /^CHANGELOG/i.test(normalized)) {
+  if (
+    normalized.startsWith(".changeset/") ||
+    normalized.startsWith("docs/design/") ||
+    /^CHANGELOG/i.test(normalized)
+  ) {
     return false;
   }
   return (
@@ -164,7 +190,10 @@ function isCurrentTierDoc(file: string): boolean {
 }
 
 function hasRecordMarker(text: string): boolean {
-  return text.split("\n").slice(0, 10).some((line) => line.includes(recordMarker));
+  return text
+    .split("\n")
+    .slice(0, 10)
+    .some((line) => line.includes(recordMarker));
 }
 
 async function listFiles(roots: string[]): Promise<string[]> {
@@ -191,7 +220,12 @@ async function runFileListCommand(command: string[]): Promise<string | null> {
       stderr: "pipe",
     });
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    ) {
       return null;
     }
     throw error;

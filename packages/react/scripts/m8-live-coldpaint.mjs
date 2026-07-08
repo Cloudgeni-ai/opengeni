@@ -10,8 +10,12 @@ import { chromium } from "playwright";
 const CHROMIUM = "/nix/store/7xr3qnq93srn4dgak7qw74dw836wpp1y-chromium-138.0.7204.49/bin/chromium";
 const WS = process.argv[2];
 const SID = process.argv[3];
-const OUT = "/home/jorge/repos/Cloudgeni-ai/opengeni-workbench-wt/packages/react/.agent/ui-evidence/m8-live";
-if (!WS || !SID) { console.error("usage: node m8-live-coldpaint.mjs <ws> <sid>"); process.exit(2); }
+const OUT =
+  "/home/jorge/repos/Cloudgeni-ai/opengeni-workbench-wt/packages/react/.agent/ui-evidence/m8-live";
+if (!WS || !SID) {
+  console.error("usage: node m8-live-coldpaint.mjs <ws> <sid>");
+  process.exit(2);
+}
 
 const isChannelA = (p) => /\/(fs|git|terminal)\//.test(p) || /\/stream-capabilities$/.test(p);
 const isCapture = (p) => /\/workspace\/capture(\/file)?(\?|$)/.test(p);
@@ -27,18 +31,25 @@ pg.on("request", (r) => {
 });
 
 navStart = Date.now();
-await pg.goto(`http://127.0.0.1:3000/workspaces/${WS}/sessions/${SID}`, { waitUntil: "domcontentloaded" });
+await pg.goto(`http://127.0.0.1:3000/workspaces/${WS}/sessions/${SID}`, {
+  waitUntil: "domcontentloaded",
+});
 
 // First paint of capture-backed change data = the "Changes" tab shows its count badge.
 // The dock brain fetches the capture on mount (active tab is the host's "run"); the
 // badge is derived from that capture, so its presence == capture painted.
-const changesTab = pg.locator('[role=tab]', { hasText: /^Changes/ });
+const changesTab = pg.locator("[role=tab]", { hasText: /^Changes/ });
 await changesTab.first().waitFor({ state: "visible", timeout: 15000 });
 // wait until the badge digit is present (capture data reconciled into the count)
-await pg.waitForFunction(() => {
-  const t = [...document.querySelectorAll('[role=tab]')].find((e) => /^Changes/.test(e.textContent || ""));
-  return t && /\d/.test(t.textContent || "");
-}, { timeout: 15000 });
+await pg.waitForFunction(
+  () => {
+    const t = [...document.querySelectorAll("[role=tab]")].find((e) =>
+      /^Changes/.test(e.textContent || ""),
+    );
+    return t && /\d/.test(t.textContent || "");
+  },
+  { timeout: 15000 },
+);
 const tPaint = Date.now() - navStart;
 
 const before = reqs.filter((r) => r.t <= tPaint);
@@ -49,10 +60,10 @@ const captureBefore = before.filter((r) => isCapture(r.path));
 await changesTab.first().click();
 await pg.waitForTimeout(1500);
 await pg.screenshot({ path: `${OUT}/coldpaint-changes.png` });
-const changesBodyLen = (await pg.textContent('body'))?.length ?? 0;
+const changesBodyLen = (await pg.textContent("body"))?.length ?? 0;
 
 // Files tab — cold tree from capture.
-const filesTab = pg.locator('[role=tab]', { hasText: /^Files/ });
+const filesTab = pg.locator("[role=tab]", { hasText: /^Files/ });
 await filesTab.first().click();
 await pg.waitForTimeout(1200);
 await pg.screenshot({ path: `${OUT}/coldpaint-files.png` });
@@ -60,12 +71,18 @@ await pg.screenshot({ path: `${OUT}/coldpaint-files.png` });
 // Machine chip — should read cold/offline with an "as of" label (box stopped).
 let chipText = null;
 try {
-  const chip = pg.locator('[aria-label*="machine" i], [data-og-machine-chip], button:has-text("Offline"), button:has-text("Live")').first();
+  const chip = pg
+    .locator(
+      '[aria-label*="machine" i], [data-og-machine-chip], button:has-text("Offline"), button:has-text("Live")',
+    )
+    .first();
   chipText = await chip.textContent({ timeout: 2000 });
   await chip.click({ timeout: 2000 });
   await pg.waitForTimeout(600);
   await pg.screenshot({ path: `${OUT}/coldpaint-machinechip-popover.png` });
-} catch { /* chip optional */ }
+} catch {
+  /* chip optional */
+}
 
 const verdict = {
   sessionId: SID,

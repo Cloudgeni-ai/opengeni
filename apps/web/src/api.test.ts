@@ -14,9 +14,22 @@ describe("web API auth helpers", () => {
   test("builds access key headers only for configured key modes", () => {
     expect(authHeadersForAccessKey(null)).toEqual({});
     expect(authHeadersForAccessKey("secret")).toEqual({});
-    expect(authHeadersForAccessKey("secret", { mode: "configuredToken", headerName: "authorization", scheme: "bearer" })).toEqual({ authorization: "Bearer secret" });
-    expect(authHeadersForAccessKey("secret", { mode: "deploymentKey", headerName: "x-opengeni-access-key" })).toEqual({ "x-opengeni-access-key": "secret" });
-    expect(authHeadersForAccessKey("secret", { mode: "managedSession", session: "cookie" })).toEqual({});
+    expect(
+      authHeadersForAccessKey("secret", {
+        mode: "configuredToken",
+        headerName: "authorization",
+        scheme: "bearer",
+      }),
+    ).toEqual({ authorization: "Bearer secret" });
+    expect(
+      authHeadersForAccessKey("secret", {
+        mode: "deploymentKey",
+        headerName: "x-opengeni-access-key",
+      }),
+    ).toEqual({ "x-opengeni-access-key": "secret" });
+    expect(
+      authHeadersForAccessKey("secret", { mode: "managedSession", session: "cookie" }),
+    ).toEqual({});
   });
 
   test("defaults to same-origin API paths for deployed web builds", () => {
@@ -32,10 +45,18 @@ describe("web API auth helpers", () => {
         storage.set(key, value);
       },
     };
-    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage)).toBe(true);
-    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage)).toBe(false);
-    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "api-sha", fakeStorage)).toBe(false);
-    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage)).toBe(false);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+    ).toBe(true);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage),
+    ).toBe(false);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "api-sha", fakeStorage),
+    ).toBe(false);
+    expect(
+      shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage),
+    ).toBe(false);
   });
 
   test("sends managed verification resend requests through Better Auth", async () => {
@@ -47,7 +68,9 @@ describe("web API auth helpers", () => {
     }) as unknown as typeof fetch;
 
     try {
-      await expect(sendVerificationEmail({ email: "user@example.com" })).resolves.toEqual({ status: true });
+      await expect(sendVerificationEmail({ email: "user@example.com" })).resolves.toEqual({
+        status: true,
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

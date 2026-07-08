@@ -1,13 +1,26 @@
 import { describe, expect, test } from "bun:test";
-import { composeSendInput, FILE_ONLY_MESSAGE_TEXT, resolveSendExtras, shouldSubmitOnKey } from "../src/hooks/use-composer";
+import {
+  composeSendInput,
+  FILE_ONLY_MESSAGE_TEXT,
+  resolveSendExtras,
+  shouldSubmitOnKey,
+} from "../src/hooks/use-composer";
 
 describe("composeSendInput", () => {
   test("sends bare text with the idempotency key when no extras are configured", () => {
-    expect(composeSendInput("hello", "ce-1", undefined)).toEqual({ text: "hello", clientEventId: "ce-1" });
+    expect(composeSendInput("hello", "ce-1", undefined)).toEqual({
+      text: "hello",
+      clientEventId: "ce-1",
+    });
   });
 
   test("merges static extras under the text", () => {
-    expect(composeSendInput("hello", "ce-1", { model: "gpt-5.5", tools: [{ kind: "mcp", id: "opengeni" }] })).toEqual({
+    expect(
+      composeSendInput("hello", "ce-1", {
+        model: "gpt-5.5",
+        tools: [{ kind: "mcp", id: "opengeni" }],
+      }),
+    ).toEqual({
       text: "hello",
       clientEventId: "ce-1",
       model: "gpt-5.5",
@@ -24,7 +37,9 @@ describe("composeSendInput", () => {
     expect(composeSendInput("hi", "ce-a", sendExtras).model).toBe("gpt-5.5");
     // Operator switches the picker to GLM 5.2 before the next send.
     selectedModel = "accounts/fireworks/models/glm-5p2";
-    expect(composeSendInput("hi again", "ce-b", sendExtras).model).toBe("accounts/fireworks/models/glm-5p2");
+    expect(composeSendInput("hi again", "ce-b", sendExtras).model).toBe(
+      "accounts/fireworks/models/glm-5p2",
+    );
   });
 
   test("evaluates function extras at send time and never lets them override text or clientEventId", () => {
@@ -69,7 +84,9 @@ describe("shouldSubmitOnKey", () => {
   });
 
   test("IME composition Enter never submits", () => {
-    expect(shouldSubmitOnKey({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: true } })).toBe(false);
+    expect(
+      shouldSubmitOnKey({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: true } }),
+    ).toBe(false);
   });
 
   test("other keys never submit", () => {

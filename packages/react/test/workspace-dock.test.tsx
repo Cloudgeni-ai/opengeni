@@ -54,9 +54,7 @@ describe("WorkspaceDock", () => {
   test("a host-controlled dock offers no built-in open/close controls", async () => {
     // The host's own toggle is the ONE open/close affordance: no chrome
     // Collapse button (it duplicated the host toggle) and no re-open rail.
-    const rendered = await renderComponent(
-      <ControlledDock onCollapsedChange={() => {}} />,
-    );
+    const rendered = await renderComponent(<ControlledDock onCollapsedChange={() => {}} />);
 
     expect(rendered.container.textContent ?? "").toContain("Run content");
     expect(rendered.container.querySelector('[title="Collapse"]')).toBeNull();
@@ -107,7 +105,9 @@ describe("WorkspaceDock", () => {
       // The overlay's own close control drives the same collapsed contract.
       await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
       expect(changes.at(-1)).toBe(true);
-      expect(rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]')).toBeNull();
+      expect(
+        rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]'),
+      ).toBeNull();
 
       await rendered.unmount();
     });

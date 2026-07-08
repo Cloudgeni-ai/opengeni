@@ -1,4 +1,15 @@
-import { ActivityFailure, CancellationScope, condition, continueAsNew, defineSignal, isCancellation, patched, setHandler, TimeoutFailure, workflowInfo } from "@temporalio/workflow";
+import {
+  ActivityFailure,
+  CancellationScope,
+  condition,
+  continueAsNew,
+  defineSignal,
+  isCancellation,
+  patched,
+  setHandler,
+  TimeoutFailure,
+  workflowInfo,
+} from "@temporalio/workflow";
 import type * as activities from "../activities";
 import { activity, workflowFailureMessage } from "./activities";
 
@@ -66,8 +77,10 @@ function isWorkerDeathFailure(error: unknown): boolean {
     return false;
   }
   const cause = error.cause;
-  return cause instanceof TimeoutFailure
-    && (cause.timeoutType === "HEARTBEAT" || cause.timeoutType === "SCHEDULE_TO_START");
+  return (
+    cause instanceof TimeoutFailure &&
+    (cause.timeoutType === "HEARTBEAT" || cause.timeoutType === "SCHEDULE_TO_START")
+  );
 }
 
 export const userMessage = defineSignal<[string]>("userMessage");
@@ -153,7 +166,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
     }
     const workflowId = workflowInfo().workflowId;
-    const turn = await activity.claimNextQueuedTurn({ workspaceId: input.workspaceId, sessionId: input.sessionId, workflowId });
+    const turn = await activity.claimNextQueuedTurn({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      workflowId,
+    });
     if (!turn) {
       if (interruptedEventId === null) {
         // With an active goal, idling out is replaced by a synthesized
@@ -183,7 +200,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         }
       }
       const seenWakeups = wakeups;
-      const woke = await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, "5s");
+      const woke = await condition(
+        () => interruptedEventId !== null || wakeups !== seenWakeups,
+        "5s",
+      );
       if (interruptedEventId) {
         const idleInterruptEventId = interruptedEventId;
         interruptedEventId = null;
@@ -191,16 +211,30 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         // shutting down so a later wake does not auto-continue it. The
         // activity inspects the trigger and skips the pause for steer-tagged
         // interrupts (steering redirects work, it does not stop it).
-        await activity.pauseGoalForInterrupt({ workspaceId: input.workspaceId, sessionId: input.sessionId, triggerEventId: idleInterruptEventId });
-        await activity.markSessionIdle({ workspaceId: input.workspaceId, sessionId: input.sessionId });
+        await activity.pauseGoalForInterrupt({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          triggerEventId: idleInterruptEventId,
+        });
+        await activity.markSessionIdle({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         return;
       }
       if (woke) {
         continue;
       }
-      const finalTurn = await activity.claimNextQueuedTurn({ workspaceId: input.workspaceId, sessionId: input.sessionId, workflowId });
+      const finalTurn = await activity.claimNextQueuedTurn({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        workflowId,
+      });
       if (!finalTurn) {
-        await activity.markSessionIdle({ workspaceId: input.workspaceId, sessionId: input.sessionId });
+        await activity.markSessionIdle({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         // A queueChanged/userMessage signal can land between the final claim and
         // completion; Temporal blocks completion while a signal is buffered, so
         // re-checking here guarantees the queued turn is picked up instead of
@@ -211,18 +245,40 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         return;
       }
       turnsThisRun += 1;
-      if (!await runTurn(input.accountId, input.workspaceId, input.sessionId, finalTurn.id, finalTurn.triggerEventId)) {
+      if (
+        !(await runTurn(
+          input.accountId,
+          input.workspaceId,
+          input.sessionId,
+          finalTurn.id,
+          finalTurn.triggerEventId,
+        ))
+      ) {
         return;
       }
       continue;
     }
     turnsThisRun += 1;
-    if (!await runTurn(input.accountId, input.workspaceId, input.sessionId, turn.id, turn.triggerEventId)) {
+    if (
+      !(await runTurn(
+        input.accountId,
+        input.workspaceId,
+        input.sessionId,
+        turn.id,
+        turn.triggerEventId,
+      ))
+    ) {
       return;
     }
   }
 
-  async function runTurn(accountId: string, workspaceId: string, sessionId: string, turnId: string, triggerEventId: string): Promise<boolean> {
+  async function runTurn(
+    accountId: string,
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    triggerEventId: string,
+  ): Promise<boolean> {
     if (interruptedEventId) {
       await activity.interruptActiveTurn({
         accountId,
@@ -250,21 +306,26 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // histories replay deterministically on the original lease-less path, and any
     // future workflow-side lease change can branch on it without breaking replay.
     const statelessLease = patched("sandbox-stateless-lease");
-    void statelessLease;   // command path unchanged today (see comment above)
+    void statelessLease; // command path unchanged today (see comment above)
     // Deliberately schedules the LEGACY activity name: in-flight session
     // workflows (multi-day by design) recorded this name in their histories,
     // and scheduling a different activity type at the same position is a
     // non-deterministic change on replay. Migrate to runAgentTurn with
     // patched() once pre-rename sessions have drained.
-    const turn: Promise<activities.RunAgentTurnResult> = scope.run(() => activity.runAgentSegment({
-      accountId,
-      workspaceId,
-      sessionId,
-      triggerEventId,
-      workflowId,
-      turnId,
-    }));
-    const outcome: { kind: "result"; result: activities.RunAgentTurnResult } | { kind: "interrupt" } | { kind: "failure"; error: unknown } = await Promise.race([
+    const turn: Promise<activities.RunAgentTurnResult> = scope.run(() =>
+      activity.runAgentSegment({
+        accountId,
+        workspaceId,
+        sessionId,
+        triggerEventId,
+        workflowId,
+        turnId,
+      }),
+    );
+    const outcome:
+      | { kind: "result"; result: activities.RunAgentTurnResult }
+      | { kind: "interrupt" }
+      | { kind: "failure"; error: unknown } = await Promise.race([
       turn.then(
         (result: activities.RunAgentTurnResult) => ({ kind: "result" as const, result }),
         (error: unknown) => ({ kind: "failure" as const, error }),

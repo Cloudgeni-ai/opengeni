@@ -3,7 +3,11 @@ import type { SessionEvent } from "../src/types";
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
-export function makeEvent(sequence: number, type: SessionEvent["type"] = "agent.message.delta", payload: unknown = { text: `t${sequence}` }): SessionEvent {
+export function makeEvent(
+  sequence: number,
+  type: SessionEvent["type"] = "agent.message.delta",
+  payload: unknown = { text: `t${sequence}` },
+): SessionEvent {
   return {
     id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE_ID,
@@ -38,7 +42,10 @@ export function bytesStream(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 /** A byte stream that emits chunks and then never closes (until cancelled). */
-export function hangingBytesStream(chunks: string[], signal?: AbortSignal): ReadableStream<Uint8Array> {
+export function hangingBytesStream(
+  chunks: string[],
+  signal?: AbortSignal,
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let index = 0;
   return new ReadableStream<Uint8Array>({

@@ -36,7 +36,11 @@ export async function refreshCodexToken(
   const res = await fetchImpl(CODEX_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id: CODEX_CLIENT_ID, grant_type: "refresh_token", refresh_token: refreshToken }),
+    body: JSON.stringify({
+      client_id: CODEX_CLIENT_ID,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
   });
   const text = await res.text();
   if (!res.ok) {
@@ -46,20 +50,33 @@ export async function refreshCodexToken(
       throw new CodexReloginRequired(msg);
     }
     if (res.status === 401) {
-      throw new CodexReloginRequired("Your Codex session could not be refreshed. Please disconnect and sign in again.");
+      throw new CodexReloginRequired(
+        "Your Codex session could not be refreshed. Please disconnect and sign in again.",
+      );
     }
     throw new CodexRefreshTransient(`Failed to refresh Codex token: ${res.status}`);
   }
-  const body = JSON.parse(text) as { id_token?: string; access_token?: string; refresh_token?: string };
-  return { idToken: body.id_token, accessToken: body.access_token, refreshToken: body.refresh_token };
+  const body = JSON.parse(text) as {
+    id_token?: string;
+    access_token?: string;
+    refresh_token?: string;
+  };
+  return {
+    idToken: body.id_token,
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token,
+  };
 }
 
 // Codes that mean the refresh token is permanently dead -> reconnect required.
 // Includes the standard OAuth `invalid_grant` alongside the Codex-specific codes.
 const PERMANENT_REFRESH_FAILURES: Record<string, string> = {
-  refresh_token_expired: "Your Codex refresh token has expired. Please disconnect and sign in again.",
-  refresh_token_reused: "Your Codex refresh token was already used. Please disconnect and sign in again.",
-  refresh_token_invalidated: "Your Codex refresh token was revoked. Please disconnect and sign in again.",
+  refresh_token_expired:
+    "Your Codex refresh token has expired. Please disconnect and sign in again.",
+  refresh_token_reused:
+    "Your Codex refresh token was already used. Please disconnect and sign in again.",
+  refresh_token_invalidated:
+    "Your Codex refresh token was revoked. Please disconnect and sign in again.",
   invalid_grant: "Your Codex session is no longer valid. Please disconnect and sign in again.",
 };
 

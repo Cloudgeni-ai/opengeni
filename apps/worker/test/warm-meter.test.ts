@@ -28,11 +28,12 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
-import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
 import {
-  createSandboxLeaseActivities,
-  type TerminateBoxFn,
-} from "../src/activities/sandbox-lease";
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
+import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 
 let available = true;
@@ -86,18 +87,32 @@ async function warmGroup(
 ): Promise<void> {
   for (const h of holders) {
     await acquireLease(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: groupId,
-      kind: h.kind, holderId: h.holderId, backend: "modal", leaseTtlMs: 90_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: groupId,
+      kind: h.kind,
+      holderId: h.holderId,
+      backend: "modal",
+      leaseTtlMs: 90_000,
     });
   }
   await commitWarmingToWarm(db, {
-    accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: groupId,
-    expectedEpoch: 0, instanceId: "box", resumeBackendId: "modal",
-    resumeState: { sandboxId: "box" }, leaseTtlMs: 90_000,
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sandboxGroupId: groupId,
+    expectedEpoch: 0,
+    instanceId: "box",
+    resumeBackendId: "modal",
+    resumeState: { sandboxId: "box" },
+    leaseTtlMs: 90_000,
   });
 }
 
-async function backdateMeterCursor(workspaceId: string, groupId: string, secondsAgo: number): Promise<void> {
+async function backdateMeterCursor(
+  workspaceId: string,
+  groupId: string,
+  secondsAgo: number,
+): Promise<void> {
   await admin`
     update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
@@ -146,16 +161,24 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
 describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied provider stop)", () => {
   test("(1) the reaper sweep meters a WARM viewer-only box but NOT a turn-held box", async () => {
     if (!available) return;
-    const settings = testSettings({ sandboxBackend: "local", sandboxOwnershipEnabled: true, webSearchEnabled: false });
+    const settings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      webSearchEnabled: false,
+    });
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
+      terminateBox: spy.fn,
+    });
 
     const ws = await freshWorkspace();
     const viewerOnly = crypto.randomUUID();
@@ -182,16 +205,22 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
 
   test("(2) re-running the reaper sweep does not double-charge the same (group, epoch, tick)", async () => {
     if (!available) return;
-    const settings = testSettings({ sandboxBackend: "local", sandboxOwnershipEnabled: true, webSearchEnabled: false });
+    const settings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      webSearchEnabled: false,
+    });
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
+      terminateBox: spy.fn,
+    });
 
     const ws = await freshWorkspace();
     const group = crypto.randomUUID();
     await warmGroup(ws, group, [{ kind: "viewer", holderId: "v1" }]);
-    await reapSandboxLeases();                       // seed
+    await reapSandboxLeases(); // seed
     await backdateMeterCursor(ws.workspaceId, group, 8);
-    await reapSandboxLeases();                       // accrue tick 1
+    await reapSandboxLeases(); // accrue tick 1
     expect(await warmSecondsCount(ws.workspaceId, group)).toBe(1);
 
     // Replay the same tick index; the idempotency key must prevent a duplicate
@@ -207,14 +236,16 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
       sandboxBackend: "local",
       sandboxOwnershipEnabled: true,
       webSearchEnabled: false,
-      billingMode: "stripe",     // enable balance enforcement
-      sandboxIdleGraceMs: 0,     // drain grace already elapsed → terminate same sweep
+      billingMode: "stripe", // enable balance enforcement
+      sandboxIdleGraceMs: 0, // drain grace already elapsed → terminate same sweep
     });
     const spy = makeTerminateSpy();
-    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), { terminateBox: spy.fn });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
+      terminateBox: spy.fn,
+    });
 
     const ws = await freshWorkspace();
-    await seedBalance(ws.accountId, 0);   // 0 balance
+    await seedBalance(ws.accountId, 0); // 0 balance
     const viewerOnly = crypto.randomUUID();
     const turnHeld = crypto.randomUUID();
     await warmGroup(ws, viewerOnly, [{ kind: "viewer", holderId: "v1" }]);
@@ -229,7 +260,7 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
     expect(result.forceDrained).toBeGreaterThanOrEqual(1);
     expect(spy.calls.map((c) => c.group)).toContain(viewerOnly);
     expect(spy.calls.map((c) => c.group)).not.toContain(turnHeld);
-    expect(await readLiveness(ws.workspaceId, viewerOnly)).toBe("cold");   // drained → terminated → cold
-    expect(await readLiveness(ws.workspaceId, turnHeld)).toBe("warm");     // SPARED — a paying turn is never killed
+    expect(await readLiveness(ws.workspaceId, viewerOnly)).toBe("cold"); // drained → terminated → cold
+    expect(await readLiveness(ws.workspaceId, turnHeld)).toBe("warm"); // SPARED — a paying turn is never killed
   }, 90_000);
 });

@@ -115,15 +115,19 @@ describe("sanitizeEventPayload (deep walk)", () => {
 
   test("redacts session MCP credential header values to names", () => {
     const cleaned = sanitizeEventPayload({
-      mcpServers: [{
-        id: "crm",
-        url: "https://crm.example/mcp",
-        headers: { Authorization: "Bearer create-secret" },
-      }],
-      mcpCredentialUpdates: [{
-        id: "crm",
-        headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
-      }],
+      mcpServers: [
+        {
+          id: "crm",
+          url: "https://crm.example/mcp",
+          headers: { Authorization: "Bearer create-secret" },
+        },
+      ],
+      mcpCredentialUpdates: [
+        {
+          id: "crm",
+          headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
+        },
+      ],
     }) as unknown as {
       mcpServers: Array<{ id: string; url: string; headerNames: string[] }>;
       mcpCredentialUpdates: Array<{ id: string; headerNames: string[] }>;
@@ -163,7 +167,9 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(serialized).not.toContain("raw-refresh-token");
     expect(serialized).not.toContain("secret-verifier");
     expect(serialized).not.toContain("secret-bundle");
-    expect(cleaned.authorizationUrl).toBe("https://linear.app/oauth/authorize?client_id=public-client");
+    expect(cleaned.authorizationUrl).toBe(
+      "https://linear.app/oauth/authorize?client_id=public-client",
+    );
     expect(cleaned.access_token).toBe("[redacted]");
     expect(cleaned.refreshToken).toBe("[redacted]");
     expect(cleaned.encryptedPkceVerifier).toBe("[redacted]");

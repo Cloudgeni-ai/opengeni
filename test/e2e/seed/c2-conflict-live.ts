@@ -29,11 +29,17 @@ console.log(`[c2] session=${sid} settled`);
 // 2. Warm the box + read the base the editor would load.
 let base;
 for (let i = 0; i < 20; i++) {
-  try { base = await client.fsRead(ws, sid, { path: "conflict.txt" }); break; }
-  catch (e) { await new Promise((r) => setTimeout(r, 1500)); }
+  try {
+    base = await client.fsRead(ws, sid, { path: "conflict.txt" });
+    break;
+  } catch {
+    await new Promise((r) => setTimeout(r, 1500));
+  }
 }
 if (!base) throw new Error("could not warm box / read base");
-console.log(`[c2] base read from live box: ${JSON.stringify(base.content)} (== capture base ${JSON.stringify(BASE)}: ${base.content === BASE})`);
+console.log(
+  `[c2] base read from live box: ${JSON.stringify(base.content)} (== capture base ${JSON.stringify(BASE)}: ${base.content === BASE})`,
+);
 
 // 3. Out-of-band mutation on the box (simulates the agent / another writer
 //    changing the file between the editor's capture-load and the flush).
@@ -44,7 +50,9 @@ console.log(`[c2] out-of-band mutation applied: ${JSON.stringify(DIVERGED)}`);
 const liveReread = await client.fsRead(ws, sid, { path: "conflict.txt" });
 const diverged = liveReread.content !== base.content;
 console.log(`[c2] guard re-read live: ${JSON.stringify(liveReread.content)}`);
-console.log(`[c2] DIVERGENCE DETECTED (live != base): ${diverged} → useWorkspaceEdit sets state="conflict", writes NOTHING (force=false path)`);
+console.log(
+  `[c2] DIVERGENCE DETECTED (live != base): ${diverged} → useWorkspaceEdit sets state="conflict", writes NOTHING (force=false path)`,
+);
 
 // 5. Prove no silent overwrite: the user's buffer was NOT written (the guard
 //    returns before fsWrite). The box still holds the diverged content.
@@ -56,9 +64,13 @@ console.log(`[c2] NO SILENT OVERWRITE (user buffer not written): ${noOverwrite}`
 // 6. force=true is the explicit last-writer-wins escape (conflict-bar "overwrite").
 await client.fsWrite(ws, sid, { path: "conflict.txt", content: USER_BUFFER, encoding: "utf8" });
 const forced = await client.fsRead(ws, sid, { path: "conflict.txt" });
-console.log(`[c2] after explicit force-flush (conflict-bar overwrite): ${JSON.stringify(forced.content)} → ${forced.content === USER_BUFFER}`);
+console.log(
+  `[c2] after explicit force-flush (conflict-bar overwrite): ${JSON.stringify(forced.content)} → ${forced.content === USER_BUFFER}`,
+);
 
 const PASS = base.content === BASE && diverged && noOverwrite && forced.content === USER_BUFFER;
-console.log(`\n[c2] VERDICT: ${PASS ? "PASS" : "FAIL"} — divergence detected on a real box, write withheld, force overrides.`);
+console.log(
+  `\n[c2] VERDICT: ${PASS ? "PASS" : "FAIL"} — divergence detected on a real box, write withheld, force overrides.`,
+);
 console.log(`[c2] session id: ${sid}`);
 process.exit(PASS ? 0 : 1);

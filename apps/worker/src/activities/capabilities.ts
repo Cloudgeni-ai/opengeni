@@ -1,4 +1,9 @@
-import { environmentsEncryptionKeyBytes, parseModelProvidersJson, type RegistryProvider, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  parseModelProvidersJson,
+  type RegistryProvider,
+  type Settings,
+} from "@opengeni/config";
 import { settingsWithMcpCapabilityServers } from "@opengeni/core";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -19,7 +24,11 @@ import {
   type SessionMcpServerForRun,
 } from "@opengeni/db";
 
-export async function settingsWithEnabledCapabilityMcpServers(db: Database, workspaceId: string, settings: Settings): Promise<Settings> {
+export async function settingsWithEnabledCapabilityMcpServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+): Promise<Settings> {
   const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
   return settingsWithMcpCapabilityServers(settings, enabled);
 }
@@ -38,10 +47,16 @@ export async function settingsWithSessionMcpServersForRun(
     }
     throw new Error("session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
   }
-  return settingsWithSessionMcpServers(settings, await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey));
+  return settingsWithSessionMcpServers(
+    settings,
+    await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey),
+  );
 }
 
-export function settingsWithSessionMcpServers(settings: Settings, servers: SessionMcpServerForRun[]): Settings {
+export function settingsWithSessionMcpServers(
+  settings: Settings,
+  servers: SessionMcpServerForRun[],
+): Settings {
   if (servers.length === 0) {
     return settings;
   }
@@ -57,7 +72,9 @@ export function settingsWithSessionMcpServers(settings: Settings, servers: Sessi
         ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
         ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
         cacheToolsList: server.cacheToolsList ?? false,
-        ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
+        ...(server.requireApproval !== undefined
+          ? { requireApproval: server.requireApproval }
+          : {}),
         headers: server.headers,
       })),
     ],
@@ -71,13 +88,19 @@ export function settingsWithSessionMcpServers(settings: Settings, servers: Sessi
  * this overlay (metadata-only read); the per-request bearer is resolved later via
  * codexRequestStorage. Idempotent and a no-op when not applicable.
  */
-export async function settingsWithCodexCredential(db: Database, workspaceId: string, settings: Settings, activeOverride?: boolean): Promise<Settings> {
+export async function settingsWithCodexCredential(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  activeOverride?: boolean,
+): Promise<Settings> {
   // Same active-credential predicate the billing bypass uses, so provider
   // injection and billing can never disagree on what an "active codex" turn is.
   // The caller may pass `activeOverride` (a single, shared read; P2-b) so routing
   // and billing decide from the exact same observation, immune to a concurrent
   // disconnect/reconnect landing between two independent reads.
-  const active = activeOverride ?? await workspaceCodexSubscriptionActive(db, settings, workspaceId);
+  const active =
+    activeOverride ?? (await workspaceCodexSubscriptionActive(db, settings, workspaceId));
   if (!active) {
     return settings; // disabled / not connected / needs_relogin / error -> leave settings unchanged
   }
@@ -139,7 +162,11 @@ export function withCodexProvider(settings: Settings): Settings {
     label: "Codex (ChatGPT subscription)",
     api: "responses",
     baseUrl: CODEX_PROVIDER_BASE_URL,
-    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({ id: `${CODEX_MODEL_ID_PREFIX}${slug}`, label: slug, reasoningEffort: true })),
+    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
+      id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      label: slug,
+      reasoningEffort: true,
+    })),
   };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, codexProvider]) };
 }

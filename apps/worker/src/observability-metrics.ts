@@ -29,7 +29,13 @@ function eventAttributes(attributes: Record<string, unknown> | undefined): Attri
 }
 
 function eventAttributeValue(value: unknown): AttributeValue {
-  if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
     return value;
   }
   try {
@@ -39,7 +45,9 @@ function eventAttributeValue(value: unknown): AttributeValue {
   }
 }
 
-export function runtimeMetricsHooksForObservability(observability: Observability): RuntimeMetricsHooks {
+export function runtimeMetricsHooksForObservability(
+  observability: Observability,
+): RuntimeMetricsHooks {
   return {
     onModelCall: ({ provider, outcome, durationSeconds }) => {
       observability.incrementCounter({
@@ -107,7 +115,9 @@ export class TurnLifecycleMetrics {
       this.startedTurns.delete(turnId);
     }
     if (outcome) {
-      const observedDuration = durationSeconds ?? (startedAt === undefined ? 0 : Math.max(0, (this.now() - startedAt) / 1000));
+      const observedDuration =
+        durationSeconds ??
+        (startedAt === undefined ? 0 : Math.max(0, (this.now() - startedAt) / 1000));
       this.observability.incrementCounter({
         name: "opengeni_turns_total",
         help: "Total agent turns by terminal outcome.",
@@ -185,7 +195,10 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
   });
 }
 
-export function recordSandboxLeaseGauges(observability: Observability, counts: Partial<Record<SandboxLeaseLiveness, number>>): void {
+export function recordSandboxLeaseGauges(
+  observability: Observability,
+  counts: Partial<Record<SandboxLeaseLiveness, number>>,
+): void {
   for (const liveness of ["cold", "warming", "warm", "draining"] as const) {
     observability.setGauge({
       name: "opengeni_sandbox_leases",
@@ -196,7 +209,10 @@ export function recordSandboxLeaseGauges(observability: Observability, counts: P
   }
 }
 
-export function recordCreditBalanceGauges(observability: Observability, balances: CreditBalanceGauge[]): void {
+export function recordCreditBalanceGauges(
+  observability: Observability,
+  balances: CreditBalanceGauge[],
+): void {
   const previous = creditBalanceGaugeAccounts.get(observability) ?? new Set<string>();
   const current = new Set<string>();
   for (const balance of balances) {
@@ -232,7 +248,11 @@ export function recordSandboxOrphansTerminated(observability: Observability, cou
   });
 }
 
-export function recordCreditMicros(observability: Observability | undefined, kind: CreditMicrosKind, amountMicros: number): void {
+export function recordCreditMicros(
+  observability: Observability | undefined,
+  kind: CreditMicrosKind,
+  amountMicros: number,
+): void {
   if (!observability || amountMicros <= 0) {
     return;
   }

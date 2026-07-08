@@ -12,7 +12,12 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { capabilityFormError, capabilityKindLabel, emptyCapabilityForm, type CapabilityFormState } from "@/lib/capabilities";
+import {
+  capabilityFormError,
+  capabilityKindLabel,
+  emptyCapabilityForm,
+  type CapabilityFormState,
+} from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
 import type { CapabilityKind } from "@/types";
 
@@ -44,7 +49,8 @@ export function AddCustomDialog({
 
   const isMcp = form.kind === "mcp";
   const error = capabilityFormError(form);
-  const update = (patch: Partial<CapabilityFormState>) => setForm((current) => ({ ...current, ...patch }));
+  const update = (patch: Partial<CapabilityFormState>) =>
+    setForm((current) => ({ ...current, ...patch }));
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -74,7 +80,9 @@ export function AddCustomDialog({
                   onClick={() => update({ kind })}
                   className={cn(
                     "rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
-                    form.kind === kind ? "bg-surface-2 text-fg shadow-sm" : "text-fg-subtle hover:text-fg-muted",
+                    form.kind === kind
+                      ? "bg-surface-2 text-fg shadow-sm"
+                      : "text-fg-subtle hover:text-fg-muted",
                   )}
                 >
                   {capabilityKindLabel(kind)}
@@ -84,12 +92,16 @@ export function AddCustomDialog({
           </div>
 
           <div className="grid gap-1.5">
-            <Label htmlFor="add-name" className="text-xs text-fg-muted">Name</Label>
+            <Label htmlFor="add-name" className="text-xs text-fg-muted">
+              Name
+            </Label>
             <Input
               id="add-name"
               value={form.name}
               onChange={(event) => update({ name: event.target.value })}
-              placeholder={isMcp ? "e.g. Internal Tools MCP" : `e.g. ${capabilityKindLabel(form.kind)} name`}
+              placeholder={
+                isMcp ? "e.g. Internal Tools MCP" : `e.g. ${capabilityKindLabel(form.kind)} name`
+              }
               autoFocus
             />
           </div>
@@ -97,7 +109,9 @@ export function AddCustomDialog({
           {/* Endpoint URL — MCP servers only. */}
           {isMcp ? (
             <div className="grid gap-1.5">
-              <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">Server URL</Label>
+              <Label htmlFor="add-endpoint" className="text-xs text-fg-muted">
+                Server URL
+              </Label>
               <Input
                 id="add-endpoint"
                 value={form.endpointUrl}
@@ -108,7 +122,9 @@ export function AddCustomDialog({
             </div>
           ) : (
             <div className="grid gap-1.5">
-              <Label htmlFor="add-homepage" className="text-xs text-fg-muted">Homepage <span className="text-fg-subtle">(optional)</span></Label>
+              <Label htmlFor="add-homepage" className="text-xs text-fg-muted">
+                Homepage <span className="text-fg-subtle">(optional)</span>
+              </Label>
               <Input
                 id="add-homepage"
                 value={form.homepageUrl}
@@ -120,7 +136,9 @@ export function AddCustomDialog({
           )}
 
           <div className="grid gap-1.5">
-            <Label htmlFor="add-description" className="text-xs text-fg-muted">Description <span className="text-fg-subtle">(optional)</span></Label>
+            <Label htmlFor="add-description" className="text-xs text-fg-muted">
+              Description <span className="text-fg-subtle">(optional)</span>
+            </Label>
             <textarea
               id="add-description"
               value={form.description}
@@ -141,7 +159,9 @@ export function AddCustomDialog({
           </label>
 
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
             <Button type="submit" disabled={busy || Boolean(error)}>
               {busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
               Add {capabilityKindLabel(form.kind)}

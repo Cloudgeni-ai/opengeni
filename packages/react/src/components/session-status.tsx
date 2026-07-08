@@ -85,8 +85,16 @@ export type StatusDotProps = {
 export function StatusDot({ status, className }: StatusDotProps) {
   const meta = SESSION_STATUS_META[status];
   return (
-    <span className={cn("relative inline-flex size-1.5 shrink-0 rounded-full", meta.dotClassName, className)}>
-      {meta.pulse ? <span className={cn("absolute inset-0 animate-og-pulse rounded-full", meta.dotClassName)} /> : null}
+    <span
+      className={cn(
+        "relative inline-flex size-1.5 shrink-0 rounded-full",
+        meta.dotClassName,
+        className,
+      )}
+    >
+      {meta.pulse ? (
+        <span className={cn("absolute inset-0 animate-og-pulse rounded-full", meta.dotClassName)} />
+      ) : null}
     </span>
   );
 }

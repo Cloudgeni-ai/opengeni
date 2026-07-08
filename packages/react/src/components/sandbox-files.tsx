@@ -168,16 +168,21 @@ export function SandboxFiles({
                   className="h-full"
                 />
               ) : fileView.error ? (
-                <Notice>Could not open {viewPath}: {fileView.error.message}</Notice>
+                <Notice>
+                  Could not open {viewPath}: {fileView.error.message}
+                </Notice>
               ) : fileView.loading ? (
                 <Notice>Loading {viewPath}…</Notice>
               ) : fileView.isBinary ? (
-                <Notice>{viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).</Notice>
+                <Notice>
+                  {viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).
+                </Notice>
               ) : fileView.content !== null ? (
                 <>
                   {fileView.truncated && (
                     <div className="border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-status-running">
-                      Large file — showing a truncated preview ({fileView.sizeBytes ?? 0} bytes loaded). Editing is disabled to avoid corrupting the file.
+                      Large file — showing a truncated preview ({fileView.sizeBytes ?? 0} bytes
+                      loaded). Editing is disabled to avoid corrupting the file.
                     </div>
                   )}
                   {usePierre ? (
@@ -233,9 +238,7 @@ function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: 
         </span>
       )}
       {dirty && (
-        <span className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">
-          {dirtyCount} changed
-        </span>
+        <span className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">{dirtyCount} changed</span>
       )}
     </div>
   );
@@ -303,11 +306,25 @@ function useFileView(
   });
   useEffect(() => {
     if (!path) {
-      setState({ content: null, isBinary: false, truncated: false, sizeBytes: null, loading: false, error: null });
+      setState({
+        content: null,
+        isBinary: false,
+        truncated: false,
+        sizeBytes: null,
+        loading: false,
+        error: null,
+      });
       return;
     }
     let cancelled = false;
-    setState({ content: null, isBinary: false, truncated: false, sizeBytes: null, loading: true, error: null });
+    setState({
+      content: null,
+      isBinary: false,
+      truncated: false,
+      sizeBytes: null,
+      loading: true,
+      error: null,
+    });
     void readFile(path)
       .then((res) => {
         if (cancelled) return;

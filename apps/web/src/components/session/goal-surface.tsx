@@ -44,13 +44,28 @@ type GoalPillMeta = {
 
 const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
-  paused: { label: "Goal paused", icon: PauseIcon, tint: "text-status-waiting", ring: "border-status-waiting/40" },
+  paused: {
+    label: "Goal paused",
+    icon: PauseIcon,
+    tint: "text-status-waiting",
+    ring: "border-status-waiting/40",
+  },
   // "Needs attention" is the requires_action state — the SAME state the subagent
   // rows paint with the doctrine "waiting" dot (status-waiting/purple). It wears
   // that one hue too, so a session that needs you reads as one colour across the
   // pill and the lineage; its triangle glyph + label set it apart from paused.
-  attention: { label: "Needs attention", icon: TriangleAlertIcon, tint: "text-status-waiting", ring: "border-status-waiting/50" },
-  completed: { label: "Goal completed", icon: CheckCircle2Icon, tint: "text-status-idle", ring: "border-status-idle/40" },
+  attention: {
+    label: "Needs attention",
+    icon: TriangleAlertIcon,
+    tint: "text-status-waiting",
+    ring: "border-status-waiting/50",
+  },
+  completed: {
+    label: "Goal completed",
+    icon: CheckCircle2Icon,
+    tint: "text-status-idle",
+    ring: "border-status-idle/40",
+  },
 };
 
 /** A session lifecycle state where the goal is NOT actively being pursued — the
@@ -61,7 +76,10 @@ function isSessionStalled(status: SessionStatus): boolean {
   return status === "requires_action" || status === "failed" || status === "cancelled";
 }
 
-function goalPillState(goalStatus: "active" | "paused" | "completed", sessionStatus: SessionStatus): GoalPillState {
+function goalPillState(
+  goalStatus: "active" | "paused" | "completed",
+  sessionStatus: SessionStatus,
+): GoalPillState {
   if (goalStatus === "completed") {
     return "completed";
   }
@@ -102,7 +120,11 @@ function formatCoarseElapsed(ms: number): string {
  * moment it stopped ticking — a completed goal shows its final duration, a
  * paused one holds still.
  */
-function useLiveElapsed(startIso: string | null | undefined, live: boolean, endIso?: string | null): string | null {
+function useLiveElapsed(
+  startIso: string | null | undefined,
+  live: boolean,
+  endIso?: string | null,
+): string | null {
   const start = startIso ? Date.parse(startIso) : Number.NaN;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -121,13 +143,7 @@ function useLiveElapsed(startIso: string | null | undefined, live: boolean, endI
 
 /* --- the floating pill ------------------------------------------------------ */
 
-export function GoalSurface({
-  session,
-  goal,
-}: {
-  session: Session;
-  goal: UseGoalResult;
-}) {
+export function GoalSurface({ session, goal }: { session: Session; goal: UseGoalResult }) {
   const [open, setOpen] = useState(false);
   const record = goal.goal;
   // All hooks run unconditionally (the null-goal early return is below): the
@@ -142,7 +158,9 @@ export function GoalSurface({
     // final duration; a paused one the time up to the pause; a stalled session
     // (needs input / failed / cancelled) freezes at the goal's last update —
     // never a clock that kept counting past the moment work stopped.
-    record?.status === "completed" || record?.status === "paused" || isSessionStalled(session.status)
+    record?.status === "completed" ||
+      record?.status === "paused" ||
+      isSessionStalled(session.status)
       ? record?.updatedAt
       : null,
   );
@@ -171,14 +189,22 @@ export function GoalSurface({
             )}
           >
             <Icon className={cn("size-3.5 shrink-0", meta.tint)} />
-            <span className={cn("shrink-0 font-medium", state === "pursuing" ? "text-fg" : meta.tint)}>{meta.label}</span>
-            <span aria-hidden className="shrink-0 text-fg-subtle">·</span>
+            <span
+              className={cn("shrink-0 font-medium", state === "pursuing" ? "text-fg" : meta.tint)}
+            >
+              {meta.label}
+            </span>
+            <span aria-hidden className="shrink-0 text-fg-subtle">
+              ·
+            </span>
             <span className="min-w-0 truncate text-fg-muted" title={record.text}>
               {record.text}
             </span>
             {elapsed ? (
               <>
-                <span aria-hidden className="shrink-0 text-fg-subtle">·</span>
+                <span aria-hidden className="shrink-0 text-fg-subtle">
+                  ·
+                </span>
                 <span className="shrink-0 tabular-nums text-fg-subtle" title="Time on this goal">
                   {elapsed}
                 </span>
@@ -193,7 +219,11 @@ export function GoalSurface({
                 type="button"
                 aria-label={record.status === "paused" ? "Resume goal" : "Pause goal"}
                 disabled={goal.updating}
-                onClick={() => void (record.status === "paused" ? goal.resume() : goal.pause("Paused from the console"))}
+                onClick={() =>
+                  void (record.status === "paused"
+                    ? goal.resume()
+                    : goal.pause("Paused from the console"))
+                }
                 className="ml-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-fg-subtle outline-none transition-colors hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
               >
                 {goal.updating ? (
@@ -265,14 +295,23 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
         </p>
       ) : null}
       {record.status === "paused" && (record.pausedReason ?? record.rationale) ? (
-        <p className="mt-2 text-xs leading-5 text-status-waiting/90">Paused because {record.pausedReason ?? record.rationale}</p>
+        <p className="mt-2 text-xs leading-5 text-status-waiting/90">
+          Paused because {record.pausedReason ?? record.rationale}
+        </p>
       ) : null}
       {record.status === "completed" && record.evidence ? (
         <p className="mt-2 text-xs leading-5 text-status-idle/90">Evidence {record.evidence}</p>
       ) : null}
 
       <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-        <MetaChip dot={record.maxAutoContinuations !== null && record.autoContinuations >= record.maxAutoContinuations ? "waiting" : undefined}>
+        <MetaChip
+          dot={
+            record.maxAutoContinuations !== null &&
+            record.autoContinuations >= record.maxAutoContinuations
+              ? "waiting"
+              : undefined
+          }
+        >
           {record.maxAutoContinuations !== null
             ? `${record.autoContinuations} of ${record.maxAutoContinuations} auto-continues`
             : `${record.autoContinuations} auto-continue${record.autoContinuations === 1 ? "" : "s"}`}
@@ -289,13 +328,32 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
       <div className="mt-3 flex items-center justify-between gap-2">
         <DeleteGoalButton goal={goal} />
         {record.status === "active" ? (
-          <Button type="button" variant="ghost" size="xs" disabled={goal.updating} onClick={() => void goal.pause("Paused from the console")}>
-            {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PauseIcon className="size-3" />}
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            disabled={goal.updating}
+            onClick={() => void goal.pause("Paused from the console")}
+          >
+            {goal.updating ? (
+              <Loader2Icon className="size-3 animate-spin" />
+            ) : (
+              <PauseIcon className="size-3" />
+            )}
             Pause goal
           </Button>
         ) : record.status === "paused" ? (
-          <Button type="button" size="xs" disabled={goal.updating} onClick={() => void goal.resume()}>
-            {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PlayIcon className="size-3" />}
+          <Button
+            type="button"
+            size="xs"
+            disabled={goal.updating}
+            onClick={() => void goal.resume()}
+          >
+            {goal.updating ? (
+              <Loader2Icon className="size-3 animate-spin" />
+            ) : (
+              <PlayIcon className="size-3" />
+            )}
             Resume goal
           </Button>
         ) : null}
@@ -323,10 +381,22 @@ function DeleteGoalButton({ goal }: { goal: UseGoalResult }) {
     return (
       <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
         <span className="pl-1">Delete goal?</span>
-        <Button type="button" variant="ghost" size="xs" disabled={goal.updating} onClick={() => setConfirming(false)}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          disabled={goal.updating}
+          onClick={() => setConfirming(false)}
+        >
           Cancel
         </Button>
-        <Button type="button" variant="destructive" size="xs" disabled={goal.updating} onClick={() => void goal.deleteGoal()}>
+        <Button
+          type="button"
+          variant="destructive"
+          size="xs"
+          disabled={goal.updating}
+          onClick={() => void goal.deleteGoal()}
+        >
           {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : null}
           Delete
         </Button>

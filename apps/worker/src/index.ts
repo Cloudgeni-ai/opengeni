@@ -1,8 +1,24 @@
-import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions, type Settings } from "@opengeni/config";
+import {
+  dbSearchPath,
+  getSettings,
+  resolveNatsControlPlaneAuth,
+  retryStartupDependency,
+  startupRetryOptions,
+  type Settings,
+} from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
-import { createObservability, logStartupDependencyRetry, type Observability } from "@opengeni/observability";
-import { Connection, ScheduleAlreadyRunning, ScheduleOverlapPolicy, Client as TemporalClient } from "@temporalio/client";
+import {
+  createObservability,
+  logStartupDependencyRetry,
+  type Observability,
+} from "@opengeni/observability";
+import {
+  Connection,
+  ScheduleAlreadyRunning,
+  ScheduleOverlapPolicy,
+  Client as TemporalClient,
+} from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ensureModalRegistryImage } from "@opengeni/runtime";
 import { createActivities, type ActivityDependencies } from "./activities";
@@ -33,7 +49,9 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
   connection: NativeConnection;
 }> {
   const settings = options.settings ?? getSettings();
-  const observability = options.activityDependencies?.observability ?? createObservability(settings, { component: "worker" });
+  const observability =
+    options.activityDependencies?.observability ??
+    createObservability(settings, { component: "worker" });
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
   // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
   // both set (so non-modal / public-image deployments are byte-unchanged and never
@@ -54,16 +72,19 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
       onRetry: (event) => logStartupDependencyRetry(observability, event),
     },
   );
-  const activities = options.activities ?? createActivities({
-    ...options.activityDependencies,
-    settings,
-    observability,
-  });
+  const activities =
+    options.activities ??
+    createActivities({
+      ...options.activityDependencies,
+      settings,
+      observability,
+    });
   const worker = await Worker.create({
     connection,
     namespace: settings.temporalNamespace,
     taskQueue: settings.temporalTaskQueue,
-    workflowsPath: options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
+    workflowsPath:
+      options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
     activities,
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
@@ -164,7 +185,12 @@ export async function registerSandboxReaperSchedule(
       scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
       reaperPeriodMs: settings.sandboxLeaseReaperPeriodMs,
     });
-    return { registered: true, close: async () => { await connection.close(); } };
+    return {
+      registered: true,
+      close: async () => {
+        await connection.close();
+      },
+    };
   } catch (error) {
     if (error instanceof ScheduleAlreadyRunning) {
       // Another worker in the pool already created it. The Schedule exists
@@ -174,7 +200,12 @@ export async function registerSandboxReaperSchedule(
       observability.info("Global sandbox-lease reaper Schedule already registered", {
         scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
       });
-      return { registered: false, close: async () => { await connection.close(); } };
+      return {
+        registered: false,
+        close: async () => {
+          await connection.close();
+        },
+      };
     }
     await connection.close().catch(() => undefined);
     throw error;
@@ -185,7 +216,8 @@ export async function startWorker() {
   const settings = getSettings();
   const observability = createObservability(settings, { component: "worker" });
   const retryOptions = startupRetryOptions(settings);
-  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) => logStartupDependencyRetry(observability, event);
+  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
+    logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
@@ -203,7 +235,9 @@ export async function startWorker() {
       () =>
         createNatsEventBus(
           settings.natsUrl,
-          controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+          controlPlaneAuth
+            ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+            : undefined,
           { logger: observabilityEventLogger(observability) },
         ),
       { ...retryOptions, onRetry },

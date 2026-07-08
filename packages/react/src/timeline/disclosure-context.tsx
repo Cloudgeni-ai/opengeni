@@ -21,8 +21,18 @@ const DisclosureDefaultsContext = createContext<boolean | undefined>(undefined);
  * Seed the initial open state of every timeline collapsible below this node.
  * Intended for screenshot/test instrumentation only; absent by default.
  */
-export function DisclosureDefaultsProvider({ defaultOpen, children }: { defaultOpen: boolean; children: ReactNode }) {
-  return <DisclosureDefaultsContext.Provider value={defaultOpen}>{children}</DisclosureDefaultsContext.Provider>;
+export function DisclosureDefaultsProvider({
+  defaultOpen,
+  children,
+}: {
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <DisclosureDefaultsContext.Provider value={defaultOpen}>
+      {children}
+    </DisclosureDefaultsContext.Provider>
+  );
 }
 
 /**

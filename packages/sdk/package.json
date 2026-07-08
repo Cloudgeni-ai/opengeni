@@ -8,6 +8,10 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "packages/sdk"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",
@@ -18,13 +22,6 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     }
-  },
-  "files": [
-    "dist",
-    "src"
-  ],
-  "engines": {
-    "node": ">=18"
   },
   "publishConfig": {
     "access": "public",
@@ -41,5 +38,8 @@
     "tsup": "^8.5.0",
     "typescript": "^6.0.3",
     "zod": "^4.2.1"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

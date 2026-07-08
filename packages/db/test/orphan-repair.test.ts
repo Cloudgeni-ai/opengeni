@@ -66,12 +66,12 @@ describe("orphanedResultRowIndicesForRepair (migration 0014 spec)", () => {
   test("covers every result/call type pair the SDK can emit", () => {
     const rows = [
       // orphans (no preceding call)
-      row({ type: "computer_call_result", callId: "cc" }),       // 0 orphan
-      row({ type: "shell_call_output", callId: "sh" }),          // 1 orphan
-      row({ type: "apply_patch_call_output", callId: "ap" }),    // 2 orphan
+      row({ type: "computer_call_result", callId: "cc" }), // 0 orphan
+      row({ type: "shell_call_output", callId: "sh" }), // 1 orphan
+      row({ type: "apply_patch_call_output", callId: "ap" }), // 2 orphan
       // paired
-      row({ type: "shell_call", callId: "ok" }),                 // 3 call
-      row({ type: "shell_call_output", callId: "ok" }),          // 4 result — kept
+      row({ type: "shell_call", callId: "ok" }), // 3 call
+      row({ type: "shell_call_output", callId: "ok" }), // 4 result — kept
     ];
     expect(orphanedResultRowIndicesForRepair(rows)).toEqual([0, 1, 2]);
   });
@@ -80,7 +80,7 @@ describe("orphanedResultRowIndicesForRepair (migration 0014 spec)", () => {
     const rows = [
       row(functionResult("orphan_a")), // 0 orphan
       row(functionCall("good")),
-      row(functionResult("good")),     // paired — kept
+      row(functionResult("good")), // paired — kept
       row(functionResult("orphan_b")), // 3 orphan
     ];
     expect(orphanedResultRowIndicesForRepair(rows)).toEqual([0, 3]);

@@ -8,11 +8,7 @@ import {
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
-import {
-  listGitHubInstallationIdsForWorkspace,
-  requireFile,
-  type Database,
-} from "@opengeni/db";
+import { listGitHubInstallationIdsForWorkspace, requireFile, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
@@ -20,7 +16,9 @@ export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[
   const out: ToolRef[] = [];
   for (const tool of tools) {
     if (tool.kind !== "mcp") {
-      throw new HTTPException(422, { message: `unsupported tool kind: ${(tool as { kind?: string }).kind}` });
+      throw new HTTPException(422, {
+        message: `unsupported tool kind: ${(tool as { kind?: string }).kind}`,
+      });
     }
     const optional = tool.optional === true;
     if (!mcpServerIds.has(tool.id)) {
@@ -37,25 +35,36 @@ export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[
     //  - optional:true + unknown id is skipped above: the client explicitly
     //    opted into graceful degradation for MCPs (for example docs servers
     //    like context7) that only some deployments configure.
-    out.push(optional ? { kind: "mcp", id: tool.id, optional: true } : { kind: "mcp", id: tool.id });
+    out.push(
+      optional ? { kind: "mcp", id: tool.id, optional: true } : { kind: "mcp", id: tool.id },
+    );
   }
   return mergeToolRefs([], out);
 }
 
 type McpSettings = Pick<Settings, "mcpServers">;
 
-export function enabledCapabilityMcpToolRefs(settings: McpSettings, runtimeSettings: McpSettings): ToolRef[] {
+export function enabledCapabilityMcpToolRefs(
+  settings: McpSettings,
+  runtimeSettings: McpSettings,
+): ToolRef[] {
   const configuredIds = new Set(settings.mcpServers.map((server) => server.id));
-  return runtimeSettings.mcpServers
-    .filter((server) => !configuredIds.has(server.id))
-    // AUTO-ATTACHED (workspace-default) capability servers are marked optional:
-    // one of them having a broken/expired credential must SKIP that server, not
-    // fail the whole turn before the model runs. The caller only reaches here
-    // when the request omitted `tools`; an explicit list is never defaulted.
-    .map((server) => ({ kind: "mcp", id: server.id, optional: true }));
+  return (
+    runtimeSettings.mcpServers
+      .filter((server) => !configuredIds.has(server.id))
+      // AUTO-ATTACHED (workspace-default) capability servers are marked optional:
+      // one of them having a broken/expired credential must SKIP that server, not
+      // fail the whole turn before the model runs. The caller only reaches here
+      // when the request omitted `tools`; an explicit list is never defaulted.
+      .map((server) => ({ kind: "mcp", id: server.id, optional: true }))
+  );
 }
 
-export function withDefaultEnabledCapabilityMcpTools(tools: ToolRef[], settings: McpSettings, runtimeSettings: McpSettings): ToolRef[] {
+export function withDefaultEnabledCapabilityMcpTools(
+  tools: ToolRef[],
+  settings: McpSettings,
+  runtimeSettings: McpSettings,
+): ToolRef[] {
   return mergeToolRefs(tools, enabledCapabilityMcpToolRefs(settings, runtimeSettings));
 }
 
@@ -93,17 +102,23 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         ...(resource.subpath ? { subpath: normalizeMountPath(resource.subpath) } : {}),
         ...(resource.provider ? { provider: resource.provider } : {}),
         ...(resource.repositoryId !== undefined ? { repositoryId: resource.repositoryId } : {}),
-        ...(resource.installationId !== undefined ? { installationId: resource.installationId } : {}),
+        ...(resource.installationId !== undefined
+          ? { installationId: resource.installationId }
+          : {}),
         ...(resource.projectId !== undefined ? { projectId: resource.projectId } : {}),
         ...(resource.connectionId ? { connectionId: resource.connectionId } : {}),
-        ...(resource.githubInstallationId ? { githubInstallationId: resource.githubInstallationId } : {}),
+        ...(resource.githubInstallationId
+          ? { githubInstallationId: resource.githubInstallationId }
+          : {}),
         ...(resource.githubRepositoryId ? { githubRepositoryId: resource.githubRepositoryId } : {}),
       };
     }
     const key = stableJson(normalized);
     const mounted = normalized.mountPath ? mountPaths.get(normalized.mountPath) : undefined;
     if (mounted && mounted !== key) {
-      throw new HTTPException(422, { message: `duplicate resource mount path: ${normalized.mountPath}` });
+      throw new HTTPException(422, {
+        message: `duplicate resource mount path: ${normalized.mountPath}`,
+      });
     }
     if (normalized.mountPath) {
       mountPaths.set(normalized.mountPath, key);
@@ -111,7 +126,9 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
     const identity = resourceIdentityKey(normalized);
     const seenIdentity = identities.get(identity);
     if (seenIdentity && seenIdentity !== key) {
-      throw new HTTPException(422, { message: `duplicate resource with different settings: ${identity}` });
+      throw new HTTPException(422, {
+        message: `duplicate resource with different settings: ${identity}`,
+      });
     }
     identities.set(identity, key);
     if (!seenResources.has(key)) {
@@ -122,7 +139,10 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   return out;
 }
 
-export function mergeResourceRefs(existing: ResourceRef[], additions: ResourceRef[]): ResourceRef[] {
+export function mergeResourceRefs(
+  existing: ResourceRef[],
+  additions: ResourceRef[],
+): ResourceRef[] {
   try {
     return mergeContractResourceRefs(existing, additions, { rejectConflicts: true });
   } catch (error) {
@@ -138,8 +158,12 @@ export function validateGitHubRepositorySelectionShape(resources: ResourceRef[])
     if (resource.kind !== "repository") {
       return [];
     }
-    const installationRaw = resource.githubInstallationId ?? (resource.provider === "github" ? resource.installationId : undefined);
-    const repositoryRaw = resource.githubRepositoryId ?? (resource.provider === "github" ? resource.repositoryId : undefined);
+    const installationRaw =
+      resource.githubInstallationId ??
+      (resource.provider === "github" ? resource.installationId : undefined);
+    const repositoryRaw =
+      resource.githubRepositoryId ??
+      (resource.provider === "github" ? resource.repositoryId : undefined);
     if (installationRaw === null && repositoryRaw === null) {
       return [];
     }
@@ -150,7 +174,8 @@ export function validateGitHubRepositorySelectionShape(resources: ResourceRef[])
     const repositoryId = positiveInteger(repositoryRaw);
     if (!installationId || !repositoryId) {
       throw new HTTPException(422, {
-        message: "GitHub App repository resources require positive github_installation_id and github_repository_id",
+        message:
+          "GitHub App repository resources require positive github_installation_id and github_repository_id",
       });
     }
     return [{ installationId, repositoryId }];
@@ -167,20 +192,31 @@ export function validateGitHubRepositorySelectionShape(resources: ResourceRef[])
   return installationId;
 }
 
-export async function validateGitHubRepositorySelection(db: Database, workspaceId: string, resources: ResourceRef[]): Promise<void> {
+export async function validateGitHubRepositorySelection(
+  db: Database,
+  workspaceId: string,
+  resources: ResourceRef[],
+): Promise<void> {
   const installationId = validateGitHubRepositorySelectionShape(resources);
   if (installationId === null) {
     return;
   }
-  const linkedInstallationIds = new Set(await listGitHubInstallationIdsForWorkspace(db, workspaceId));
+  const linkedInstallationIds = new Set(
+    await listGitHubInstallationIdsForWorkspace(db, workspaceId),
+  );
   if (!linkedInstallationIds.has(installationId)) {
     throw new HTTPException(422, {
-      message: "GitHub App repository resources must belong to a GitHub App installation linked to this workspace",
+      message:
+        "GitHub App repository resources must belong to a GitHub App installation linked to this workspace",
     });
   }
 }
 
-export async function validateFileResources(db: Database, workspaceId: string, resources: ResourceRef[]): Promise<void> {
+export async function validateFileResources(
+  db: Database,
+  workspaceId: string,
+  resources: ResourceRef[],
+): Promise<void> {
   const fileIds = new Set<string>();
   for (const resource of resources) {
     if (resource.kind !== "file") {
@@ -195,7 +231,9 @@ export async function validateFileResources(db: Database, workspaceId: string, r
       throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
     }
     if (file.status !== "ready") {
-      throw new HTTPException(422, { message: `file resource ${resource.fileId} is ${file.status}` });
+      throw new HTTPException(422, {
+        message: `file resource ${resource.fileId} is ${file.status}`,
+      });
     }
   }
 }

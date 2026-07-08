@@ -1,8 +1,17 @@
 {
   "name": "@opengeni/events",
   "version": "0.2.8",
-  "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/events"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -12,10 +21,6 @@
       "default": "./src/index.ts"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -33,10 +38,5 @@
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/events"
   }
 }

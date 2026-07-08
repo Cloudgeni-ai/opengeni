@@ -53,7 +53,9 @@ class FakeBackend implements RoutableBackendSession {
 
   async exec(args: unknown): Promise<{ stdout: string; exitCode: number }> {
     if (this.fenceUntilEpoch !== null && this.epochProvider() <= this.fenceUntilEpoch) {
-      const err = new Error("sandbox lease superseded; op fenced by a stale epoch") as Error & { fenced: boolean };
+      const err = new Error("sandbox lease superseded; op fenced by a stale epoch") as Error & {
+        fenced: boolean;
+      };
       err.fenced = true;
       throw err;
     }
@@ -191,7 +193,11 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
         if (pointer.activeSandboxId === null) {
           return { session: modal, sandboxId: null, kind: "modal" };
         }
-        return { session: byId[pointer.activeSandboxId]!, sandboxId: pointer.activeSandboxId, kind: "selfhosted" };
+        return {
+          session: byId[pointer.activeSandboxId]!,
+          sandboxId: pointer.activeSandboxId,
+          kind: "selfhosted",
+        };
       },
     });
 
@@ -300,7 +306,9 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.kind).toBe("selfhosted");
     expect(r.sandboxId).toBe("sbx-self");
     // The session reaches the enrollment's agent subject.
-    const exec = (await (r.session as { exec: (a: unknown) => Promise<{ stdout: string }> }).exec({ cmd: "echo $HOSTNAME" }));
+    const exec = await (r.session as { exec: (a: unknown) => Promise<{ stdout: string }> }).exec({
+      cmd: "echo $HOSTNAME",
+    });
     expect(exec.stdout.trim()).toBe("the-laptop");
     // The op carried the swap's active_epoch as the fence.
     expect(mock.requests[0]?.req.epoch).toBe(7);
@@ -325,7 +333,13 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       environment: env,
     });
     const r = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
-    const manifest = (r.session as { state: { manifest: { resolveEnvironment(): Promise<Record<string, string>>; root: string } } }).state.manifest;
+    const manifest = (
+      r.session as {
+        state: {
+          manifest: { resolveEnvironment(): Promise<Record<string, string>>; root: string };
+        };
+      }
+    ).state.manifest;
     expect(await manifest.resolveEnvironment()).toEqual(env);
     expect(manifest.root).toBe("/workspace");
   });
@@ -383,7 +397,9 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 })).rejects.toThrow(/cannot be established/);
+    await expect(resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 })).rejects.toThrow(
+      /cannot be established/,
+    );
   });
 
   test("unknown sandbox id -> unresolvable", async () => {
@@ -395,7 +411,9 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "ghost", activeEpoch: 1 })).rejects.toThrow(/not found/);
+    await expect(resolve({ activeSandboxId: "ghost", activeEpoch: 1 })).rejects.toThrow(
+      /not found/,
+    );
   });
 
   test("end-to-end: proxy + real resolver, swap Modal->selfhosted lands the op on the laptop", async () => {
@@ -410,7 +428,10 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => laptop,
       relay: RELAY,
     });
-    const proxy = new RoutingSandboxSession({ readPointer: ptr.read, resolveActiveBackend: resolve });
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
 
     // Before swap: the op runs on the group Modal box.
     expect(((await proxy.exec({ cmd: "uname" })) as { stdout: string }).stdout).toBe("group-modal");
@@ -433,7 +454,11 @@ describe("RoutingSandboxSession — native-desktop surface (machine-primary comp
     const proxy = new RoutingSandboxSession({
       defaultResolved: { session: native, sandboxId: "sbx-self", kind: "selfhosted" },
       readPointer: ptr.read,
-      resolveActiveBackend: async () => ({ session: native, sandboxId: "sbx-self", kind: "selfhosted" }),
+      resolveActiveBackend: async () => ({
+        session: native,
+        sandboxId: "sbx-self",
+        kind: "selfhosted",
+      }),
     });
 
     // The REAL discriminator selects the native computer for this proxy.
@@ -501,7 +526,11 @@ describe("RoutingSandboxSession — native-desktop surface (machine-primary comp
     const proxy = new RoutingSandboxSession({
       defaultResolved: { session: native, sandboxId: "sbx-self", kind: "selfhosted" },
       readPointer: ptr.read,
-      resolveActiveBackend: async () => ({ session: native, sandboxId: "sbx-self", kind: "selfhosted" }),
+      resolveActiveBackend: async () => ({
+        session: native,
+        sandboxId: "sbx-self",
+        kind: "selfhosted",
+      }),
     });
 
     const shot = await proxy.screenshot!();

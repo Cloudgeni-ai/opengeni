@@ -7,7 +7,6 @@ import {
   recordingStorageKey,
   contentTypeForCodec,
   extForCodec,
-  RecordingError,
   RecordingUnavailableError,
   type RecordingProcess,
 } from "../src/sandbox/recording";
@@ -16,11 +15,16 @@ import {
 // (formatted-string-with-banner) contract. The recording loop reads bytes via a
 // DIRECT `base64 <path>` exec (NOT readFile), so the mock answers stat + base64
 // over the same exec channel.
-function makeMockSession(opts: { fileBytes?: Uint8Array | null; statSize?: number | "MISSING" } = {}) {
+function makeMockSession(
+  opts: { fileBytes?: Uint8Array | null; statSize?: number | "MISSING" } = {},
+) {
   const execCalls: string[] = [];
   const base64Calls: string[] = [];
   const fmt = (body: string) => `Chunk ID: a\nProcess exited with code 0\nOutput:\n${body}`;
-  const bytesFor = () => (opts.fileBytes === null ? new Uint8Array() : (opts.fileBytes ?? new Uint8Array([1, 2, 3, 4, 5])));
+  const bytesFor = () =>
+    opts.fileBytes === null
+      ? new Uint8Array()
+      : (opts.fileBytes ?? new Uint8Array([1, 2, 3, 4, 5]));
   const session: Record<string, unknown> = {
     execCommand: async (args: { cmd: string }) => {
       execCalls.push(args.cmd);
@@ -32,7 +36,9 @@ function makeMockSession(opts: { fileBytes?: Uint8Array | null; statSize?: numbe
         base64Calls.push(args.cmd);
         // base64 typically wraps at 76 cols + a trailing newline; the reader
         // strips all whitespace, so emit a realistic wrapped body.
-        const b64 = Buffer.from(bytesFor()).toString("base64").replace(/(.{4})/g, "$1\n");
+        const b64 = Buffer.from(bytesFor())
+          .toString("base64")
+          .replace(/(.{4})/g, "$1\n");
         return fmt(b64 + "\n");
       }
       return fmt("");
@@ -117,8 +123,14 @@ describe("recording loop (P4.3)", () => {
     const bytes = new Uint8Array([7, 7, 7, 7]);
     const { session, base64Calls } = makeMockSession({ fileBytes: bytes });
     const proc: RecordingProcess = {
-      recordingId: "rec-tmp", codec: "vp9-webm", boxPath: "/tmp/og-rec-rec-tmp.webm",
-      pidFile: "/tmp/p", dimensions: [1280, 800], framerate: 15, startedAt: Date.now(), display: ":0",
+      recordingId: "rec-tmp",
+      codec: "vp9-webm",
+      boxPath: "/tmp/og-rec-rec-tmp.webm",
+      pidFile: "/tmp/p",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
     };
     const result = await readRecordingBytes(session, proc, 268_435_456);
     expect(result.bytes).toEqual(bytes);
@@ -128,43 +140,75 @@ describe("recording loop (P4.3)", () => {
   test("F8: an oversize file fails max-bytes-exceeded (never uploads a truncated video)", async () => {
     const { session } = makeMockSession({ statSize: 999_999_999 });
     const proc: RecordingProcess = {
-      recordingId: "rec-5", codec: "h264-mp4", boxPath: "/tmp/og-rec-rec-5.mp4",
-      pidFile: "/tmp/p", dimensions: [1280, 800], framerate: 15, startedAt: Date.now(), display: ":0",
+      recordingId: "rec-5",
+      codec: "h264-mp4",
+      boxPath: "/tmp/og-rec-rec-5.mp4",
+      pidFile: "/tmp/p",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
     };
-    await expect(readRecordingBytes(session, proc, 1000)).rejects.toMatchObject({ reason: "max-bytes-exceeded" });
+    await expect(readRecordingBytes(session, proc, 1000)).rejects.toMatchObject({
+      reason: "max-bytes-exceeded",
+    });
   });
 
   test("a missing box file fails box-death", async () => {
     const { session } = makeMockSession({ statSize: "MISSING" });
     const proc: RecordingProcess = {
-      recordingId: "rec-6", codec: "h264-mp4", boxPath: "/tmp/og-rec-rec-6.mp4",
-      pidFile: "/tmp/p", dimensions: [1280, 800], framerate: 15, startedAt: Date.now(), display: ":0",
+      recordingId: "rec-6",
+      codec: "h264-mp4",
+      boxPath: "/tmp/og-rec-rec-6.mp4",
+      pidFile: "/tmp/p",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
     };
     await expect(readRecordingBytes(session, proc)).rejects.toMatchObject({ reason: "box-death" });
   });
 
   test("a session without exec/execCommand fails RecordingUnavailableError", async () => {
     const proc: RecordingProcess = {
-      recordingId: "rec-7", codec: "h264-mp4", boxPath: "/tmp/x", pidFile: "/tmp/p",
-      dimensions: [1280, 800], framerate: 15, startedAt: Date.now(), display: ":0",
+      recordingId: "rec-7",
+      codec: "h264-mp4",
+      boxPath: "/tmp/x",
+      pidFile: "/tmp/p",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
     };
     // No exec and no execCommand: the box cannot run the stat/base64 read at all.
-    await expect(readRecordingBytes({ readFile: async () => new Uint8Array() }, proc)).rejects.toBeInstanceOf(RecordingUnavailableError);
+    await expect(
+      readRecordingBytes({ readFile: async () => new Uint8Array() }, proc),
+    ).rejects.toBeInstanceOf(RecordingUnavailableError);
   });
 
   test("deleteRecordingArtifacts removes the file, pid, and log (called only post-PUT, F9)", async () => {
     const { session, execCalls } = makeMockSession();
     const proc: RecordingProcess = {
-      recordingId: "rec-8", codec: "h264-mp4", boxPath: "/tmp/og-rec-rec-8.mp4", pidFile: "/tmp/og-rec-rec-8.pid",
-      dimensions: [1280, 800], framerate: 15, startedAt: Date.now(), display: ":0",
+      recordingId: "rec-8",
+      codec: "h264-mp4",
+      boxPath: "/tmp/og-rec-rec-8.mp4",
+      pidFile: "/tmp/og-rec-rec-8.pid",
+      dimensions: [1280, 800],
+      framerate: 15,
+      startedAt: Date.now(),
+      display: ":0",
     };
     await deleteRecordingArtifacts(session, proc);
-    expect(execCalls[0]).toContain("rm -f /tmp/og-rec-rec-8.mp4 /tmp/og-rec-rec-8.pid /tmp/og-rec-rec-8.log");
+    expect(execCalls[0]).toContain(
+      "rm -f /tmp/og-rec-rec-8.mp4 /tmp/og-rec-rec-8.pid /tmp/og-rec-rec-8.log",
+    );
   });
 
   test("storage key + codec helpers", () => {
     expect(recordingStorageKey("ws", "sess", "rec", "h264-mp4")).toBe("recordings/ws/sess/rec.mp4");
-    expect(recordingStorageKey("ws", "sess", "rec", "vp9-webm")).toBe("recordings/ws/sess/rec.webm");
+    expect(recordingStorageKey("ws", "sess", "rec", "vp9-webm")).toBe(
+      "recordings/ws/sess/rec.webm",
+    );
     expect(contentTypeForCodec("h264-mp4")).toBe("video/mp4");
     expect(contentTypeForCodec("vp9-webm")).toBe("video/webm");
     expect(extForCodec("h264-mp4")).toBe("mp4");

@@ -56,34 +56,43 @@ describe("catalog import persistence", () => {
       attributionNote: "MIT attribution",
     });
 
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:one-a",
-      importBatchId: batch1.id,
-      providerDomain: "one.example",
-      mcpUrl: "https://one.example/mcp",
-      name: "One",
-      tier: "verified",
-      provenance: "detected",
-      logoAssetPath: "catalog-assets/integrations-sh/logos/one.example/logo.png",
-    }));
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:two-a",
-      importBatchId: batch1.id,
-      providerDomain: "two.example",
-      mcpUrl: "https://two.example/mcp",
-      name: "Two",
-      tier: "community",
-      provenance: "discovered",
-    }));
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:one-renamed",
-      importBatchId: batch1.id,
-      providerDomain: "one.example",
-      mcpUrl: "https://one.example/mcp",
-      name: "One Renamed",
-      tier: "verified",
-      provenance: "detected",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:one-a",
+        importBatchId: batch1.id,
+        providerDomain: "one.example",
+        mcpUrl: "https://one.example/mcp",
+        name: "One",
+        tier: "verified",
+        provenance: "detected",
+        logoAssetPath: "catalog-assets/integrations-sh/logos/one.example/logo.png",
+      }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:two-a",
+        importBatchId: batch1.id,
+        providerDomain: "two.example",
+        mcpUrl: "https://two.example/mcp",
+        name: "Two",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:one-renamed",
+        importBatchId: batch1.id,
+        providerDomain: "one.example",
+        mcpUrl: "https://one.example/mcp",
+        name: "One Renamed",
+        tier: "verified",
+        provenance: "detected",
+      }),
+    );
 
     const afterUpsert = await admin<{ n: number }[]>`
       SELECT count(*)::int AS n
@@ -122,27 +131,34 @@ describe("catalog import persistence", () => {
       snapshotRef: "empty-abort-seed",
       attributionNote: "MIT attribution",
     });
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:empty-abort",
-      importBatchId: batch.id,
-      providerDomain: "empty-abort.example",
-      mcpUrl: "https://empty-abort.example/mcp",
-      name: "Empty Abort",
-      tier: "verified",
-      provenance: "detected",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:empty-abort",
+        importBatchId: batch.id,
+        providerDomain: "empty-abort.example",
+        mcpUrl: "https://empty-abort.example/mcp",
+        name: "Empty Abort",
+        tier: "verified",
+        provenance: "detected",
+      }),
+    );
     const before = await admin<{ n: number }[]>`SELECT count(*)::int AS n FROM import_batches`;
 
-    await expect(importIntegrationsCatalog({
-      db,
-      snapshot: { generatedAt: "2026-07-04T00:00:00.000Z", importRows: [] },
-      storage: null,
-      storeLogos: false,
-    })).rejects.toThrow("zero importable rows");
+    await expect(
+      importIntegrationsCatalog({
+        db,
+        snapshot: { generatedAt: "2026-07-04T00:00:00.000Z", importRows: [] },
+        storage: null,
+        storeLogos: false,
+      }),
+    ).rejects.toThrow("zero importable rows");
 
     const after = await admin<{ n: number }[]>`SELECT count(*)::int AS n FROM import_batches`;
     expect(after[0]?.n).toBe(before[0]?.n);
-    const rows = await admin<{ stale: boolean; stale_at: Date | null; import_batch_id: string | null }[]>`
+    const rows = await admin<
+      { stale: boolean; stale_at: Date | null; import_batch_id: string | null }[]
+    >`
       SELECT stale, stale_at, import_batch_id
       FROM capability_catalog_items
       WHERE source = 'registry'
@@ -164,15 +180,18 @@ describe("catalog import persistence", () => {
       attributionNote: "MIT attribution",
     });
     const capabilityId = "mcp:integrations-sh:shared-preference";
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: capabilityId,
-      importBatchId: batch.id,
-      providerDomain: "shared-preference.example",
-      mcpUrl: "https://shared-preference.example/mcp",
-      name: "Global Shared Preference",
-      tier: "community",
-      provenance: "discovered",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: capabilityId,
+        importBatchId: batch.id,
+        providerDomain: "shared-preference.example",
+        mcpUrl: "https://shared-preference.example/mcp",
+        name: "Global Shared Preference",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
     await upsertCapabilityCatalogItem(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -206,15 +225,18 @@ describe("catalog import persistence", () => {
       attributionNote: "MIT attribution",
     });
     const capabilityId = "mcp:integrations-sh:enabled-dedupe";
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: capabilityId,
-      importBatchId: batch.id,
-      providerDomain: "enabled-dedupe.example",
-      mcpUrl: "https://global.enabled-dedupe.example/mcp",
-      name: "Global Enabled Dedupe",
-      tier: "community",
-      provenance: "discovered",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: capabilityId,
+        importBatchId: batch.id,
+        providerDomain: "enabled-dedupe.example",
+        mcpUrl: "https://global.enabled-dedupe.example/mcp",
+        name: "Global Enabled Dedupe",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
     await upsertCapabilityCatalogItem(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -249,33 +271,42 @@ describe("catalog import persistence", () => {
       snapshotRef: "multi-stale-seed",
       attributionNote: "MIT attribution",
     });
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:multi-active",
-      importBatchId: batch1.id,
-      providerDomain: "multi-active.example",
-      mcpUrl: "https://multi-active.example/mcp",
-      name: "Multi Active",
-      tier: "verified",
-      provenance: "detected",
-    }));
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:multi-stale-one",
-      importBatchId: batch1.id,
-      providerDomain: "multi-stale-one.example",
-      mcpUrl: "https://multi-stale-one.example/mcp",
-      name: "Multi Stale One",
-      tier: "community",
-      provenance: "discovered",
-    }));
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:multi-stale-two",
-      importBatchId: batch1.id,
-      providerDomain: "multi-stale-two.example",
-      mcpUrl: "https://multi-stale-two.example/mcp",
-      name: "Multi Stale Two",
-      tier: "community",
-      provenance: "discovered",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:multi-active",
+        importBatchId: batch1.id,
+        providerDomain: "multi-active.example",
+        mcpUrl: "https://multi-active.example/mcp",
+        name: "Multi Active",
+        tier: "verified",
+        provenance: "detected",
+      }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:multi-stale-one",
+        importBatchId: batch1.id,
+        providerDomain: "multi-stale-one.example",
+        mcpUrl: "https://multi-stale-one.example/mcp",
+        name: "Multi Stale One",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:multi-stale-two",
+        importBatchId: batch1.id,
+        providerDomain: "multi-stale-two.example",
+        mcpUrl: "https://multi-stale-two.example/mcp",
+        name: "Multi Stale Two",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
 
     const batch2 = await createImportBatch(db, {
       source: "integrations.sh",
@@ -284,23 +315,28 @@ describe("catalog import persistence", () => {
       attributionNote: "MIT attribution",
     });
     const staleDomains = new Set(["multi-stale-one.example", "multi-stale-two.example"]);
-    const activeKeys = (await listRegistryCatalogSurfaceKeys(db))
-      .filter((key) => !staleDomains.has(key.providerDomain));
+    const activeKeys = (await listRegistryCatalogSurfaceKeys(db)).filter(
+      (key) => !staleDomains.has(key.providerDomain),
+    );
 
     const staleCount = await markStaleRegistryCatalogItems(db, activeKeys, batch2.id);
 
     expect(staleCount).toBe(2);
-    const rows = await admin<{ provider_domain: string; stale: boolean; import_batch_id: string | null }[]>`
+    const rows = await admin<
+      { provider_domain: string; stale: boolean; import_batch_id: string | null }[]
+    >`
       SELECT provider_domain, stale, import_batch_id
       FROM capability_catalog_items
       WHERE source = 'registry'
         AND provider_domain IN ('multi-stale-one.example', 'multi-stale-two.example')
       ORDER BY provider_domain`;
-    expect(rows.map((row) => ({
-      provider_domain: row.provider_domain,
-      stale: row.stale,
-      import_batch_id: row.import_batch_id,
-    }))).toEqual([
+    expect(
+      rows.map((row) => ({
+        provider_domain: row.provider_domain,
+        stale: row.stale,
+        import_batch_id: row.import_batch_id,
+      })),
+    ).toEqual([
       { provider_domain: "multi-stale-one.example", stale: true, import_batch_id: batch2.id },
       { provider_domain: "multi-stale-two.example", stale: true, import_batch_id: batch2.id },
     ]);
@@ -315,32 +351,39 @@ describe("catalog import persistence", () => {
       snapshotRef: "stale-list-seed",
       attributionNote: "MIT attribution",
     });
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:list-active",
-      importBatchId: batch1.id,
-      providerDomain: "list-active.example",
-      mcpUrl: "https://list-active.example/mcp",
-      name: "List Active",
-      tier: "verified",
-      provenance: "detected",
-    }));
-    await upsertRegistryCapabilityCatalogItem(db, registryRow({
-      id: "mcp:integrations-sh:list-stale",
-      importBatchId: batch1.id,
-      providerDomain: "list-stale.example",
-      mcpUrl: "https://list-stale.example/mcp",
-      name: "List Stale",
-      tier: "community",
-      provenance: "discovered",
-    }));
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:list-active",
+        importBatchId: batch1.id,
+        providerDomain: "list-active.example",
+        mcpUrl: "https://list-active.example/mcp",
+        name: "List Active",
+        tier: "verified",
+        provenance: "detected",
+      }),
+    );
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: "mcp:integrations-sh:list-stale",
+        importBatchId: batch1.id,
+        providerDomain: "list-stale.example",
+        mcpUrl: "https://list-stale.example/mcp",
+        name: "List Stale",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
     const batch2 = await createImportBatch(db, {
       source: "integrations.sh",
       snapshotDate: new Date("2026-07-04T00:00:00.000Z"),
       snapshotRef: "stale-list-refresh",
       attributionNote: "MIT attribution",
     });
-    const activeKeys = (await listRegistryCatalogSurfaceKeys(db))
-      .filter((key) => key.providerDomain !== "list-stale.example");
+    const activeKeys = (await listRegistryCatalogSurfaceKeys(db)).filter(
+      (key) => key.providerDomain !== "list-stale.example",
+    );
     expect(await markStaleRegistryCatalogItems(db, activeKeys, batch2.id)).toBe(1);
 
     const catalog = await listCapabilityCatalogItems(db, ws.workspaceId);

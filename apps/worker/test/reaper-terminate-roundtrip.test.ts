@@ -43,7 +43,8 @@ function makeFakeModalClient() {
       return {
         kill: async () => {},
         closed: false,
-        persistWorkspace: async () => new TextEncoder().encode("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-snap-123\"}"),
+        persistWorkspace: async () =>
+          new TextEncoder().encode('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-123"}'),
         modal: { images: { delete: async () => {} } },
       };
     },
@@ -140,7 +141,9 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(resumeCalls).toEqual(["sb-live-123"]); // resumed BY ID, not thrown
     // persistWorkspace was captured and folded onto the lease BEFORE terminate.
     expect(persistedArchives).toHaveLength(1);
-    expect(Buffer.from(persistedArchives[0]!, "base64").toString("utf8")).toContain("MODAL_SANDBOX_FS_SNAPSHOT_V1");
+    expect(Buffer.from(persistedArchives[0]!, "base64").toString("utf8")).toContain(
+      "MODAL_SANDBOX_FS_SNAPSHOT_V1",
+    );
     expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID, AFTER persist
   });
 
@@ -163,7 +166,12 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
         },
         async resume() {
           selfhostedResumeCalls.push(backend);
-          return { kill: async () => { selfhostedDeleteCalls.push("kill"); }, closed: false };
+          return {
+            kill: async () => {
+              selfhostedDeleteCalls.push("kill");
+            },
+            closed: false,
+          };
         },
         async serializeSessionState(state: Record<string, unknown>) {
           return { ...state };
@@ -246,22 +254,28 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       backendId: "modal",
     };
     const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
-    const lease = { sandboxGroupId: "group-nosnap", leaseEpoch: 1, backend: "modal", resumeBackendId: "modal", resumeState };
+    const lease = {
+      sandboxGroupId: "group-nosnap",
+      leaseEpoch: 1,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState,
+    };
     const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
 
-    const persistArchive = async () => ({ wrote: true as const, priorArchive: null, priorArchivePrev: null });
+    const persistArchive = async () => ({
+      wrote: true as const,
+      priorArchive: null,
+      priorArchivePrev: null,
+    });
 
     // The snapshot failure must propagate (so the caller skips + leaves the lease
     // draining); the box is NEVER terminated with un-captured files. The failing
     // client is injected explicitly (no global @opengeni/runtime mock).
     await expect(
-      terminateProviderBox(
-        settings,
-        lease as never,
-        observability,
-        persistArchive,
-        ((backend: string) => (backend === "modal" ? failClient : undefined)) as never,
-      ),
+      terminateProviderBox(settings, lease as never, observability, persistArchive, ((
+        backend: string,
+      ) => (backend === "modal" ? failClient : undefined)) as never),
     ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
     expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
   });

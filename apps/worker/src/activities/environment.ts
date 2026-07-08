@@ -18,10 +18,7 @@ import {
   type Database,
   type VariableSetForRun as WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
-import {
-  createGitHubAppInstallationToken,
-  githubAppBotIdentity,
-} from "@opengeni/github";
+import { createGitHubAppInstallationToken, githubAppBotIdentity } from "@opengeni/github";
 
 // Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
 // attach paths can load the SAME decrypted workspace environment the turn
@@ -116,7 +113,12 @@ export async function sandboxEnvironmentForRun(
     sessionId?: string;
     runId?: string;
   } = {},
-): Promise<{ environment: Record<string, string>; gitToken?: string; gitTokens?: GitTokenSeeds; toolspaceToken?: string }> {
+): Promise<{
+  environment: Record<string, string>;
+  gitToken?: string;
+  gitTokens?: GitTokenSeeds;
+  toolspaceToken?: string;
+}> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
   // paths via stableSandboxEnvironmentForRun) < platform run-scoped git auth
@@ -146,11 +148,11 @@ export async function sandboxEnvironmentForRun(
   // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
   let toolspaceToken: string | undefined;
   if (
-    settings.toolspaceEnabled
-    && settings.delegationSecret
-    && options.scope
-    && options.sessionId
-    && options.runId
+    settings.toolspaceEnabled &&
+    settings.delegationSecret &&
+    options.scope &&
+    options.sessionId &&
+    options.runId
   ) {
     toolspaceToken = await signDelegatedAccessToken(settings.delegationSecret, {
       accountId: options.scope.accountId,
@@ -161,7 +163,10 @@ export async function sandboxEnvironmentForRun(
       sessionId: options.sessionId,
       exp: Math.floor(Date.now() / 1000) + 60 * 60,
     });
-    environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.scope.workspaceId);
+    environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
+      settings,
+      options.scope.workspaceId,
+    );
   }
   const selections = gitCredentialSelections(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
@@ -177,7 +182,10 @@ export async function sandboxEnvironmentForRun(
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   if (options.deferGitHubToken) {
-    applyGitAuthPointerEnvironment(environment, await resolveRunGitIdentityWithSelections(settings, selections, options));
+    applyGitAuthPointerEnvironment(
+      environment,
+      await resolveRunGitIdentityWithSelections(settings, selections, options),
+    );
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   // Run-scoped sandbox preparation for repository resources. GitHub retains the
@@ -265,7 +273,9 @@ async function mintRunGitTokensWithIdentity(
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
       if (!minted.token) {
-        throw new Error("connection-credential provider (gitCredentials) did not return a token for a token request");
+        throw new Error(
+          "connection-credential provider (gitCredentials) did not return a token for a token request",
+        );
       }
       token = minted.token;
       if (minted.identity) {
@@ -365,7 +375,9 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
     const ref = gitCredentialRepositoryRef(resource, provider);
     entry.repositoryRefs.push(ref);
     if (provider === "github") {
-      const installationId = positiveInteger(resource.githubInstallationId ?? resource.installationId);
+      const installationId = positiveInteger(
+        resource.githubInstallationId ?? resource.installationId,
+      );
       const repositoryId = positiveInteger(resource.githubRepositoryId ?? resource.repositoryId);
       if (installationId && repositoryId) {
         if (entry.installationId > 0 && entry.installationId !== installationId) {
@@ -380,11 +392,16 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
   return [...byProvider.values()];
 }
 
-function repositoryCredentialProvider(resource: Extract<ResourceRef, { kind: "repository" }>): GitCredentialProvider | null {
+function repositoryCredentialProvider(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): GitCredentialProvider | null {
   if (resource.provider) {
     return resource.provider;
   }
-  if (positiveInteger(resource.githubInstallationId) && positiveInteger(resource.githubRepositoryId)) {
+  if (
+    positiveInteger(resource.githubInstallationId) &&
+    positiveInteger(resource.githubRepositoryId)
+  ) {
     return "github";
   }
   return null;

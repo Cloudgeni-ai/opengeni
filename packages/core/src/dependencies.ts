@@ -9,9 +9,22 @@ import type { ManagedAuth } from "./managed-auth-type";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 
 export type SessionWorkflowClient = {
-  signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
-  wakeSessionWorkflow: (input: { accountId: string; workspaceId: string; sessionId: string; workflowId: string }) => Promise<void>;
-  signalApprovalDecision: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
+  signalUserMessage: (input: {
+    sessionId: string;
+    eventId: string;
+    workflowId: string;
+  }) => Promise<void>;
+  wakeSessionWorkflow: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    workflowId: string;
+  }) => Promise<void>;
+  signalApprovalDecision: (input: {
+    sessionId: string;
+    eventId: string;
+    workflowId: string;
+  }) => Promise<void>;
   // Interrupt must reach the workflow whether or not an execution is currently
   // running: a long-lived session that has gone idle (its workflow returned
   // after markSessionIdle) has NO running execution, so a plain
@@ -20,16 +33,35 @@ export type SessionWorkflowClient = {
   // needs the session-workflow args (accountId/workspaceId) to start a fresh
   // run when none is live; the buffered `interrupt` signal is then honored by
   // the workflow's idle-interrupt path (pause goal + mark idle).
-  signalInterrupt: (input: { accountId: string; workspaceId: string; sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
+  signalInterrupt: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    eventId: string;
+    workflowId: string;
+  }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
-  triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }) => Promise<void>;
-  startRigVerification: (input: { workspaceId: string; changeId?: string; versionId?: string; workflowId?: string }) => Promise<void>;
+  triggerScheduledTask: (input: {
+    task: ScheduledTask;
+    agentRunUsageIdempotencyKey?: string;
+    triggerWorkflowId?: string;
+  }) => Promise<void>;
+  startRigVerification: (input: {
+    workspaceId: string;
+    changeId?: string;
+    versionId?: string;
+    workflowId?: string;
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 
 export type DocumentIndexClient = {
-  indexDocument: (input: { accountId: string; workspaceId: string; documentId: string }) => Promise<Document | void>;
+  indexDocument: (input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+  }) => Promise<Document | void>;
 };
 
 export type AppDependencies = {

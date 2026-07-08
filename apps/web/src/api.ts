@@ -10,7 +10,9 @@ export function resolveApiBaseUrl(value: string | undefined): string {
 }
 
 export const apiBaseUrl = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
-export const bundleDeploymentRevision = String(import.meta.env.VITE_OPENGENI_DEPLOYMENT_REVISION ?? "");
+export const bundleDeploymentRevision = String(
+  import.meta.env.VITE_OPENGENI_DEPLOYMENT_REVISION ?? "",
+);
 const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
@@ -26,7 +28,9 @@ export class ApiError extends Error {
 }
 
 export function isApiErrorStatus(error: unknown, status: number): boolean {
-  return (error instanceof ApiError || error instanceof OpenGeniApiError) && error.status === status;
+  return (
+    (error instanceof ApiError || error instanceof OpenGeniApiError) && error.status === status
+  );
 }
 
 /**
@@ -69,7 +73,10 @@ export function configureClientAuth(auth: ClientConfig["auth"]): void {
   activeAuthConfig = auth;
 }
 
-export function authHeadersForAccessKey(value: string | null, auth: ClientConfig["auth"] | null = activeAuthConfig): Record<string, string> {
+export function authHeadersForAccessKey(
+  value: string | null,
+  auth: ClientConfig["auth"] | null = activeAuthConfig,
+): Record<string, string> {
   if (!value) {
     return {};
   }
@@ -100,7 +107,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const text = await response.text();
     throw new ApiError(response.status, text);
   }
-  return await response.json() as T;
+  return (await response.json()) as T;
 }
 
 async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -116,28 +123,38 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
     const text = await response.text();
     throw new Error(`Auth ${response.status}: ${text}`);
   }
-  return await response.json() as T;
+  return (await response.json()) as T;
 }
 
 export async function fetchAuthSession(): Promise<AuthSession | null> {
   return await authRequest<AuthSession | null>("/get-session", { method: "GET" });
 }
 
-export async function signUpEmail(input: { name: string; email: string; password: string }): Promise<unknown> {
+export async function signUpEmail(input: {
+  name: string;
+  email: string;
+  password: string;
+}): Promise<unknown> {
   return await authRequest<unknown>("/sign-up/email", {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
-export async function sendVerificationEmail(input: { email: string }): Promise<{ status: boolean }> {
+export async function sendVerificationEmail(input: {
+  email: string;
+}): Promise<{ status: boolean }> {
   return await authRequest<{ status: boolean }>("/send-verification-email", {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
-export async function signInEmail(input: { email: string; password: string; rememberMe?: boolean }): Promise<unknown> {
+export async function signInEmail(input: {
+  email: string;
+  password: string;
+  rememberMe?: boolean;
+}): Promise<unknown> {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",
     body: JSON.stringify(input),
@@ -151,7 +168,10 @@ export async function signOutManaged(): Promise<unknown> {
 // Completes a password reset. `token` comes from the emailed link
 // (`<PUBLIC_BASE_URL>/reset-password?token=…`); Better Auth mounts this at
 // `/v1/auth/reset-password` and expects `{ newPassword, token }`.
-export async function resetPassword(input: { newPassword: string; token: string }): Promise<unknown> {
+export async function resetPassword(input: {
+  newPassword: string;
+  token: string;
+}): Promise<unknown> {
   return await authRequest<unknown>("/reset-password", {
     method: "POST",
     body: JSON.stringify(input),
@@ -168,9 +188,16 @@ export async function fetchClientConfig(): Promise<ClientConfig> {
 export function shouldReloadForDeploymentRevision(
   config: Pick<ClientConfig, "deploymentRevision">,
   bundleRevision = bundleDeploymentRevision,
-  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof sessionStorage === "undefined" ? null : sessionStorage,
+  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof sessionStorage === "undefined"
+    ? null
+    : sessionStorage,
 ): boolean {
-  if (!bundleRevision || !config.deploymentRevision || bundleRevision === config.deploymentRevision || !storage) {
+  if (
+    !bundleRevision ||
+    !config.deploymentRevision ||
+    bundleRevision === config.deploymentRevision ||
+    !storage
+  ) {
     return false;
   }
   const key = `${deploymentReloadStoragePrefix}${config.deploymentRevision}`;

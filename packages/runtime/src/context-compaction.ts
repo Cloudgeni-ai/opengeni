@@ -74,8 +74,7 @@ export function isUserMessage(item: unknown): boolean {
 /** True for our synthetic compaction summary item. */
 export function isCompactionSummary(item: unknown): boolean {
   return (
-    isUserMessage(item)
-    && (item as Record<string, unknown>)[COMPACTION_SUMMARY_MARKER] === true
+    isUserMessage(item) && (item as Record<string, unknown>)[COMPACTION_SUMMARY_MARKER] === true
   );
 }
 
@@ -102,10 +101,14 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
 }
 
 export function clampCompactionThresholdRatio(value: number | undefined | null): number {
-  const numeric = typeof value === "number" && Number.isFinite(value)
-    ? value
-    : DEFAULT_COMPACTION_THRESHOLD_RATIO;
-  return Math.min(MAX_COMPACTION_THRESHOLD_RATIO, Math.max(MIN_COMPACTION_THRESHOLD_RATIO, numeric));
+  const numeric =
+    typeof value === "number" && Number.isFinite(value)
+      ? value
+      : DEFAULT_COMPACTION_THRESHOLD_RATIO;
+  return Math.min(
+    MAX_COMPACTION_THRESHOLD_RATIO,
+    Math.max(MIN_COMPACTION_THRESHOLD_RATIO, numeric),
+  );
 }
 
 export function clientCompactionThresholdTokens(input: {
@@ -113,7 +116,10 @@ export function clientCompactionThresholdTokens(input: {
   contextReservedOutputTokens: number;
   contextCompactionThresholdRatio?: number | null;
 }): number {
-  return Math.floor(Math.max(0, input.contextWindowTokens) * clampCompactionThresholdRatio(input.contextCompactionThresholdRatio));
+  return Math.floor(
+    Math.max(0, input.contextWindowTokens) *
+      clampCompactionThresholdRatio(input.contextCompactionThresholdRatio),
+  );
 }
 
 export type ClientCompactionDecision = {
@@ -169,7 +175,10 @@ export class CompactionNeededError extends Error {
   }
 }
 
-export function findCompactionNeededError(error: unknown, seen = new WeakSet<object>()): CompactionNeededError | null {
+export function findCompactionNeededError(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): CompactionNeededError | null {
   if (error instanceof CompactionNeededError) {
     return error;
   }
@@ -182,8 +191,7 @@ export function findCompactionNeededError(error: unknown, seen = new WeakSet<obj
   seen.add(error);
   const record = error as Record<string, unknown>;
   return (
-    findCompactionNeededError(record.cause, seen)
-    ?? findCompactionNeededError(record.error, seen)
+    findCompactionNeededError(record.cause, seen) ?? findCompactionNeededError(record.error, seen)
   );
 }
 
@@ -193,7 +201,10 @@ export function findCompactionNeededError(error: unknown, seen = new WeakSet<obj
  * item. Retained for the read-path budget guard only; the client compaction
  * rebuild no longer uses a keep-recent tail.
  */
-export function findKeepBoundary(items: readonly CompactionItem[], keepRecentTokens: number): number {
+export function findKeepBoundary(
+  items: readonly CompactionItem[],
+  keepRecentTokens: number,
+): number {
   const boundaries: number[] = [];
   for (let i = 0; i < items.length; i += 1) {
     if (isUserMessage(items[i])) {
@@ -283,18 +294,23 @@ export type DeterministicFallbackCompactionInput = {
   targetTokens?: number;
 };
 
-export function buildDeterministicFallbackCompactionHistory(input: DeterministicFallbackCompactionInput): CompactionItem[] {
+export function buildDeterministicFallbackCompactionHistory(
+  input: DeterministicFallbackCompactionInput,
+): CompactionItem[] {
   const sourceTokens = Math.max(1, estimateTokens(input.items));
-  const requestedTarget = typeof input.targetTokens === "number" && input.targetTokens > 0
-    ? Math.floor(input.targetTokens)
-    : Math.floor(sourceTokens * COMPACTION_FALLBACK_TARGET_RATIO);
+  const requestedTarget =
+    typeof input.targetTokens === "number" && input.targetTokens > 0
+      ? Math.floor(input.targetTokens)
+      : Math.floor(sourceTokens * COMPACTION_FALLBACK_TARGET_RATIO);
   const targetTokens = Math.max(1, Math.min(requestedTarget, Math.max(1, sourceTokens - 1)));
-  const summaryItem = buildSummaryItem([
-    "Non-LLM context compaction fallback.",
-    input.cause ? `Summarizer failure: ${input.cause}` : "Summarizer failure: unavailable.",
-    "Older assistant, tool, reasoning, and image history was dropped deterministically.",
-    "Retained context above is limited to initial instructions and the most recent user messages that fit the fallback budget; oversized retained messages may be middle-truncated.",
-  ].join("\n"));
+  const summaryItem = buildSummaryItem(
+    [
+      "Non-LLM context compaction fallback.",
+      input.cause ? `Summarizer failure: ${input.cause}` : "Summarizer failure: unavailable.",
+      "Older assistant, tool, reasoning, and image history was dropped deterministically.",
+      "Retained context above is limited to initial instructions and the most recent user messages that fit the fallback budget; oversized retained messages may be middle-truncated.",
+    ].join("\n"),
+  );
   const summaryTokens = estimateItemTokens(summaryItem);
   let remaining = Math.max(0, targetTokens - summaryTokens);
   const retainedInstructions: CompactionItem[] = [];
@@ -326,7 +342,10 @@ export function buildDeterministicFallbackCompactionHistory(input: Deterministic
     if (!isUserMessage(item) || isCompactionSummary(item)) {
       continue;
     }
-    const capped = compactMessageToEstimatedItemBudget(item, Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, remaining));
+    const capped = compactMessageToEstimatedItemBudget(
+      item,
+      Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, remaining),
+    );
     if (!capped) {
       continue;
     }
@@ -370,7 +389,10 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   return next;
 }
 
-function compactMessageToEstimatedItemBudget(item: CompactionItem, maxItemTokens: number): CompactionItem | null {
+function compactMessageToEstimatedItemBudget(
+  item: CompactionItem,
+  maxItemTokens: number,
+): CompactionItem | null {
   if (maxItemTokens <= 0) {
     return null;
   }
@@ -474,7 +496,11 @@ export function renderCompactionPromptInputForChat(
   const last = rendered.at(-1);
   const prefix = rendered.slice(0, -1);
   let kept = prefix.slice();
-  while (kept.length > 0 && transcriptLength([...kept, last].filter((line): line is string => line !== undefined)) > maxChars) {
+  while (
+    kept.length > 0 &&
+    transcriptLength([...kept, last].filter((line): line is string => line !== undefined)) >
+      maxChars
+  ) {
     kept.shift();
   }
   const lines = [...kept, last].filter((line): line is string => line !== undefined);

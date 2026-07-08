@@ -16,10 +16,12 @@ describe("manual scheduled-task trigger idempotency token", () => {
     const token1 = scheduledTaskTriggerToken("my-stable-token");
     const token2 = scheduledTaskTriggerToken("my-stable-token");
     expect(token1).toBe(token2);
-    expect(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, token1))
-      .toBe(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, token2));
-    expect(manualScheduledTaskTriggerWorkflowId(TASK, token1))
-      .toBe(manualScheduledTaskTriggerWorkflowId(TASK, token2));
+    expect(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, token1)).toBe(
+      manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, token2),
+    );
+    expect(manualScheduledTaskTriggerWorkflowId(TASK, token1)).toBe(
+      manualScheduledTaskTriggerWorkflowId(TASK, token2),
+    );
   });
 
   test("usage key and workflow id share the token so charge and run dedupe together", () => {
@@ -34,8 +36,12 @@ describe("manual scheduled-task trigger idempotency token", () => {
     const a = scheduledTaskTriggerToken();
     const b = scheduledTaskTriggerToken();
     expect(a).not.toBe(b);
-    expect(manualScheduledTaskTriggerWorkflowId(TASK, a)).not.toBe(manualScheduledTaskTriggerWorkflowId(TASK, b));
-    expect(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, a)).not.toBe(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, b));
+    expect(manualScheduledTaskTriggerWorkflowId(TASK, a)).not.toBe(
+      manualScheduledTaskTriggerWorkflowId(TASK, b),
+    );
+    expect(manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, a)).not.toBe(
+      manualScheduledTaskTriggerUsageKey(WORKSPACE, TASK, b),
+    );
   });
 
   test("blank / whitespace-only trigger id is treated as absent (fresh token)", () => {

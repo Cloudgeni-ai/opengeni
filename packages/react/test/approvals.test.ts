@@ -4,7 +4,11 @@ import { approvalsFromRequiresAction, projectPendingApprovals } from "../src/app
 
 let sequence = 0;
 
-function event(type: string, payload: unknown, options: { turnId?: string | null } = {}): SessionEvent {
+function event(
+  type: string,
+  payload: unknown,
+  options: { turnId?: string | null } = {},
+): SessionEvent {
   sequence += 1;
   return {
     id: `evt-${sequence}`,
@@ -38,7 +42,10 @@ describe("approvalsFromRequiresAction", () => {
       ],
     });
     expect(approvals.map((approval) => approval.id)).toEqual(["appr-1", "call-2", "raw-3", "3"]);
-    expect(approvals[0]).toMatchObject({ name: "run_command", arguments: { cmd: "rm -rf /tmp/x" } });
+    expect(approvals[0]).toMatchObject({
+      name: "run_command",
+      arguments: { cmd: "rm -rf /tmp/x" },
+    });
     expect(approvals[3]!.name).toBe("approval");
   });
 
@@ -99,14 +106,18 @@ describe("projectPendingApprovals", () => {
 
   test("the owning turn failing or being cancelled clears its approvals", () => {
     reset();
-    expect(projectPendingApprovals([
-      requiresAction([{ id: "appr-1", name: "run_command" }]),
-      event("turn.failed", { error: "boom" }),
-    ])).toEqual([]);
-    expect(projectPendingApprovals([
-      requiresAction([{ id: "appr-2", name: "run_command" }]),
-      event("turn.cancelled", {}),
-    ])).toEqual([]);
+    expect(
+      projectPendingApprovals([
+        requiresAction([{ id: "appr-1", name: "run_command" }]),
+        event("turn.failed", { error: "boom" }),
+      ]),
+    ).toEqual([]);
+    expect(
+      projectPendingApprovals([
+        requiresAction([{ id: "appr-2", name: "run_command" }]),
+        event("turn.cancelled", {}),
+      ]),
+    ).toEqual([]);
   });
 
   test("deleting an unrelated queued turn does not clear the pending approval", () => {

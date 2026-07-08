@@ -164,7 +164,9 @@ describe("handleAuthorizationRequest", () => {
 
   test("a denial response is still a SIGNED, server-addressed auth response", async () => {
     const out = await handleAuthorizationRequest(deps(), authRequest(undefined));
-    const claims = JSON.parse(Buffer.from(Buffer.from(out).toString("utf8").split(".")[1]!, "base64url").toString());
+    const claims = JSON.parse(
+      Buffer.from(Buffer.from(out).toString("utf8").split(".")[1]!, "base64url").toString(),
+    );
     expect(claims.aud).toBe("NSERVERID"); // addressed to the requesting server
     expect(claims.iss).toBe(account.getPublicKey()); // signed by the callout account
   });

@@ -4,11 +4,16 @@ import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { applyManifestToProvidedSession } from "../../../node_modules/.bun/@openai+agents-core@0.11.6+4b65e697391ccbcb/node_modules/@openai/agents-core/dist/sandbox/runtime/providedSessionManifest.js";
 
-async function manifestEnv(manifest: { resolveEnvironment?: () => Promise<Record<string, string>>; environment?: Record<string, { value?: string }> }): Promise<Record<string, string | undefined>> {
+async function manifestEnv(manifest: {
+  resolveEnvironment?: () => Promise<Record<string, string>>;
+  environment?: Record<string, { value?: string }>;
+}): Promise<Record<string, string | undefined>> {
   if (manifest.resolveEnvironment) {
     return manifest.resolveEnvironment();
   }
-  return Object.fromEntries(Object.entries(manifest.environment ?? {}).map(([key, value]) => [key, value.value]));
+  return Object.fromEntries(
+    Object.entries(manifest.environment ?? {}).map(([key, value]) => [key, value.value]),
+  );
 }
 
 describe("lazy provisioning synthetic manifest", () => {
@@ -34,7 +39,11 @@ describe("lazy provisioning synthetic manifest", () => {
 
   test("manifest environment stays stable when proxy switches from synthetic to real backend", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
-    const environment = { HOME: "/workspace", DEPLOY_TARGET: "lazy-test", GIT_ASKPASS: "/workspace/.opengeni/askpass" };
+    const environment = {
+      HOME: "/workspace",
+      DEPLOY_TARGET: "lazy-test",
+      GIT_ASKPASS: "/workspace/.opengeni/askpass",
+    };
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
@@ -67,7 +76,11 @@ describe("lazy provisioning synthetic manifest", () => {
 
   test("real backend manifest equal to agent manifest emits no env drift during lazy setup", async () => {
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
-    const environment = { HOME: "/workspace", DEPLOY_TARGET: "lazy-test", GIT_ASKPASS: "/workspace/.opengeni/askpass" };
+    const environment = {
+      HOME: "/workspace",
+      DEPLOY_TARGET: "lazy-test",
+      GIT_ASKPASS: "/workspace/.opengeni/askpass",
+    };
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
@@ -86,7 +99,9 @@ describe("lazy provisioning synthetic manifest", () => {
     });
 
     expect(events.filter((event) => event.type === "sandbox.env.drift")).toEqual([]);
-    expect(await manifestEnv((agent as { defaultManifest: never }).defaultManifest)).toEqual(environment);
+    expect(await manifestEnv((agent as { defaultManifest: never }).defaultManifest)).toEqual(
+      environment,
+    );
   });
 
   // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the
@@ -100,7 +115,13 @@ describe("lazy provisioning synthetic manifest", () => {
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
-      rigSetup: { rigId: "rig-1", rigName: "dev-machine", versionId: "ver-9", script: "echo hi", timeoutMs: 60_000 },
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-9",
+        script: "echo hi",
+        timeoutMs: 60_000,
+      },
     });
     const execCmds: string[] = [];
     const backend = {
@@ -111,7 +132,10 @@ describe("lazy provisioning synthetic manifest", () => {
       },
     };
 
-    await runOwnedSandboxSetup(agent, backend as never, backend as never, { settings, environment });
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+    });
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
@@ -146,7 +170,11 @@ describe("lazy provisioning synthetic manifest", () => {
     } as unknown as RoutableBackendSession;
     const proxy = new RoutingSandboxSession({
       // Synthetic unprovisioned default: NO createEditor (this is what broke bind).
-      defaultResolved: { session: { state: { manifest: {} } }, sandboxId: null, kind: "unprovisioned" },
+      defaultResolved: {
+        session: { state: { manifest: {} } },
+        sandboxId: null,
+        kind: "unprovisioned",
+      },
       readPointer: async () => ({ activeSandboxId: null, activeEpoch: 1 }),
       resolveActiveBackend: async () => {
         resolveCount += 1;
@@ -167,9 +195,15 @@ describe("lazy provisioning synthetic manifest", () => {
     expect(resolveCount).toBe(0);
 
     // The editor op establishes the backend (resolve) on first use and delegates.
-    const result = await editor.createFile({ type: "create_file", path: "/workspace/x", diff: "+hi" });
+    const result = await editor.createFile({
+      type: "create_file",
+      path: "/workspace/x",
+      diff: "+hi",
+    });
     expect(resolveCount).toBe(1);
     expect(result).toEqual({ output: "created" });
-    expect(realEditorCalls).toEqual([{ op: "createFile", operation: { type: "create_file", path: "/workspace/x", diff: "+hi" } }]);
+    expect(realEditorCalls).toEqual([
+      { op: "createFile", operation: { type: "create_file", path: "/workspace/x", diff: "+hi" } },
+    ]);
   });
 });

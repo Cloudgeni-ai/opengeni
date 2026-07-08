@@ -34,17 +34,32 @@ const messageRow = (producer: string | null, text: string) => ({
 
 const toolCallRow = (producer: string | null, callId: string) => ({
   producerCodexCredentialId: producer,
-  item: { type: "function_call", callId, name: "do_it", arguments: "{}" } as Record<string, unknown>,
+  item: { type: "function_call", callId, name: "do_it", arguments: "{}" } as Record<
+    string,
+    unknown
+  >,
 });
 
 const toolSearchCallRow = (producer: string | null, callId: string) => ({
   producerCodexCredentialId: producer,
-  item: { type: "tool_search_call", call_id: callId, status: "completed", execution: "client", arguments: { query: "send email" } } as Record<string, unknown>,
+  item: {
+    type: "tool_search_call",
+    call_id: callId,
+    status: "completed",
+    execution: "client",
+    arguments: { query: "send email" },
+  } as Record<string, unknown>,
 });
 
 const toolSearchOutputRow = (producer: string | null, callId: string) => ({
   producerCodexCredentialId: producer,
-  item: { type: "tool_search_output", call_id: callId, status: "completed", execution: "client", tools: [{ type: "function", name: "codex_apps__gmail_send_email" }] } as Record<string, unknown>,
+  item: {
+    type: "tool_search_output",
+    call_id: callId,
+    status: "completed",
+    execution: "client",
+    tools: [{ type: "function", name: "codex_apps__gmail_send_email" }],
+  } as Record<string, unknown>,
 });
 
 describe("applyCodexHistoryStrip", () => {
@@ -58,7 +73,9 @@ describe("applyCodexHistoryStrip", () => {
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
     // A's reasoning item is gone ENTIRELY (id + blob) — not just blanked.
     expect(out).toHaveLength(3);
-    expect(out.some((item) => item.type === "reasoning" && (item as any).id === "rs_blob-A")).toBe(false);
+    expect(out.some((item) => item.type === "reasoning" && (item as any).id === "rs_blob-A")).toBe(
+      false,
+    );
     // B's (the current account's) reasoning survives untouched, blob intact.
     const bReasoning = out.find((item) => item.type === "reasoning") as any;
     expect(bReasoning.id).toBe("rs_blob-B");
@@ -89,7 +106,11 @@ describe("applyCodexHistoryStrip", () => {
   test("HOLE B — codex→non-codex: a non-codex turn (current=null) DROPS codex-produced reasoning", () => {
     // Before the fix this no-op'd, replaying codex-minted encrypted reasoning into
     // the Azure/built-in Responses call (which any responses provider 400s).
-    const rows = [reasoningRow("A", "codex-blob"), reasoningRow(null, "azure-blob"), messageRow("A", "answer")];
+    const rows = [
+      reasoningRow("A", "codex-blob"),
+      reasoningRow(null, "azure-blob"),
+      messageRow("A", "answer"),
+    ];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: null });
     // The codex-produced reasoning (producer != null) is dropped…
     expect(out.some((item) => (item as any).id === "rs_codex-blob")).toBe(false);
@@ -121,10 +142,16 @@ describe("applyCodexHistoryStrip", () => {
   });
 
   test("foreign compaction summary is kept; only its encrypted_content blob is stripped", () => {
-    const rows = [{
-      producerCodexCredentialId: "A",
-      item: { type: "compaction", encrypted_content: "comp-blob", summary: "the story so far" } as Record<string, unknown>,
-    }];
+    const rows = [
+      {
+        producerCodexCredentialId: "A",
+        item: {
+          type: "compaction",
+          encrypted_content: "comp-blob",
+          summary: "the story so far",
+        } as Record<string, unknown>,
+      },
+    ];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
     expect(out).toHaveLength(1);
     expect(out[0].type).toBe("compaction");
@@ -140,20 +167,50 @@ describe("applyCodexHistoryStrip", () => {
 // neutralizes the blob's reasoning identity when the resuming turn's account
 // differs (else replays the blob byte-for-byte by reference).
 describe("resumeRunStateForCodexAccount", () => {
-  const blobWithReasoning = (accountTag: string) => JSON.stringify({
-    $schemaVersion: "1.12",
-    originalInput: [
-      { type: "reasoning", id: `rs_${accountTag}_orig`, content: [{ type: "input_text", text: "t" }], providerData: { encrypted_content: `enc-${accountTag}-orig` } },
-      { type: "message", role: "user", content: "hi" },
-    ],
-    modelResponses: [
-      { output: [{ type: "reasoning", id: `rs_${accountTag}_resp`, content: [], providerData: { encrypted_content: `enc-${accountTag}-resp` } }] },
-    ],
-    generatedItems: [
-      { type: "reasoning_item", rawItem: { type: "reasoning", id: `rs_${accountTag}_gen`, content: [], providerData: { encrypted_content: `enc-${accountTag}-gen` } } },
-      { type: "message_output_item", rawItem: { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] } },
-    ],
-  });
+  const blobWithReasoning = (accountTag: string) =>
+    JSON.stringify({
+      $schemaVersion: "1.12",
+      originalInput: [
+        {
+          type: "reasoning",
+          id: `rs_${accountTag}_orig`,
+          content: [{ type: "input_text", text: "t" }],
+          providerData: { encrypted_content: `enc-${accountTag}-orig` },
+        },
+        { type: "message", role: "user", content: "hi" },
+      ],
+      modelResponses: [
+        {
+          output: [
+            {
+              type: "reasoning",
+              id: `rs_${accountTag}_resp`,
+              content: [],
+              providerData: { encrypted_content: `enc-${accountTag}-resp` },
+            },
+          ],
+        },
+      ],
+      generatedItems: [
+        {
+          type: "reasoning_item",
+          rawItem: {
+            type: "reasoning",
+            id: `rs_${accountTag}_gen`,
+            content: [],
+            providerData: { encrypted_content: `enc-${accountTag}-gen` },
+          },
+        },
+        {
+          type: "message_output_item",
+          rawItem: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "answer" }],
+          },
+        },
+      ],
+    });
 
   test("cross-account resume strips every reasoning item's id + encrypted_content from the blob", () => {
     const out = resumeRunStateForCodexAccount(
@@ -210,8 +267,10 @@ describe("resumeRunStateForCodexAccount", () => {
 describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => {
   // The exact length the model-input pipeline (run-input.ts → prepareRunInput)
   // produces on the ITEMS read path: sanitize(strip(active items)).
-  const itemsPathModelLen = (rows: ReturnType<typeof messageRow>[], current: { currentCodexCredentialId: string | null }) =>
-    sanitizeHistoryItemsForModel(applyCodexHistoryStrip(rows, current)).length;
+  const itemsPathModelLen = (
+    rows: ReturnType<typeof messageRow>[],
+    current: { currentCodexCredentialId: string | null },
+  ) => sanitizeHistoryItemsForModel(applyCodexHistoryStrip(rows, current)).length;
 
   test("HOLE D — items path: reconcile-seed equals the stripped model-input length and is strictly less than the un-stripped count", () => {
     // A cross-account switch to B over a history holding ≥1 A-minted reasoning item.
@@ -244,14 +303,21 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     const stateHistory = [
       messageRow("A", "u1").item,
       messageRow("A", "a1").item,
-      { type: "reasoning", id: "rs_blob-B", summary: [{ type: "summary_text", text: "cot-blob-B" }], providerData: { encrypted_content: "blob-B" } },
+      {
+        type: "reasoning",
+        id: "rs_blob-B",
+        summary: [{ type: "summary_text", text: "cot-blob-B" }],
+        providerData: { encrypted_content: "blob-B" },
+      },
       messageRow("B", "switch-turn message").item,
       messageRow("B", "reply").item,
     ];
     // OLD seed (4): slices past the genuinely-new switch-turn message — it is SILENTLY
     // LOST (the exact HOLE D failure).
     const old = historyRowsToAppend(stateHistory, unstrippedCount);
-    expect(old.rows.map((row) => row.item)).not.toContainEqual(messageRow("B", "switch-turn message").item);
+    expect(old.rows.map((row) => row.item)).not.toContainEqual(
+      messageRow("B", "switch-turn message").item,
+    );
     // FIXED seed (3): the slice begins exactly at the first genuinely-new item; the
     // user's message and the reply are both persisted.
     const fixed = historyRowsToAppend(stateHistory, strippedSeed);
@@ -285,12 +351,14 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     // The REAL seeds: blob path (modelHistoryFromItems = false) vs the WRONG strip.
     const blobSeed = reconcileSeedCount(activeRows, false, current);
     const strippedSeed = reconcileSeedCount(activeRows, true, current);
-    expect(blobSeed).toBe(3);       // matches the blob's 3-item completed prefix
-    expect(strippedSeed).toBe(2);   // the bug: under-counts by K=1 (drops the kept reasoning)
+    expect(blobSeed).toBe(3); // matches the blob's 3-item completed prefix
+    expect(strippedSeed).toBe(2); // the bug: under-counts by K=1 (drops the kept reasoning)
 
     // FIXED seed (3): the reconcile appends ONLY the genuinely-new post-approval reply.
     const fixed = historyRowsToAppend(blobStateHistory, blobSeed);
-    expect(fixed.rows.map((row) => row.item)).toEqual([messageRow("B", "answer after approval").item]);
+    expect(fixed.rows.map((row) => row.item)).toEqual([
+      messageRow("B", "answer after approval").item,
+    ]);
 
     // WRONG seed (2, the unconditional strip): the reconcile RE-APPENDS the already-
     // persisted "a1" message at a fresh position — the HOLE E duplication the fix avoids.
@@ -300,17 +368,26 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
   });
 
   test("no-op invariant: same-account and non-codex turns seed identically on BOTH paths (strip is a no-op)", () => {
-    const sameAccountRows = [messageRow("A", "u1"), reasoningRow("A", "blob-A"), messageRow("A", "a1")];
+    const sameAccountRows = [
+      messageRow("A", "u1"),
+      reasoningRow("A", "blob-A"),
+      messageRow("A", "a1"),
+    ];
     // Same-account (current == producer A): items-path seed == blob-path seed.
-    expect(reconcileSeedCount(sameAccountRows, true, { currentCodexCredentialId: "A" }))
-      .toBe(reconcileSeedCount(sameAccountRows, false, { currentCodexCredentialId: "A" }));
+    expect(reconcileSeedCount(sameAccountRows, true, { currentCodexCredentialId: "A" })).toBe(
+      reconcileSeedCount(sameAccountRows, false, { currentCodexCredentialId: "A" }),
+    );
     // Non-codex over a no-codex history (every producer null == current null): identical.
-    const nonCodexRows = [messageRow(null, "u1"), reasoningRow(null, "azure-blob"), messageRow(null, "a1")];
-    expect(reconcileSeedCount(nonCodexRows, true, { currentCodexCredentialId: null }))
-      .toBe(reconcileSeedCount(nonCodexRows, false, { currentCodexCredentialId: null }));
+    const nonCodexRows = [
+      messageRow(null, "u1"),
+      reasoningRow(null, "azure-blob"),
+      messageRow(null, "a1"),
+    ];
+    expect(reconcileSeedCount(nonCodexRows, true, { currentCodexCredentialId: null })).toBe(
+      reconcileSeedCount(nonCodexRows, false, { currentCodexCredentialId: null }),
+    );
   });
 });
-
 
 describe("applyCodexHistoryStrip: tool_search items (progressive connector disclosure)", () => {
   test("cross-account: a turn on B drops A-minted tool_search_call AND tool_search_output whole", () => {
@@ -333,7 +410,11 @@ describe("applyCodexHistoryStrip: tool_search items (progressive connector discl
   });
 
   test("a non-codex turn (current=null) drops codex-produced tool_search items", () => {
-    const rows = [toolSearchCallRow("A", "tsA"), toolSearchOutputRow("A", "tsA"), messageRow(null, "plain")];
+    const rows = [
+      toolSearchCallRow("A", "tsA"),
+      toolSearchOutputRow("A", "tsA"),
+      messageRow(null, "plain"),
+    ];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: null });
     expect(out.map((i) => i.type)).toEqual(["message"]);
   });
@@ -343,7 +424,11 @@ describe("applyCodexHistoryStrip: tool_search items (progressive connector discl
     // but rotation edge cases are exactly where invariants die). The strip drops
     // A's call; the downstream history sanitizer must then drop B's now-orphaned
     // output so the replay cannot 400.
-    const rows = [toolSearchCallRow("A", "tsX"), toolSearchOutputRow("B", "tsX"), messageRow("B", "hi")];
+    const rows = [
+      toolSearchCallRow("A", "tsX"),
+      toolSearchOutputRow("B", "tsX"),
+      messageRow("B", "hi"),
+    ];
     const stripped = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
     expect(stripped.map((i) => i.type)).toEqual(["tool_search_output", "message"]);
     const sanitized = sanitizeHistoryItemsForModel(stripped);

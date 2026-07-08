@@ -4,7 +4,22 @@ import type { Settings } from "@opengeni/config";
 import { SandboxImageConflictError, SandboxLeaseSupersededError } from "@opengeni/db";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, createTurnSandboxProvisioner, emitModelCallUsage, ensureTurnModalRegistryImage, filterUnmaterializedSandboxFileDownloads, historyRowsToAppend, isLazySandboxProvisionRetryable, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import {
+  acceptsPromptCacheKeyForTurn,
+  classifyContextWindowOverflowError,
+  computerToolModeForTurn,
+  createTurnSandboxProvisioner,
+  emitModelCallUsage,
+  ensureTurnModalRegistryImage,
+  filterUnmaterializedSandboxFileDownloads,
+  historyRowsToAppend,
+  isLazySandboxProvisionRetryable,
+  isWorkerShutdownCancellation,
+  modelUsageSourceKey,
+  resolveActiveSandboxBackend,
+  shouldStartOnTurnRecording,
+  WORKER_SHUTDOWN_RESUME_TEXT,
+} from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
@@ -17,7 +32,12 @@ function functionCall(callId: string) {
   return { type: "function_call", callId, name: "tool", arguments: "{}", status: "completed" };
 }
 function functionResult(callId: string) {
-  return { type: "function_call_result", callId, status: "completed", output: { type: "text", text: "ok" } };
+  return {
+    type: "function_call_result",
+    callId,
+    status: "completed",
+    output: { type: "text", text: "ok" },
+  };
 }
 
 /**
@@ -39,9 +59,7 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
     }
     watermark = nextWatermark;
   }
-  return [...persistedByPosition.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, item]) => item);
+  return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
 
 describe("conversation-truth reconcile (orphaned tool output guard)", () => {
@@ -79,7 +97,11 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     // nor dangling call).
     expect(persisted.some((item) => item.callId === "call_b")).toBe(false);
     // The settled A pair is intact and ordered.
-    expect(persisted).toEqual([userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")]);
+    expect(persisted).toEqual([
+      userMessage("do A and B"),
+      functionCall("call_a"),
+      functionResult("call_a"),
+    ]);
   });
 
   test("defers a dangling call until its result lands, then persists the pair together", () => {
@@ -94,7 +116,10 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     // Next reconcile: the result arrived; call and result persist together.
     const snapSettled = [userMessage("go"), functionCall("call_x"), functionResult("call_x")];
     const second = historyRowsToAppend(snapSettled, first.nextWatermark);
-    expect(second.rows.map((row) => row.item)).toEqual([functionCall("call_x"), functionResult("call_x")]);
+    expect(second.rows.map((row) => row.item)).toEqual([
+      functionCall("call_x"),
+      functionResult("call_x"),
+    ]);
     expect(second.nextWatermark).toBe(3);
   });
 
@@ -117,12 +142,16 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     // (never colliding with superseded prefix rows nor the fractional summary).
     const sanitized = [
       userMessage("[summary] folded prefix"), // slice idx 0 — already persisted at 5.5
-      userMessage("recent turn"),             // slice idx 1 — already persisted at 6
-      userMessage("brand new turn"),          // slice idx 2 — NEW
-      functionCall("call_z"),                 // slice idx 3 — NEW
-      functionResult("call_z"),               // slice idx 4 — NEW
+      userMessage("recent turn"), // slice idx 1 — already persisted at 6
+      userMessage("brand new turn"), // slice idx 2 — NEW
+      functionCall("call_z"), // slice idx 3 — NEW
+      functionResult("call_z"), // slice idx 4 — NEW
     ];
-    const result = historyRowsToAppend(sanitized, /* persistedHistoryCount */ 2, /* nextPosition */ 10);
+    const result = historyRowsToAppend(
+      sanitized,
+      /* persistedHistoryCount */ 2,
+      /* nextPosition */ 10,
+    );
     expect(result.rows.map((row) => row.position)).toEqual([10, 11, 12]);
     expect(result.rows.map((row) => row.item)).toEqual([
       userMessage("brand new turn"),
@@ -236,24 +265,30 @@ describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count
   });
 
   test("orphan-free active history: sanitized seed equals raw count (common path unchanged)", () => {
-    const activeRows = [
-      userMessage("hi"),
-      functionCall("c1"),
-      functionResult("c1"),
-    ];
+    const activeRows = [userMessage("hi"), functionCall("c1"), functionResult("c1")];
     expect(sanitizedSeed(activeRows)).toBe(activeRows.length);
   });
 });
 
 describe("model usage source key (re-dispatch charge stability)", () => {
   test("uses the provider responseId verbatim when present (stable + unique)", () => {
-    expect(modelUsageSourceKey({ responseId: "resp_abc", dispatchId: "act-1", positionalKey: "response-1" }))
-      .toBe("resp_abc");
+    expect(
+      modelUsageSourceKey({
+        responseId: "resp_abc",
+        dispatchId: "act-1",
+        positionalKey: "response-1",
+      }),
+    ).toBe("resp_abc");
     // The responseId path ignores the dispatch id, so a true activity retry
     // that re-emits the SAME responseId produces the SAME key and dedupes the
     // charge (no double-bill).
-    expect(modelUsageSourceKey({ responseId: "resp_abc", dispatchId: "act-2", positionalKey: "response-1" }))
-      .toBe("resp_abc");
+    expect(
+      modelUsageSourceKey({
+        responseId: "resp_abc",
+        dispatchId: "act-2",
+        positionalKey: "response-1",
+      }),
+    ).toBe("resp_abc");
   });
 
   test("positional fallback is unique per dispatch so a re-dispatch does not collide", () => {
@@ -261,16 +296,32 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // first model call of dispatch A and of dispatch B both keyed "response-1"
     // -> the second charge deduped away (undercharge). Folding the per-execution
     // dispatch id in keeps them distinct.
-    const dispatchAFirst = modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" });
-    const dispatchBFirst = modelUsageSourceKey({ responseId: null, dispatchId: "act-B", positionalKey: "response-1" });
+    const dispatchAFirst = modelUsageSourceKey({
+      responseId: null,
+      dispatchId: "act-A",
+      positionalKey: "response-1",
+    });
+    const dispatchBFirst = modelUsageSourceKey({
+      responseId: null,
+      dispatchId: "act-B",
+      positionalKey: "response-1",
+    });
     expect(dispatchAFirst).not.toBe(dispatchBFirst);
     expect(dispatchAFirst).toBe("act-A:response-1");
     expect(dispatchBFirst).toBe("act-B:response-1");
 
     // The aggregate fallback (no per-response usage at all) has the same hazard
     // and the same fix.
-    const aggA = modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "aggregate" });
-    const aggB = modelUsageSourceKey({ responseId: null, dispatchId: "act-B", positionalKey: "aggregate" });
+    const aggA = modelUsageSourceKey({
+      responseId: null,
+      dispatchId: "act-A",
+      positionalKey: "aggregate",
+    });
+    const aggB = modelUsageSourceKey({
+      responseId: null,
+      dispatchId: "act-B",
+      positionalKey: "aggregate",
+    });
     expect(aggA).not.toBe(aggB);
   });
 
@@ -278,17 +329,24 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // Same dispatch id + same positional slot -> same key, so a retried record
     // within the one execution still dedupes (idempotent), while distinct calls
     // (response-1 vs response-2) stay distinct.
-    expect(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }))
-      .toBe(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }));
-    expect(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }))
-      .not.toBe(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-2" }));
+    expect(
+      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+    ).toBe(
+      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+    );
+    expect(
+      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+    ).not.toBe(
+      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-2" }),
+    );
   });
 
   test("degrades to the bare positional key when no dispatch id is available", () => {
     // Outside a Temporal activity context (local/test) there is no activityId;
     // the key falls back to the positional value rather than throwing.
-    expect(modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }))
-      .toBe("aggregate");
+    expect(
+      modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }),
+    ).toBe("aggregate");
   });
 });
 
@@ -362,7 +420,9 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     // Home backend stays cloud (e.g. modal) but the active sandbox is a BYO
     // machine — buildAgent must be told "selfhosted" so the repository clone hook
     // is skipped (never `git clone` onto the user's real disk).
-    expect(await resolveActiveSandboxBackend(true, selfhostedPointer, selfhostedKind)).toBe("selfhosted");
+    expect(await resolveActiveSandboxBackend(true, selfhostedPointer, selfhostedKind)).toBe(
+      "selfhosted",
+    );
   });
 
   test("returns undefined when routing is off (flag gated; home backend default)", async () => {
@@ -382,9 +442,15 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
   });
 
   test("returns undefined when there is no active swap (null pointer == cloud group box)", async () => {
-    expect(await resolveActiveSandboxBackend(true, async () => null, selfhostedKind)).toBeUndefined();
     expect(
-      await resolveActiveSandboxBackend(true, async () => ({ activeSandboxId: null }), selfhostedKind),
+      await resolveActiveSandboxBackend(true, async () => null, selfhostedKind),
+    ).toBeUndefined();
+    expect(
+      await resolveActiveSandboxBackend(
+        true,
+        async () => ({ activeSandboxId: null }),
+        selfhostedKind,
+      ),
     ).toBeUndefined();
   });
 
@@ -456,7 +522,9 @@ describe("turn-time Modal private-registry warm", () => {
 
     expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
     expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe("acr-credentials-gecko");
+    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
+      "acr-credentials-gecko",
+    );
   });
 
   test("keeps non-modal or public-image turns on the no-op path", async () => {
@@ -500,7 +568,11 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
     // "selfhosted", which is desktop-capable), so the desktop-capable check alone
     // would over-trigger. The effective-backend gate is what suppresses it.
     expect(
-      shouldStartOnTurnRecording({ ...base, establishedBackendId: "selfhosted", effectiveBackend: "selfhosted" }),
+      shouldStartOnTurnRecording({
+        ...base,
+        establishedBackendId: "selfhosted",
+        effectiveBackend: "selfhosted",
+      }),
     ).toBe(false);
   });
 
@@ -508,12 +580,22 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
     // Home backend is a cloud box (established could even still read modal in the
     // degraded no-enrollment edge), but the ACTIVE pointer resolves selfhosted —
     // recording must skip.
-    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "modal", effectiveBackend: "selfhosted" })).toBe(false);
+    expect(
+      shouldStartOnTurnRecording({
+        ...base,
+        establishedBackendId: "modal",
+        effectiveBackend: "selfhosted",
+      }),
+    ).toBe(false);
   });
 
   test("machine-home turn degraded back to its cloud group box: records (effective backend undefined)", () => {
     expect(
-      shouldStartOnTurnRecording({ ...base, establishedBackendId: "modal", effectiveBackend: undefined }),
+      shouldStartOnTurnRecording({
+        ...base,
+        establishedBackendId: "modal",
+        effectiveBackend: undefined,
+      }),
     ).toBe(true);
   });
 
@@ -560,21 +642,28 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("transient supersession retries inside the single-flight", async () => {
     let establishes = 0;
-    const provisioner = createTurnSandboxProvisioner(async () => {
-      establishes += 1;
-      if (establishes === 1) {
-        throw new SandboxLeaseSupersededError("group-1", 7);
-      }
-      return "ready";
-    }, { backoffMs: 1 });
+    const provisioner = createTurnSandboxProvisioner(
+      async () => {
+        establishes += 1;
+        if (establishes === 1) {
+          throw new SandboxLeaseSupersededError("group-1", 7);
+        }
+        return "ready";
+      },
+      { backoffMs: 1 },
+    );
 
     await expect(provisioner.get()).resolves.toBe("ready");
     expect(establishes).toBe(2);
   });
 
   test("image conflict is actionable and not retried", async () => {
-    expect(isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new"))).toBe(false);
-    expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(true);
+    expect(
+      isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
+    ).toBe(false);
+    expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
+      true,
+    );
   });
 });
 
@@ -598,11 +687,23 @@ describe("worker shutdown preemption", () => {
 describe("sandbox file materialization note", () => {
   test("filters downloads already materialized on the current box", () => {
     const downloads = [
-      { fileId: "file-1", mountPath: "files/file-1", filename: "one.txt", url: "https://example.com/1" },
-      { fileId: "file-2", mountPath: "files/file-2", filename: "two.txt", url: "https://example.com/2" },
+      {
+        fileId: "file-1",
+        mountPath: "files/file-1",
+        filename: "one.txt",
+        url: "https://example.com/1",
+      },
+      {
+        fileId: "file-2",
+        mountPath: "files/file-2",
+        filename: "two.txt",
+        url: "https://example.com/2",
+      },
     ];
 
-    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"]))).toEqual([downloads[1]]);
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"]))).toEqual([
+      downloads[1],
+    ]);
     expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(downloads);
   });
 
@@ -625,15 +726,22 @@ describe("sandbox file materialization note", () => {
 
 describe("context window overflow classifier", () => {
   test("matches OpenAI/Azure context-window variants", () => {
-    const byCode = Object.assign(new Error("Bad Request"), { code: "context_length_exceeded", status: 400 });
+    const byCode = Object.assign(new Error("Bad Request"), {
+      code: "context_length_exceeded",
+      status: 400,
+    });
     expect(classifyContextWindowOverflowError(byCode)?.code).toBe("context_length_exceeded");
 
     expect(
-      classifyContextWindowOverflowError(new Error("Your input exceeds the context window of this model"))?.message,
+      classifyContextWindowOverflowError(
+        new Error("Your input exceeds the context window of this model"),
+      )?.message,
     ).toContain("exceeds the context window");
 
     expect(
-      classifyContextWindowOverflowError(new Error("This model's maximum context length is 128000 tokens"))?.message,
+      classifyContextWindowOverflowError(
+        new Error("This model's maximum context length is 128000 tokens"),
+      )?.message,
     ).toContain("maximum context length");
 
     const nested = {
@@ -643,13 +751,21 @@ describe("context window overflow classifier", () => {
         message: "The request failed because the input exceeds the context window.",
       },
     };
-    expect(classifyContextWindowOverflowError(nested)?.detail).toContain("exceeds the context window");
+    expect(classifyContextWindowOverflowError(nested)?.detail).toContain(
+      "exceeds the context window",
+    );
   });
 
   test("does not match unrelated provider failures", () => {
     expect(classifyContextWindowOverflowError(new Error("Too Many Requests"))).toBeNull();
-    expect(classifyContextWindowOverflowError(Object.assign(new Error("invalid tool call"), { status: 400 }))).toBeNull();
-    expect(classifyContextWindowOverflowError({ code: "rate_limit_exceeded", message: "rate limit" })).toBeNull();
+    expect(
+      classifyContextWindowOverflowError(
+        Object.assign(new Error("invalid tool call"), { status: 400 }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyContextWindowOverflowError({ code: "rate_limit_exceeded", message: "rate limit" }),
+    ).toBeNull();
   });
 });
 
@@ -662,7 +778,9 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
     // api is irrelevant once kind is codex-subscription — codex wins.
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe("function-image");
+    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
+      "function-image",
+    );
     expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
   });
 

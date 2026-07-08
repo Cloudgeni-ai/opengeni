@@ -1,8 +1,17 @@
 {
   "name": "@opengeni/observability",
   "version": "0.3.0",
-  "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/observability"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -12,10 +21,6 @@
       "default": "./src/index.ts"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -25,16 +30,11 @@
     "typecheck": "tsgo --noEmit",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
+  "dependencies": {
+    "prom-client": "^15.1.3"
+  },
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/observability"
-  },
-  "dependencies": {
-    "prom-client": "^15.1.3"
   }
 }

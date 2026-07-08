@@ -16,21 +16,73 @@ import "./styles.css";
 
 function hunk(startAdd: number, addLines: number, ctx = 2): GitDiffHunk {
   const lines: GitDiffLine[] = [];
-  for (let i = 0; i < ctx; i++) lines.push({ type: "context", oldNo: startAdd + i, newNo: startAdd + i, text: `  const keep_${i} = ${i};` });
+  for (let i = 0; i < ctx; i++)
+    lines.push({
+      type: "context",
+      oldNo: startAdd + i,
+      newNo: startAdd + i,
+      text: `  const keep_${i} = ${i};`,
+    });
   for (let i = 0; i < addLines; i++) {
-    lines.push({ type: "del", oldNo: startAdd + ctx + i, newNo: null, text: `  const removed_${i} = "old value ${i}";` });
-    lines.push({ type: "add", oldNo: null, newNo: startAdd + ctx + i, text: `  const added_${i} = "new value ${i}";` });
+    lines.push({
+      type: "del",
+      oldNo: startAdd + ctx + i,
+      newNo: null,
+      text: `  const removed_${i} = "old value ${i}";`,
+    });
+    lines.push({
+      type: "add",
+      oldNo: null,
+      newNo: startAdd + ctx + i,
+      text: `  const added_${i} = "new value ${i}";`,
+    });
   }
-  for (let i = 0; i < ctx; i++) lines.push({ type: "context", oldNo: startAdd + ctx + addLines + i, newNo: startAdd + ctx + addLines + i, text: `  return added_${i};` });
-  return { oldStart: startAdd, oldLines: ctx + addLines, newStart: startAdd, newLines: ctx + addLines * 2, header: `@@ -${startAdd},${ctx + addLines} +${startAdd},${ctx + addLines * 2} @@`, lines };
+  for (let i = 0; i < ctx; i++)
+    lines.push({
+      type: "context",
+      oldNo: startAdd + ctx + addLines + i,
+      newNo: startAdd + ctx + addLines + i,
+      text: `  return added_${i};`,
+    });
+  return {
+    oldStart: startAdd,
+    oldLines: ctx + addLines,
+    newStart: startAdd,
+    newLines: ctx + addLines * 2,
+    header: `@@ -${startAdd},${ctx + addLines} +${startAdd},${ctx + addLines * 2} @@`,
+    lines,
+  };
 }
 
-function file(path: string, add: number, del: number, hunks: GitDiffHunk[], overrides: Partial<GitFileDiff> = {}): GitFileDiff {
-  return { path, oldPath: null, status: "modified", isBinary: false, isImage: false, additions: add, deletions: del, truncated: false, hunks, ...overrides };
+function file(
+  path: string,
+  add: number,
+  del: number,
+  hunks: GitDiffHunk[],
+  overrides: Partial<GitFileDiff> = {},
+): GitFileDiff {
+  return {
+    path,
+    oldPath: null,
+    status: "modified",
+    isBinary: false,
+    isImage: false,
+    additions: add,
+    deletions: del,
+    truncated: false,
+    hunks,
+    ...overrides,
+  };
 }
 
 function makeDiff(count: number): GitFileDiff[] {
-  const dirs = ["apps/api/src", "apps/web/src/components", "packages/core/lib", "packages/db/migrations", "docs"];
+  const dirs = [
+    "apps/api/src",
+    "apps/web/src/components",
+    "packages/core/lib",
+    "packages/db/migrations",
+    "docs",
+  ];
   return Array.from({ length: count }, (_, i) => {
     const dir = dirs[i % dirs.length];
     const size = 1 + (i % 5);
@@ -75,7 +127,15 @@ function filesResult(tree: FileTreeNode[], source: "live" | "capture"): UseSandb
     tree,
     expand: async () => {},
     expandingPaths: new Set<string>(),
-    readFile: async () => ({ path: "", encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 }),
+    readFile: async () => ({
+      path: "",
+      encoding: "utf8",
+      content: "",
+      sizeBytes: 0,
+      truncated: false,
+      isBinary: false,
+      revision: 0,
+    }),
     writeFile: async () => ({ path: "", sizeBytes: 0, revision: 0 }),
     createFile: async () => {},
     createDir: async () => {},
@@ -98,13 +158,22 @@ function App() {
   let body: React.ReactNode;
   switch (view) {
     case "changes-small":
-      body = <WorkbenchChanges diff={smallDiff} source="capture" capturedAt={capturedAt} captureRevision={12} />;
+      body = (
+        <WorkbenchChanges
+          diff={smallDiff}
+          source="capture"
+          capturedAt={capturedAt}
+          captureRevision={12}
+        />
+      );
       break;
     case "changes-guard":
       body = <WorkbenchChanges diff={guardDiff} source="live" capturedAt={null} />;
       break;
     case "files-dense":
-      body = <FileBrowser result={filesResult(denseTree(60, 50), "live")} className="min-h-0 flex-1" />;
+      body = (
+        <FileBrowser result={filesResult(denseTree(60, 50), "live")} className="min-h-0 flex-1" />
+      );
       break;
     case "files-flat": {
       // 2000 files, all visible at the root — the strongest visible-list
@@ -120,14 +189,26 @@ function App() {
     case "files-residue": {
       // Pre-expanded residue view: a small tree so the residue dir + its inline
       // "open when live" row are visible without interaction.
-      body = <FileBrowser result={filesResult(denseTree(4, 6), "capture")} className="min-h-0 flex-1" />;
+      body = (
+        <FileBrowser result={filesResult(denseTree(4, 6), "capture")} className="min-h-0 flex-1" />
+      );
       break;
     }
     default:
-      body = <WorkbenchChanges diff={makeDiff(40)} source="capture" capturedAt={capturedAt} captureRevision={7} />;
+      body = (
+        <WorkbenchChanges
+          diff={makeDiff(40)}
+          source="capture"
+          capturedAt={capturedAt}
+          captureRevision={7}
+        />
+      );
   }
   return (
-    <div className="og-root h-dvh bg-og-bg p-4" data-og-theme={theme === "light" ? "light" : undefined}>
+    <div
+      className="og-root h-dvh bg-og-bg p-4"
+      data-og-theme={theme === "light" ? "light" : undefined}
+    >
       <div className="mx-auto flex h-full max-w-5xl flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-0">
         {body}
       </div>

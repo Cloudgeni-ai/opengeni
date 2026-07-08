@@ -7,7 +7,7 @@ import {
   matchCommand,
   parseCommandLine,
 } from "../commands/registry";
-import type { CommandContext, Notice, SlashCommand } from "../commands/types";
+import type { CommandContext, SlashCommand } from "../commands/types";
 
 /**
  * Context the composer supplies for command execution and visibility. The
@@ -298,7 +298,9 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
         case "ArrowDown": {
           event.preventDefault();
           navigatedRef.current = true;
-          setHighlight((current) => (items.length === 0 ? 0 : (Math.min(current, items.length - 1) + 1) % items.length));
+          setHighlight((current) =>
+            items.length === 0 ? 0 : (Math.min(current, items.length - 1) + 1) % items.length,
+          );
           return true;
         }
         case "ArrowUp": {

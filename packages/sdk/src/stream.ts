@@ -8,7 +8,10 @@ import type { SessionEvent } from "./types";
  */
 export type SessionEventStreamTransport = {
   /** Open the SSE stream, replaying durable events after `after` first. */
-  openStream: (after: number, signal: AbortSignal | undefined) => Promise<ReadableStream<Uint8Array>>;
+  openStream: (
+    after: number,
+    signal: AbortSignal | undefined,
+  ) => Promise<ReadableStream<Uint8Array>>;
   /** Replay durable events by sequence (`GET .../events?after=&limit=`). */
   listEvents: (after: number, limit: number) => Promise<SessionEvent[]>;
 };

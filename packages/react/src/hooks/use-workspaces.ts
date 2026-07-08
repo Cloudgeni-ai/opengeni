@@ -27,7 +27,10 @@ export type UseWorkspacesResult = {
 export function useWorkspaces(options: UseWorkspacesOptions = {}): UseWorkspacesResult {
   const client = useOpenGeniClient(options);
   const load = useCallback(async () => await client.listWorkspaces(), [client]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const create = useCallback(

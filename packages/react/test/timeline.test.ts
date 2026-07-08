@@ -22,7 +22,9 @@ import {
 describe("toolDisplayName", () => {
   test("strips the MCP server-id prefix and shows only the tool", () => {
     // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
-    expect(toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations")).toBe("list organizations");
+    expect(
+      toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations"),
+    ).toBe("list organizations");
     expect(toolDisplayName("opengeni__set_session_title")).toBe("set session title");
   });
 
@@ -38,7 +40,11 @@ describe("toolDisplayName", () => {
 
 let sequence = 0;
 
-function event(type: string, payload: unknown, options: { turnId?: string | null } = {}): SessionEvent {
+function event(
+  type: string,
+  payload: unknown,
+  options: { turnId?: string | null } = {},
+): SessionEvent {
   sequence += 1;
   return {
     id: `evt-${sequence}`,
@@ -52,7 +58,12 @@ function event(type: string, payload: unknown, options: { turnId?: string | null
   };
 }
 
-function eventAt(sequenceNumber: number, type: string, payload: unknown, options: { turnId?: string | null } = {}): SessionEvent {
+function eventAt(
+  sequenceNumber: number,
+  type: string,
+  payload: unknown,
+  options: { turnId?: string | null } = {},
+): SessionEvent {
   return {
     id: `evt-${sequenceNumber}`,
     workspaceId: "ws-1",
@@ -89,7 +100,9 @@ function turnGroups(groups: TimelineGroup[]): TurnGroup[] {
 }
 
 function flattenActivityIds(group: TurnGroup | undefined): string[] {
-  return activityGroups(group?.groups ?? []).flatMap((activity) => activity.items.map((item) => item.id));
+  return activityGroups(group?.groups ?? []).flatMap((activity) =>
+    activity.items.map((item) => item.id),
+  );
 }
 
 describe("buildTimeline", () => {
@@ -174,7 +187,11 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline([
       event("agent.message.delta", { text: "Checking the cluster" }),
-      event("agent.toolCall.created", { id: "call-1", name: "exec", arguments: { cmd: "kubectl get pods" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec",
+        arguments: { cmd: "kubectl get pods" },
+      }),
       event("agent.toolCall.output", { id: "call-1", output: "ok" }),
       event("agent.message.completed", { text: "Checking the cluster now." }),
     ]);
@@ -197,9 +214,17 @@ describe("buildTimeline", () => {
   test("legacy user messages with no queued turn keep their ledger position", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: "turn-a" }),
+      event(
+        "agent.toolCall.created",
+        { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } },
+        { turnId: "turn-a" },
+      ),
       event("user.message", { text: "legacy steering" }, { turnId: null }),
-      event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "make test" } }, { turnId: "turn-a" }),
+      event(
+        "agent.toolCall.created",
+        { id: "call-2", name: "exec_command", arguments: { cmd: "make test" } },
+        { turnId: "turn-a" },
+      ),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "user-message", "tool-call"]);
     expect((items[1] as UserMessageItem).text).toBe("legacy steering");
@@ -208,7 +233,12 @@ describe("buildTimeline", () => {
   test("a genesis user message with queued and started events stays first", () => {
     const items = buildTimeline([
       eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(
+        4,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+        { turnId: "turn-a" },
+      ),
       eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
       eventAt(9, "agent.message.completed", { text: "First answer." }, { turnId: "turn-a" }),
     ]);
@@ -220,22 +250,61 @@ describe("buildTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-        eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+        eventAt(
+          4,
+          "turn.queued",
+          { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+          { turnId: "turn-a" },
+        ),
         eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
-        eventAt(9, "agent.toolCall.created", { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } }, { turnId: "turn-a" }),
+        eventAt(
+          9,
+          "agent.toolCall.created",
+          { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } },
+          { turnId: "turn-a" },
+        ),
         eventAt(16, "user.message", { text: "QUEUED-MSG" }, { turnId: null }),
-        eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
-        eventAt(41, "agent.toolCall.created", { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } }, { turnId: "turn-a" }),
-        eventAt(57, "agent.message.completed", { text: "Turn A final answer." }, { turnId: "turn-a" }),
+        eventAt(
+          17,
+          "turn.queued",
+          { turnId: "turn-b", triggerEventId: "evt-16", source: "user" },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          41,
+          "agent.toolCall.created",
+          { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } },
+          { turnId: "turn-a" },
+        ),
+        eventAt(
+          57,
+          "agent.message.completed",
+          { text: "Turn A final answer." },
+          { turnId: "turn-a" },
+        ),
         eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
         eventAt(61, "turn.started", { triggerEventId: "evt-16" }, { turnId: "turn-b" }),
-        eventAt(62, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "queued work" } }, { turnId: "turn-b" }),
-        eventAt(80, "agent.message.completed", { text: "Turn B final answer." }, { turnId: "turn-b" }),
+        eventAt(
+          62,
+          "agent.toolCall.created",
+          { id: "call-b-1", name: "exec_command", arguments: { cmd: "queued work" } },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          80,
+          "agent.message.completed",
+          { text: "Turn B final answer." },
+          { turnId: "turn-b" },
+        ),
         eventAt(94, "turn.completed", {}, { turnId: "turn-b" }),
       ]),
     );
 
-    expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
+    expect(
+      groups.map((group) =>
+        group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind,
+      ),
+    ).toEqual([
       "item:user-message",
       "turn",
       "item:agent-message",
@@ -247,35 +316,74 @@ describe("buildTimeline", () => {
     expect(turns).toHaveLength(2);
     expect(flattenActivityIds(turns[0])).toEqual(["evt-9", "evt-41"]);
     expect(flattenActivityIds(turns[1])).toEqual(["evt-62"]);
-    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({ kind: "agent-message", text: "Turn A final answer." });
-    expect(groups[3]?.kind === "item" ? groups[3].item : null).toMatchObject({ kind: "user-message", text: "QUEUED-MSG" });
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "Turn A final answer.",
+    });
+    expect(groups[3]?.kind === "item" ? groups[3].item : null).toMatchObject({
+      kind: "user-message",
+      text: "QUEUED-MSG",
+    });
   });
 
   test("a queued user message stays pending at the end until the queued turn starts", () => {
     const pendingItems = buildTimeline([
       eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(
+        4,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+        { turnId: "turn-a" },
+      ),
       eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
       eventAt(9, "agent.message.delta", { text: "Still working." }, { turnId: "turn-a" }),
       eventAt(16, "user.message", { text: "Queued follow-up" }, { turnId: null }),
-      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+      eventAt(
+        17,
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "evt-16", source: "user" },
+        { turnId: "turn-b" },
+      ),
     ]);
-    expect(pendingItems.at(-1)).toMatchObject({ kind: "user-message", text: "Queued follow-up", pending: true });
+    expect(pendingItems.at(-1)).toMatchObject({
+      kind: "user-message",
+      text: "Queued follow-up",
+      pending: true,
+    });
 
     const anchoredItems = buildTimeline([
       eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(
+        4,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+        { turnId: "turn-a" },
+      ),
       eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
       eventAt(9, "agent.message.delta", { text: "Still working." }, { turnId: "turn-a" }),
       eventAt(16, "user.message", { text: "Queued follow-up" }, { turnId: null }),
-      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+      eventAt(
+        17,
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "evt-16", source: "user" },
+        { turnId: "turn-b" },
+      ),
       eventAt(57, "agent.message.completed", { text: "Turn A done." }, { turnId: "turn-a" }),
       eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
       eventAt(61, "turn.started", { triggerEventId: "evt-16" }, { turnId: "turn-b" }),
-      eventAt(62, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } }, { turnId: "turn-b" }),
+      eventAt(
+        62,
+        "agent.toolCall.created",
+        { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } },
+        { turnId: "turn-b" },
+      ),
     ]);
-    const followUpIndex = anchoredItems.findIndex((item) => item.kind === "user-message" && item.text === "Queued follow-up");
-    const turnBIndex = anchoredItems.findIndex((item) => item.kind === "tool-call" && item.turnId === "turn-b");
+    const followUpIndex = anchoredItems.findIndex(
+      (item) => item.kind === "user-message" && item.text === "Queued follow-up",
+    );
+    const turnBIndex = anchoredItems.findIndex(
+      (item) => item.kind === "tool-call" && item.turnId === "turn-b",
+    );
     expect(followUpIndex).toBeGreaterThan(-1);
     expect(turnBIndex).toBeGreaterThan(followUpIndex);
     expect(anchoredItems[followUpIndex]).not.toHaveProperty("pending");
@@ -285,25 +393,55 @@ describe("buildTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-        eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+        eventAt(
+          4,
+          "turn.queued",
+          { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+          { turnId: "turn-a" },
+        ),
         eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
-        eventAt(9, "agent.toolCall.created", { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } }, { turnId: "turn-a" }),
+        eventAt(
+          9,
+          "agent.toolCall.created",
+          { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } },
+          { turnId: "turn-a" },
+        ),
         eventAt(16, "user.message", { text: "Retracted follow-up" }, { turnId: null }),
-        eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
-        eventAt(18, "turn.cancelled", { turnId: "turn-b", triggerEventId: "evt-16" }, { turnId: "turn-b" }),
-        eventAt(41, "agent.toolCall.created", { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } }, { turnId: "turn-a" }),
-        eventAt(57, "agent.message.completed", { text: "Turn A final answer." }, { turnId: "turn-a" }),
+        eventAt(
+          17,
+          "turn.queued",
+          { turnId: "turn-b", triggerEventId: "evt-16", source: "user" },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          18,
+          "turn.cancelled",
+          { turnId: "turn-b", triggerEventId: "evt-16" },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          41,
+          "agent.toolCall.created",
+          { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } },
+          { turnId: "turn-a" },
+        ),
+        eventAt(
+          57,
+          "agent.message.completed",
+          { text: "Turn A final answer." },
+          { turnId: "turn-a" },
+        ),
         eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
       ]),
     );
 
     expect(JSON.stringify(groups)).not.toContain("Retracted follow-up");
     expect(JSON.stringify(groups)).not.toContain("Interrupted.");
-    expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
-      "item:user-message",
-      "turn",
-      "item:agent-message",
-    ]);
+    expect(
+      groups.map((group) =>
+        group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind,
+      ),
+    ).toEqual(["item:user-message", "turn", "item:agent-message"]);
     const [turn] = turnGroups(groups);
     expect(turn?.outcome).toBe("complete");
     expect(flattenActivityIds(turn)).toEqual(["evt-9", "evt-41"]);
@@ -312,11 +450,26 @@ describe("buildTimeline", () => {
   test("a queued turn without turn.started anchors on the first same-turn activity", () => {
     const items = buildTimeline([
       eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
-      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(
+        4,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+        { turnId: "turn-a" },
+      ),
       eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
       eventAt(16, "user.message", { text: "Crash-resumed follow-up" }, { turnId: null }),
-      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
-      eventAt(61, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } }, { turnId: "turn-b" }),
+      eventAt(
+        17,
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "evt-16", source: "user" },
+        { turnId: "turn-b" },
+      ),
+      eventAt(
+        61,
+        "agent.toolCall.created",
+        { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } },
+        { turnId: "turn-b" },
+      ),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["user-message", "user-message", "tool-call"]);
     expect(items[1]).toMatchObject({ kind: "user-message", text: "Crash-resumed follow-up" });
@@ -334,7 +487,10 @@ describe("buildTimeline", () => {
           { kind: "file" }, // malformed: dropped
           "garbage",
         ],
-        tools: [{ kind: "mcp", id: "opengeni" }, { kind: "other", id: "x" }],
+        tools: [
+          { kind: "mcp", id: "opengeni" },
+          { kind: "other", id: "x" },
+        ],
       }),
     ]);
     expect(items[0]?.kind).toBe("user-message");
@@ -369,8 +525,16 @@ describe("buildTimeline", () => {
   test("matches tool outputs to calls by id and marks them complete", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "terraform_plan", arguments: { dir: "infra" } }),
-      event("agent.toolCall.created", { id: "call-2", name: "read_file", arguments: { path: "main.tf" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "terraform_plan",
+        arguments: { dir: "infra" },
+      }),
+      event("agent.toolCall.created", {
+        id: "call-2",
+        name: "read_file",
+        arguments: { path: "main.tf" },
+      }),
       event("agent.toolCall.output", { id: "call-2", output: "resource {}" }),
     ]);
     const first = items[0] as ToolCallItem;
@@ -427,9 +591,15 @@ describe("buildTimeline", () => {
       event("agent.toolCall.created", {
         id: "call-1",
         name: "session_send_message",
-        arguments: JSON.stringify({ sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", message: "go" }),
+        arguments: JSON.stringify({
+          sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+          message: "go",
+        }),
       }),
-      event("agent.toolCall.output", { id: "call-1", output: { isError: true, content: [{ type: "text", text: "delivery failed" }] } }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { isError: true, content: [{ type: "text", text: "delivery failed" }] },
+      }),
     ]);
     expect((items[0] as WorkerItem).status).toBe("failed");
   });
@@ -472,9 +642,15 @@ describe("buildTimeline", () => {
       event("agent.toolCall.created", {
         id: "call-1",
         name: "session_interrupt",
-        arguments: JSON.stringify({ sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", mode: "steer" }),
+        arguments: JSON.stringify({
+          sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+          mode: "steer",
+        }),
       }),
-      event("agent.toolCall.output", { id: "call-1", output: { content: [{ type: "text", text: "{}" }] } }),
+      event("agent.toolCall.output", {
+        id: "call-1",
+        output: { content: [{ type: "text", text: "{}" }] },
+      }),
     ]);
     const item = items[0] as WorkerItem;
     expect(item.action).toBe("interrupt");
@@ -513,7 +689,10 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline([
       event("sandbox.operation.started", { name: "repository-clone" }),
-      event("sandbox.operation.failed", { name: "repository-clone", error: "authentication failed" }),
+      event("sandbox.operation.failed", {
+        name: "repository-clone",
+        error: "authentication failed",
+      }),
     ]);
     const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
     expect(sandbox?.name).toBe("repository-clone");
@@ -527,8 +706,16 @@ describe("buildTimeline", () => {
     // even when the file is already present — it must not read as re-downloading.
     reset();
     const items = buildTimeline([
-      event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
-      event("sandbox.operation.completed", { name: "file-resource-download", fileId: "f1", path: "files/photo.png" }),
+      event("sandbox.operation.started", {
+        name: "file-resource-download",
+        fileId: "f1",
+        path: "files/photo.png",
+      }),
+      event("sandbox.operation.completed", {
+        name: "file-resource-download",
+        fileId: "f1",
+        path: "files/photo.png",
+      }),
     ]);
     expect(items.filter((item) => item.kind === "sandbox")).toHaveLength(0);
   });
@@ -537,7 +724,11 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline([
       event("sandbox.operation.started", { name: "file-resource-download", fileId: "f1" }),
-      event("sandbox.operation.failed", { name: "file-resource-download", fileId: "f1", error: "signed URL expired" }),
+      event("sandbox.operation.failed", {
+        name: "file-resource-download",
+        fileId: "f1",
+        error: "signed URL expired",
+      }),
     ]);
     const sandbox = items.find((item): item is SandboxItem => item.kind === "sandbox");
     expect(sandbox?.name).toBe("file-resource-download");
@@ -567,8 +758,12 @@ describe("buildTimeline", () => {
       event("sandbox.command.output.delta", { name: "build", text: "Step 1/4\n" }),
       event("sandbox.command.output.delta", { name: "test", text: "3 pass\n" }),
     ]);
-    const build = items.find((item): item is SandboxItem => item.kind === "sandbox" && item.name === "build");
-    const test_ = items.find((item): item is SandboxItem => item.kind === "sandbox" && item.name === "test");
+    const build = items.find(
+      (item): item is SandboxItem => item.kind === "sandbox" && item.name === "build",
+    );
+    const test_ = items.find(
+      (item): item is SandboxItem => item.kind === "sandbox" && item.name === "test",
+    );
     expect(build?.output).toBe("Step 1/4\n");
     expect(test_?.output).toBe("3 pass\n");
   });
@@ -598,9 +793,18 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
-    expect(items.map((item) => item.kind)).toEqual(["session-status", "turn-end", "notice", "turn-end", "notice"]);
+    expect(items.map((item) => item.kind)).toEqual([
+      "session-status",
+      "turn-end",
+      "notice",
+      "turn-end",
+      "notice",
+    ]);
     expect(items[0]).toMatchObject({ kind: "session-status", status: "requires_action" });
-    expect(items[1]).toMatchObject({ outcome: "failed", failureText: "model provider unavailable" });
+    expect(items[1]).toMatchObject({
+      outcome: "failed",
+      failureText: "model provider unavailable",
+    });
     expect(items[2]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
     expect(items[3]).toMatchObject({ outcome: "cancelled", failureText: null });
     expect(items[4]).toMatchObject({ tone: "cancelled" });
@@ -626,7 +830,9 @@ describe("buildTimeline", () => {
       event("turn.cancelled", {}, { turnId: "turn-cancelled" }),
     ]);
     const turnEnds = items.filter((item): item is TurnEndItem => item.kind === "turn-end");
-    expect(turnEnds.map(({ turnId, outcome, failureText }) => ({ turnId, outcome, failureText }))).toEqual([
+    expect(
+      turnEnds.map(({ turnId, outcome, failureText }) => ({ turnId, outcome, failureText })),
+    ).toEqual([
       { turnId: "turn-complete", outcome: "complete", failureText: null },
       { turnId: "turn-failed", outcome: "failed", failureText: "model provider unavailable" },
       { turnId: "turn-cancelled", outcome: "cancelled", failureText: null },
@@ -636,11 +842,18 @@ describe("buildTimeline", () => {
   test("failed turns with activity fold the failure into turn-end instead of emitting a duplicate notice", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "make build" },
+      }),
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
-    expect(items[1]).toMatchObject({ outcome: "failed", failureText: "model provider unavailable" });
+    expect(items[1]).toMatchObject({
+      outcome: "failed",
+      failureText: "model provider unavailable",
+    });
   });
 
   test("failed turns without activity keep the failure notice", () => {
@@ -653,7 +866,11 @@ describe("buildTimeline", () => {
   test("cancelled turns with activity fold interruption into turn-end instead of emitting a duplicate notice", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make test" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "make test" },
+      }),
       event("turn.cancelled", {}),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
@@ -662,7 +879,10 @@ describe("buildTimeline", () => {
 
   test("cancelled turns without activity keep the interruption notice", () => {
     reset();
-    const items = buildTimeline([event("turn.started", { triggerEventId: "evt-start" }), event("turn.cancelled", {})]);
+    const items = buildTimeline([
+      event("turn.started", { triggerEventId: "evt-start" }),
+      event("turn.cancelled", {}),
+    ]);
     expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
     expect(items[1]).toMatchObject({ tone: "cancelled", text: "Interrupted." });
   });
@@ -670,18 +890,31 @@ describe("buildTimeline", () => {
   test("null-turn failures use activity since the last turn boundary for notice suppression", () => {
     reset();
     const withActivity = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: null }),
+      event(
+        "agent.toolCall.created",
+        { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } },
+        { turnId: null },
+      ),
       event("turn.failed", { error: "boom" }, { turnId: null }),
     ]);
     expect(withActivity.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
 
     reset();
     const afterUserBoundary = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: null }),
+      event(
+        "agent.toolCall.created",
+        { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } },
+        { turnId: null },
+      ),
       event("user.message", { text: "new turn" }),
       event("turn.failed", { error: "boom" }, { turnId: null }),
     ]);
-    expect(afterUserBoundary.map((item) => item.kind)).toEqual(["tool-call", "user-message", "turn-end", "notice"]);
+    expect(afterUserBoundary.map((item) => item.kind)).toEqual([
+      "tool-call",
+      "user-message",
+      "turn-end",
+      "notice",
+    ]);
   });
 
   // Chip doctrine: the TURN failed — items caught mid-flight did not. Red is
@@ -690,7 +923,11 @@ describe("buildTimeline", () => {
   test("turn.failed marks in-flight tool calls as interrupted (not failed, not complete)", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "make build" },
+      }),
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect((items[0] as ToolCallItem).status).toBe("cancelled");
@@ -699,7 +936,11 @@ describe("buildTimeline", () => {
   test("turn.cancelled marks in-flight tool calls as cancelled (not failed, not complete)", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make test" } }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "make test" },
+      }),
       event("turn.cancelled", {}),
     ]);
     expect((items[0] as ToolCallItem).status).toBe("cancelled");
@@ -726,7 +967,11 @@ describe("buildTimeline", () => {
   test("turn.cancelled marks in-flight worker items as cancelled (not failed)", () => {
     reset();
     const items = buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "session_create", arguments: JSON.stringify({ initialMessage: "go" }) }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_create",
+        arguments: JSON.stringify({ initialMessage: "go" }),
+      }),
       event("turn.cancelled", {}),
     ]);
     expect((items[0] as WorkerItem).status).toBe("cancelled");
@@ -753,16 +998,20 @@ describe("buildTimeline", () => {
   test("tool.auth_needed becomes a structured auth-needed item carrying the full payload", () => {
     reset();
     const items = buildTimeline([
-      event("tool.auth_needed", {
-        serverId: "mcp-linear",
-        toolName: "create_issue",
-        providerDomain: "linear.app",
-        connectionId: "conn-1",
-        reason: "refresh_failed",
-        scopes: ["issues:write"],
-        resource: "https://mcp.linear.app/sse",
-        authorizationUrl: "https://linear.app/oauth/authorize",
-      }, { turnId: "turn-1" }),
+      event(
+        "tool.auth_needed",
+        {
+          serverId: "mcp-linear",
+          toolName: "create_issue",
+          providerDomain: "linear.app",
+          connectionId: "conn-1",
+          reason: "refresh_failed",
+          scopes: ["issues:write"],
+          resource: "https://mcp.linear.app/sse",
+          authorizationUrl: "https://linear.app/oauth/authorize",
+        },
+        { turnId: "turn-1" },
+      ),
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
@@ -780,7 +1029,9 @@ describe("buildTimeline", () => {
 
   test("tool.auth_needed tolerates a sparse payload and drops an unknown reason", () => {
     reset();
-    const items = buildTimeline([event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" })]);
+    const items = buildTimeline([
+      event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" }),
+    ]);
     expect(items[0]).toMatchObject({
       kind: "auth-needed",
       providerDomain: "supabase.com",
@@ -838,7 +1089,11 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "make build" },
+        }),
         event("turn.failed", { error: "model provider unavailable" }),
       ]),
     );
@@ -855,10 +1110,22 @@ describe("groupTimeline", () => {
       buildTimeline([
         event("user.message", { text: "ship it" }, { turnId: null }),
         event("agent.reasoning.delta", { text: "checking" }, { turnId: "turn-fold" }),
-        event("agent.message.completed", { text: "The tests need one patch first." }, { turnId: "turn-fold" }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, { turnId: "turn-fold" }),
+        event(
+          "agent.message.completed",
+          { text: "The tests need one patch first." },
+          { turnId: "turn-fold" },
+        ),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } },
+          { turnId: "turn-fold" },
+        ),
         event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-fold" }),
-        event("agent.message.completed", { text: "Final answer: tests are green." }, { turnId: "turn-fold" }),
+        event(
+          "agent.message.completed",
+          { text: "Final answer: tests are green." },
+          { turnId: "turn-fold" },
+        ),
         event("turn.completed", {}, { turnId: "turn-fold" }),
       ]),
     );
@@ -869,7 +1136,10 @@ describe("groupTimeline", () => {
     expect(turn?.groups.map((group) => group.kind)).toEqual(["activity", "item", "activity"]);
     const final = groups[2];
     expect(final?.kind).toBe("item");
-    expect(final?.kind === "item" ? final.item : null).toMatchObject({ kind: "agent-message", text: "Final answer: tests are green." });
+    expect(final?.kind === "item" ? final.item : null).toMatchObject({
+      kind: "agent-message",
+      text: "Final answer: tests are green.",
+    });
   });
 
   test("a turn that ends on activity folds everything and extracts nothing", () => {
@@ -877,9 +1147,21 @@ describe("groupTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         event("user.message", { text: "run it" }, { turnId: null }),
-        event("agent.message.completed", { text: "Starting with the build." }, { turnId: "turn-activity-end" }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: "turn-activity-end" }),
-        event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-activity-end" }),
+        event(
+          "agent.message.completed",
+          { text: "Starting with the build." },
+          { turnId: "turn-activity-end" },
+        ),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } },
+          { turnId: "turn-activity-end" },
+        ),
+        event(
+          "agent.toolCall.output",
+          { id: "call-1", output: "ok" },
+          { turnId: "turn-activity-end" },
+        ),
         event("turn.completed", {}, { turnId: "turn-activity-end" }),
       ]),
     );
@@ -893,10 +1175,22 @@ describe("groupTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         event("user.message", { text: "first request" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } }, { turnId: "turn-steer" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } },
+          { turnId: "turn-steer" },
+        ),
         event("user.message", { text: "actually run tests only" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "bun test" } }, { turnId: "turn-steer" }),
-        event("agent.message.completed", { text: "Final answer after steering." }, { turnId: "turn-steer" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-2", name: "exec_command", arguments: { cmd: "bun test" } },
+          { turnId: "turn-steer" },
+        ),
+        event(
+          "agent.message.completed",
+          { text: "Final answer after steering." },
+          { turnId: "turn-steer" },
+        ),
         event("turn.completed", {}, { turnId: "turn-steer" }),
       ]),
     );
@@ -911,20 +1205,35 @@ describe("groupTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         event("user.message", { text: "setup" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } }, { turnId: "turn-1" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } },
+          { turnId: "turn-1" },
+        ),
         event("agent.message.completed", { text: "Setup complete." }, { turnId: "turn-1" }),
         event("turn.completed", {}, { turnId: "turn-1" }),
         event("session.status.changed", { status: "idle" }, { turnId: null }),
         event("user.message", { text: "deploy" }, { turnId: null }),
         event("session.status.changed", { status: "running" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } }, { turnId: "turn-2" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } },
+          { turnId: "turn-2" },
+        ),
         event("agent.message.completed", { text: "Deploy failed." }, { turnId: "turn-2" }),
         event("turn.failed", { error: "deploy failed" }, { turnId: "turn-2" }),
       ]),
     );
     // The idle/running ticks between and inside turns project no rows at all —
     // the shape is purely user → turn → answer, twice.
-    expect(groups.map((group) => group.kind)).toEqual(["item", "turn", "item", "item", "turn", "item"]);
+    expect(groups.map((group) => group.kind)).toEqual([
+      "item",
+      "turn",
+      "item",
+      "item",
+      "turn",
+      "item",
+    ]);
     const turns = turnGroups(groups);
     expect(turns.map((turn) => turn.id)).toEqual(["turn-turn-1", "turn-turn-2"]);
     expect(turns[0]?.groups.map((group) => group.kind)).toEqual(["activity"]);
@@ -935,32 +1244,47 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } }, { turnId: "turn-1" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } },
+          { turnId: "turn-1" },
+        ),
         event("agent.message.completed", { text: "Setup complete." }, { turnId: "turn-1" }),
         event("turn.completed", {}, { turnId: "turn-1" }),
         event("session.status.changed", { status: "idle" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } }, { turnId: "turn-2" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } },
+          { turnId: "turn-2" },
+        ),
         event("agent.message.completed", { text: "Deploy complete." }, { turnId: "turn-2" }),
         event("turn.completed", {}, { turnId: "turn-2" }),
       ]),
     );
     // No divider row separates the turns anymore; the foreign-turn guard alone
     // keeps turn-2's walk-back from absorbing turn-1's final message.
-    expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
-      "turn",
-      "item:agent-message",
-      "turn",
-      "item:agent-message",
-    ]);
+    expect(
+      groups.map((group) =>
+        group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind,
+      ),
+    ).toEqual(["turn", "item:agent-message", "turn", "item:agent-message"]);
     const turns = turnGroups(groups);
-    expect(turns.map((turn) => turn.groups.map((group) => group.kind))).toEqual([["activity"], ["activity"]]);
+    expect(turns.map((turn) => turn.groups.map((group) => group.kind))).toEqual([
+      ["activity"],
+      ["activity"],
+    ]);
   });
 
   test("activity-less turns create no turn group and keep their notice", () => {
     reset();
-    const groups = groupTimeline(buildTimeline([event("turn.failed", { error: "model provider unavailable" })]));
+    const groups = groupTimeline(
+      buildTimeline([event("turn.failed", { error: "model provider unavailable" })]),
+    );
     expect(groups.map((group) => group.kind)).toEqual(["item"]);
-    expect(groups[0]?.kind === "item" ? groups[0].item : null).toMatchObject({ kind: "notice", tone: "failed" });
+    expect(groups[0]?.kind === "item" ? groups[0].item : null).toMatchObject({
+      kind: "notice",
+      tone: "failed",
+    });
   });
 
   test("machinery status ticks vanish; attention statuses inside a settled turn fold into the body", () => {
@@ -970,7 +1294,11 @@ describe("groupTimeline", () => {
         event("user.message", { text: "run checks" }, { turnId: null }),
         event("session.status.changed", { status: "running" }, { turnId: null }),
         event("session.status.changed", { status: "requires_action" }, { turnId: null }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, { turnId: "turn-status" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } },
+          { turnId: "turn-status" },
+        ),
         event("agent.message.completed", { text: "Checks passed." }, { turnId: "turn-status" }),
         event("turn.completed", {}, { turnId: "turn-status" }),
       ]),
@@ -978,15 +1306,26 @@ describe("groupTimeline", () => {
     expect(groups.map((group) => group.kind)).toEqual(["item", "turn", "item"]);
     const [turn] = turnGroups(groups);
     // The running tick projected nothing; the requires_action divider folds.
-    expect(turn?.groups.map((group) => (group.kind === "item" ? group.item.kind : group.kind))).toEqual(["session-status", "activity"]);
+    expect(
+      turn?.groups.map((group) => (group.kind === "item" ? group.item.kind : group.kind)),
+    ).toEqual(["session-status", "activity"]);
     const folded = turn?.groups[0];
-    expect(folded?.kind === "item" ? folded.item : null).toMatchObject({ kind: "session-status", status: "requires_action" });
+    expect(folded?.kind === "item" ? folded.item : null).toMatchObject({
+      kind: "session-status",
+      status: "requires_action",
+    });
   });
 
   test("live activity groups have no turn outcome", () => {
     reset();
     const groups = groupTimeline(
-      buildTimeline([event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } })]),
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "make build" },
+        }),
+      ]),
     );
     const [activity] = activityGroups(groups);
     expect(activity?.outcome).toBeUndefined();
@@ -998,8 +1337,16 @@ describe("groupTimeline", () => {
     const groups = groupTimeline(
       buildTimeline([
         event("agent.reasoning.delta", { text: "thinking" }, { turnId: "turn-split" }),
-        event("agent.message.completed", { text: "Checking this first." }, { turnId: "turn-split" }),
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: "turn-split" }),
+        event(
+          "agent.message.completed",
+          { text: "Checking this first." },
+          { turnId: "turn-split" },
+        ),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } },
+          { turnId: "turn-split" },
+        ),
         event("turn.failed", { error: "compiler exploded" }, { turnId: "turn-split" }),
       ]),
     );
@@ -1018,9 +1365,17 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } }, { turnId: "turn-1" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } },
+          { turnId: "turn-1" },
+        ),
         event("turn.completed", {}, { turnId: "turn-1" }),
-        event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } }, { turnId: "turn-2" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } },
+          { turnId: "turn-2" },
+        ),
         event("turn.failed", { error: "deploy failed" }, { turnId: "turn-2" }),
       ]),
     );
@@ -1028,7 +1383,10 @@ describe("groupTimeline", () => {
     expect(groups.map((group) => group.kind)).toEqual(["turn", "turn"]);
     expect(activities).toHaveLength(2);
     expect(activities.map((group) => group.outcome)).toEqual(["complete", "cancelled"]);
-    expect(activities.map((group) => group.items.map((item) => item.turnId))).toEqual([["turn-1"], ["turn-2"]]);
+    expect(activities.map((group) => group.items.map((item) => item.turnId))).toEqual([
+      ["turn-1"],
+      ["turn-2"],
+    ]);
     expect(activities[0]?.failureText).toBeUndefined();
     expect(activities[1]?.failureText).toBeUndefined();
   });
@@ -1037,7 +1395,11 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } }, { turnId: null }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } },
+          { turnId: null },
+        ),
         event("turn.failed", { error: "tail failed" }, { turnId: null }),
       ]),
     );
@@ -1049,7 +1411,11 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } }, { turnId: null }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } },
+          { turnId: null },
+        ),
         event("turn.cancelled", {}, { turnId: null }),
       ]),
     );
@@ -1080,7 +1446,11 @@ describe("extractSessionRef", () => {
     expect(extractSessionRef({ sessionId: id })).toBe(id);
     expect(extractSessionRef({ id, status: "queued" })).toBe(id);
     expect(extractSessionRef(JSON.stringify({ session: { id, workspaceId: "ws" } }))).toBe(id);
-    expect(extractSessionRef({ content: [{ type: "text", text: JSON.stringify({ id, status: "queued" }) }] })).toBe(id);
+    expect(
+      extractSessionRef({
+        content: [{ type: "text", text: JSON.stringify({ id, status: "queued" }) }],
+      }),
+    ).toBe(id);
     expect(extractSessionRef({ structuredContent: { sessionId: id } })).toBe(id);
   });
 
@@ -1101,7 +1471,11 @@ describe("cluster outcomes inside a failed turn", () => {
       event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
       event("agent.toolCall.output", { id: "c1", output: "ok" }),
       event("agent.message.completed", { text: "Narration between clusters." }),
-      event("agent.toolCall.created", { id: "c2", name: "exec_command", arguments: { cmd: "pwd" } }),
+      event("agent.toolCall.created", {
+        id: "c2",
+        name: "exec_command",
+        arguments: { cmd: "pwd" },
+      }),
       event("agent.toolCall.output", { id: "c2", output: "/workspace" }),
       event("turn.failed", { error: "context overflow" }),
     ]);
@@ -1121,7 +1495,11 @@ describe("cluster outcomes inside a failed turn", () => {
       event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
       event("agent.toolCall.output", { id: "c1", output: "ok" }),
       event("agent.message.completed", { text: "Narration." }),
-      event("agent.toolCall.created", { id: "c2", name: "exec_command", arguments: { cmd: "boom" } }),
+      event("agent.toolCall.created", {
+        id: "c2",
+        name: "exec_command",
+        arguments: { cmd: "boom" },
+      }),
       event("agent.toolCall.output", { id: "c2", output: "exit 1", error: true }),
       event("turn.failed", { error: "tool failed" }),
     ]);
@@ -1142,11 +1520,27 @@ describe("credit exhaustion", () => {
     const items = buildTimeline([
       event("user.message", { text: "keep going" }),
       event("agent.message.delta", { text: "Working…" }),
-      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }),
+      event("turn.completed", {
+        detail: "insufficient OpenGeni credits",
+        segmentLimit: "budget_exhausted",
+      }),
     ]);
-    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message", "turn-end", "notice"]);
-    expect(items[2]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
-    expect(items[3]).toMatchObject({ kind: "notice", tone: "failed", text: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items.map((item) => item.kind)).toEqual([
+      "user-message",
+      "agent-message",
+      "turn-end",
+      "notice",
+    ]);
+    expect(items[2]).toMatchObject({
+      kind: "turn-end",
+      outcome: "failed",
+      failureText: CREDIT_EXHAUSTION_MESSAGE,
+    });
+    expect(items[3]).toMatchObject({
+      kind: "notice",
+      tone: "failed",
+      text: CREDIT_EXHAUSTION_MESSAGE,
+    });
   });
 
   test("turn.completed with only the detail text (no segmentLimit) still projects as failed", () => {
@@ -1154,7 +1548,11 @@ describe("credit exhaustion", () => {
     const items = buildTimeline([
       event("turn.completed", { detail: "insufficient OpenGeni credits" }),
     ]);
-    expect(items[0]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items[0]).toMatchObject({
+      kind: "turn-end",
+      outcome: "failed",
+      failureText: CREDIT_EXHAUSTION_MESSAGE,
+    });
     expect(items[1]).toMatchObject({ kind: "notice", tone: "failed" });
   });
 
@@ -1174,17 +1572,34 @@ describe("credit exhaustion", () => {
     const items = buildTimeline([
       event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
     ]);
-    expect(items[0]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
-    expect(items[1]).toMatchObject({ kind: "notice", tone: "failed", text: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items[0]).toMatchObject({
+      kind: "turn-end",
+      outcome: "failed",
+      failureText: CREDIT_EXHAUSTION_MESSAGE,
+    });
+    expect(items[1]).toMatchObject({
+      kind: "notice",
+      tone: "failed",
+      text: CREDIT_EXHAUSTION_MESSAGE,
+    });
   });
 
   test("groupTimeline folds a credit-exhausted turn as failed", () => {
     reset();
-    const groups = groupTimeline(buildTimeline([
-      event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
-      event("agent.toolCall.output", { id: "c1", output: "ok" }),
-      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }),
-    ]));
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "c1",
+          name: "exec_command",
+          arguments: { cmd: "ls" },
+        }),
+        event("agent.toolCall.output", { id: "c1", output: "ok" }),
+        event("turn.completed", {
+          detail: "insufficient OpenGeni credits",
+          segmentLimit: "budget_exhausted",
+        }),
+      ]),
+    );
     const turnGroup = groups.find((group) => group.kind === "turn");
     expect(turnGroup?.outcome).toBe("failed");
     expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE);
@@ -1194,36 +1609,54 @@ describe("credit exhaustion", () => {
 describe("creditExhaustedFromEvents", () => {
   test("true when the LAST turn-end is credit exhaustion (either payload shape)", () => {
     reset();
-    expect(creditExhaustedFromEvents([
-      event("turn.completed", {}, { turnId: "turn-1" }),
-      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }, { turnId: "turn-2" }),
-    ])).toBe(true);
+    expect(
+      creditExhaustedFromEvents([
+        event("turn.completed", {}, { turnId: "turn-1" }),
+        event(
+          "turn.completed",
+          { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" },
+          { turnId: "turn-2" },
+        ),
+      ]),
+    ).toBe(true);
     reset();
-    expect(creditExhaustedFromEvents([
-      event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
-    ])).toBe(true);
+    expect(
+      creditExhaustedFromEvents([
+        event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
+      ]),
+    ).toBe(true);
   });
 
   test("false when a later turn settles any other way, or with no turn ends", () => {
     reset();
-    expect(creditExhaustedFromEvents([
-      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }, { turnId: "turn-1" }),
-      event("turn.completed", {}, { turnId: "turn-2" }),
-    ])).toBe(false);
+    expect(
+      creditExhaustedFromEvents([
+        event(
+          "turn.completed",
+          { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" },
+          { turnId: "turn-1" },
+        ),
+        event("turn.completed", {}, { turnId: "turn-2" }),
+      ]),
+    ).toBe(false);
     reset();
-    expect(creditExhaustedFromEvents([
-      event("user.message", { text: "hello" }),
-      event("agent.message.delta", { text: "hi" }),
-    ])).toBe(false);
+    expect(
+      creditExhaustedFromEvents([
+        event("user.message", { text: "hello" }),
+        event("agent.message.delta", { text: "hi" }),
+      ]),
+    ).toBe(false);
     expect(creditExhaustedFromEvents([])).toBe(false);
   });
 
   test("orders by sequence, not array order", () => {
     reset();
-    expect(creditExhaustedFromEvents([
-      eventAt(20, "turn.completed", { segmentLimit: "budget_exhausted" }, { turnId: "turn-2" }),
-      eventAt(10, "turn.completed", {}, { turnId: "turn-1" }),
-    ])).toBe(true);
+    expect(
+      creditExhaustedFromEvents([
+        eventAt(20, "turn.completed", { segmentLimit: "budget_exhausted" }, { turnId: "turn-2" }),
+        eventAt(10, "turn.completed", {}, { turnId: "turn-1" }),
+      ]),
+    ).toBe(true);
   });
 });
 
@@ -1264,7 +1697,12 @@ describe("buildTimeline — memory writes", () => {
   test("carries a deduped flag through only when the save collapsed into an existing memory", () => {
     reset();
     const items = buildTimeline([
-      event("memory.saved", { memoryId: "mem-2", kind: "semantic", preview: "Ships on Fridays.", deduped: true }),
+      event("memory.saved", {
+        memoryId: "mem-2",
+        kind: "semantic",
+        preview: "Ships on Fridays.",
+        deduped: true,
+      }),
     ]);
     expect((items[0] as MemoryItem).deduped).toBe(true);
   });
@@ -1293,7 +1731,12 @@ describe("buildTimeline — memory writes", () => {
   test("projects an archive (corrected, no replacement) carrying the archived action", () => {
     reset();
     const items = buildTimeline([
-      event("memory.corrected", { memoryId: "mem-3", kind: "episodic", preview: "Tried the beta once.", action: "archived" }),
+      event("memory.corrected", {
+        memoryId: "mem-3",
+        kind: "episodic",
+        preview: "Tried the beta once.",
+        action: "archived",
+      }),
     ]);
     const memory = items[0] as MemoryItem;
     expect(memory.variant).toBe("corrected");
@@ -1305,7 +1748,12 @@ describe("buildTimeline — memory writes", () => {
   test("projects an in-place update (corrected, no replacement) carrying the updated action", () => {
     reset();
     const items = buildTimeline([
-      event("memory.corrected", { memoryId: "mem-4", kind: "preference", preview: "Prefers dark mode.", action: "updated" }),
+      event("memory.corrected", {
+        memoryId: "mem-4",
+        kind: "preference",
+        preview: "Prefers dark mode.",
+        action: "updated",
+      }),
     ]);
     const memory = items[0] as MemoryItem;
     expect(memory.variant).toBe("corrected");
@@ -1323,11 +1771,13 @@ describe("buildTimeline — memory writes", () => {
 
   test("clusters memory writes as activity steps alongside tool calls", () => {
     reset();
-    const groups = groupTimeline(buildTimeline([
-      event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
-      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
-      event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
-    ]));
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
+      ]),
+    );
     const activities = collectActivityGroups(groups);
     expect(activities).toHaveLength(1);
     expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);

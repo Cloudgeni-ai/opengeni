@@ -57,13 +57,22 @@ describe("migration 0019 (session_stream_acknowledgments)", () => {
       await migrate(DB_URL);
 
       // --- Columns exist with the right nullability/default.
-      const cols = await sql<{ column_name: string; is_nullable: string; column_default: string | null }[]>`
+      const cols = await sql<
+        { column_name: string; is_nullable: string; column_default: string | null }[]
+      >`
         SELECT column_name, is_nullable, column_default
         FROM information_schema.columns
         WHERE table_name = 'session_stream_acknowledgments'
         ORDER BY column_name`;
       const colMap = new Map(cols.map((c) => [c.column_name, c]));
-      for (const name of ["account_id", "workspace_id", "sandbox_group_id", "subject_id", "acknowledged_unredacted", "acknowledged_shared"]) {
+      for (const name of [
+        "account_id",
+        "workspace_id",
+        "sandbox_group_id",
+        "subject_id",
+        "acknowledged_unredacted",
+        "acknowledged_shared",
+      ]) {
         expect(colMap.get(name), `missing column ${name}`).toBeDefined();
       }
       expect(colMap.get("subject_id")!.is_nullable).toBe("NO");
@@ -77,16 +86,26 @@ describe("migration 0019 (session_stream_acknowledgments)", () => {
       expect(idx.map((r) => r.indexname)).toContain("session_stream_ack_subject_idx");
 
       // --- RLS is enabled + forced.
-      const rls = (await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+      const rls = (
+        await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
         SELECT relrowsecurity, relforcerowsecurity FROM pg_class
-        WHERE relname = 'session_stream_acknowledgments'`)[0]!;
+        WHERE relname = 'session_stream_acknowledgments'`
+      )[0]!;
       expect(rls.relrowsecurity).toBe(true);
       expect(rls.relforcerowsecurity).toBe(true);
 
       // --- Re-ack upsert: a second ack for the same (workspace, group, subject)
       // updates in place (no duplicate) and ORs the consent bits monotonically.
-      const accountId = (await sql<{ id: string }[]>`INSERT INTO "managed_accounts" ("name") VALUES ('acct') RETURNING "id"`)[0]!.id;
-      const workspaceId = (await sql<{ id: string }[]>`INSERT INTO "workspaces" ("account_id", "name") VALUES (${accountId}, 'ws') RETURNING "id"`)[0]!.id;
+      const accountId = (
+        await sql<
+          { id: string }[]
+        >`INSERT INTO "managed_accounts" ("name") VALUES ('acct') RETURNING "id"`
+      )[0]!.id;
+      const workspaceId = (
+        await sql<
+          { id: string }[]
+        >`INSERT INTO "workspaces" ("account_id", "name") VALUES (${accountId}, 'ws') RETURNING "id"`
+      )[0]!.id;
       const groupId = "00000000-0000-4000-8000-000000000abc";
 
       await sql`

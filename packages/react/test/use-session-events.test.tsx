@@ -7,7 +7,11 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 
 registerDom();
 
-function event(sequence: number, type: SessionEvent["type"] = "user.message", payload: unknown = { text: `m-${sequence}` }): SessionEvent {
+function event(
+  sequence: number,
+  type: SessionEvent["type"] = "user.message",
+  payload: unknown = { text: `m-${sequence}` },
+): SessionEvent {
   return {
     id: `evt-${sequence}`,
     workspaceId: WORKSPACE_ID,
@@ -89,13 +93,20 @@ describe("useSessionEvents", () => {
     const store = [
       event(1, "session.created", {}),
       event(2),
-      ...Array.from({ length: 5099 }, (_, index) => event(index + 3, "agent.message.delta", { text: "older" })),
+      ...Array.from({ length: 5099 }, (_, index) =>
+        event(index + 3, "agent.message.delta", { text: "older" }),
+      ),
       event(5102),
-      ...Array.from({ length: 1000 }, (_, index) => event(index + 5103, "agent.message.delta", { text: "middle" })),
+      ...Array.from({ length: 1000 }, (_, index) =>
+        event(index + 5103, "agent.message.delta", { text: "middle" }),
+      ),
       ...Array.from({ length: 1000 }, (_, index) => event(index + 6103)),
     ];
     const { client, listCalls } = scriptedClient({ store });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     // One fetch: the tail page already contains a boundary, so the head is
@@ -144,7 +155,10 @@ describe("useSessionEvents", () => {
         return listPage(store, options);
       },
     });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     const first = hook.result.current.loadOlder();
@@ -157,8 +171,12 @@ describe("useSessionEvents", () => {
 
     expect(firstResult).toBe(false);
     expect(secondResult).toBe(false);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual(store.map((item) => item.sequence));
-    expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(store.length);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual(
+      store.map((item) => item.sequence),
+    );
+    expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(
+      store.length,
+    );
     expect(hook.result.current.hasOlder).toBe(false);
 
     await hook.unmount();
@@ -166,11 +184,15 @@ describe("useSessionEvents", () => {
 
   test("full replay and nonzero after keep the stream-only behavior", async () => {
     const full = scriptedClient({ store: [], streamEvents: [event(1), event(2)] });
-    const fullHook = await renderHook(() => useSessionEvents(SESSION_ID, {
-      client: full.client,
-      workspaceId: WORKSPACE_ID,
-      replay: "full",
-    }), undefined);
+    const fullHook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: full.client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
+      undefined,
+    );
     await flush(20);
     expect(full.listCalls).toHaveLength(0);
     expect(full.streamCalls).toEqual([0]);
@@ -179,11 +201,15 @@ describe("useSessionEvents", () => {
     await fullHook.unmount();
 
     const resumed = scriptedClient({ store: [], streamEvents: [event(6)] });
-    const resumedHook = await renderHook(() => useSessionEvents(SESSION_ID, {
-      client: resumed.client,
-      workspaceId: WORKSPACE_ID,
-      after: 5,
-    }), undefined);
+    const resumedHook = await renderHook(
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: resumed.client,
+          workspaceId: WORKSPACE_ID,
+          after: 5,
+        }),
+      undefined,
+    );
     await flush(20);
     expect(resumed.listCalls).toHaveLength(0);
     expect(resumed.streamCalls).toEqual([5]);
@@ -193,18 +219,21 @@ describe("useSessionEvents", () => {
   });
 
   test("the initial window is a single fetch regardless of log size", async () => {
-    const store = Array.from({ length: 40_000 }, (_, index) => event(index + 1, "agent.message.delta", { text: "x" }));
+    const store = Array.from({ length: 40_000 }, (_, index) =>
+      event(index + 1, "agent.message.delta", { text: "x" }),
+    );
     const { client, listCalls } = scriptedClient({ store });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     // First paint is exactly ONE fetch — deeper history is the sentinel's job.
     expect(hook.result.current.events).toHaveLength(5000);
     expect(hook.result.current.events[0]?.sequence).toBe(35_001);
     expect(hook.result.current.hasOlder).toBe(true);
-    expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true },
-    ]);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
 
     await hook.unmount();
   });
@@ -218,7 +247,10 @@ describe("useSessionEvents", () => {
       store: [],
       listEvents: async () => coalescedTail,
     });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
@@ -252,7 +284,10 @@ describe("useSessionEvents", () => {
         return [];
       },
     });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([8]);
@@ -275,15 +310,23 @@ describe("useSessionEvents", () => {
       { before: 4, limit: 5000, compact: true },
     ]);
     const agentText = hook.result.current.timeline
-      .filter((item): item is Extract<TimelineItem, { kind: "agent-message" }> => item.kind === "agent-message")
+      .filter(
+        (item): item is Extract<TimelineItem, { kind: "agent-message" }> =>
+          item.kind === "agent-message",
+      )
       .map((item) => item.text);
     expect(agentText).toEqual(["abcdefghi"]);
     const rawEquivalent = [
       event(1, "session.created", {}),
-      ...Array.from("abcdefghi", (text, index) => event(index + 2, "agent.message.delta", { text })),
+      ...Array.from("abcdefghi", (text, index) =>
+        event(index + 2, "agent.message.delta", { text }),
+      ),
     ];
     const rawText = buildTimeline(rawEquivalent)
-      .filter((item): item is Extract<TimelineItem, { kind: "agent-message" }> => item.kind === "agent-message")
+      .filter(
+        (item): item is Extract<TimelineItem, { kind: "agent-message" }> =>
+          item.kind === "agent-message",
+      )
       .map((item) => item.text);
     expect(agentText).toEqual(rawText);
 
@@ -291,9 +334,14 @@ describe("useSessionEvents", () => {
   });
 
   test("group early-stop still works on many-turn logs", async () => {
-    const store = Array.from({ length: 20_000 }, (_, index) => event(index + 1, "user.message", { text: `m-${index + 1}` }));
+    const store = Array.from({ length: 20_000 }, (_, index) =>
+      event(index + 1, "user.message", { text: `m-${index + 1}` }),
+    );
     const { client, listCalls } = scriptedClient({ store });
-    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
     await flush(20);
 
     expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);

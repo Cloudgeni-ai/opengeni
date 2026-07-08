@@ -36,5 +36,7 @@ export function orgSettingsPath(workspaceId: string): string {
 export type CheckoutOutcome = "success" | "cancelled";
 
 export function parseCheckoutOutcome(search: Record<string, unknown>): CheckoutOutcome | undefined {
-  return search.checkout === "success" || search.checkout === "cancelled" ? search.checkout : undefined;
+  return search.checkout === "success" || search.checkout === "cancelled"
+    ? search.checkout
+    : undefined;
 }

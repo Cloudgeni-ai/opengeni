@@ -33,7 +33,12 @@
 
 import { computerTool, tool, type Computer, type Tool } from "@openai/agents";
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
-import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
+import {
+  KeyAction,
+  PointerAction,
+  PointerButton,
+  type DesktopInputRequest,
+} from "@opengeni/agent-proto";
 
 import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
 // `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
@@ -45,7 +50,10 @@ import { stripExecBanner } from "./sandbox";
 // `requireBoundSession` lives in @openai/agents-core/sandbox/capabilities/base
 // but is NOT re-exported from the public @openai/agents/sandbox barrel, so we
 // inline the trivial bound-session guard (parity with the SDK's own helper).
-function requireBoundSession(capabilityType: string, session?: SandboxSessionLike): SandboxSessionLike {
+function requireBoundSession(
+  capabilityType: string,
+  session?: SandboxSessionLike,
+): SandboxSessionLike {
   if (!session) {
     throw new ComputerUnavailableError(`capability "${capabilityType}" used before bind(session)`);
   }
@@ -107,12 +115,31 @@ export type SandboxComputerOptions = {
 
 // X keysym map for keypress(): model key names → xdotool keysyms.
 const KEYSYM: Record<string, string> = {
-  ctrl: "ctrl", control: "ctrl", alt: "alt", option: "alt", shift: "shift",
-  cmd: "super", meta: "super", win: "super", super: "super",
-  enter: "Return", return: "Return", tab: "Tab", esc: "Escape", escape: "Escape",
-  backspace: "BackSpace", delete: "Delete", space: "space",
-  up: "Up", down: "Down", left: "Left", right: "Right",
-  pageup: "Prior", pagedown: "Next", home: "Home", end: "End",
+  ctrl: "ctrl",
+  control: "ctrl",
+  alt: "alt",
+  option: "alt",
+  shift: "shift",
+  cmd: "super",
+  meta: "super",
+  win: "super",
+  super: "super",
+  enter: "Return",
+  return: "Return",
+  tab: "Tab",
+  esc: "Escape",
+  escape: "Escape",
+  backspace: "BackSpace",
+  delete: "Delete",
+  space: "space",
+  up: "Up",
+  down: "Down",
+  left: "Left",
+  right: "Right",
+  pageup: "Prior",
+  pagedown: "Next",
+  home: "Home",
+  end: "End",
 };
 function toKeysym(k: string): string {
   const low = k.toLowerCase();
@@ -120,40 +147,75 @@ function toKeysym(k: string): string {
   if (/^f([1-9]|1[0-2])$/.test(low)) return low.toUpperCase();
   return low.length === 1 ? low : k;
 }
-const BUTTON_NUM: Record<ComputerButton, number> = { left: 1, wheel: 2, right: 3, back: 8, forward: 9 };
+const BUTTON_NUM: Record<ComputerButton, number> = {
+  left: 1,
+  wheel: 2,
+  right: 3,
+  back: 8,
+  forward: 9,
+};
 
 // The structural slice of a provider session computer-use drives. exec and
 // execCommand are optional because the SDK's SandboxSessionLike leaves them
 // optional (Modal implements execCommand, not exec — F1). readFile is intentionally
 // NOT in this type: screenshots read the /tmp PNG via `base64 <path>` over
 // exec/execCommand (readFile path-validates against /workspace and rejects /tmp).
-type ExecResultLike = { output?: string; stdout?: string; stderr?: string; exitCode?: number | null; sessionId?: number };
+type ExecResultLike = {
+  output?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  sessionId?: number;
+};
 type ComputerSession = {
   // A native provider exec returns a structured `ExecResultLike`; the routing proxy
   // fronting a Modal box returns the execCommand banner STRING. Both are handled.
-  exec?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike | string>;
-  execCommand?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
+  exec?: (args: {
+    cmd: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<ExecResultLike | string>;
+  execCommand?: (args: {
+    cmd: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
 };
 
 /** No exec/execCommand on the session, or the display is not up. */
 export class ComputerUnavailableError extends Error {
-  constructor(message: string) { super(message); this.name = "ComputerUnavailableError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ComputerUnavailableError";
+  }
 }
 /** The screenshot file read back SHORT of its on-box byte size — a chunk was truncated
  *  by the provider's exec-output cap. This is deterministic, NOT a warm-up transient, so
  *  it fails LOUD immediately with the byte counts (never a silent blank the model would
  *  read as a real empty screen) and is not retried. */
 export class ScreenshotReadError extends Error {
-  constructor(message: string) { super(message); this.name = "ScreenshotReadError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ScreenshotReadError";
+  }
 }
 /** A write action attempted while readOnly. */
 export class ComputerReadOnlyError extends Error {
-  constructor() { super("computer-use is read-only — write actions are disabled"); this.name = "ComputerReadOnlyError"; }
+  constructor() {
+    super("computer-use is read-only — write actions are disabled");
+    this.name = "ComputerReadOnlyError";
+  }
 }
 /** A nonzero xdotool/scrot exit, OR a command that did not finish before the
  *  yield window (F3 — "still running" is a failure, not a silent success). */
 export class ComputerActionError extends Error {
-  constructor(public cmd: string, public exitCode: number, public stderr: string) {
+  constructor(
+    public cmd: string,
+    public exitCode: number,
+    public stderr: string,
+  ) {
     super(`computer action failed (${exitCode}): ${cmd}${stderr ? `\n${stderr}` : ""}`);
     this.name = "ComputerActionError";
   }
@@ -195,7 +257,9 @@ export class SandboxComputer implements Computer {
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
-  rebind(session: SandboxSessionLike) { this.session = session as unknown as ComputerSession; }
+  rebind(session: SandboxSessionLike) {
+    this.session = session as unknown as ComputerSession;
+  }
 
   // The single command primitive. Dual-paths exec/execCommand (F1), then uses the
   // established string-aware parsers (F2/F3): exitCode from the preamble, and
@@ -285,7 +349,9 @@ export class SandboxComputer implements Computer {
         if (bytes.length === 0) {
           // A cold/not-yet-painting :0 yields a zero-byte frame. Retry rather than
           // hand the model an empty image_url; throw once the budget is spent.
-          throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
+          throw new ComputerUnavailableError(
+            "scrot produced an empty screenshot (display not up?)",
+          );
         }
         return Buffer.from(bytes).toString("base64");
       } catch (error) {
@@ -351,7 +417,9 @@ export class SandboxComputer implements Computer {
     if (typeof this.session.execCommand === "function") {
       return stripExecBanner(await this.session.execCommand(args));
     }
-    throw new ComputerUnavailableError("session cannot run commands (no exec/execCommand) — screenshots unavailable");
+    throw new ComputerUnavailableError(
+      "session cannot run commands (no exec/execCommand) — screenshots unavailable",
+    );
   }
 
   // Read the screenshot PNG bytes off the box. A SINGLE `base64 <file>` over Modal's
@@ -402,7 +470,8 @@ export class SandboxComputer implements Computer {
   async scroll(xp: number, yp: number, sx: number, sy: number) {
     this.guardWrite();
     // F5: model deltas are PIXELS — convert to wheel notches, clamp.
-    const notches = (px: number): number => Math.min(SCROLL_MAX_CLICKS, Math.max(0, Math.round(Math.abs(px) / SCROLL_NOTCH_PIXELS)));
+    const notches = (px: number): number =>
+      Math.min(SCROLL_MAX_CLICKS, Math.max(0, Math.round(Math.abs(px) / SCROLL_NOTCH_PIXELS)));
     const vBtn = sy < 0 ? 4 : 5;
     const hBtn = sx < 0 ? 6 : 7;
     const vN = notches(sy);
@@ -455,7 +524,13 @@ export type NativeDesktopSession = {
   // width/height when the agent did not have to shrink the PNG to fit the transport
   // budget). NativeDesktopComputer scales model clicks from the ENCODED pixel space
   // back to native pixels using their ratio before injecting.
-  screenshot(): Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
+  screenshot(): Promise<{
+    png: Uint8Array;
+    width: number;
+    height: number;
+    nativeWidth: number;
+    nativeHeight: number;
+  }>;
 };
 
 /** Model `Button` → wire `PointerButton`. The proto has no back/forward button, so
@@ -495,7 +570,11 @@ export type NativeDesktopComputerOptions = {
  *  "no shareable content (Screen Recording denied?)"). */
 function isTerminalCaptureDenial(error: unknown): boolean {
   const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
-  return msg.includes("screen recording") || msg.includes("permission is not granted") || msg.includes("consent");
+  return (
+    msg.includes("screen recording") ||
+    msg.includes("permission is not granted") ||
+    msg.includes("consent")
+  );
 }
 
 /**
@@ -536,12 +615,15 @@ export class NativeDesktopComputer implements Computer {
     // should pass "mac" so the model uses ⌘-based shortcuts — see the coordinate TODO.
     this.environment = opts.environment ?? "ubuntu";
     this.readOnly = opts.readOnly ?? false;
-    this.screenshotWarmupBudgetMs = opts.screenshotWarmupBudgetMs ?? NATIVE_SCREENSHOT_WARMUP_BUDGET_MS;
+    this.screenshotWarmupBudgetMs =
+      opts.screenshotWarmupBudgetMs ?? NATIVE_SCREENSHOT_WARMUP_BUDGET_MS;
     this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? NATIVE_SCREENSHOT_RETRY_DELAY_MS;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
-  rebind(session: NativeDesktopSession) { this.session = session; }
+  rebind(session: NativeDesktopSession) {
+    this.session = session;
+  }
 
   private guardWrite() {
     if (this.readOnly) throw new ComputerReadOnlyError();
@@ -564,7 +646,12 @@ export class NativeDesktopComputer implements Computer {
     };
   }
 
-  private async pointer(x: number, y: number, action: PointerAction, button: PointerButton): Promise<void> {
+  private async pointer(
+    x: number,
+    y: number,
+    action: PointerAction,
+    button: PointerButton,
+  ): Promise<void> {
     // COORDINATE SEAM: the model computes x/y against the pixels of the screenshot it
     // just saw — which the agent may have DOWNSCALED to fit the transport's max
     // payload (a full-res Retina/busy screen exceeds NATS's 1 MiB default). We scale
@@ -574,7 +661,10 @@ export class NativeDesktopComputer implements Computer {
     // and the coordinates pass through unchanged. Self-hosted Linux (XTEST/x11) and
     // any non-downscaled frame are 1:1 and unaffected.
     const n = this.toNative(x, y);
-    await this.session.desktopInput({ $case: "pointer", pointer: { x: n.x, y: n.y, action, button } });
+    await this.session.desktopInput({
+      $case: "pointer",
+      pointer: { x: n.x, y: n.y, action, button },
+    });
   }
 
   async screenshot(): Promise<string> {
@@ -605,7 +695,9 @@ export class NativeDesktopComputer implements Computer {
         if (png.length === 0) {
           // A warming capture yields an empty frame — retry rather than hand the model
           // a blank; throw once the budget is spent.
-          throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
+          throw new ComputerUnavailableError(
+            "native desktop screenshot returned an empty frame (display not up?)",
+          );
         }
         // Record the encoded (what the model sees) vs native geometry of THIS frame so
         // the next click/move/scroll/drag scales its coordinates back to native pixels.
@@ -626,24 +718,43 @@ export class NativeDesktopComputer implements Computer {
     // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
     // then rethrow — never return "".
     const reason = lastError instanceof Error ? lastError.message : String(lastError);
-    console.warn(`[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`);
+    console.warn(
+      `[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`,
+    );
     if (lastError instanceof Error) {
       throw lastError;
     }
-    throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
+    throw new ComputerUnavailableError(
+      "native desktop screenshot returned an empty frame (display not up?)",
+    );
   }
 
   async click(x: number, y: number, button: ComputerButton) {
     this.guardWrite();
-    await this.pointer(x, y, PointerAction.POINTER_ACTION_CLICK, POINTER_BUTTON[button] ?? PointerButton.POINTER_BUTTON_LEFT);
+    await this.pointer(
+      x,
+      y,
+      PointerAction.POINTER_ACTION_CLICK,
+      POINTER_BUTTON[button] ?? PointerButton.POINTER_BUTTON_LEFT,
+    );
   }
   async doubleClick(x: number, y: number) {
     this.guardWrite();
-    await this.pointer(x, y, PointerAction.POINTER_ACTION_DOUBLE_CLICK, PointerButton.POINTER_BUTTON_LEFT);
+    await this.pointer(
+      x,
+      y,
+      PointerAction.POINTER_ACTION_DOUBLE_CLICK,
+      PointerButton.POINTER_BUTTON_LEFT,
+    );
   }
   async move(x: number, y: number) {
     this.guardWrite();
-    await this.pointer(x, y, PointerAction.POINTER_ACTION_MOVE, PointerButton.POINTER_BUTTON_UNSPECIFIED);
+    await this.pointer(
+      x,
+      y,
+      PointerAction.POINTER_ACTION_MOVE,
+      PointerButton.POINTER_BUTTON_UNSPECIFIED,
+    );
   }
   async scroll(x: number, y: number, sx: number, sy: number) {
     this.guardWrite();
@@ -652,13 +763,19 @@ export class NativeDesktopComputer implements Computer {
     // owns the platform-appropriate wheel translation, so they pass through unscaled
     // (no xdotool "notch" quantization here — that is an xdotool-specific artifact).
     const n = this.toNative(x, y);
-    await this.session.desktopInput({ $case: "scroll", scroll: { x: n.x, y: n.y, deltaX: sx, deltaY: sy } });
+    await this.session.desktopInput({
+      $case: "scroll",
+      scroll: { x: n.x, y: n.y, deltaX: sx, deltaY: sy },
+    });
   }
   async type(text: string) {
     this.guardWrite();
     // A literal text burst: isText:true tells the agent to type the string verbatim
     // (Unicode-aware) rather than interpret it as a key name.
-    await this.session.desktopInput({ $case: "key", key: { key: text, isText: true, action: KeyAction.KEY_ACTION_PRESS } });
+    await this.session.desktopInput({
+      $case: "key",
+      key: { key: text, isText: true, action: KeyAction.KEY_ACTION_PRESS },
+    });
   }
   async keypress(keys: string[]) {
     this.guardWrite();
@@ -667,7 +784,10 @@ export class NativeDesktopComputer implements Computer {
     // NOT xdotool X keysyms (SandboxComputer's toKeysym maps to "Return"/"super"/
     // "Prior", which are X-specific and wrong for the macOS CGEvent path). The agent
     // owns the per-platform key-name → keycode mapping (the KeyEvent.key contract).
-    await this.session.desktopInput({ $case: "key", key: { key: keys.join("+"), isText: false, action: KeyAction.KEY_ACTION_PRESS } });
+    await this.session.desktopInput({
+      $case: "key",
+      key: { key: keys.join("+"), isText: false, action: KeyAction.KEY_ACTION_PRESS },
+    });
   }
   async drag(path: [number, number][]) {
     this.guardWrite();
@@ -675,9 +795,19 @@ export class NativeDesktopComputer implements Computer {
     // Press at the start, move through each waypoint with the button held, release at
     // the last point. The agent tracks button state across the DOWN → MOVE… → UP.
     const [sx, sy] = path[0]!;
-    await this.pointer(sx, sy, PointerAction.POINTER_ACTION_DOWN, PointerButton.POINTER_BUTTON_LEFT);
+    await this.pointer(
+      sx,
+      sy,
+      PointerAction.POINTER_ACTION_DOWN,
+      PointerButton.POINTER_BUTTON_LEFT,
+    );
     for (const [px, py] of path.slice(1)) {
-      await this.pointer(px, py, PointerAction.POINTER_ACTION_MOVE, PointerButton.POINTER_BUTTON_LEFT);
+      await this.pointer(
+        px,
+        py,
+        PointerAction.POINTER_ACTION_MOVE,
+        PointerButton.POINTER_BUTTON_LEFT,
+      );
     }
     const [ex, ey] = path[path.length - 1]!;
     await this.pointer(ex, ey, PointerAction.POINTER_ACTION_UP, PointerButton.POINTER_BUTTON_LEFT);
@@ -695,7 +825,9 @@ export class NativeDesktopComputer implements Computer {
  * agent-loop ↔ sandbox-leaf import coupling) and is future-proof: any backend that
  * grows native inject/capture is picked up automatically.
  */
-export function isNativeDesktopSession(session: SandboxSessionLike): session is SandboxSessionLike & NativeDesktopSession {
+export function isNativeDesktopSession(
+  session: SandboxSessionLike,
+): session is SandboxSessionLike & NativeDesktopSession {
   const s = session as Partial<NativeDesktopSession>;
   return typeof s.desktopInput === "function" && typeof s.screenshot === "function";
 }
@@ -724,20 +856,32 @@ type ToolOutputImage = { type: "image"; image: { data: Uint8Array; mediaType: st
  *  (shared/media). Screenshots are always PNG (scrot / ScreenCaptureKit / x11), so
  *  an unrecognized header defaults to image/png rather than failing the frame. */
 function sniffScreenshotMediaType(bytes: Uint8Array): string {
-  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+    return "image/png";
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
-  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return "image/gif";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38)
+    return "image/gif";
   if (
-    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
-    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
-  ) return "image/webp";
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  )
+    return "image/webp";
   return "image/png";
 }
 
 /** Build the SDK `ToolOutputImage` from raw screenshot bytes — the structured shape
  *  the SDK's `imageOutputFromBytes` produces (`{type:'image', image:{data,mediaType}}`). */
 function imageOutputFromScreenshotBytes(bytes: Uint8Array): ToolOutputImage {
-  return { type: "image", image: { data: Uint8Array.from(bytes), mediaType: sniffScreenshotMediaType(bytes) } };
+  return {
+    type: "image",
+    image: { data: Uint8Array.from(bytes), mediaType: sniffScreenshotMediaType(bytes) },
+  };
 }
 
 /** Render an image tool-output as a text-transport string, in lockstep with the
@@ -747,7 +891,8 @@ function imageOutputFromScreenshotBytes(bytes: Uint8Array): ToolOutputImage {
 function renderImageForTextTransport(output: ToolOutputImage | string): string {
   if (typeof output === "string") return output;
   const { image } = output;
-  const mediaType = typeof image.mediaType === "string" ? image.mediaType : "application/octet-stream";
+  const mediaType =
+    typeof image.mediaType === "string" ? image.mediaType : "application/octet-stream";
   return `data:${mediaType};base64,${Buffer.from(image.data).toString("base64")}`;
 }
 
@@ -760,7 +905,9 @@ function renderImageForTextTransport(output: ToolOutputImage | string): string {
 function supportsStructuredToolOutputTransport(modelInstance: unknown): boolean {
   if (!modelInstance) return false;
   const constructorName =
-    typeof modelInstance === "object" && modelInstance && typeof (modelInstance as { constructor?: unknown }).constructor === "function"
+    typeof modelInstance === "object" &&
+    modelInstance &&
+    typeof (modelInstance as { constructor?: unknown }).constructor === "function"
       ? ((modelInstance as { constructor: { name?: string } }).constructor.name ?? "")
       : "";
   return !constructorName.includes("ChatCompletions");
@@ -773,11 +920,20 @@ const COMPUTER_READ_ONLY_MESSAGE =
 // zod: zod is not a @opengeni/runtime dependency) with `strict:false`, mirroring the
 // SDK's own `apply_patch` function-tool schema style.
 const COORD_PROPS = {
-  x: { type: "integer", description: "X coordinate in the pixels of the most recent computer_screenshot" },
-  y: { type: "integer", description: "Y coordinate in the pixels of the most recent computer_screenshot" },
+  x: {
+    type: "integer",
+    description: "X coordinate in the pixels of the most recent computer_screenshot",
+  },
+  y: {
+    type: "integer",
+    description: "Y coordinate in the pixels of the most recent computer_screenshot",
+  },
 } as const;
 
-function objectSchema(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
+function objectSchema(
+  properties: Record<string, unknown>,
+  required: string[],
+): Record<string, unknown> {
   return { type: "object", properties, required, additionalProperties: false };
 }
 
@@ -809,7 +965,10 @@ export function computerFunctionTools(
   // Perform a WRITE action, surfacing read-only / failures as a model-readable
   // string rather than an uncaught throw (an uncaught throw becomes a tool error
   // the backend may 400 on, or kills the step).
-  const write = async (confirmation: string, action: () => void | Promise<void>): Promise<string> => {
+  const write = async (
+    confirmation: string,
+    action: () => void | Promise<void>,
+  ): Promise<string> => {
     if (readOnly) return COMPUTER_READ_ONLY_MESSAGE;
     try {
       await action();
@@ -845,19 +1004,29 @@ export function computerFunctionTools(
       description:
         "Click the mouse at (x, y). `button` is one of left|right|wheel|back|forward (default left). Take a computer_screenshot first to find coordinates.",
       parameters: objectSchema(
-        { ...COORD_PROPS, button: { type: "string", enum: ["left", "right", "wheel", "back", "forward"], description: "Mouse button; defaults to left" } },
+        {
+          ...COORD_PROPS,
+          button: {
+            type: "string",
+            enum: ["left", "right", "wheel", "back", "forward"],
+            description: "Mouse button; defaults to left",
+          },
+        },
         ["x", "y"],
       ) as never,
       strict: false,
       ...approval,
       execute: async (input) => {
         const { x, y, button } = input as { x: number; y: number; button?: ComputerButton };
-        return write(`clicked ${button ?? "left"} at (${x}, ${y})`, () => computer.click(x, y, button ?? "left"));
+        return write(`clicked ${button ?? "left"} at (${x}, ${y})`, () =>
+          computer.click(x, y, button ?? "left"),
+        );
       },
     }),
     tool({
       name: "computer_double_click",
-      description: "Double-click the left mouse button at (x, y). Take a computer_screenshot first to find coordinates.",
+      description:
+        "Double-click the left mouse button at (x, y). Take a computer_screenshot first to find coordinates.",
       parameters: objectSchema({ ...COORD_PROPS }, ["x", "y"]) as never,
       strict: false,
       ...approval,
@@ -884,22 +1053,39 @@ export function computerFunctionTools(
       parameters: objectSchema(
         {
           ...COORD_PROPS,
-          scroll_x: { type: "integer", description: "Horizontal scroll amount in pixels (positive = right)" },
-          scroll_y: { type: "integer", description: "Vertical scroll amount in pixels (positive = down)" },
+          scroll_x: {
+            type: "integer",
+            description: "Horizontal scroll amount in pixels (positive = right)",
+          },
+          scroll_y: {
+            type: "integer",
+            description: "Vertical scroll amount in pixels (positive = down)",
+          },
         },
         ["x", "y", "scroll_x", "scroll_y"],
       ) as never,
       strict: false,
       ...approval,
       execute: async (input) => {
-        const { x, y, scroll_x, scroll_y } = input as { x: number; y: number; scroll_x: number; scroll_y: number };
-        return write(`scrolled (${scroll_x}, ${scroll_y}) at (${x}, ${y})`, () => computer.scroll(x, y, scroll_x, scroll_y));
+        const { x, y, scroll_x, scroll_y } = input as {
+          x: number;
+          y: number;
+          scroll_x: number;
+          scroll_y: number;
+        };
+        return write(`scrolled (${scroll_x}, ${scroll_y}) at (${x}, ${y})`, () =>
+          computer.scroll(x, y, scroll_x, scroll_y),
+        );
       },
     }),
     tool({
       name: "computer_type",
-      description: "Type a literal text string at the current keyboard focus. Click the target field first.",
-      parameters: objectSchema({ text: { type: "string", description: "The literal text to type" } }, ["text"]) as never,
+      description:
+        "Type a literal text string at the current keyboard focus. Click the target field first.",
+      parameters: objectSchema(
+        { text: { type: "string", description: "The literal text to type" } },
+        ["text"],
+      ) as never,
       strict: false,
       ...approval,
       execute: async (input) => {
@@ -912,7 +1098,13 @@ export function computerFunctionTools(
       description:
         'Press a key or chord. `keys` is an ordered list pressed together, e.g. ["ctrl","c"] or ["Enter"]. Use key names (ctrl, alt, shift, cmd, enter, tab, esc, arrows…), not characters.',
       parameters: objectSchema(
-        { keys: { type: "array", items: { type: "string" }, description: "Keys pressed together as a chord" } },
+        {
+          keys: {
+            type: "array",
+            items: { type: "string" },
+            description: "Keys pressed together as a chord",
+          },
+        },
         ["keys"],
       ) as never,
       strict: false,
@@ -1017,7 +1209,9 @@ export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
  */
 export class ComputerUseCapability extends Capability {
   readonly type = "computer-use";
-  constructor(private args: ComputerUseArgs = {}) { super(); }
+  constructor(private args: ComputerUseArgs = {}) {
+    super();
+  }
 
   override tools(): Tool<unknown>[] {
     const session = requireBoundSession("computer-use", this._session);
@@ -1048,9 +1242,19 @@ export class ComputerUseCapability extends Capability {
       case "hosted":
         return [this.hostedComputerTool(computer)];
       case "function-image":
-        return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, true);
+        return computerFunctionTools(
+          computer,
+          this.args.readOnly ?? false,
+          this.args.needsApproval,
+          true,
+        );
       case "function-text":
-        return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, false);
+        return computerFunctionTools(
+          computer,
+          this.args.readOnly ?? false,
+          this.args.needsApproval,
+          false,
+        );
       case undefined:
         break; // fall through to the legacy sniff (back-compat), preserved byte-for-byte
     }
@@ -1059,7 +1263,12 @@ export class ComputerUseCapability extends Capability {
     if (supportsStructuredToolOutputTransport(this._modelInstance)) {
       return [this.hostedComputerTool(computer)];
     }
-    return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, this.args.imageFunctionResults ?? false);
+    return computerFunctionTools(
+      computer,
+      this.args.readOnly ?? false,
+      this.args.needsApproval,
+      this.args.imageFunctionResults ?? false,
+    );
   }
 
   /** The single HOSTED `computer_use_preview` tool bound to `computer` — identical
@@ -1067,7 +1276,9 @@ export class ComputerUseCapability extends Capability {
   private hostedComputerTool(computer: Computer): Tool<unknown> {
     return computerTool({
       computer,
-      ...(this.args.needsApproval !== undefined ? { needsApproval: this.args.needsApproval as never } : {}),
+      ...(this.args.needsApproval !== undefined
+        ? { needsApproval: this.args.needsApproval as never }
+        : {}),
     }) as unknown as Tool<unknown>;
   }
 }

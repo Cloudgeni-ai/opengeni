@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/contracts";
-import { buildSandboxImage, freePort, runCommand, startProcess, startTestServices, type StartedProcess, type TestServices, waitFor } from "@opengeni/testing";
+import {
+  buildSandboxImage,
+  freePort,
+  runCommand,
+  startProcess,
+  startTestServices,
+  type StartedProcess,
+  type TestServices,
+  waitFor,
+} from "@opengeni/testing";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 let apiPort = 0;
@@ -20,7 +29,8 @@ describe("real Docker sandbox e2e", () => {
     api = await startProcess(["bun", "apps/api/src/index.ts"], {
       cwd: repoRoot,
       env,
-      ready: async () => (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
+      ready: async () =>
+        (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
       timeoutMs: 45_000,
     });
     workspaceId = await discoverWorkspaceId();
@@ -28,7 +38,10 @@ describe("real Docker sandbox e2e", () => {
       cwd: repoRoot,
       env,
     });
-    await waitFor(() => worker.logs().includes("test worker listening"), { timeoutMs: 90_000, describe: () => worker.logs() });
+    await waitFor(() => worker.logs().includes("test worker listening"), {
+      timeoutMs: 90_000,
+      describe: () => worker.logs(),
+    });
   }, 360_000);
 
   afterAll(async () => {
@@ -47,12 +60,19 @@ describe("real Docker sandbox e2e", () => {
       }),
     });
     expect(create.status).toBe(202);
-    const session = await create.json() as { id: string };
+    const session = (await create.json()) as { id: string };
 
-    await waitFor(async () => {
-      const events = await sessionEvents(session.id);
-      return events.some((event) => event.type === "session.status.changed" && (event.payload as { status?: string }).status === "idle");
-    }, { timeoutMs: 180_000 });
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(session.id);
+        return events.some(
+          (event) =>
+            event.type === "session.status.changed" &&
+            (event.payload as { status?: string }).status === "idle",
+        );
+      },
+      { timeoutMs: 180_000 },
+    );
 
     const events = await sessionEvents(session.id);
     const toolOutputs = events
@@ -73,7 +93,12 @@ describe("real Docker sandbox e2e", () => {
       }),
     });
     expect(upload.status).toBe(201);
-    const uploadBody = await upload.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    const uploadBody = (await upload.json()) as {
+      fileId: string;
+      uploadId: string;
+      putUrl: string;
+      requiredHeaders: Record<string, string>;
+    };
     const put = await fetch(uploadBody.putUrl, {
       method: "PUT",
       body: "file-mounted-ok",
@@ -95,24 +120,35 @@ describe("real Docker sandbox e2e", () => {
       }),
     });
     expect(create.status).toBe(202);
-    const session = await create.json() as { id: string };
+    const session = (await create.json()) as { id: string };
 
-    await waitFor(async () => {
-      const events = await sessionEvents(session.id);
-      return events.some((event) => event.type === "session.status.changed" && (event.payload as { status?: string }).status === "idle");
-    }, { timeoutMs: 180_000 });
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(session.id);
+        return events.some(
+          (event) =>
+            event.type === "session.status.changed" &&
+            (event.payload as { status?: string }).status === "idle",
+        );
+      },
+      { timeoutMs: 180_000 },
+    );
 
     const events = await sessionEvents(session.id);
-    expect(events
-      .filter((event) => event.type === "agent.toolCall.output")
-      .some((event) => JSON.stringify(event.payload ?? {}).includes("file-mounted-ok"))).toBe(true);
+    expect(
+      events
+        .filter((event) => event.type === "agent.toolCall.output")
+        .some((event) => JSON.stringify(event.payload ?? {}).includes("file-mounted-ok")),
+    ).toBe(true);
   }, 240_000);
 
   test("views uploaded image resources from materialized sandbox files", async () => {
-    const imageBytes = Uint8Array.from(Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-      "base64",
-    ));
+    const imageBytes = Uint8Array.from(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    );
     const upload = await fetch(apiPath("/files/uploads"), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -123,14 +159,22 @@ describe("real Docker sandbox e2e", () => {
       }),
     });
     expect(upload.status).toBe(201);
-    const uploadBody = await upload.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    const uploadBody = (await upload.json()) as {
+      fileId: string;
+      uploadId: string;
+      putUrl: string;
+      requiredHeaders: Record<string, string>;
+    };
     const put = await fetch(uploadBody.putUrl, {
       method: "PUT",
       body: imageBytes,
       headers: uploadBody.requiredHeaders,
     });
     expect(put.ok).toBe(true);
-    expect((await fetch(apiPath(`/files/uploads/${uploadBody.uploadId}/complete`), { method: "POST" })).ok).toBe(true);
+    expect(
+      (await fetch(apiPath(`/files/uploads/${uploadBody.uploadId}/complete`), { method: "POST" }))
+        .ok,
+    ).toBe(true);
 
     const create = await fetch(apiPath("/sessions"), {
       method: "POST",
@@ -142,42 +186,53 @@ describe("real Docker sandbox e2e", () => {
       }),
     });
     expect(create.status).toBe(202);
-    const session = await create.json() as { id: string };
+    const session = (await create.json()) as { id: string };
 
-    await waitFor(async () => {
-      const events = await sessionEvents(session.id);
-      return events.some((event) => event.type === "session.status.changed" && (event.payload as { status?: string }).status === "idle");
-    }, { timeoutMs: 180_000 });
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(session.id);
+        return events.some(
+          (event) =>
+            event.type === "session.status.changed" &&
+            (event.payload as { status?: string }).status === "idle",
+        );
+      },
+      { timeoutMs: 180_000 },
+    );
 
     const events = await sessionEvents(session.id);
-    const viewOutput = events.find((event) =>
-      event.type === "agent.toolCall.output" &&
-      JSON.stringify(event.payload ?? {}).includes("sandbox-view-image")
+    const viewOutput = events.find(
+      (event) =>
+        event.type === "agent.toolCall.output" &&
+        JSON.stringify(event.payload ?? {}).includes("sandbox-view-image"),
     );
     expect(JSON.stringify(viewOutput?.payload ?? {})).not.toContain("unable to read image");
     expect(JSON.stringify(viewOutput?.payload ?? {})).toContain("image");
   }, 240_000);
 
   test("sandbox image has required CLIs and no custom Azure login helper", async () => {
-    const result = await runCommand([
-      "docker",
-      "run",
-      "--rm",
-      "opengeni-sandbox:local",
-      "bash",
-      "-lc",
+    const result = await runCommand(
       [
-        "terraform version >/dev/null",
-        "checkov --version >/dev/null",
-        "az version --output none",
-        "gh --version >/dev/null",
-        "git --version >/dev/null",
-        "jq --version >/dev/null",
-        "curl --version >/dev/null",
-        "test -x /usr/local/bin/opengeni-git-askpass",
-        "test ! -e /usr/local/bin/opengeni-azure-login",
-      ].join(" && "),
-    ], { timeoutMs: 120_000 });
+        "docker",
+        "run",
+        "--rm",
+        "opengeni-sandbox:local",
+        "bash",
+        "-lc",
+        [
+          "terraform version >/dev/null",
+          "checkov --version >/dev/null",
+          "az version --output none",
+          "gh --version >/dev/null",
+          "git --version >/dev/null",
+          "jq --version >/dev/null",
+          "curl --version >/dev/null",
+          "test -x /usr/local/bin/opengeni-git-askpass",
+          "test ! -e /usr/local/bin/opengeni-azure-login",
+        ].join(" && "),
+      ],
+      { timeoutMs: 120_000 },
+    );
     expect(result.exitCode).toBe(0);
   }, 180_000);
 });
@@ -185,13 +240,13 @@ describe("real Docker sandbox e2e", () => {
 async function sessionEvents(sessionId: string): Promise<SessionEvent[]> {
   const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=200`));
   expect(response.ok).toBe(true);
-  return await response.json() as SessionEvent[];
+  return (await response.json()) as SessionEvent[];
 }
 
 async function discoverWorkspaceId(): Promise<string> {
   const response = await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`);
   expect(response.ok).toBe(true);
-  const context = await response.json() as { defaultWorkspaceId?: string };
+  const context = (await response.json()) as { defaultWorkspaceId?: string };
   expect(typeof context.defaultWorkspaceId).toBe("string");
   return context.defaultWorkspaceId!;
 }

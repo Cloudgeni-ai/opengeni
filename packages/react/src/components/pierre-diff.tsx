@@ -124,11 +124,7 @@ export function PierreDiff({
   } as CSSProperties;
 
   return (
-    <div
-      className={cn("min-w-0", className)}
-      data-opengeni-pierre-diff
-      style={pierreVars}
-    >
+    <div className={cn("min-w-0", className)} data-opengeni-pierre-diff style={pierreVars}>
       <Suspense fallback={loading ?? <DiffSkeleton />}>
         {diff.map((file) => (
           <div key={file.path} className="mb-2">
@@ -145,11 +141,7 @@ export function PierreDiff({
 }
 
 function DiffSkeleton() {
-  return (
-    <div className="p-3 text-og-sm text-og-fg-subtle">
-      Loading diff…
-    </div>
-  );
+  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading diff…</div>;
 }
 
 /**

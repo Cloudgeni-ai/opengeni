@@ -78,7 +78,10 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
 
    These only seed initial state; the live components and animations are untouched.
    -------------------------------------------------------------------------- */
-const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams();
+const params =
+  typeof window !== "undefined"
+    ? new URLSearchParams(window.location.search)
+    : new URLSearchParams();
 const INITIAL_THEME: "dark" | "light" = params.get("theme") === "light" ? "light" : "dark";
 const FORCE_EXPAND_ALL = params.get("expand") === "all";
 
@@ -87,13 +90,17 @@ function Harness() {
   const [showCatalog, setShowCatalog] = useState(FORCE_EXPAND_ALL);
 
   const tree = (
-    <div className="og-root min-h-full bg-og-bg" data-og-theme={theme === "light" ? "light" : undefined}>
+    <div
+      className="og-root min-h-full bg-og-bg"
+      data-og-theme={theme === "light" ? "light" : undefined}
+    >
       <div className="mx-auto w-full max-w-3xl px-5 py-10 sm:px-8">
         <header className="mb-8 flex items-center justify-between gap-4">
           <div>
             <h1 className="text-base font-semibold text-og-fg">Timeline tool-call renderers</h1>
             <p className="mt-0.5 text-[12.5px] text-og-fg-subtle">
-              @opengeni/react — real components, real SessionEvent shapes, one buildTimeline pipeline.
+              @opengeni/react — real components, real SessionEvent shapes, one buildTimeline
+              pipeline.
             </p>
           </div>
           <button
@@ -116,9 +123,9 @@ function Harness() {
                 <div className="min-w-0">
                   <h2 className={EYEBROW}>Renderer catalog — every tool × state</h2>
                   <p className="mt-1.5 text-og-sm text-og-fg-subtle">
-                    A reference matrix, not a real run — it deliberately includes the failure states (a
-                    rejected patch, an unparseable diff) so every fallback renders. Click a row to expand;
-                    screenshots open in the lightbox.
+                    A reference matrix, not a real run — it deliberately includes the failure states
+                    (a rejected patch, an unparseable diff) so every fallback renders. Click a row
+                    to expand; screenshots open in the lightbox.
                   </p>
                 </div>
                 <button
@@ -157,13 +164,17 @@ function Harness() {
               <MessageTimeline events={completedTurnEvents()} className="max-h-none" />
             </Section>
 
-            <Section title="Failed turn — folds, but the error is never hidden" hint="Failed turns start open so the error and folded context stay visible.">
+            <Section
+              title="Failed turn — folds, but the error is never hidden"
+              hint="Failed turns start open so the error and folded context stay visible."
+            >
               <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
             </Section>
 
             <Section
               title="Memory writes — a first-class step, saved & corrected"
-              hint="memory.saved / memory.corrected fold into the chip summary ('… · 2 memories saved · 2 memories updated'); expanded, each is a calm neutral row (supersede = old → new, in-place = live text). With a host onMemoryClick, expanding reveals a 'View in memory' deep-link.">
+              hint="memory.saved / memory.corrected fold into the chip summary ('… · 2 memories saved · 2 memories updated'); expanded, each is a calm neutral row (supersede = old → new, in-place = live text). With a host onMemoryClick, expanding reveals a 'View in memory' deep-link."
+            >
               <MessageTimeline
                 events={memoryTurnEvents()}
                 onMemoryClick={(id) => window.alert(`Open memory ${id}`)}
@@ -204,7 +215,11 @@ function Harness() {
 
   // When ?expand=all is set, seed every collapsible open through the real
   // DisclosureDefaultsProvider context. Absent otherwise — zero app-side change.
-  return FORCE_EXPAND_ALL ? <DisclosureDefaultsProvider defaultOpen>{tree}</DisclosureDefaultsProvider> : tree;
+  return FORCE_EXPAND_ALL ? (
+    <DisclosureDefaultsProvider defaultOpen>{tree}</DisclosureDefaultsProvider>
+  ) : (
+    tree
+  );
 }
 
 /**
@@ -234,13 +249,23 @@ function RawGroup({ group, insideTurn = false }: { group: TimelineGroup; insideT
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
+          <ActivityRail
+            items={group.items}
+            onOpenSession={(id) => window.alert(`Open session ${id}`)}
+            bare={insideTurn}
+          />
         </TurnSummary>
       ) : (
-        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
+        <ActivityRail
+          items={group.items}
+          onOpenSession={(id) => window.alert(`Open session ${id}`)}
+          bare={insideTurn}
+        />
       );
     case "turn": {
-      const body = group.groups.map((child) => <RawGroup key={rawGroupKey(child)} group={child} insideTurn />);
+      const body = group.groups.map((child) => (
+        <RawGroup key={rawGroupKey(child)} group={child} insideTurn />
+      ));
       return (
         <TurnSummary
           items={flattenActivities(group.groups)}
@@ -253,13 +278,17 @@ function RawGroup({ group, insideTurn = false }: { group: TimelineGroup; insideT
           {insideTurn ? (
             <div className="flex flex-col gap-4">{body}</div>
           ) : (
-            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
+              {body}
+            </div>
           )}
         </TurnSummary>
       );
     }
     case "item":
-      return <TimelineRow item={group.item} onOpenSession={(id) => window.alert(`Open session ${id}`)} />;
+      return (
+        <TimelineRow item={group.item} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+      );
   }
 }
 
@@ -289,7 +318,9 @@ function flattenActivities(groups: TimelineGroup[]): ActivityItem[] {
 function durationBetween(startedAt: string, endedAt: string): number | undefined {
   const started = Date.parse(startedAt);
   const ended = Date.parse(endedAt);
-  return Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? ended - started : undefined;
+  return Number.isFinite(started) && Number.isFinite(ended) && ended >= started
+    ? ended - started
+    : undefined;
 }
 
 createRoot(document.getElementById("root")!).render(<Harness />);

@@ -10,7 +10,9 @@ const FLOOR = 60_000; // ROTATION_IDLE_FLOOR_MS
 
 describe("continuationHoldMs — the all-capped idle is a real wait", () => {
   test("(f) an all-capped idle with continueDelayMs:0 STILL holds the floor (a 0 cannot skip the hold)", () => {
-    expect(continuationHoldMs({ status: "idle", continueDelayMs: 0, idleUntilReset: true }, FLOOR)).toBe(FLOOR);
+    expect(
+      continuationHoldMs({ status: "idle", continueDelayMs: 0, idleUntilReset: true }, FLOOR),
+    ).toBe(FLOOR);
   });
 
   test("(f) an all-capped idle with an undefined delay holds the floor", () => {
@@ -18,7 +20,12 @@ describe("continuationHoldMs — the all-capped idle is a real wait", () => {
   });
 
   test("(f) an all-capped idle with a positive delay holds exactly that delay", () => {
-    expect(continuationHoldMs({ status: "idle", continueDelayMs: 5 * 60_000, idleUntilReset: true }, FLOOR)).toBe(5 * 60_000);
+    expect(
+      continuationHoldMs(
+        { status: "idle", continueDelayMs: 5 * 60_000, idleUntilReset: true },
+        FLOOR,
+      ),
+    ).toBe(5 * 60_000);
   });
 
   test("a NORMAL continueDelayMs:0 (rotation candidate ready) does NOT hold — re-dispatch now", () => {
@@ -31,7 +38,9 @@ describe("continuationHoldMs — the all-capped idle is a real wait", () => {
   });
 
   test("a non-idle result never holds (even if idleUntilReset is somehow set)", () => {
-    expect(continuationHoldMs({ status: "failed", continueDelayMs: 99, idleUntilReset: true }, FLOOR)).toBe(0);
+    expect(
+      continuationHoldMs({ status: "failed", continueDelayMs: 99, idleUntilReset: true }, FLOOR),
+    ).toBe(0);
     expect(continuationHoldMs({ status: "requires_action" }, FLOOR)).toBe(0);
   });
 });

@@ -22,7 +22,10 @@ const emptyPackRuntime: WorkspacePackRuntime = { sandboxImage: null, skills: [] 
  * test on the built-in catalog), so their installations are skipped here
  * without consulting the API's built-in pack list.
  */
-export async function resolveWorkspacePackRuntime(db: Database, workspaceId: string): Promise<WorkspacePackRuntime> {
+export async function resolveWorkspacePackRuntime(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspacePackRuntime> {
   const installations = await listPackInstallations(db, workspaceId);
   const active = installations.filter((installation) => installation.status === "active");
   if (active.length === 0) {
@@ -49,9 +52,14 @@ export async function resolveWorkspacePackRuntime(db: Database, workspaceId: str
  * packs. Violations fail the turn with a plain error instead of guessing.
  */
 export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): WorkspacePackRuntime {
-  const imagePacks = packs.filter((pack) => typeof pack.sandboxImage === "string" && pack.sandboxImage.trim().length > 0);
+  const imagePacks = packs.filter(
+    (pack) => typeof pack.sandboxImage === "string" && pack.sandboxImage.trim().length > 0,
+  );
   if (imagePacks.length > 1) {
-    const ids = imagePacks.map((pack) => pack.id).sort().join(", ");
+    const ids = imagePacks
+      .map((pack) => pack.id)
+      .sort()
+      .join(", ");
     throw new Error(
       `Multiple enabled packs declare a sandbox image (${ids}). Only one enabled pack per workspace may declare sandboxImage; disable the others and retry.`,
     );
@@ -94,7 +102,10 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
  * resolution; per-session overrides do not exist in this slice, so the worker
  * resolves workspace > default and passes the result as instructionsTemplate.
  */
-export async function resolveWorkspaceAgentInstructions(db: Database, workspaceId: string): Promise<string | null> {
+export async function resolveWorkspaceAgentInstructions(
+  db: Database,
+  workspaceId: string,
+): Promise<string | null> {
   const workspace = await getWorkspace(db, workspaceId);
   return workspace?.agentInstructions ?? null;
 }
@@ -104,7 +115,10 @@ export async function resolveWorkspaceAgentInstructions(db: Database, workspaceI
  * the settings pass through untouched, so deployments without packs keep the
  * global OPENGENI_DOCKER_IMAGE / OPENGENI_MODAL_IMAGE_REF behavior exactly.
  */
-export function settingsWithPackSandboxImage(settings: Settings, sandboxImage: string | null): Settings {
+export function settingsWithPackSandboxImage(
+  settings: Settings,
+  sandboxImage: string | null,
+): Settings {
   if (!sandboxImage) {
     return settings;
   }

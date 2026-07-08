@@ -51,9 +51,13 @@ export function assertWorkspaceMemberRemovable(input: {
     throw new HTTPException(404, { message: "member not found" });
   }
   if (memberCanAdminister(target)) {
-    const remainingAdmins = members.filter((member) => member.subjectId !== subjectId && memberCanAdminister(member));
+    const remainingAdmins = members.filter(
+      (member) => member.subjectId !== subjectId && memberCanAdminister(member),
+    );
     if (remainingAdmins.length === 0) {
-      throw new HTTPException(409, { message: "cannot remove the last member who can manage this workspace" });
+      throw new HTTPException(409, {
+        message: "cannot remove the last member who can manage this workspace",
+      });
     }
   }
 }

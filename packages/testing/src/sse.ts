@@ -6,11 +6,14 @@ export type ParsedSseEvent = {
   data: string;
 };
 
-export async function collectSse(url: string, options: {
-  count: number;
-  timeoutMs?: number;
-  signal?: AbortSignal;
-}): Promise<SessionEvent[]> {
+export async function collectSse(
+  url: string,
+  options: {
+    count: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
+): Promise<SessionEvent[]> {
   const abort = new AbortController();
   const timeout = setTimeout(() => abort.abort(), options.timeoutMs ?? 20_000);
   options.signal?.addEventListener("abort", () => abort.abort(), { once: true });

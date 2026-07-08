@@ -560,9 +560,11 @@ export type Workspace = z.infer<typeof Workspace>;
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
 // V1 agent surfaces (turn injection + first-party memory tools); default false.
-export const WorkspaceSettingsSchema = z.object({
-  memoryEnabled: z.boolean().optional(),
-}).passthrough();
+export const WorkspaceSettingsSchema = z
+  .object({
+    memoryEnabled: z.boolean().optional(),
+  })
+  .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 
 // Resolve the effective memoryEnabled flag from a raw settings bag (default off).
@@ -574,9 +576,11 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 // PATCH body for workspace settings: a partial patch that deep-merges into the
 // stored bag. memoryEnabled is the only typed key today; passthrough carries
 // forward-compatible unknown keys through validation.
-export const UpdateWorkspaceSettingsRequest = z.object({
-  memoryEnabled: z.boolean().optional(),
-}).passthrough();
+export const UpdateWorkspaceSettingsRequest = z
+  .object({
+    memoryEnabled: z.boolean().optional(),
+  })
+  .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
 
 export const SetWorkspaceDefaultRigRequest = z.object({
@@ -628,13 +632,22 @@ export const DelegatedAccessTokenPayload = z.object({
 });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
 
-export async function signDelegatedAccessToken(secret: string, payload: DelegatedAccessTokenPayload): Promise<string> {
-  const encodedPayload = base64UrlEncode(JSON.stringify(DelegatedAccessTokenPayload.parse(payload)));
+export async function signDelegatedAccessToken(
+  secret: string,
+  payload: DelegatedAccessTokenPayload,
+): Promise<string> {
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(DelegatedAccessTokenPayload.parse(payload)),
+  );
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `ogd_${encodedPayload}.${signature}`;
 }
 
-export async function verifyDelegatedAccessToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<DelegatedAccessTokenPayload | null> {
+export async function verifyDelegatedAccessToken(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<DelegatedAccessTokenPayload | null> {
   if (!token.startsWith("ogd_")) {
     return null;
   }
@@ -649,7 +662,9 @@ export async function verifyDelegatedAccessToken(secret: string, token: string, 
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = DelegatedAccessTokenPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  const payload = DelegatedAccessTokenPayload.safeParse(
+    JSON.parse(base64UrlDecode(encodedPayload)),
+  );
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -677,13 +692,20 @@ export const EnrollmentBearerPayload = z.object({
 });
 export type EnrollmentBearerPayload = z.infer<typeof EnrollmentBearerPayload>;
 
-export async function signEnrollmentBearer(secret: string, payload: EnrollmentBearerPayload): Promise<string> {
+export async function signEnrollmentBearer(
+  secret: string,
+  payload: EnrollmentBearerPayload,
+): Promise<string> {
   const encodedPayload = base64UrlEncode(JSON.stringify(EnrollmentBearerPayload.parse(payload)));
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `oge_${encodedPayload}.${signature}`;
 }
 
-export async function verifyEnrollmentBearer(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<EnrollmentBearerPayload | null> {
+export async function verifyEnrollmentBearer(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<EnrollmentBearerPayload | null> {
   if (!token.startsWith("oge_")) {
     return null;
   }
@@ -733,7 +755,10 @@ export const EnrollTokenPayload = z.object({
 });
 export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
 
-export async function signEnrollToken(secret: string, payload: EnrollTokenPayload): Promise<string> {
+export async function signEnrollToken(
+  secret: string,
+  payload: EnrollTokenPayload,
+): Promise<string> {
   const encodedPayload = base64UrlEncode(JSON.stringify(EnrollTokenPayload.parse(payload)));
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `oget_${encodedPayload}.${signature}`;
@@ -747,7 +772,11 @@ export async function signEnrollToken(secret: string, payload: EnrollTokenPayloa
  * bearer fails the prefix gate; a same-secret token that lacks the typ claim fails
  * the schema gate — both halves of the domain separation are enforced here.
  */
-export async function verifyEnrollToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<EnrollTokenPayload | null> {
+export async function verifyEnrollToken(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<EnrollTokenPayload | null> {
   if (!token.startsWith("oget_")) {
     return null;
   }
@@ -809,7 +838,10 @@ export const StreamTokenPayload = z.object({
 });
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
 
-export async function signStreamToken(secret: string, payload: StreamTokenPayload): Promise<string> {
+export async function signStreamToken(
+  secret: string,
+  payload: StreamTokenPayload,
+): Promise<string> {
   const encodedPayload = base64UrlEncode(JSON.stringify(StreamTokenPayload.parse(payload)));
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `ogs_${encodedPayload}.${signature}`;
@@ -825,7 +857,11 @@ export async function signStreamToken(secret: string, payload: StreamTokenPayloa
  * lease + route params — verify proves the token is authentic + unexpired, the
  * caller proves it is for THIS box's current epoch and THIS workspace+session.
  */
-export async function verifyStreamToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<StreamTokenPayload | null> {
+export async function verifyStreamToken(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<StreamTokenPayload | null> {
   if (!token.startsWith("ogs_")) {
     return null;
   }
@@ -902,7 +938,11 @@ export async function signRelayToken(secret: string, payload: RelayTokenPayload)
  * The channel-key scope (claim.workspaceId/agentId vs the StreamOpen channel key)
  * is enforced by the relay at USE — verify proves authenticity + freshness only.
  */
-export async function verifyRelayToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<RelayTokenPayload | null> {
+export async function verifyRelayToken(
+  secret: string,
+  token: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<RelayTokenPayload | null> {
   if (!token.startsWith("ogr_")) {
     return null;
   }
@@ -1108,7 +1148,12 @@ export type LimitDecision = z.infer<typeof LimitDecision>;
 // the admitted quantity so a PULL host can grant a partial allowance.
 export const EntitlementDecision = z.discriminatedUnion("allowed", [
   z.object({ allowed: z.literal(true), quantity: z.number().optional() }),
-  z.object({ allowed: z.literal(false), reason: z.string(), code: z.string().optional(), quantity: z.number().optional() }),
+  z.object({
+    allowed: z.literal(false),
+    reason: z.string(),
+    code: z.string().optional(),
+    quantity: z.number().optional(),
+  }),
 ]);
 export type EntitlementDecision = z.infer<typeof EntitlementDecision>;
 
@@ -1256,9 +1301,7 @@ export type GitHubAppApiPort = {
     code: string;
     installationId: number;
   }) => Promise<GitHubInstallationSummary>;
-  listRepositories?: (input: {
-    installationIds?: number[];
-  }) => Promise<GitHubRepository[]>;
+  listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
 };
 
 export const BillingBalance = z.object({
@@ -1271,10 +1314,14 @@ export type BillingBalance = z.infer<typeof BillingBalance>;
 
 export const CreateCheckoutRequest = z.object({
   accountId: z.string().uuid().optional(),
-  amountUsd: z.number().min(5).max(10_000).refine(
-    (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
-    { message: "amountUsd must use cent precision" },
-  ),
+  amountUsd: z
+    .number()
+    .min(5)
+    .max(10_000)
+    .refine(
+      (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
+      { message: "amountUsd must use cent precision" },
+    ),
   successUrl: z.string().url().optional(),
   cancelUrl: z.string().url().optional(),
 });
@@ -1366,7 +1413,16 @@ export type FileDownloadUrlResponse = z.infer<typeof FileDownloadUrlResponse>;
 export const DocumentStatus = z.enum(["queued", "indexing", "ready", "failed"]);
 export type DocumentStatus = z.infer<typeof DocumentStatus>;
 
-export const KnowledgeSourceKind = z.enum(["manual_upload", "meeting_transcript", "repository", "email", "chat", "document", "web", "other"]);
+export const KnowledgeSourceKind = z.enum([
+  "manual_upload",
+  "meeting_transcript",
+  "repository",
+  "email",
+  "chat",
+  "document",
+  "web",
+  "other",
+]);
 export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
 
 export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
@@ -1478,7 +1534,13 @@ export const KnowledgeMemoryStatus = z.enum([
 ]);
 export type KnowledgeMemoryStatus = z.infer<typeof KnowledgeMemoryStatus>;
 
-export const KnowledgeMemoryKind = z.enum(["semantic", "episodic", "procedural", "decision", "preference"]);
+export const KnowledgeMemoryKind = z.enum([
+  "semantic",
+  "episodic",
+  "procedural",
+  "decision",
+  "preference",
+]);
 export type KnowledgeMemoryKind = z.infer<typeof KnowledgeMemoryKind>;
 
 export const KnowledgeSourceRef = z.object({
@@ -1602,13 +1664,19 @@ export const ToolRef = z.object({
 export type ToolRef = z.infer<typeof ToolRef>;
 
 const registryId = /^[A-Za-z0-9_-]+$/;
-const httpsUrl = z.string().url().refine((value) => {
-  try {
-    return new URL(value).protocol === "https:";
-  } catch {
-    return false;
-  }
-}, { message: "URL must use https" });
+const httpsUrl = z
+  .string()
+  .url()
+  .refine(
+    (value) => {
+      try {
+        return new URL(value).protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    { message: "URL must use https" },
+  );
 
 export const SessionMcpServerInput = z.object({
   id: z.string().min(1).regex(registryId),
@@ -1635,13 +1703,15 @@ export const SessionMcpCredentialUpdateInput = z.object({
 });
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
-export const SessionMcpServerMetadata = z.object({
-  id: z.string().min(1).regex(registryId),
-  name: z.string().min(1).nullable(),
-  url: httpsUrl,
-  headerNames: z.array(z.string()).default([]),
-  credentialVersion: z.number().int().positive(),
-}).strict();
+export const SessionMcpServerMetadata = z
+  .object({
+    id: z.string().min(1).regex(registryId),
+    name: z.string().min(1).nullable(),
+    url: httpsUrl,
+    headerNames: z.array(z.string()).default([]),
+    credentialVersion: z.number().int().positive(),
+  })
+  .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
 
 export class ResourceRefConflictError extends Error {
@@ -1680,8 +1750,14 @@ export function mergeResourceRefs(
   options: { rejectConflicts?: boolean } = {},
 ): ResourceRef[] {
   const out = [...existing];
-  const mountPaths = new Map(existing.flatMap((resource) => resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : []));
-  const identities = new Map(existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const));
+  const mountPaths = new Map(
+    existing.flatMap((resource) =>
+      resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : [],
+    ),
+  );
+  const identities = new Map(
+    existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const),
+  );
   const exact = new Set(existing.map(stableJson));
 
   for (const resource of additions) {
@@ -1692,12 +1768,16 @@ export function mergeResourceRefs(
     if (options.rejectConflicts) {
       const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
       if (existingAtMount && existingAtMount !== serialized) {
-        throw new ResourceRefConflictError(`resource mount path is already attached: ${resource.mountPath}`);
+        throw new ResourceRefConflictError(
+          `resource mount path is already attached: ${resource.mountPath}`,
+        );
       }
       const identity = resourceIdentityKey(resource);
       const existingIdentity = identities.get(identity);
       if (existingIdentity && existingIdentity !== serialized) {
-        throw new ResourceRefConflictError(`resource is already attached with different settings: ${identity}`);
+        throw new ResourceRefConflictError(
+          `resource is already attached with different settings: ${identity}`,
+        );
       }
     }
     out.push(resource);
@@ -1710,9 +1790,17 @@ export function mergeResourceRefs(
   return out;
 }
 
-export function reasoningEffortForMetadata(metadata: Record<string, unknown>, fallback: ReasoningEffort): ReasoningEffort {
+export function reasoningEffortForMetadata(
+  metadata: Record<string, unknown>,
+  fallback: ReasoningEffort,
+): ReasoningEffort {
   const value = metadata.reasoningEffort;
-  return value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
+  return value === "none" ||
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
     ? value
     : fallback;
 }
@@ -1733,12 +1821,23 @@ function sortJson(value: unknown): unknown {
     return value.map(sortJson);
   }
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, sortJson(nested)]),
+    );
   }
   return value;
 }
 
-export const SessionTurnStatus = z.enum(["queued", "running", "requires_action", "completed", "failed", "cancelled"]);
+export const SessionTurnStatus = z.enum([
+  "queued",
+  "running",
+  "requires_action",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
 export const SessionTurnSource = z.enum(["user", "scheduled_task", "api", "goal"]);
@@ -1842,9 +1941,11 @@ export function isClearedRunStateBlob(serialized: string | null | undefined): bo
   }
   try {
     const parsed = JSON.parse(serialized) as unknown;
-    return typeof parsed === "object"
-      && parsed !== null
-      && (parsed as Record<string, unknown>)[CLEARED_RUN_STATE_MARKER] === true;
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as Record<string, unknown>)[CLEARED_RUN_STATE_MARKER] === true
+    );
   } catch {
     return false;
   }
@@ -1904,7 +2005,10 @@ export const ReorderSessionTurnsRequest = z.object({
 });
 export type ReorderSessionTurnsRequest = z.infer<typeof ReorderSessionTurnsRequest>;
 
-export const VariableSetVariableName = z.string().regex(/^[A-Z][A-Z0-9_]*$/).max(128);
+export const VariableSetVariableName = z
+  .string()
+  .regex(/^[A-Z][A-Z0-9_]*$/)
+  .max(128);
 export type VariableSetVariableName = z.infer<typeof VariableSetVariableName>;
 
 function withVariableSetIdAlias<T extends z.ZodRawShape>(shape: T) {
@@ -1954,10 +2058,14 @@ export type WorkspaceEnvironment = VariableSet;
 export const CreateVariableSetRequest = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
-  variables: z.array(z.object({
-    name: VariableSetVariableName,
-    value: z.string().min(1).max(32768),
-  })).default([]),
+  variables: z
+    .array(
+      z.object({
+        name: VariableSetVariableName,
+        value: z.string().min(1).max(32768),
+      }),
+    )
+    .default([]),
 });
 export type CreateVariableSetRequest = z.infer<typeof CreateVariableSetRequest>;
 /** @deprecated use CreateVariableSetRequest */
@@ -2055,12 +2163,14 @@ export type RigCheckResult = z.infer<typeof RigCheckResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
-export const RigChangeVerification = z.object({
-  startedAt: z.string().optional(),
-  finishedAt: z.string().optional(),
-  log: z.string().optional(),
-  checkResults: z.array(RigCheckResult).optional(),
-}).passthrough();
+export const RigChangeVerification = z
+  .object({
+    startedAt: z.string().optional(),
+    finishedAt: z.string().optional(),
+    log: z.string().optional(),
+    checkResults: z.array(RigCheckResult).optional(),
+  })
+  .passthrough();
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
 
 export const RigChange = z.object({
@@ -2153,7 +2263,10 @@ export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
     timeZone: z.string().min(1).default("UTC"),
     hour: z.number().int().min(0).max(23),
     minute: z.number().int().min(0).max(59),
-    daysOfWeek: z.array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"])).min(1).optional(),
+    daysOfWeek: z
+      .array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]))
+      .min(1)
+      .optional(),
   }),
 ]);
 export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
@@ -2293,7 +2406,9 @@ export const CapabilityPackScheduledTaskTemplate = z.object({
   // instantiable templates; built-in packs may instead build prompts in code.
   prompt: z.string().min(1).optional(),
 });
-export type CapabilityPackScheduledTaskTemplate = z.infer<typeof CapabilityPackScheduledTaskTemplate>;
+export type CapabilityPackScheduledTaskTemplate = z.infer<
+  typeof CapabilityPackScheduledTaskTemplate
+>;
 
 // One file inside a pack skill directory. Paths are workspace-relative POSIX
 // paths inside the skill directory (for example "SKILL.md" or
@@ -2311,31 +2426,47 @@ export type CapabilityPackSkillFile = z.infer<typeof CapabilityPackSkillFile>;
 // A skill delivered by a capability pack. The name doubles as the skill
 // directory under the sandbox skill index (skills/<name>), so it must be a
 // single safe path segment. Every skill must ship a top-level SKILL.md.
-export const CapabilityPackSkill = z.object({
-  name: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
-    message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
-  }),
-  description: z.string().min(1).max(2048).optional(),
-  files: z.array(CapabilityPackSkillFile).min(1).max(64),
-}).superRefine((skill, ctx) => {
-  const seen = new Set<string>();
-  skill.files.forEach((file, index) => {
-    if (seen.has(file.path)) {
-      ctx.addIssue({ code: "custom", message: `duplicate skill file path: ${file.path}`, path: ["files", index, "path"] });
+export const CapabilityPackSkill = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+        message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
+      }),
+    description: z.string().min(1).max(2048).optional(),
+    files: z.array(CapabilityPackSkillFile).min(1).max(64),
+  })
+  .superRefine((skill, ctx) => {
+    const seen = new Set<string>();
+    skill.files.forEach((file, index) => {
+      if (seen.has(file.path)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `duplicate skill file path: ${file.path}`,
+          path: ["files", index, "path"],
+        });
+      }
+      seen.add(file.path);
+    });
+    if (!skill.files.some((file) => file.path === "SKILL.md")) {
+      ctx.addIssue({
+        code: "custom",
+        message: "skill must include a top-level SKILL.md file",
+        path: ["files"],
+      });
     }
-    seen.add(file.path);
   });
-  if (!skill.files.some((file) => file.path === "SKILL.md")) {
-    ctx.addIssue({ code: "custom", message: "skill must include a top-level SKILL.md file", path: ["files"] });
-  }
-});
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 
 function isSafePackSkillRelativePath(path: string): boolean {
   if (path.startsWith("/") || path.includes("\\")) {
     return false;
   }
-  return path.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+  return path
+    .split("/")
+    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
 const CapabilityPackVariableSet = z.object({
@@ -2344,59 +2475,70 @@ const CapabilityPackVariableSet = z.object({
   required: z.boolean().default(false),
 });
 
-export const CapabilityPack = z.preprocess((input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return input;
-  }
-  const record = input as Record<string, unknown>;
-  if (record.variableSet !== undefined) {
+export const CapabilityPack = z.preprocess(
+  (input) => {
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      return input;
+    }
+    const record = input as Record<string, unknown>;
+    if (record.variableSet !== undefined) {
+      return record;
+    }
+    if (record.environment !== undefined) {
+      const { environment: _environment, ...rest } = record;
+      return { ...rest, variableSet: record.environment };
+    }
+    if (record.requiredVariables !== undefined) {
+      const { requiredVariables: _requiredVariables, ...rest } = record;
+      return {
+        ...rest,
+        variableSet: {
+          description: "Required variables",
+          requiredVariables: record.requiredVariables,
+          required: Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
+        },
+      };
+    }
     return record;
-  }
-  if (record.environment !== undefined) {
-    const { environment: _environment, ...rest } = record;
-    return { ...rest, variableSet: record.environment };
-  }
-  if (record.requiredVariables !== undefined) {
-    const { requiredVariables: _requiredVariables, ...rest } = record;
-    return {
-      ...rest,
-      variableSet: {
-        description: "Required variables",
-        requiredVariables: record.requiredVariables,
-        required: Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
-      },
-    };
-  }
-  return record;
-}, z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().min(1),
-  role: z.string().min(1),
-  category: z.string().min(1),
-  version: z.string().min(1),
-  // Container image ref (digest-pinned recommended) the pack's sessions run
-  // in. At most one enabled pack per workspace may declare one; with none,
-  // sessions use the deployment-wide image settings.
-  sandboxImage: z.string().trim().min(1).max(512).optional(),
-  // Skills delivered into the sandbox skill index when the pack is enabled.
-  skills: z.array(CapabilityPackSkill).max(32).superRefine((skills, ctx) => {
-    const seen = new Set<string>();
-    skills.forEach((skill, index) => {
-      const key = skill.name.toLowerCase();
-      if (seen.has(key)) {
-        ctx.addIssue({ code: "custom", message: `duplicate pack skill name: ${skill.name}`, path: [index, "name"] });
-      }
-      seen.add(key);
-    });
-  }).default([]),
-  tools: z.array(ToolRef).default([]),
-  connectors: z.array(CapabilityPackConnector).default([]),
-  knowledge: z.array(CapabilityPackKnowledge).default([]),
-  scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-  variableSet: CapabilityPackVariableSet.optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-}));
+  },
+  z.object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().min(1),
+    role: z.string().min(1),
+    category: z.string().min(1),
+    version: z.string().min(1),
+    // Container image ref (digest-pinned recommended) the pack's sessions run
+    // in. At most one enabled pack per workspace may declare one; with none,
+    // sessions use the deployment-wide image settings.
+    sandboxImage: z.string().trim().min(1).max(512).optional(),
+    // Skills delivered into the sandbox skill index when the pack is enabled.
+    skills: z
+      .array(CapabilityPackSkill)
+      .max(32)
+      .superRefine((skills, ctx) => {
+        const seen = new Set<string>();
+        skills.forEach((skill, index) => {
+          const key = skill.name.toLowerCase();
+          if (seen.has(key)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `duplicate pack skill name: ${skill.name}`,
+              path: [index, "name"],
+            });
+          }
+          seen.add(key);
+        });
+      })
+      .default([]),
+    tools: z.array(ToolRef).default([]),
+    connectors: z.array(CapabilityPackConnector).default([]),
+    knowledge: z.array(CapabilityPackKnowledge).default([]),
+    scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+    variableSet: CapabilityPackVariableSet.optional(),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+  }),
+);
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
 
 // Registering a pack stores the manifest itself; the request body is a full
@@ -2515,14 +2657,16 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
-export const McpServerConnectionRef = z.object({
-  connectionId: z.string().uuid().optional(),
-  providerDomain: z.string().min(1),
-  kind: ConnectionKind.optional(),
-  scopes: z.array(z.string().min(1)).optional(),
-  resource: z.string().min(1).optional(),
-  subjectScope: z.enum(["workspace", "subject"]).optional(),
-}).strict();
+export const McpServerConnectionRef = z
+  .object({
+    connectionId: z.string().uuid().optional(),
+    providerDomain: z.string().min(1),
+    kind: ConnectionKind.optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    subjectScope: z.enum(["workspace", "subject"]).optional(),
+  })
+  .strict();
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 
 export const ConnectionMetadata = z.object({
@@ -2583,17 +2727,19 @@ export const ListConnectionsResponse = z.object({
 });
 export type ListConnectionsResponse = z.infer<typeof ListConnectionsResponse>;
 
-export const OAuthStartRequest = z.object({
-  providerDomain: z.string().min(1).optional(),
-  mcpUrl: z.string().url().optional(),
-  resource: z.string().url().optional(),
-  requestedScopes: z.array(z.string().min(1)).default([]),
-  returnPath: z.string().min(1).optional(),
-  connectionId: z.string().uuid().optional(),
-}).refine((value) => Boolean(value.mcpUrl ?? value.resource), {
-  message: "mcpUrl is required",
-  path: ["mcpUrl"],
-});
+export const OAuthStartRequest = z
+  .object({
+    providerDomain: z.string().min(1).optional(),
+    mcpUrl: z.string().url().optional(),
+    resource: z.string().url().optional(),
+    requestedScopes: z.array(z.string().min(1)).default([]),
+    returnPath: z.string().min(1).optional(),
+    connectionId: z.string().uuid().optional(),
+  })
+  .refine((value) => Boolean(value.mcpUrl ?? value.resource), {
+    message: "mcpUrl is required",
+    path: ["mcpUrl"],
+  });
 export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
 
 export const OAuthStartResponse = z.object({
@@ -2630,7 +2776,13 @@ export type MarketingDailyAnalysisTaskRequest = z.infer<typeof MarketingDailyAna
 export const CapabilityKind = z.enum(["pack", "mcp", "api", "skill", "plugin"]);
 export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
-export const CapabilitySource = z.enum(["built_in", "configured", "public_registry", "registry", "manual"]);
+export const CapabilitySource = z.enum([
+  "built_in",
+  "configured",
+  "public_registry",
+  "registry",
+  "manual",
+]);
 export type CapabilitySource = z.infer<typeof CapabilitySource>;
 
 export const CapabilityInstallationStatus = z.enum(["active", "disabled"]);
@@ -2684,11 +2836,14 @@ export const CapabilityCatalogItem = z.object({
   // connectionRef resolved to one (null for header/credential-free items —
   // that means "no connection involved", not "broken"). Lets the UI match
   // connection health by id instead of guessing from providerDomain alone.
-  connectionRef: z.object({
-    connectionId: z.string().min(1),
-    providerDomain: z.string().min(1),
-    kind: z.string().min(1),
-  }).nullable().default(null),
+  connectionRef: z
+    .object({
+      connectionId: z.string().min(1),
+      providerDomain: z.string().min(1),
+      kind: z.string().min(1),
+    })
+    .nullable()
+    .default(null),
   metadata: z.record(z.string(), z.unknown()).default({}),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
@@ -2842,10 +2997,12 @@ export type LineageNode = {
   session: SessionSummary;
   children: LineageNode[];
 };
-export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
-  session: Session,
-  children: z.array(LineageNode),
-}));
+export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
+  z.object({
+    session: Session,
+    children: z.array(LineageNode),
+  }),
+);
 
 export const SessionLineageResponse = z.object({
   ancestors: z.array(Session),
@@ -3085,13 +3242,17 @@ export type SandboxCommandOutputDeltaPayload = z.infer<typeof SandboxCommandOutp
 export const FsChangeKind = z.enum(["created", "modified", "deleted", "renamed"]);
 export type FsChangeKind = z.infer<typeof FsChangeKind>;
 export const FsChangedPayload = z.object({
-  changes: z.array(z.object({
-    path: z.string(), // workspace-relative POSIX path
-    kind: FsChangeKind,
-    isDir: z.boolean().default(false),
-    sizeBytes: z.number().int().nonnegative().nullable().default(null),
-    oldPath: z.string().optional(), // for "renamed"
-  })).min(1),
+  changes: z
+    .array(
+      z.object({
+        path: z.string(), // workspace-relative POSIX path
+        kind: FsChangeKind,
+        isDir: z.boolean().default(false),
+        sizeBytes: z.number().int().nonnegative().nullable().default(null),
+        oldPath: z.string().optional(), // for "renamed"
+      }),
+    )
+    .min(1),
   source: z.enum(["write", "watch", "agent"]).default("write"),
   // Monotonic FS revision (per-lease, paired with leaseEpoch for staleness).
   revision: z.number().int().nonnegative(),
@@ -3108,7 +3269,9 @@ export const GitChangedPayload = z.object({
   ahead: z.number().int().nonnegative().default(0),
   behind: z.number().int().nonnegative().default(0),
   changedFileCount: z.number().int().nonnegative(),
-  reason: z.enum(["commit", "checkout", "stage", "worktree", "fetch", "unknown"]).default("unknown"),
+  reason: z
+    .enum(["commit", "checkout", "stage", "worktree", "fetch", "unknown"])
+    .default("unknown"),
   revision: z.number().int().nonnegative().default(0),
   leaseEpoch: z.number().int().nonnegative().default(0),
 });
@@ -3153,16 +3316,18 @@ export interface FsTreeNode {
   children?: FsTreeNode[] | undefined;
   truncated: boolean; // dir had more entries than the cap
 }
-export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() => z.object({
-  name: z.string(),
-  path: z.string(),
-  type: FsNodeType,
-  sizeBytes: z.number().int().nonnegative().nullable(),
-  mtimeMs: z.number().int().nonnegative().nullable(),
-  mode: z.number().int().nullable(),
-  children: z.array(FsTreeNode).optional(),
-  truncated: z.boolean().default(false),
-})) as z.ZodType<FsTreeNode>;
+export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() =>
+  z.object({
+    name: z.string(),
+    path: z.string(),
+    type: FsNodeType,
+    sizeBytes: z.number().int().nonnegative().nullable(),
+    mtimeMs: z.number().int().nonnegative().nullable(),
+    mode: z.number().int().nullable(),
+    children: z.array(FsTreeNode).optional(),
+    truncated: z.boolean().default(false),
+  }),
+) as z.ZodType<FsTreeNode>;
 
 export const FsListRequest = z.object({
   path: z.string().default(""), // "" = workspace root
@@ -3183,7 +3348,12 @@ export type FsEncoding = z.infer<typeof FsEncoding>;
 export const FsReadRequest = z.object({
   path: z.string(),
   encoding: FsEncoding.default("utf8"),
-  maxBytes: z.number().int().positive().max(25 * 1024 * 1024).default(5 * 1024 * 1024),
+  maxBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(25 * 1024 * 1024)
+    .default(5 * 1024 * 1024),
 });
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
 export const FsReadResponse = z.object({
@@ -3247,7 +3417,15 @@ export type FsMkdirResponse = z.infer<typeof FsMkdirResponse>;
 
 // --- A2 Git request/response (read-only; feeds Pierre diff/tree) -------------
 export const GitFileStatusCode = z.enum([
-  "added", "modified", "deleted", "renamed", "copied", "untracked", "ignored", "conflicted", "typechange",
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "copied",
+  "untracked",
+  "ignored",
+  "conflicted",
+  "typechange",
 ]);
 export type GitFileStatusCode = z.infer<typeof GitFileStatusCode>;
 export const GitFileStatus = z.object({
@@ -3314,7 +3492,12 @@ export const GitDiffRequest = z.object({
   toRef: z.string().optional(),
   pathspec: z.array(z.string()).default([]),
   contextLines: z.number().int().min(0).max(10).default(3),
-  maxBytesPerFile: z.number().int().positive().max(2 * 1024 * 1024).default(512 * 1024),
+  maxBytesPerFile: z
+    .number()
+    .int()
+    .positive()
+    .max(2 * 1024 * 1024)
+    .default(512 * 1024),
 });
 export type GitDiffRequest = z.infer<typeof GitDiffRequest>;
 export const GitDiffResponse = z.object({
@@ -3468,7 +3651,7 @@ export const GetWorkspaceCaptureFileResponse = z.object({
   isBinary: z.boolean(),
   tooLarge: z.boolean(),
   encoding: FsEncoding.nullable().default(null), // set iff content is inline
-  content: z.string().nullable().default(null),  // inline ≤256KB (per encoding)
+  content: z.string().nullable().default(null), // inline ≤256KB (per encoding)
   contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
 });
 export type GetWorkspaceCaptureFileResponse = z.infer<typeof GetWorkspaceCaptureFileResponse>;
@@ -3500,13 +3683,25 @@ export const GitShowRequest = z.object({
   ref: z.string(), // a commit/tag/tree-ish
   filePath: z.string().optional(), // ref + filePath => raw blob ("open file at commit")
   encoding: FsEncoding.default("utf8"),
-  maxBytesPerFile: z.number().int().positive().max(2 * 1024 * 1024).default(512 * 1024),
+  maxBytesPerFile: z
+    .number()
+    .int()
+    .positive()
+    .max(2 * 1024 * 1024)
+    .default(512 * 1024),
 });
 export type GitShowRequest = z.infer<typeof GitShowRequest>;
 export const GitShowResponse = z.object({
   commit: GitCommit.nullable(), // null when fetching a raw blob
   files: z.array(GitFileDiff), // commit diff vs first parent
-  blob: z.object({ content: z.string(), encoding: FsEncoding, sizeBytes: z.number().int(), truncated: z.boolean() }).nullable(),
+  blob: z
+    .object({
+      content: z.string(),
+      encoding: FsEncoding,
+      sizeBytes: z.number().int(),
+      truncated: z.boolean(),
+    })
+    .nullable(),
   revision: z.number().int().nonnegative(),
 });
 export type GitShowResponse = z.infer<typeof GitShowResponse>;
@@ -3554,7 +3749,11 @@ export const PtyOpenResponse = z.object({
 export type PtyOpenResponse = z.infer<typeof PtyOpenResponse>;
 export const PtyWriteRequest = z.object({ ptyId: z.string().uuid(), data: z.string() }); // utf-8 stdin
 export type PtyWriteRequest = z.infer<typeof PtyWriteRequest>;
-export const PtyResizeRequest = z.object({ ptyId: z.string().uuid(), cols: z.number().int().positive(), rows: z.number().int().positive() });
+export const PtyResizeRequest = z.object({
+  ptyId: z.string().uuid(),
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive(),
+});
 export type PtyResizeRequest = z.infer<typeof PtyResizeRequest>;
 export const PtyCloseRequest = z.object({ ptyId: z.string().uuid() });
 export type PtyCloseRequest = z.infer<typeof PtyCloseRequest>;
@@ -3657,11 +3856,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // default silently falls back to an own box; an explicit "shared"/{groupId}
   // request 422s at create (instead of the first turn dying on the SDK's
   // manifest-env guard).
-  sandbox: z.union([
-    z.literal("shared"),
-    z.literal("new"),
-    z.object({ groupId: z.string().uuid() }),
-  ]).optional(),
+  sandbox: z
+    .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
+    .optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -4000,7 +4197,13 @@ export const DeviceEnrollmentPollRequest = z.object({
 });
 export type DeviceEnrollmentPollRequest = z.infer<typeof DeviceEnrollmentPollRequest>;
 
-export const DeviceEnrollmentState = z.enum(["pending", "authorized", "denied", "expired", "disabled"]);
+export const DeviceEnrollmentState = z.enum([
+  "pending",
+  "authorized",
+  "denied",
+  "expired",
+  "disabled",
+]);
 export type DeviceEnrollmentState = z.infer<typeof DeviceEnrollmentState>;
 
 // The EnrollmentCredentials (field names match the proto's JSON). natsAccountCreds
@@ -4304,7 +4507,7 @@ export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesRe
 export const ClientModel = z.object({
   id: z.string(),
   label: z.string(),
-  provider: z.string(),        // provider id
+  provider: z.string(), // provider id
   providerLabel: z.string(),
   api: z.enum(["responses", "chat"]),
   contextWindowTokens: z.number().int().positive().optional(),
@@ -4324,10 +4527,14 @@ export const ClientConfig = z.object({
   models: z.array(ClientModel).default([]),
   defaultReasoningEffort: ReasoningEffort,
   allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
-  mcpServers: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-  })).default([]),
+  mcpServers: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+      }),
+    )
+    .default([]),
   fileUploads: z.object({
     enabled: z.boolean(),
     maxSizeBytes: z.number().int().positive(),
@@ -4338,11 +4545,13 @@ export const ClientConfig = z.object({
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
   // (it depends on the session's pinned backend); this is the coarse on/off the
   // client uses to decide whether to even attempt the fs/git/terminal panels.
-  structuredServices: z.object({
-    fileSystem: z.boolean(),
-    git: z.boolean(),
-    terminalEvents: z.boolean(),
-  }).default({ fileSystem: false, git: false, terminalEvents: false }),
+  structuredServices: z
+    .object({
+      fileSystem: z.boolean(),
+      git: z.boolean(),
+      terminalEvents: z.boolean(),
+    })
+    .default({ fileSystem: false, git: false, terminalEvents: false }),
 });
 export type ClientConfig = z.infer<typeof ClientConfig>;
 

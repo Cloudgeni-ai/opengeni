@@ -61,20 +61,25 @@ export async function beginRecording(args: {
 }): Promise<{ active: ActiveRecording; started: RecordingStartedPayload }> {
   const { settings, db } = args;
   const codec = settings.recordingDefaultCodec as RecordingCodec;
-  const dimensions: [number, number] = [settings.streamResolutionWidth, settings.streamResolutionHeight];
+  const dimensions: [number, number] = [
+    settings.streamResolutionWidth,
+    settings.streamResolutionHeight,
+  ];
   const framerate = settings.recordingFramerate;
-  await import("@opengeni/db").then(({ insertRecording }) => insertRecording(db, {
-    id: args.recordingId,
-    accountId: args.accountId,
-    workspaceId: args.workspaceId,
-    sessionId: args.sessionId,
-    turnId: args.turnId,
-    mode: args.mode,
-    codec,
-    width: dimensions[0],
-    height: dimensions[1],
-    reason: scrubFreeText(args.reason),
-  }));
+  await import("@opengeni/db").then(({ insertRecording }) =>
+    insertRecording(db, {
+      id: args.recordingId,
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      sessionId: args.sessionId,
+      turnId: args.turnId,
+      mode: args.mode,
+      codec,
+      width: dimensions[0],
+      height: dimensions[1],
+      reason: scrubFreeText(args.reason),
+    }),
+  );
   const proc = await startRecordingOnBox(args.session, {
     recordingId: args.recordingId,
     codec,
@@ -127,7 +132,10 @@ export async function finalizeRecording(args: {
 }): Promise<FinalizeOutcome> {
   const { settings, db, objectStorage, active } = args;
   const codec = settings.recordingDefaultCodec as RecordingCodec;
-  const fail = async (reason: RecordingFailedReason, detail: string | null): Promise<FinalizeOutcome> => {
+  const fail = async (
+    reason: RecordingFailedReason,
+    detail: string | null,
+  ): Promise<FinalizeOutcome> => {
     await updateRecording(db, {
       accountId: args.accountId,
       workspaceId: args.workspaceId,
@@ -150,7 +158,11 @@ export async function finalizeRecording(args: {
     await stopRecordingOnBox(args.session, active.proc);
 
     // 2. Read bytes off the box (size-gated; no eager delete — F8/F9).
-    const finalized = await readRecordingBytes(args.session, active.proc, settings.recordingMaxBytes);
+    const finalized = await readRecordingBytes(
+      args.session,
+      active.proc,
+      settings.recordingMaxBytes,
+    );
 
     if (!objectStorage) {
       return await fail("upload-failed", "object storage is not configured");
@@ -168,9 +180,16 @@ export async function finalizeRecording(args: {
     const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
     try {
       // `.slice()` detaches a fresh ArrayBuffer from the box read.
-      await objectStorage.putObject({ key, contentType: finalized.contentType, body: finalized.bytes.slice() });
+      await objectStorage.putObject({
+        key,
+        contentType: finalized.contentType,
+        body: finalized.bytes.slice(),
+      });
     } catch (uploadError) {
-      return await fail("upload-failed", uploadError instanceof Error ? uploadError.message : String(uploadError));
+      return await fail(
+        "upload-failed",
+        uploadError instanceof Error ? uploadError.message : String(uploadError),
+      );
     }
 
     // 4. Commit `available` with the artifact ref.
@@ -199,7 +218,8 @@ export async function finalizeRecording(args: {
     };
     return { ok: true, available };
   } catch (error) {
-    const reason: RecordingFailedReason = error instanceof RecordingError ? error.reason : "ffmpeg-error";
+    const reason: RecordingFailedReason =
+      error instanceof RecordingError ? error.reason : "ffmpeg-error";
     return await fail(reason, error instanceof Error ? error.message : String(error));
   }
 }

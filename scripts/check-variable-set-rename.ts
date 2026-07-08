@@ -2,17 +2,16 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 const root = process.cwd();
-const ignoredDirs = new Set([".git", "node_modules", "dist", "build", ".next", "coverage", ".agent"]);
-const textExtensions = new Set([
-  ".ts",
-  ".tsx",
-  ".md",
-  ".sql",
-  ".json",
-  ".toml",
-  ".yaml",
-  ".yml",
+const ignoredDirs = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  "coverage",
+  ".agent",
 ]);
+const textExtensions = new Set([".ts", ".tsx", ".md", ".sql", ".json", ".toml", ".yaml", ".yml"]);
 
 type Rule = {
   name: string;
@@ -45,7 +44,8 @@ const aliasAllow = [
 const rules: Rule[] = [
   {
     name: "old DB table/column names",
-    pattern: /\b(workspace_environments|workspace_environment_variables|environment_id|sessions_environment_idx|scheduled_tasks_environment_idx)\b/,
+    pattern:
+      /\b(workspace_environments|workspace_environment_variables|environment_id|sessions_environment_idx|scheduled_tasks_environment_idx)\b/,
     allow: [
       /^packages\/db\/drizzle\/0004_workspace_environments\.sql$/,
       /^packages\/db\/drizzle\/0046_variable_sets_rename\.sql$/,

@@ -41,7 +41,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
@@ -85,15 +87,17 @@ describe("reserveToolspaceCallForTurn", () => {
 
     const results = await Promise.all(
       Array.from({ length: parallel }, () =>
-        reserveToolspaceCallForTurn(db, workspaceId, sessionId, turnId, limit)),
+        reserveToolspaceCallForTurn(db, workspaceId, sessionId, turnId, limit),
+      ),
     );
 
     const reserved = results.filter((r) => r.reserved);
     expect(reserved.length).toBe(limit);
     expect(results.length - reserved.length).toBe(parallel - limit);
     // The returned counts are the distinct post-increment values 1..limit.
-    expect(reserved.map((r) => (r as { count: number }).count).sort((a, b) => a - b))
-      .toEqual([1, 2, 3, 4, 5]);
+    expect(reserved.map((r) => (r as { count: number }).count).sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
     // The persisted counter never overshoots the limit.
     expect(await currentCount(turnId)).toBe(limit);
   }, 60_000);
@@ -118,7 +122,13 @@ describe("reserveToolspaceCallForTurn", () => {
   test("an unknown turn id never reserves", async () => {
     if (!available) return;
     const { workspaceId, sessionId } = await freshTurn();
-    const result = await reserveToolspaceCallForTurn(db, workspaceId, sessionId, crypto.randomUUID(), 10);
+    const result = await reserveToolspaceCallForTurn(
+      db,
+      workspaceId,
+      sessionId,
+      crypto.randomUUID(),
+      10,
+    );
     expect(result).toEqual({ reserved: false });
   }, 60_000);
 });

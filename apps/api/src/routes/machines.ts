@@ -19,10 +19,7 @@ import {
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
 } from "@opengeni/contracts";
-import {
-  getEnrollment,
-  readMachineMetricsSeries,
-} from "@opengeni/db";
+import { getEnrollment, readMachineMetricsSeries } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
@@ -48,7 +45,9 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // invisible while disabled — it does not exist for this deployment yet.
   function assertSelfhostedEnabled(): void {
     if (!settings.sandboxSelfhostedEnabled) {
-      throw new HTTPException(404, { message: "selfhosted machines are not enabled for this deployment" });
+      throw new HTTPException(404, {
+        message: "selfhosted machines are not enabled for this deployment",
+      });
     }
   }
 
@@ -79,9 +78,11 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const windowMs = SERIES_WINDOWS_MS[c.req.query("window") ?? ""] ?? DEFAULT_SERIES_WINDOW_MS;
     const since = new Date(Date.now() - windowMs);
     const rows = await readMachineMetricsSeries(db, { workspaceId, enrollmentId, since });
-    return c.json(MachineMetricsSeriesResponse.parse({
-      samples: rows.map(metricRowToSample),
-    }));
+    return c.json(
+      MachineMetricsSeriesResponse.parse({
+        samples: rows.map(metricRowToSample),
+      }),
+    );
   });
 
   // ── POST /workspaces/:ws/sessions/:sessionId/active-sandbox (swap) ───────────

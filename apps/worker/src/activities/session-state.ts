@@ -65,7 +65,12 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       await finishTurn(db, input.workspaceId, turnId, "failed");
     }
     await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
-    await notifyParentOfChildTerminal({ db, bus, settings, observability, wakeSessionWorkflow }, input.workspaceId, input.sessionId, "failed");
+    await notifyParentOfChildTerminal(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      "failed",
+    );
   }
 
   async function interruptActiveTurn(input: RunAgentTurnInput): Promise<void> {
@@ -118,7 +123,9 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
    * drop it. Re-dispatches are bounded per turn by
    * WORKER_DEATH_MAX_REDISPATCHES, persisted on the turn row.
    */
-  async function requeueTurnAfterWorkerDeath(input: RequeueTurnAfterWorkerDeathInput): Promise<RequeueTurnAfterWorkerDeathResult> {
+  async function requeueTurnAfterWorkerDeath(
+    input: RequeueTurnAfterWorkerDeathInput,
+  ): Promise<RequeueTurnAfterWorkerDeathResult> {
     const { settings, db, bus, observability } = await services();
     const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
     // Reaching this activity PROVES the session workflow classified the turn's
@@ -134,10 +141,17 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     //     real settle. Requeue it, or the turn — and any goal awaiting it — is
     //     orphaned until a human intervenes (the 76e2f2ee/Vern 16h stall).
     const deathArtifactCancel = turn?.status === "cancelled";
-    if (!turn || (turn.status !== "running" && turn.status !== "requires_action" && !deathArtifactCancel)) {
+    if (
+      !turn ||
+      (turn.status !== "running" && turn.status !== "requires_action" && !deathArtifactCancel)
+    ) {
       return { action: "stale" };
     }
-    const redispatches = await incrementTurnWorkerDeathRedispatches(db, input.workspaceId, input.turnId);
+    const redispatches = await incrementTurnWorkerDeathRedispatches(
+      db,
+      input.workspaceId,
+      input.turnId,
+    );
     if (redispatches > WORKER_DEATH_MAX_REDISPATCHES) {
       return { action: "exceeded", redispatches: redispatches - 1 };
     }
@@ -146,27 +160,34 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     // Legacy run-state mode has no crash checkpoint (the dying worker never
     // captured the blob), so it always replays the original trigger against
     // the previous RunState snapshot — the documented degraded resume.
-    const resumeWithNotice = !approvalRerun
-      && settings.sessionHistorySource === "items"
-      && await countTurnSessionHistoryItems(db, input.workspaceId, input.turnId) > 0;
-    const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-      {
-        turnId: turn.id,
-        type: "turn.preempted",
-        payload: {
-          triggerEventId: input.triggerEventId,
-          reason: "worker_death",
-          redispatches,
-          resumeWithNotice,
-          ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
+    const resumeWithNotice =
+      !approvalRerun &&
+      settings.sessionHistorySource === "items" &&
+      (await countTurnSessionHistoryItems(db, input.workspaceId, input.turnId)) > 0;
+    const [preemptedEvent] = await appendAndPublishEvents(
+      db,
+      bus,
+      input.workspaceId,
+      input.sessionId,
+      [
+        {
+          turnId: turn.id,
+          type: "turn.preempted",
+          payload: {
+            triggerEventId: input.triggerEventId,
+            reason: "worker_death",
+            redispatches,
+            resumeWithNotice,
+            ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
+          },
         },
-      },
-      {
-        turnId: turn.id,
-        type: "session.status.changed",
-        payload: { status: "queued" },
-      },
-    ]);
+        {
+          turnId: turn.id,
+          type: "session.status.changed",
+          payload: { status: "queued" },
+        },
+      ],
+    );
     try {
       // Worker-death redispatch may reset a turn the dying attempt already
       // stamped `cancelled` (death artifact, see above), so the reset must
@@ -189,8 +210,11 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       // REAL persistence error, so rethrow to retry rather than silently drop
       // the turn as stale (the exact idle-stall this change fixes).
       const current = await getSessionTurn(db, input.workspaceId, input.turnId);
-      const stillRequeueable = current
-        && (current.status === "running" || current.status === "requires_action" || current.status === "cancelled");
+      const stillRequeueable =
+        current &&
+        (current.status === "running" ||
+          current.status === "requires_action" ||
+          current.status === "cancelled");
       if (!stillRequeueable) {
         return { action: "stale" };
       }
@@ -203,7 +227,12 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
 
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {
     const { db, observability } = await services();
-    const turn = await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
+    const turn = await claimNextQueuedTurnDb(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.workflowId,
+    );
     await refreshQueuedTurnsGauge(db, observability);
     return turn;
   }
@@ -220,7 +249,12 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     // point for a spawned worker, whatever the cause (goal completed, agent or
     // system paused goal, goalless work finished, idle-interrupt stop). Wake
     // the parent here, deduped per idle episode so the manager is nudged once.
-    await notifyParentOfChildTerminal({ db, bus, settings, observability, wakeSessionWorkflow }, input.workspaceId, input.sessionId, "idle");
+    await notifyParentOfChildTerminal(
+      { db, bus, settings, observability, wakeSessionWorkflow },
+      input.workspaceId,
+      input.sessionId,
+      "idle",
+    );
   }
 
   return {

@@ -1,7 +1,4 @@
-export {
-  documentIndexWorkflow,
-  type DocumentIndexWorkflowInput,
-} from "./workflows/document-index";
+export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
   approvalDecision,
   interrupt,
@@ -14,9 +11,7 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
-export {
-  sandboxReaperWorkflow,
-} from "./workflows/sandbox-reaper";
+export { sandboxReaperWorkflow } from "./workflows/sandbox-reaper";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

@@ -71,13 +71,17 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
 
   // A self-hosted machine that reports offline cannot be woken remotely — honest
   // "offline", never "waking" (dossier §3 #5 / #10).
-  const selfhostedOffline = input.activeIsSelfhosted === true && input.activeMachineState === "offline";
+  const selfhostedOffline =
+    input.activeIsSelfhosted === true && input.activeMachineState === "offline";
 
   // 2. Actively coming up: negotiation in flight, an edit/terminal is warming, or
   //    the active machine is (re)connecting. Never when self-hosted is hard-offline.
   const machineWarming =
     input.activeMachineState === "reconnecting" || input.activeMachineState === "enrolling";
-  if (!selfhostedOffline && (input.capabilitiesState === "negotiating" || input.wantsWarm === true || machineWarming)) {
+  if (
+    !selfhostedOffline &&
+    (input.capabilitiesState === "negotiating" || input.wantsWarm === true || machineWarming)
+  ) {
     return { state: "waking", label: "Waking…", asOf };
   }
 

@@ -27,14 +27,22 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    return c.json({ mode: deps.settings.billingMode, balance: await getBillingBalance(deps.db, accountId) });
+    return c.json({
+      mode: deps.settings.billingMode,
+      balance: await getBillingBalance(deps.db, accountId),
+    });
   });
 
   app.get("/v1/billing/usage", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
     const workspaceId = c.req.query("workspaceId");
-    if (workspaceId && !context.workspaceGrants.some((grant) => grant.accountId === accountId && grant.workspaceId === workspaceId)) {
+    if (
+      workspaceId &&
+      !context.workspaceGrants.some(
+        (grant) => grant.accountId === accountId && grant.workspaceId === workspaceId,
+      )
+    ) {
       throw new HTTPException(403, { message: "missing workspace access for usage query" });
     }
     return c.json({
@@ -50,7 +58,11 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing/entitlements", async (c) => {
     const context = await requireAccessContext(c, deps);
     const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
-    return c.json({ accountId, mode: deps.settings.entitlementsMode, entitlements: configuredEntitlements(deps.settings) });
+    return c.json({
+      accountId,
+      mode: deps.settings.entitlementsMode,
+      entitlements: configuredEntitlements(deps.settings),
+    });
   });
 
   app.post("/v1/billing/checkout", async (c) => {
@@ -60,7 +72,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const parsed = CreateCheckoutRequest.safeParse(await c.req.json());
     if (!parsed.success) {
-      throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "invalid checkout request" });
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid checkout request",
+      });
     }
     const body = parsed.data;
     const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
@@ -69,24 +83,29 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
     const idempotencyKey = `checkout:${accountId}:${amountMicros}:${crypto.randomUUID()}`;
-    const session = await stripe.checkout.sessions.create(stripeCheckoutSessionCreateParams({
-      accountId,
-      customerId,
-      amountCents,
-      amountMicros,
-      creditsProductId: deps.settings.stripeCreditsProductId,
-      publicBaseUrl: deps.settings.publicBaseUrl,
-      successUrl: body.successUrl,
-      cancelUrl: body.cancelUrl,
-      idempotencyKey,
-    }), { idempotencyKey });
+    const session = await stripe.checkout.sessions.create(
+      stripeCheckoutSessionCreateParams({
+        accountId,
+        customerId,
+        amountCents,
+        amountMicros,
+        creditsProductId: deps.settings.stripeCreditsProductId,
+        publicBaseUrl: deps.settings.publicBaseUrl,
+        successUrl: body.successUrl,
+        cancelUrl: body.cancelUrl,
+        idempotencyKey,
+      }),
+      { idempotencyKey },
+    );
     if (!session.url) {
       throw new HTTPException(502, { message: "Stripe did not return a checkout URL" });
     }
-    return c.json(CreateCheckoutResponse.parse({
-      checkoutSessionId: session.id,
-      url: session.url,
-    }));
+    return c.json(
+      CreateCheckoutResponse.parse({
+        checkoutSessionId: session.id,
+        url: session.url,
+      }),
+    );
   });
 
   app.post("/v1/webhooks/stripe", async (c) => {
@@ -100,9 +119,15 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = await c.req.text();
     let event: Stripe.Event;
     try {
-      event = await stripeClient(deps).webhooks.constructEventAsync(payload, signature, deps.settings.stripeWebhookSecret!);
+      event = await stripeClient(deps).webhooks.constructEventAsync(
+        payload,
+        signature,
+        deps.settings.stripeWebhookSecret!,
+      );
     } catch (error) {
-      throw new HTTPException(400, { message: error instanceof Error ? error.message : "invalid stripe signature" });
+      throw new HTTPException(400, {
+        message: error instanceof Error ? error.message : "invalid stripe signature",
+      });
     }
     const firstSeen = await recordStripeWebhookEvent(deps.db, {
       id: event.id,
@@ -120,7 +145,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       await markStripeWebhookProcessed(deps.db, event.id);
       return c.json({ received: true });
     } catch (error) {
-      throw new HTTPException(500, { message: error instanceof Error ? error.message : String(error) });
+      throw new HTTPException(500, {
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 }
@@ -136,8 +163,18 @@ export function stripeCheckoutSessionCreateParams(input: {
   cancelUrl?: string | undefined;
   idempotencyKey: string;
 }): Stripe.Checkout.SessionCreateParams {
-  const successUrl = checkoutReturnUrl(input.publicBaseUrl, input.successUrl, "/billing?checkout=success", "successUrl");
-  const cancelUrl = checkoutReturnUrl(input.publicBaseUrl, input.cancelUrl, "/billing?checkout=cancelled", "cancelUrl");
+  const successUrl = checkoutReturnUrl(
+    input.publicBaseUrl,
+    input.successUrl,
+    "/billing?checkout=success",
+    "successUrl",
+  );
+  const cancelUrl = checkoutReturnUrl(
+    input.publicBaseUrl,
+    input.cancelUrl,
+    "/billing?checkout=cancelled",
+    "cancelUrl",
+  );
   return {
     mode: "payment",
     customer: input.customerId,
@@ -149,24 +186,26 @@ export function stripeCheckoutSessionCreateParams(input: {
     cancel_url: cancelUrl,
     automatic_tax: { enabled: true },
     billing_address_collection: "auto",
-    line_items: [{
-      quantity: 1,
-      price_data: {
-        currency: "usd",
-        unit_amount: input.amountCents,
-        ...(input.creditsProductId
-          ? { product: input.creditsProductId }
-          : {
-            product_data: {
-              name: "OpenGeni credits",
-              metadata: {
-                app: "opengeni",
-                billing_model: "prepaid_credits",
-              },
-            },
-          }),
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: input.amountCents,
+          ...(input.creditsProductId
+            ? { product: input.creditsProductId }
+            : {
+                product_data: {
+                  name: "OpenGeni credits",
+                  metadata: {
+                    app: "opengeni",
+                    billing_model: "prepaid_credits",
+                  },
+                },
+              }),
+        },
       },
-    }],
+    ],
     metadata: {
       opengeni_account_id: input.accountId,
       opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
@@ -184,9 +223,16 @@ export function stripeCheckoutSessionCreateParams(input: {
   };
 }
 
-function checkoutReturnUrl(publicBaseUrl: string | undefined, candidate: string | undefined, fallbackPath: string, field: string): string {
+function checkoutReturnUrl(
+  publicBaseUrl: string | undefined,
+  candidate: string | undefined,
+  fallbackPath: string,
+  field: string,
+): string {
   if (!publicBaseUrl) {
-    throw new HTTPException(500, { message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe checkout" });
+    throw new HTTPException(500, {
+      message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe checkout",
+    });
   }
   const base = new URL(publicBaseUrl);
   const fallback = new URL(fallbackPath, base).toString();
@@ -200,7 +246,11 @@ function checkoutReturnUrl(publicBaseUrl: string | undefined, candidate: string 
   return parsed.toString();
 }
 
-async function handleStripeWebhookEvent(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
+async function handleStripeWebhookEvent(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  event: Stripe.Event,
+): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed":
       await handleCheckoutSessionCompleted(deps, event);
@@ -239,7 +289,10 @@ async function handleStripeWebhookEvent(deps: ApiRouteDeps, stripe: Stripe, even
   }
 }
 
-async function handleCheckoutSessionCompleted(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {
+async function handleCheckoutSessionCompleted(
+  deps: ApiRouteDeps,
+  event: Stripe.Event,
+): Promise<void> {
   const session = event.data.object as Stripe.Checkout.Session;
   if (session.mode !== "payment" || session.payment_status !== "paid") {
     return;
@@ -263,7 +316,10 @@ async function handleCheckoutSessionCompleted(deps: ApiRouteDeps, event: Stripe.
     idempotencyKey: credit.idempotencyKey,
     metadata: {
       stripeEventId: event.id,
-      stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null,
+      stripePaymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : (session.payment_intent?.id ?? null),
       stripePackageId: credit.packageId,
       stripeCreditAmountUsd: credit.amountUsd,
     },
@@ -285,18 +341,30 @@ async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Eve
   }
 }
 
-async function handleChargeRefunded(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
+async function handleChargeRefunded(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  event: Stripe.Event,
+): Promise<void> {
   const charge = event.data.object as Stripe.Charge;
   for (const refund of charge.refunds?.data ?? []) {
     await applyRefundDebit(deps, stripe, refund);
   }
 }
 
-async function handleRefundEvent(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
+async function handleRefundEvent(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  event: Stripe.Event,
+): Promise<void> {
   await applyRefundDebit(deps, stripe, event.data.object as Stripe.Refund);
 }
 
-async function applyRefundDebit(deps: ApiRouteDeps, stripe: Stripe, refund: Stripe.Refund): Promise<void> {
+async function applyRefundDebit(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  refund: Stripe.Refund,
+): Promise<void> {
   if (refund.status && refund.status !== "succeeded") {
     return;
   }
@@ -324,7 +392,11 @@ async function applyRefundDebit(deps: ApiRouteDeps, stripe: Stripe, refund: Stri
   recordCreditMicrosMetric(deps, "refund", centsToMicros(refund.amount));
 }
 
-async function holdDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
+async function holdDisputedCredits(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  event: Stripe.Event,
+): Promise<void> {
   const dispute = event.data.object as Stripe.Dispute;
   const metadata = await metadataForDispute(stripe, dispute);
   const accountId = metadata?.opengeni_account_id;
@@ -342,7 +414,11 @@ async function holdDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event: St
   });
 }
 
-async function releaseDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
+async function releaseDisputedCredits(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  event: Stripe.Event,
+): Promise<void> {
   const dispute = event.data.object as Stripe.Dispute;
   if (event.type === "charge.dispute.closed" && dispute.status !== "won") {
     return;
@@ -353,7 +429,7 @@ async function releaseDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event:
     return;
   }
   const holdIdempotencyKey = `stripe:dispute_hold:${dispute.id}`;
-  if (!await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey)) {
+  if (!(await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey))) {
     return;
   }
   await applyCreditLedgerEntry(deps.db, {
@@ -367,7 +443,11 @@ async function releaseDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event:
   });
 }
 
-async function mirrorCustomer(deps: ApiRouteDeps, event: Stripe.Event, customer: Stripe.Customer): Promise<void> {
+async function mirrorCustomer(
+  deps: ApiRouteDeps,
+  event: Stripe.Event,
+  customer: Stripe.Customer,
+): Promise<void> {
   const accountId = customer.metadata?.opengeni_account_id;
   if (!accountId || customer.deleted) {
     return;
@@ -380,7 +460,11 @@ async function mirrorCustomer(deps: ApiRouteDeps, event: Stripe.Event, customer:
   });
 }
 
-function recordCreditMicrosMetric(deps: ApiRouteDeps, kind: "grant" | "topup" | "refund", amountMicros: number): void {
+function recordCreditMicrosMetric(
+  deps: ApiRouteDeps,
+  kind: "grant" | "topup" | "refund",
+  amountMicros: number,
+): void {
   if (amountMicros <= 0) {
     return;
   }
@@ -392,7 +476,10 @@ function recordCreditMicrosMetric(deps: ApiRouteDeps, kind: "grant" | "topup" | 
   });
 }
 
-async function metadataForRefund(stripe: Stripe, refund: Stripe.Refund): Promise<Stripe.Metadata | null> {
+async function metadataForRefund(
+  stripe: Stripe,
+  refund: Stripe.Refund,
+): Promise<Stripe.Metadata | null> {
   if (Object.keys(refund.metadata ?? {}).length > 0) {
     return refund.metadata;
   }
@@ -400,11 +487,17 @@ async function metadataForRefund(stripe: Stripe, refund: Stripe.Refund): Promise
   return paymentIntent ? (await stripe.paymentIntents.retrieve(paymentIntent)).metadata : null;
 }
 
-async function metadataForDispute(stripe: Stripe, dispute: Stripe.Dispute): Promise<Stripe.Metadata | null> {
+async function metadataForDispute(
+  stripe: Stripe,
+  dispute: Stripe.Dispute,
+): Promise<Stripe.Metadata | null> {
   if (Object.keys(dispute.metadata ?? {}).length > 0) {
     return dispute.metadata;
   }
-  const paymentIntent = paymentIntentId((dispute as unknown as { payment_intent?: string | Stripe.PaymentIntent | null }).payment_intent);
+  const paymentIntent = paymentIntentId(
+    (dispute as unknown as { payment_intent?: string | Stripe.PaymentIntent | null })
+      .payment_intent,
+  );
   if (paymentIntent) {
     return (await stripe.paymentIntents.retrieve(paymentIntent)).metadata;
   }
@@ -414,10 +507,15 @@ async function metadataForDispute(stripe: Stripe, dispute: Stripe.Dispute): Prom
   }
   const charge = await stripe.charges.retrieve(chargeId);
   const chargePaymentIntent = paymentIntentId(charge.payment_intent);
-  return chargePaymentIntent ? (await stripe.paymentIntents.retrieve(chargePaymentIntent)).metadata : charge.metadata;
+  return chargePaymentIntent
+    ? (await stripe.paymentIntents.retrieve(chargePaymentIntent)).metadata
+    : charge.metadata;
 }
 
-function creditMetadata(metadata: Stripe.Metadata | null | undefined, label: string): {
+function creditMetadata(
+  metadata: Stripe.Metadata | null | undefined,
+  label: string,
+): {
   accountId: string;
   amountMicros: number;
   idempotencyKey: string;
@@ -434,12 +532,19 @@ function creditMetadata(metadata: Stripe.Metadata | null | undefined, label: str
     accountId,
     amountMicros,
     idempotencyKey,
-    ...(metadata?.opengeni_credit_amount_usd ? { amountUsd: metadata.opengeni_credit_amount_usd } : {}),
+    ...(metadata?.opengeni_credit_amount_usd
+      ? { amountUsd: metadata.opengeni_credit_amount_usd }
+      : {}),
     ...(metadata?.opengeni_package_id ? { packageId: metadata.opengeni_package_id } : {}),
   };
 }
 
-async function getOrCreateStripeCustomer(deps: ApiRouteDeps, stripe: Stripe, context: AccessContext, accountId: string): Promise<string> {
+async function getOrCreateStripeCustomer(
+  deps: ApiRouteDeps,
+  stripe: Stripe,
+  context: AccessContext,
+  accountId: string,
+): Promise<string> {
   const provider = stripeCustomerProvider(deps);
   const existing = await getBillingCustomer(deps.db, accountId, provider);
   if (existing) {
@@ -465,22 +570,32 @@ async function getOrCreateStripeCustomer(deps: ApiRouteDeps, stripe: Stripe, con
   return customer.id;
 }
 
-export function stripeCustomerProvider(input: ApiRouteDeps | Stripe.Event): "stripe:live" | "stripe:test" {
+export function stripeCustomerProvider(
+  input: ApiRouteDeps | Stripe.Event,
+): "stripe:live" | "stripe:test" {
   if ("livemode" in input) {
     return input.livemode ? "stripe:live" : "stripe:test";
   }
-  return input.settings.stripeSecretKey?.startsWith("sk_live_") || input.settings.stripeSecretKey?.startsWith("rk_live_")
+  return input.settings.stripeSecretKey?.startsWith("sk_live_") ||
+    input.settings.stripeSecretKey?.startsWith("rk_live_")
     ? "stripe:live"
     : "stripe:test";
 }
 
-function requireSelectedAccount(context: AccessContext, requested: string | undefined, permission: Permission): string {
+function requireSelectedAccount(
+  context: AccessContext,
+  requested: string | undefined,
+  permission: Permission,
+): string {
   const accountId = requested ?? context.defaultAccountId ?? undefined;
   if (!accountId) {
     throw new HTTPException(409, { message: "account selection is required" });
   }
   const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
-  if (!grant || (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))) {
+  if (
+    !grant ||
+    (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
+  ) {
     throw new HTTPException(403, { message: `missing permission: ${permission}` });
   }
   return accountId;

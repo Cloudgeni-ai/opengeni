@@ -5,7 +5,11 @@
 // the error wins over everything, then the initial load, then true emptiness.
 export type ListViewState = "ready" | "error" | "loading" | "empty";
 
-export function listViewState(input: { loading: boolean; error: Error | null; count: number }): ListViewState {
+export function listViewState(input: {
+  loading: boolean;
+  error: Error | null;
+  count: number;
+}): ListViewState {
   if (input.count > 0) {
     return "ready";
   }

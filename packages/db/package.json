@@ -8,6 +8,11 @@
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "packages/db"
   },
+  "files": [
+    "dist",
+    "src",
+    "drizzle"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",
@@ -30,14 +35,6 @@
       "types": "./src/provision-roles.ts",
       "default": "./src/provision-roles.ts"
     }
-  },
-  "files": [
-    "dist",
-    "src",
-    "drizzle"
-  ],
-  "engines": {
-    "node": ">=18"
   },
   "publishConfig": {
     "access": "public",
@@ -63,5 +60,8 @@
     "drizzle-kit": "^0.31.8",
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

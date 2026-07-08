@@ -50,7 +50,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     contextCompactionThresholdRatio: 0.6,
     contextReservedOutputTokens: 128_000,
     contextServerCompactThresholdTokens: undefined,
-    contextCompactSoftFraction: 0.70,
+    contextCompactSoftFraction: 0.7,
     contextCompactHardFraction: 0.85,
     contextKeepRecentTokens: 32_000,
     contextSummaryMaxTokens: 20_000,

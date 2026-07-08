@@ -28,7 +28,12 @@ describe("normalizeMemoryText", () => {
     // SQL: lower(btrim(regexp_replace(text, '\\s+', ' ', 'g'))). Replicated here as
     // the parity oracle; if the app and this diverge, exact-dedup silently misses.
     const sqlEquivalent = (text: string) => text.replace(/\s+/g, " ").trim().toLowerCase();
-    for (const sample of ["  A  b\tC  ", "already normal", "MixedCase\nLines", "\n\ttrailing\t\n"]) {
+    for (const sample of [
+      "  A  b\tC  ",
+      "already normal",
+      "MixedCase\nLines",
+      "\n\ttrailing\t\n",
+    ]) {
       expect(normalizeMemoryText(sample)).toBe(sqlEquivalent(sample));
     }
   });
@@ -42,7 +47,9 @@ describe("hashMemoryText", () => {
   });
 
   test("differently-formatted equivalents collide (dedup key)", () => {
-    expect(hashMemoryText("Deploy from main only")).toBe(hashMemoryText("  deploy   from\tmain   only "));
+    expect(hashMemoryText("Deploy from main only")).toBe(
+      hashMemoryText("  deploy   from\tmain   only "),
+    );
   });
 
   test("distinct facts do not collide", () => {
@@ -72,14 +79,17 @@ describe("sanitizeMemoryText", () => {
   });
 
   test("redacts a PEM private key block", () => {
-    const pem = "note -----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY----- end";
+    const pem =
+      "note -----BEGIN RSA PRIVATE KEY-----\nMIIabc123\n-----END RSA PRIVATE KEY----- end";
     const { text, redactionCount } = sanitizeMemoryText(pem);
     expect(text).not.toContain("MIIabc123");
     expect(redactionCount).toBe(1);
   });
 
   test("leaves clean text unchanged with zero redactions", () => {
-    const { text, redactionCount } = sanitizeMemoryText("Prefer Terraform over Pulumi for new infra.");
+    const { text, redactionCount } = sanitizeMemoryText(
+      "Prefer Terraform over Pulumi for new infra.",
+    );
     expect(text).toBe("Prefer Terraform over Pulumi for new infra.");
     expect(redactionCount).toBe(0);
   });
@@ -103,21 +113,47 @@ describe("isMemoryTextTooLong / estimateMemoryTokens / shortMemoryId", () => {
 });
 
 describe("renderWorkspaceMemoryBlock", () => {
-  const record = (over: Partial<MemoryBlockRecord> & Pick<MemoryBlockRecord, "id" | "kind" | "text">): MemoryBlockRecord => ({
+  const record = (
+    over: Partial<MemoryBlockRecord> & Pick<MemoryBlockRecord, "id" | "kind" | "text">,
+  ): MemoryBlockRecord => ({
     pinned: false,
     ...over,
   });
 
   test("returns null when only episodic records exist (episodic is excluded)", () => {
-    expect(renderWorkspaceMemoryBlock([record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "episodic", text: "happened once" })])).toBeNull();
+    expect(
+      renderWorkspaceMemoryBlock([
+        record({
+          id: "aaaaaaaa-0000-4000-8000-000000000000",
+          kind: "episodic",
+          text: "happened once",
+        }),
+      ]),
+    ).toBeNull();
   });
 
   test("sections by kind, renders short ids, and carries the standing header", () => {
     const block = renderWorkspaceMemoryBlock([
-      record({ id: "11111111-0000-4000-8000-000000000000", kind: "preference", text: "Prefer Terraform." }),
-      record({ id: "22222222-0000-4000-8000-000000000000", kind: "semantic", text: "Staging deploys from main." }),
-      record({ id: "33333333-0000-4000-8000-000000000000", kind: "procedural", text: "Run bun run typecheck before pushing." }),
-      record({ id: "44444444-0000-4000-8000-000000000000", kind: "decision", text: "Chose Azure gpt-5.5." }),
+      record({
+        id: "11111111-0000-4000-8000-000000000000",
+        kind: "preference",
+        text: "Prefer Terraform.",
+      }),
+      record({
+        id: "22222222-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "Staging deploys from main.",
+      }),
+      record({
+        id: "33333333-0000-4000-8000-000000000000",
+        kind: "procedural",
+        text: "Run bun run typecheck before pushing.",
+      }),
+      record({
+        id: "44444444-0000-4000-8000-000000000000",
+        kind: "decision",
+        text: "Chose Azure gpt-5.5.",
+      }),
       record({ id: "55555555-0000-4000-8000-000000000000", kind: "episodic", text: "excluded" }),
     ])!;
     expect(block.startsWith(WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED)).toBe(true);
@@ -128,7 +164,9 @@ describe("renderWorkspaceMemoryBlock", () => {
     expect(block).not.toContain("excluded");
     // Sections appear in the fixed order preference -> semantic -> procedural -> decision.
     expect(block.indexOf("### Preferences")).toBeLessThan(block.indexOf("### Facts & environment"));
-    expect(block.indexOf("### Facts & environment")).toBeLessThan(block.indexOf("### How we do things"));
+    expect(block.indexOf("### Facts & environment")).toBeLessThan(
+      block.indexOf("### How we do things"),
+    );
     expect(block.indexOf("### How we do things")).toBeLessThan(block.indexOf("### Decisions"));
   });
 
@@ -139,7 +177,8 @@ describe("renderWorkspaceMemoryBlock", () => {
         id: `${String(index).padStart(8, "0")}-0000-4000-8000-000000000000`,
         kind: "semantic",
         text: `Fact number ${index}: ${"detail ".repeat(30)}`.trim(),
-      }));
+      }),
+    );
     const block = renderWorkspaceMemoryBlock(many)!;
     expect(estimateMemoryTokens(block)).toBeLessThanOrEqual(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET);
     // At least the first entries survived, and every rendered entry is intact
@@ -165,13 +204,21 @@ describe("renderWorkspaceMemoryBlock", () => {
 
   test("an oversized entry is skipped, not a stopping point — later entries still fill the budget", () => {
     const block = renderWorkspaceMemoryBlock([
-      record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "semantic", text: "Small fact before." }),
+      record({
+        id: "aaaaaaaa-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "Small fact before.",
+      }),
       record({
         id: "99999999-0000-4000-8000-000000000000",
         kind: "semantic",
         text: "oversized ".repeat(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET * 2),
       }),
-      record({ id: "bbbbbbbb-0000-4000-8000-000000000000", kind: "semantic", text: "Small fact after." }),
+      record({
+        id: "bbbbbbbb-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "Small fact after.",
+      }),
     ])!;
     expect(block).toContain("[aaaaaaaa]");
     expect(block).not.toContain("[99999999]");
@@ -181,8 +228,17 @@ describe("renderWorkspaceMemoryBlock", () => {
 
   test("pinned-first input order is preserved within its section", () => {
     const block = renderWorkspaceMemoryBlock([
-      record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "preference", text: "Pinned pref.", pinned: true }),
-      record({ id: "bbbbbbbb-0000-4000-8000-000000000000", kind: "preference", text: "Unpinned pref." }),
+      record({
+        id: "aaaaaaaa-0000-4000-8000-000000000000",
+        kind: "preference",
+        text: "Pinned pref.",
+        pinned: true,
+      }),
+      record({
+        id: "bbbbbbbb-0000-4000-8000-000000000000",
+        kind: "preference",
+        text: "Unpinned pref.",
+      }),
     ])!;
     expect(block.indexOf("[aaaaaaaa]")).toBeLessThan(block.indexOf("[bbbbbbbb]"));
   });

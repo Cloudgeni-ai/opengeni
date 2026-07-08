@@ -3,7 +3,12 @@ import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
-type RecordedRequest = { url: string; method: string; headers: Record<string, string>; body: string | null };
+type RecordedRequest = {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | null;
+};
 
 function recordingFetch(responder: (request: RecordedRequest) => Response): {
   fetch: typeof fetch;
@@ -25,12 +30,22 @@ function recordingFetch(responder: (request: RecordedRequest) => Response): {
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
-function makeClient(responder: (request: RecordedRequest) => Response): { client: OpenGeniClient; requests: RecordedRequest[] } {
+function makeClient(responder: (request: RecordedRequest) => Response): {
+  client: OpenGeniClient;
+  requests: RecordedRequest[];
+} {
   const { fetch, requests } = recordingFetch(responder);
-  const client = new OpenGeniClient({ baseUrl: "https://api.example.test/", apiKey: "og_test_key", fetch });
+  const client = new OpenGeniClient({
+    baseUrl: "https://api.example.test/",
+    apiKey: "og_test_key",
+    fetch,
+  });
   return { client, requests };
 }
 
@@ -38,7 +53,10 @@ describe("OpenGeniClient", () => {
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
     const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
-    const created = await client.createSession(WORKSPACE_ID, { initialMessage: "hello", sandboxBackend: "none" });
+    const created = await client.createSession(WORKSPACE_ID, {
+      initialMessage: "hello",
+      sandboxBackend: "none",
+    });
     expect(created).toEqual(session as never);
     expect(requests).toHaveLength(1);
     const request = requests[0]!;
@@ -51,21 +69,38 @@ describe("OpenGeniClient", () => {
 
   test("getSession and listEvents hit the expected paths and query params", async () => {
     const { client, requests } = makeClient((request) =>
-      request.url.includes("/events") ? jsonResponse([makeEvent(3)]) : jsonResponse({ id: SESSION_ID }));
+      request.url.includes("/events")
+        ? jsonResponse([makeEvent(3)])
+        : jsonResponse({ id: SESSION_ID }),
+    );
     await client.getSession(WORKSPACE_ID, SESSION_ID);
-    const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, { after: 2, before: 9, limit: 10, compact: true });
+    const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, {
+      after: 2,
+      before: 9,
+      limit: 10,
+      compact: true,
+    });
     expect(events.map((event) => event.sequence)).toEqual([3]);
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`);
-    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`);
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
+    );
+    expect(requests[1]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
+    );
   });
 
   test("sendMessage wraps text in a user.message control event", async () => {
     const accepted = makeEvent(4, "user.message", { text: "do the thing" });
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
-    const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "do the thing", clientEventId: "ce-1" });
+    const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
+      text: "do the thing",
+      clientEventId: "ce-1",
+    });
     expect(result.sequence).toBe(4);
     const request = requests[0]!;
-    expect(request.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`);
+    expect(request.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+    );
     expect(JSON.parse(request.body!)).toEqual({
       type: "user.message",
       clientEventId: "ce-1",
@@ -74,10 +109,18 @@ describe("OpenGeniClient", () => {
   });
 
   test("interrupt and approval decisions post typed control events", async () => {
-    const { client, requests } = makeClient(() => jsonResponse(makeEvent(5, "user.interrupt"), 202));
+    const { client, requests } = makeClient(() =>
+      jsonResponse(makeEvent(5, "user.interrupt"), 202),
+    );
     await client.interrupt(WORKSPACE_ID, SESSION_ID, { reason: "stop" });
-    await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, { approvalId: "ap-1", decision: "approve" });
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ type: "user.interrupt", payload: { reason: "stop" } });
+    await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
+      approvalId: "ap-1",
+      decision: "approve",
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      type: "user.interrupt",
+      payload: { reason: "stop" },
+    });
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
@@ -88,23 +131,35 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
     await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);
     expect(requests).toHaveLength(1);
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/clear`);
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/clear`,
+    );
     expect(requests[0]!.method).toBe("POST");
     expect(JSON.parse(requests[0]!.body!)).toEqual({ confirm: true });
   });
 
   test("clearSessionContext surfaces a 409 (cannot clear mid-turn) as OpenGeniApiError", async () => {
     const { client } = makeClient(() => new Response("session is running", { status: 409 }));
-    const error = await client.clearSessionContext(WORKSPACE_ID, SESSION_ID).then(() => null, (caught: unknown) => caught);
+    const error = await client.clearSessionContext(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect((error as OpenGeniApiError).status).toBe(409);
   });
 
   test("compactSessionContext posts to context/compact and returns the trigger result", async () => {
-    const { client, requests } = makeClient(() => jsonResponse({ status: "queued", message: "Compaction will run before the next turn." }));
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ status: "queued", message: "Compaction will run before the next turn." }),
+    );
     const result = await client.compactSessionContext(WORKSPACE_ID, SESSION_ID);
-    expect(result).toEqual({ status: "queued", message: "Compaction will run before the next turn." });
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/compact`);
+    expect(result).toEqual({
+      status: "queued",
+      message: "Compaction will run before the next turn.",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/compact`,
+    );
     expect(requests[0]!.method).toBe("POST");
     expect(JSON.parse(requests[0]!.body!)).toEqual({});
   });
@@ -129,7 +184,9 @@ describe("OpenGeniClient", () => {
       fetch,
     });
     await client.listSessions(WORKSPACE_ID, { limit: 5 });
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5`);
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5`,
+    );
     expect(requests[0]!.headers["x-request-id"]).toBe("rid-1");
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
@@ -139,28 +196,43 @@ describe("OpenGeniClient", () => {
     await client.listSessions(WORKSPACE_ID, { limit: 5, parentSessionId: null });
     await client.listSessions(WORKSPACE_ID, { parentSessionId: SESSION_ID });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`);
-    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?parentSessionId=${SESSION_ID}`);
-    expect(requests[2]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`);
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
+    );
+    expect(requests[1]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?parentSessionId=${SESSION_ID}`,
+    );
+    expect(requests[2]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
   });
 
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
     const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
     const { client, requests } = makeClient((request) => {
       if (request.url.includes("/events/stream")) {
-        return new Response(wire, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+        return new Response(wire, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
       }
       throw new Error(`unexpected request: ${request.url}`);
     });
-    const events = await collect(client.streamEvents(WORKSPACE_ID, SESSION_ID, { reconnect: false }));
+    const events = await collect(
+      client.streamEvents(WORKSPACE_ID, SESSION_ID, { reconnect: false }),
+    );
     expect(events.map((event) => event.sequence)).toEqual([1, 2]);
-    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events/stream?after=0`);
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events/stream?after=0`,
+    );
     expect(requests[0]!.headers.accept).toBe("text/event-stream");
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
   test("openEventStream rejects non-2xx responses with OpenGeniApiError", async () => {
     const { client } = makeClient(() => new Response("no access", { status: 403 }));
-    await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toMatchObject({ status: 403 });
+    await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toMatchObject({
+      status: 403,
+    });
   });
 });

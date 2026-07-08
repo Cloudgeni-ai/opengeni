@@ -101,7 +101,13 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
     const caps = await negotiateSelfhostedCapabilities({
       sessionId: "33333333-3333-3333-3333-333333333333",
       leaseEpoch: 4,
-      enrollment: { status: "active", exposure: "whole-machine", allowScreenControl: true, hasDisplay: true, lastSeenAt: new Date().toISOString() },
+      enrollment: {
+        status: "active",
+        exposure: "whole-machine",
+        allowScreenControl: true,
+        hasDisplay: true,
+        lastSeenAt: new Date().toISOString(),
+      },
       session,
     });
     expect(caps.FileSystem.available).toBe(true);
@@ -114,7 +120,13 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
     const offline = await negotiateSelfhostedCapabilities({
       sessionId: "33333333-3333-3333-3333-333333333333",
       leaseEpoch: 4,
-      enrollment: { status: "active", exposure: "whole-machine", allowScreenControl: true, hasDisplay: true, lastSeenAt: new Date(Date.now() - 600_000).toISOString() },
+      enrollment: {
+        status: "active",
+        exposure: "whole-machine",
+        allowScreenControl: true,
+        hasDisplay: true,
+        lastSeenAt: new Date(Date.now() - 600_000).toISOString(),
+      },
       session,
     });
     expect(offline.FileSystem.reason).toBe("agent_offline");

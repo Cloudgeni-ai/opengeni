@@ -13,7 +13,9 @@ import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 
 const ALL_PERMS = ["sessions:control" as const];
 
-function baseFilterCtx(overrides: Partial<{ sessionId: string | null; permissions: string[] }> = {}) {
+function baseFilterCtx(
+  overrides: Partial<{ sessionId: string | null; permissions: string[] }> = {},
+) {
   return {
     sessionId: overrides.sessionId === undefined ? SESSION_ID : overrides.sessionId,
     status: null,
@@ -29,15 +31,30 @@ describe("parseCommandLine", () => {
   });
 
   test("parses a bare name token (palette filtering mode)", () => {
-    expect(parseCommandLine("/cle")).toEqual({ name: "cle", rest: "", hasTrailingSpace: false, args: [] });
+    expect(parseCommandLine("/cle")).toEqual({
+      name: "cle",
+      rest: "",
+      hasTrailingSpace: false,
+      args: [],
+    });
   });
 
   test("a trailing space closes the name and enters arg-hint mode", () => {
-    expect(parseCommandLine("/goal ")).toEqual({ name: "goal", rest: "", hasTrailingSpace: true, args: [] });
+    expect(parseCommandLine("/goal ")).toEqual({
+      name: "goal",
+      rest: "",
+      hasTrailingSpace: true,
+      args: [],
+    });
   });
 
   test("splits args after the name", () => {
-    expect(parseCommandLine("/goal pause")).toEqual({ name: "goal", rest: "pause", hasTrailingSpace: true, args: ["pause"] });
+    expect(parseCommandLine("/goal pause")).toEqual({
+      name: "goal",
+      rest: "pause",
+      hasTrailingSpace: true,
+      args: ["pause"],
+    });
   });
 });
 
@@ -54,7 +71,9 @@ describe("hasPermission", () => {
 
 describe("filterCommands", () => {
   test("hides permission-gated commands entirely when the perm is absent", () => {
-    const names = filterCommands(defaultCommands, "", baseFilterCtx({ permissions: [] })).map((c) => c.name);
+    const names = filterCommands(defaultCommands, "", baseFilterCtx({ permissions: [] })).map(
+      (c) => c.name,
+    );
     expect(names).toContain("help");
     expect(names).toContain("clear-view");
     expect(names).not.toContain("clear");
@@ -64,11 +83,15 @@ describe("filterCommands", () => {
 
   test("shows gated commands when the operator holds the permission", () => {
     const names = filterCommands(defaultCommands, "", baseFilterCtx()).map((c) => c.name);
-    expect(names).toEqual(expect.arrayContaining(["help", "clear-view", "goal", "compact", "clear"]));
+    expect(names).toEqual(
+      expect.arrayContaining(["help", "clear-view", "goal", "compact", "clear"]),
+    );
   });
 
   test("hides session-only commands until a session exists (available())", () => {
-    const names = filterCommands(defaultCommands, "", baseFilterCtx({ sessionId: null })).map((c) => c.name);
+    const names = filterCommands(defaultCommands, "", baseFilterCtx({ sessionId: null })).map(
+      (c) => c.name,
+    );
     expect(names).toContain("help");
     expect(names).not.toContain("clear");
     expect(names).not.toContain("goal");
@@ -79,7 +102,9 @@ describe("filterCommands", () => {
       expect.arrayContaining(["clear", "clear-view"]),
     );
     // alias "?" resolves /help
-    expect(filterCommands(defaultCommands, "?", baseFilterCtx()).map((c) => c.name)).toEqual(["help"]);
+    expect(filterCommands(defaultCommands, "?", baseFilterCtx()).map((c) => c.name)).toEqual([
+      "help",
+    ]);
   });
 });
 
@@ -109,7 +134,9 @@ describe("firstMissingRequiredArg", () => {
 
 // --- Command execution against a fake client + UI affordances ----------------
 
-function makeCtx(overrides: Partial<CommandContext> & { client: CommandContext["client"] }): CommandContext {
+function makeCtx(
+  overrides: Partial<CommandContext> & { client: CommandContext["client"] },
+): CommandContext {
   const notices: Parameters<CommandContext["notice"]>[0][] = [];
   const ctx: CommandContext = {
     workspaceId: WORKSPACE_ID,
@@ -139,7 +166,14 @@ describe("default command handlers", () => {
 
   test("/goal pause calls updateGoal with paused", async () => {
     const calls: unknown[] = [];
-    const ctx = makeCtx({ client: fakeClient({ updateGoal: async (ws, sid, req) => { calls.push([ws, sid, req]); return {} as never; } }) });
+    const ctx = makeCtx({
+      client: fakeClient({
+        updateGoal: async (ws, sid, req) => {
+          calls.push([ws, sid, req]);
+          return {} as never;
+        },
+      }),
+    });
     const result = await run(goal, ["pause"], ctx);
     expect(result.status).toBe("ok");
     expect(calls[0]).toEqual([WORKSPACE_ID, SESSION_ID, { status: "paused" }]);
@@ -147,13 +181,26 @@ describe("default command handlers", () => {
 
   test("/goal resume calls updateGoal with active", async () => {
     const calls: unknown[] = [];
-    const ctx = makeCtx({ client: fakeClient({ updateGoal: async (_ws, _sid, req) => { calls.push(req); return {} as never; } }) });
+    const ctx = makeCtx({
+      client: fakeClient({
+        updateGoal: async (_ws, _sid, req) => {
+          calls.push(req);
+          return {} as never;
+        },
+      }),
+    });
     await run(goal, ["resume"], ctx);
     expect(calls[0]).toEqual({ status: "active" });
   });
 
   test("/goal maps a 404 to a 'no goal' error notice", async () => {
-    const ctx = makeCtx({ client: fakeClient({ updateGoal: async () => { throw Object.assign(new Error("nope"), { status: 404 }); } }) });
+    const ctx = makeCtx({
+      client: fakeClient({
+        updateGoal: async () => {
+          throw Object.assign(new Error("nope"), { status: 404 });
+        },
+      }),
+    });
     const result = await run(goal, ["pause"], ctx);
     expect(result.status).toBe("error");
     expect(result.message).toMatch(/no goal/i);
@@ -163,8 +210,15 @@ describe("default command handlers", () => {
     let confirmed = false;
     let cleared = false;
     const ctx = makeCtx({
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
-      confirm: async () => { confirmed = true; return true; },
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
+      confirm: async () => {
+        confirmed = true;
+        return true;
+      },
     });
     const result = await run(clear, [], ctx);
     expect(confirmed).toBe(true);
@@ -175,7 +229,11 @@ describe("default command handlers", () => {
   test("/clear aborts (no server call) when the operator cancels the confirm", async () => {
     let cleared = false;
     const ctx = makeCtx({
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
       confirm: async () => false,
     });
     const result = await run(clear, [], ctx);
@@ -185,7 +243,11 @@ describe("default command handlers", () => {
 
   test("/clear maps a 409 to a 'stop the turn first' error", async () => {
     const ctx = makeCtx({
-      client: fakeClient({ clearSessionContext: async () => { throw Object.assign(new Error("busy"), { status: 409 }); } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          throw Object.assign(new Error("busy"), { status: 409 });
+        },
+      }),
       confirm: async () => true,
     });
     const result = await run(clear, [], ctx);
@@ -194,7 +256,14 @@ describe("default command handlers", () => {
   });
 
   test("/compact surfaces the server result message", async () => {
-    const ctx = makeCtx({ client: fakeClient({ compactSessionContext: async () => ({ status: "queued", message: "Compaction will run before the next turn." }) }) });
+    const ctx = makeCtx({
+      client: fakeClient({
+        compactSessionContext: async () => ({
+          status: "queued",
+          message: "Compaction will run before the next turn.",
+        }),
+      }),
+    });
     const result = await run(compact, [], ctx);
     expect(result).toEqual({ status: "ok", message: "Compaction will run before the next turn." });
   });
@@ -202,7 +271,16 @@ describe("default command handlers", () => {
   test("/help and /clear-view are client-only (no client calls)", async () => {
     let helped = false;
     let cleared = false;
-    const ctx = makeCtx({ client: fakeClient({}), openHelp: () => { helped = true; }, clearView: () => { cleared = true; return true; } });
+    const ctx = makeCtx({
+      client: fakeClient({}),
+      openHelp: () => {
+        helped = true;
+      },
+      clearView: () => {
+        cleared = true;
+        return true;
+      },
+    });
     expect((await run(help, [], ctx)).status).toBe("ok");
     expect((await run(clearView, [], ctx)).status).toBe("ok");
     expect(helped).toBe(true);
@@ -215,7 +293,13 @@ describe("default command handlers", () => {
   // honest error instead of a green success notice on a silent no-op.
   test("/clear-view reports an error (not false success) when no view-reset is wired", async () => {
     let invoked = false;
-    const ctx = makeCtx({ client: fakeClient({}), clearView: () => { invoked = true; return false; } });
+    const ctx = makeCtx({
+      client: fakeClient({}),
+      clearView: () => {
+        invoked = true;
+        return false;
+      },
+    });
     const result = await run(clearView, [], ctx);
     expect(invoked).toBe(true);
     expect(result.status).toBe("error");
@@ -230,7 +314,11 @@ describe("default command handlers", () => {
   });
 
   test("extensibility: a new command is one object literal the registry renders from", () => {
-    const ping: SlashCommand = { name: "ping", description: "Ping.", run: () => ({ status: "ok", message: "pong" }) };
+    const ping: SlashCommand = {
+      name: "ping",
+      description: "Ping.",
+      run: () => ({ status: "ok", message: "pong" }),
+    };
     const commands = [...defaultCommands, ping];
     expect(filterCommands(commands, "pi", baseFilterCtx()).map((c) => c.name)).toEqual(["ping"]);
     expect(matchCommand(commands, "/ping")?.name).toBe("ping");

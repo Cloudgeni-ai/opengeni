@@ -73,7 +73,12 @@ export type ConnectionStatusPillProps = {
  * the Machines dashboard, the dock header, and the session timeline. Reconnecting
  * breathes (the resiliency-as-headline blip), online/offline hold still.
  */
-export function ConnectionStatusPill({ status, label, size = "md", className }: ConnectionStatusPillProps) {
+export function ConnectionStatusPill({
+  status,
+  label,
+  size = "md",
+  className,
+}: ConnectionStatusPillProps) {
   const meta = CONNECTION_STATUS_META[status];
   return (
     <span
@@ -100,8 +105,16 @@ export type ConnectionDotProps = {
 export function ConnectionDot({ status, className }: ConnectionDotProps) {
   const meta = CONNECTION_STATUS_META[status];
   return (
-    <span className={cn("relative inline-flex size-1.5 shrink-0 rounded-full", meta.dotClassName, className)}>
-      {meta.pulse ? <span className={cn("absolute inset-0 animate-og-pulse rounded-full", meta.dotClassName)} /> : null}
+    <span
+      className={cn(
+        "relative inline-flex size-1.5 shrink-0 rounded-full",
+        meta.dotClassName,
+        className,
+      )}
+    >
+      {meta.pulse ? (
+        <span className={cn("absolute inset-0 animate-og-pulse rounded-full", meta.dotClassName)} />
+      ) : null}
     </span>
   );
 }
@@ -121,11 +134,19 @@ export type MachineStatusPillProps = {
  * dashboard row, the dock header, and the timeline all reuse so the status
  * language is identical everywhere.
  */
-export function MachineStatusPill({ state, sharedSessionCount, size = "md", className }: MachineStatusPillProps) {
+export function MachineStatusPill({
+  state,
+  sharedSessionCount,
+  size = "md",
+  className,
+}: MachineStatusPillProps) {
   const stateBadge = MACHINE_STATE_BADGE_META[state];
   const shared = (sharedSessionCount ?? 0) > 1;
   return (
-    <span className={cn("og-root inline-flex flex-wrap items-center gap-1", className)} data-machine-state={state}>
+    <span
+      className={cn("og-root inline-flex flex-wrap items-center gap-1", className)}
+      data-machine-state={state}
+    >
       <ConnectionStatusPill status={connectionStatusForState(state)} size={size} />
       {stateBadge ? (
         <span
