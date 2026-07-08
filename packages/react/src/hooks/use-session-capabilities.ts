@@ -8,7 +8,21 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
-export type SessionCapabilitiesState = "idle" | "negotiating" | "ready" | "cold" | "error";
+// "on-demand" is the boxless-benign resting state: the lease is cold and NOTHING
+// asked to warm a box (no viewer/consent action, no files-tab warm). Under lazy
+// provisioning a chat-only turn never creates a box, so this is the correct calm
+// terminal state — NOT an error. It is distinct from "cold", which now means "a
+// warm-up is genuinely in flight" (a viewer attach was requested) and therefore
+// still polls with a patience deadline. A box appears on demand when the agent
+// first runs a sandbox tool; the workbench observes `sandbox.provision` and
+// renegotiates to pick up the freshly-warm box.
+export type SessionCapabilitiesState =
+  | "idle"
+  | "negotiating"
+  | "ready"
+  | "cold"
+  | "on-demand"
+  | "error";
 
 export type UseSessionCapabilitiesOptions = ClientOverride & {
   /**
@@ -268,9 +282,15 @@ export function useSessionCapabilities(
         const wantDesktopAttach = attachDesktop && desktopAttachable(caps.DesktopStream);
         const wantTerminalAttach = attachTerminal && terminalAttachable(caps.Terminal);
         // The Files surface warms the box for fast Channel-A ops. It folds no live
-        // URL (files are stateless HTTP) — the attach is purely a liveness refcount,
-        // so it's wanted whenever the FileSystem capability is advertised at all.
-        const wantFilesAttach = attachFiles && caps.FileSystem.available;
+        // URL (files are stateless HTTP) — the attach is purely a liveness refcount.
+        // Under lazy provisioning it must only KEEP AN EXISTING box warm, never
+        // cold-CREATE one: merely opening the Files tab on a boxless session must
+        // not force a box (that would defeat lazy provisioning). So it's wanted only
+        // when the FileSystem cap is advertised AND a box already exists (liveness
+        // is anything but cold). A genuine warm action (desktop consent / terminal
+        // engage) still spins a cold box up — those are user-initiated, files-open
+        // is not.
+        const wantFilesAttach = attachFiles && caps.FileSystem.available && caps.liveness !== "cold";
         if (wantDesktopAttach || wantTerminalAttach || wantFilesAttach) {
           try {
             // Declare WHICH plane we're attaching for. `desktop:true` opts into the
@@ -348,12 +368,26 @@ export function useSessionCapabilities(
           }
         }
 
+        // Whether ANYTHING asked to warm a box this negotiation. Only then is a
+        // cold lease "warming in flight" — worth polling, and worth surfacing a
+        // stall as an error. With no warm-up requested a cold lease is the benign
+        // boxless resting state (below), never an error.
+        const warmUpRequested = wantDesktopAttach || wantTerminalAttach || wantFilesAttach;
         if (caps.liveness === "warm" || caps.liveness === "draining" || localViewerId) {
           setState("ready");
           startHeartbeat(caps);
-        } else {
+        } else if (warmUpRequested) {
+          // A warm-up is genuinely in flight (a viewer attach was requested) but the
+          // box isn't warm yet — poll until it warms, with the patience deadline so a
+          // real stall surfaces as an error.
           setState("cold");
           pollUntilWarm();
+        } else {
+          // Boxless and nobody asked for a box: rest in the benign on-demand state.
+          // NO poll, NO deadline, NO false "sandbox offline". The box is created on
+          // demand when the agent first runs a sandbox tool; the workbench watches
+          // for `sandbox.provision` and renegotiates to pick the warm box back up.
+          setState("on-demand");
         }
       } catch (cause) {
         if (cancelled) return;
