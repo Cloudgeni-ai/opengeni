@@ -141,16 +141,17 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
       githubInstallationId: 123,
       githubRepositoryId: 456,
     };
-    // Skip the (network) mint: lazy/cloud and machine-effective repo turns still
-    // declare the stable git-auth pointers eagerly; only the token VALUE defers.
+    // Lazy cloud defer skips the network mint but still declares stable git-auth
+    // pointers eagerly; selfhosted machine skip is a separate mode and keeps the
+    // stable base env byte-for-byte.
     const { environment: turnEnv, gitToken, gitTokens } = await sandboxEnvironmentForRun(
       settings,
       [repoResource],
       {},
-      { skipGitHubToken: true },
+      { deferGitHubToken: true },
     );
 
-    // The rotating token keys are ABSENT from the manifest env (the broker removed them).
+    // The rotating token keys are ABSENT from the manifest env.
     expect(turnEnv.GH_TOKEN).toBeUndefined();
     expect(turnEnv.GITHUB_TOKEN).toBeUndefined();
     expect(turnEnv.GITLAB_TOKEN).toBeUndefined();

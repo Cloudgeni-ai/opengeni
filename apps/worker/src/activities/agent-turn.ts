@@ -1428,7 +1428,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnResources,
         workspaceEnvironment?.values ?? {},
         {
-          skipGitHubToken: activeSandboxBackend === "selfhosted" || establishPolicy === "on-demand",
+          skipGitHubToken: activeSandboxBackend === "selfhosted",
+          deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
           scope: connectionScope,
           gitCredentials: connectionCredentials?.gitCredentials,
           sessionId: input.sessionId,

@@ -104,11 +104,13 @@ export async function sandboxEnvironmentForRun(
   workspaceEnvironment: Record<string, string> = {},
   // §7.6 P4a - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
-  // `skipGitHubToken` (legacy option name): a connected-machine turn skips the
-  // inert platform git token mint entirely. `= {}` default so the non-optional
-  // reads below are safe.
+  // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
+  // token mint entirely and returns the stable base env unchanged. `deferGitHubToken`
+  // is the lazy CLOUD path: apply stable git-auth pointers now, mint only the token
+  // value later. `= {}` default so the non-optional reads below are safe.
   options: {
     skipGitHubToken?: boolean;
+    deferGitHubToken?: boolean;
     scope?: ConnectionScope;
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
     sessionId?: string;
@@ -162,9 +164,6 @@ export async function sandboxEnvironmentForRun(
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.scope.workspaceId);
   }
   const selections = gitCredentialSelections(resources);
-  if (selections.length > 0 && options.skipGitHubToken) {
-    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
-  }
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
   // a connected machine (selfhosted), platform git provider tokens are INERT: exec
   // routes over NATS to the user's machine, which uses ITS OWN git credentials, and
@@ -175,6 +174,10 @@ export async function sandboxEnvironmentForRun(
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
   if (selections.length === 0 || options.skipGitHubToken) {
+    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+  }
+  if (options.deferGitHubToken) {
+    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   // Run-scoped sandbox preparation for repository resources. GitHub retains the
