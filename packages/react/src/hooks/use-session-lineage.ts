@@ -53,13 +53,17 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refreshSoon = useDebouncedCallback(() => void state.refresh(), 150);
   const delayedChildRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Clear a pending delayed refresh on session/workspace SWITCH (not just
+  // unmount): otherwise a timer scheduled for the previous session can fire
+  // ~2.5s later and commit that session's lineage onto the new one.
   useEffect(() => {
     return () => {
       if (delayedChildRefreshRef.current !== null) {
         clearTimeout(delayedChildRefreshRef.current);
+        delayedChildRefreshRef.current = null;
       }
     };
-  }, []);
+  }, [sessionId, workspaceId]);
   const refreshAfterChildCreate = useCallback(() => {
     void state.refresh();
     if (delayedChildRefreshRef.current !== null) {
