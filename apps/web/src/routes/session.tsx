@@ -264,6 +264,13 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
     [capabilityNames],
   );
+  // One lineage read for the whole session view: it gates the dock's "Agents"
+  // tab AND feeds the composer-anchored agents pill, so both stay a single
+  // source of truth (event-derived off the shared feed — no extra poll). Must
+  // sit above the loading/error early-returns — it's a hook, so it has to run
+  // unconditionally on every render.
+  const lineage = useSessionLineage(sessionId, { events });
+  const agentNodes = lineage.lineage?.children ?? [];
 
   if (loading || !session) {
     if (loadError) {
@@ -283,12 +290,6 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     }
     return <LoadingPanel label="Opening session" />;
   }
-
-  // One lineage read for the whole session view: it gates the dock's "Agents"
-  // tab AND feeds the composer-anchored agents pill, so both stay a single
-  // source of truth (event-derived off the shared feed — no extra poll).
-  const lineage = useSessionLineage(sessionId, { events });
-  const agentNodes = lineage.lineage?.children ?? [];
 
   const chatPane = (
     <SessionChatPane
