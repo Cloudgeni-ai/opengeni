@@ -6480,6 +6480,19 @@ export async function latestWorkspaceCapture(db: Database, workspaceId: string, 
   });
 }
 
+/** A specific capture revision for a session (the M2 file route with an explicit
+ *  `?revision=`), or null if that revision was never captured / already GC'd. */
+export async function workspaceCaptureAtRevision(db: Database, workspaceId: string, sessionId: string, revision: number): Promise<WorkspaceCaptureRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
+      select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
+      where session_id = ${sessionId} and revision = ${revision}
+      limit 1
+    `);
+    return rows.length ? mapWorkspaceCaptureRow(rows[0]!) : null;
+  });
+}
+
 /**
  * Plan the keep-latest-N GC for a session. Pure read + set-difference (no
  * mutation): returns the evicted rows' ids, the per-revision manifest/tree blob

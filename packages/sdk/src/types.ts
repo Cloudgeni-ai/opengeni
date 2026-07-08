@@ -646,6 +646,93 @@ export type GitLogResponse = { commits: GitCommit[]; hasMore: boolean };
 export type GitShowRequest = { path?: string; ref: string; filePath?: string; encoding?: FsEncoding; maxBytesPerFile?: number };
 export type GitShowResponse = { commit: GitCommit | null; files: GitFileDiff[]; blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null; revision: number };
 
+// Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
+// + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
+// GitFileStatus / GitFileDiff / GitFileStatusCode / FsEncoding above.
+export type WorkspaceCaptureFile = {
+  path: string;
+  status: GitFileStatusCode;
+  hash: string | null;
+  baseHash: string | null;
+  contentRef: string | null;
+  sizeBytes: number;
+  isBinary: boolean;
+  tooLarge: boolean;
+  deleted: boolean;
+};
+export type WorkspaceCaptureRepo = {
+  root: string;
+  head: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  status: GitFileStatus[];
+  diff: GitFileDiff[];
+};
+export type WorkspaceCaptureStats = {
+  repoCount: number;
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  totalBytes: number;
+  tooLargeCount: number;
+  binaryCount: number;
+  treeEntryCount: number;
+  treeTruncated: boolean;
+  durationMs: number;
+  fingerprint?: string;
+};
+export type WorkspaceCaptureManifest = {
+  version: 1;
+  revision: number;
+  capturedAt: string;
+  turnId: string | null;
+  leaseEpoch: number;
+  treeIndex: FsTreeNode;
+  treeTruncated: boolean;
+  repos: WorkspaceCaptureRepo[];
+  files: WorkspaceCaptureFile[];
+  stats: WorkspaceCaptureStats;
+};
+export type WorkspaceRevisionCapturedPayload = {
+  revision: number;
+  turnId: string | null;
+  capturedAt: string;
+  leaseEpoch: number;
+  stats: WorkspaceCaptureStats;
+};
+export type WorkspaceCaptureSignedUrl = { url: string; expiresAt: string };
+// GET …/workspace/capture. Exactly one of manifest/manifestUrl is non-null.
+export type GetWorkspaceCaptureResponse =
+  | { available: false }
+  | {
+      available: true;
+      revision: number;
+      capturedAt: string;
+      turnId: string | null;
+      leaseEpoch: number;
+      sizeBytes: number;
+      stats: WorkspaceCaptureStats;
+      manifest: WorkspaceCaptureManifest | null;
+      manifestUrl: WorkspaceCaptureSignedUrl | null;
+    };
+// GET …/workspace/capture/file. content inline (≤256KB) OR contentUrl OR marker
+// only (tooLarge / missing blob).
+export type GetWorkspaceCaptureFileResponse = {
+  path: string;
+  revision: number;
+  status: GitFileStatusCode;
+  hash: string | null;
+  baseHash: string | null;
+  sizeBytes: number;
+  isBinary: boolean;
+  tooLarge: boolean;
+  encoding: FsEncoding | null;
+  content: string | null;
+  contentUrl: WorkspaceCaptureSignedUrl | null;
+};
+
 // A2 Terminal exec + PTY.
 export type TerminalExecRequest = { command: string; cwd?: string; timeoutMs?: number; emitStream?: boolean };
 export type TerminalExecResponse = { stdout: string; stderr: string; exitCode: number | null; running: boolean; wallTimeSeconds: number };

@@ -3036,6 +3036,61 @@ export const WorkspaceRevisionCapturedPayload = z.object({
 });
 export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
 
+// --- M2 capture READ API (dossier §10.3) -------------------------------------
+// A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
+// served inline for the ≤2MB common case (the <200ms one-round-trip paint); a
+// >2MB manifest and a >256KB single-file after-image fall back to one of these.
+export const WorkspaceCaptureSignedUrl = z.object({
+  url: z.string().url(),
+  expiresAt: z.string(),
+});
+export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl>;
+
+// GET …/sessions/:sid/workspace/capture. `{available:false}` when no capture row
+// exists yet (or its manifest blob was GC'd) — the client falls back to the
+// live/wake path (status-quo behavior, NEVER an error → served 200). When
+// available: the row metadata (revision/turn/epoch/stats/size) is always inline;
+// the manifest is inline (`manifest`) for the ≤2MB common case and a signed GET
+// URL (`manifestUrl`) above that. Exactly one of manifest/manifestUrl is non-null.
+export const GetWorkspaceCaptureResponse = z.discriminatedUnion("available", [
+  z.object({ available: z.literal(false) }),
+  z.object({
+    available: z.literal(true),
+    revision: z.number().int().nonnegative(),
+    capturedAt: z.string(),
+    turnId: z.string().nullable(),
+    leaseEpoch: z.number().int().nonnegative(),
+    sizeBytes: z.number().int().nonnegative(),
+    stats: WorkspaceCaptureStats,
+    manifest: WorkspaceCaptureManifest.nullable().default(null),
+    manifestUrl: WorkspaceCaptureSignedUrl.nullable().default(null),
+  }),
+]);
+export type GetWorkspaceCaptureResponse = z.infer<typeof GetWorkspaceCaptureResponse>;
+
+// GET …/sessions/:sid/workspace/capture/file?path=…&revision=…. A single
+// after-image resolved from the (revision|latest) manifest. The file metadata
+// (from the manifest entry) is always present; `content` is inline for ≤256KB
+// (base64 for binary, utf8 otherwise), else a signed GET URL (`contentUrl`) to
+// the raw content-addressed blob. A tooLarge marker (or a captured file with no
+// content blob — e.g. the after-image was GC'd) returns metadata only, no
+// content and no URL. Path-not-in-manifest / deleted → 404 at the route (not
+// represented here).
+export const GetWorkspaceCaptureFileResponse = z.object({
+  path: z.string(),
+  revision: z.number().int().nonnegative(),
+  status: GitFileStatusCode,
+  hash: z.string().nullable(),
+  baseHash: z.string().nullable(),
+  sizeBytes: z.number().int().nonnegative(),
+  isBinary: z.boolean(),
+  tooLarge: z.boolean(),
+  encoding: FsEncoding.nullable().default(null), // set iff content is inline
+  content: z.string().nullable().default(null),  // inline ≤256KB (per encoding)
+  contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
+});
+export type GetWorkspaceCaptureFileResponse = z.infer<typeof GetWorkspaceCaptureFileResponse>;
+
 export const GitLogRequest = z.object({
   path: z.string().default(""),
   ref: z.string().default("HEAD"),

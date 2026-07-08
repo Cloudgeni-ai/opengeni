@@ -27,6 +27,8 @@ import type {
   FsMkdirResponse,
   FsTreeNode,
   GitDiffResponse,
+  GetWorkspaceCaptureResponse,
+  GetWorkspaceCaptureFileResponse,
   GitStatusResponse,
   ListPacksResponse,
   PackInstallation,
@@ -679,6 +681,17 @@ export class MockOpenGeniClient implements SessionClientLike {
       ],
       revision: 1,
     };
+  }
+
+  // The demo mock serves a live warm workspace (fsList/gitDiff above), so there
+  // is no cold capture to read — the workbench falls back to the live path. M3/M4
+  // add a fixture-capture mock for the cold-paint demo state.
+  async getWorkspaceCapture(): Promise<GetWorkspaceCaptureResponse> {
+    return { available: false };
+  }
+
+  async getWorkspaceCaptureFile(_workspaceId: string, _sessionId: string, _path: string): Promise<GetWorkspaceCaptureFileResponse> {
+    throw new Error("no capture in the demo mock");
   }
 
   async terminalExec(): Promise<TerminalExecResponse> {
