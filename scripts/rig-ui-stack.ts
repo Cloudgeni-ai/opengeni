@@ -17,6 +17,8 @@ import {
   createRigVersion,
   createVariableSet,
   listRigVersions,
+  recordAuditEvent,
+  setWorkspaceDefaultRig,
   updateRigChangeStatus,
   type Database,
 } from "@opengeni/db";
@@ -336,6 +338,44 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
       createdBy: "system",
     },
   });
+
+  // 4) A rig whose active version's most recent re-verify FAILED — a check that
+  //    used to pass regressed (the self-healing narrative). The active-version
+  //    health derives from a `rig.verification.failed` audit row (list card dot).
+  const legacy = await createRig(db, {
+    ...ws,
+    name: "legacy-box",
+    description: "Older toolchain kept for the reporting pipeline.",
+    createdBy: "user:you",
+    initialVersion: {
+      image: "ghcr.io/opengeni/legacy:base",
+      setupScript: "apt-get install -y python2 make",
+      checks: [
+        { name: "python2 present", command: "python2 --version" },
+        { name: "make present", command: "make --version" },
+      ],
+      changelog: "Initial legacy box",
+      createdBy: "user:you",
+    },
+  });
+  const legacyVersions = await listRigVersions(db, workspaceId, legacy.id);
+  const legacyActive = legacyVersions.find((version) => version.active) ?? legacyVersions[0]!;
+  await recordAuditEvent(db, {
+    accountId,
+    workspaceId,
+    action: "rig.verification.failed",
+    targetType: "rig",
+    targetId: legacy.id,
+    metadata: {
+      versionId: legacyActive.id,
+      passed: false,
+      finishedAt: new Date(Date.now() - 90_000).toISOString(),
+    },
+  });
+
+  // The workspace default rig: new sessions materialize from it unless the
+  // composer picks another. Drives the "Default" badge + set/clear control.
+  await setWorkspaceDefaultRig(db, workspaceId, dev.id);
 }
 
 main().catch(async (error) => {

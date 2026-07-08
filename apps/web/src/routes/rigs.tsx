@@ -190,8 +190,10 @@ function RigCard({ workspaceId, rig, isDefault }: { workspaceId: string; rig: Ri
                 title="Workspace default — new sessions use this rig unless another is picked"
                 className="border-brand/30 text-brand"
               >
-                <StarIcon className="size-3 shrink-0 fill-current" />
-                Default
+                <span className="inline-flex items-center gap-1">
+                  <StarIcon className="size-3 shrink-0 fill-current" />
+                  Default
+                </span>
               </MetaChip>
             ) : null}
           </div>

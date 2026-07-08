@@ -83,6 +83,12 @@ async function main() {
       url: `${base}/rigs`,
       prepare: async (page) => {
         await page.getByText("dev-machine").first().waitFor({ timeout: 15_000 });
+        // The list now carries per-card verification health + the default badge;
+        // wait for all three health states so the shot captures them together.
+        await page.getByText("Checks passing").first().waitFor({ timeout: 10_000 });
+        await page.getByText("Check failing").first().waitFor({ timeout: 10_000 });
+        await page.getByText("Not verified").first().waitFor({ timeout: 10_000 });
+        await page.getByText("Default").first().waitFor({ timeout: 10_000 });
       },
     },
     {
@@ -152,6 +158,23 @@ async function main() {
           await select.selectOption(value);
         }
         await page.waitForTimeout(300);
+      },
+    },
+    {
+      name: "12-detail-default-control",
+      url: `${base}/rigs/${devRig.id}`,
+      prepare: async (page) => {
+        // dev-machine is the seeded workspace default: the header shows the
+        // "Default" badge and the rigs:manage "Clear default" control.
+        await page.getByRole("button", { name: "Clear default" }).waitFor({ timeout: 15_000 });
+      },
+    },
+    {
+      name: "13-detail-set-default",
+      url: `${base}/rigs/${ciRig.id}`,
+      prepare: async (page) => {
+        // A non-default rig header offers "Set as default".
+        await page.getByRole("button", { name: "Set as default" }).waitFor({ timeout: 15_000 });
       },
     },
     {
