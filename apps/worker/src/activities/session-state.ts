@@ -121,10 +121,20 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function requeueTurnAfterWorkerDeath(input: RequeueTurnAfterWorkerDeathInput): Promise<RequeueTurnAfterWorkerDeathResult> {
     const { settings, db, bus, observability } = await services();
     const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
-    if (!turn || (turn.status !== "running" && turn.status !== "requires_action")) {
-      // The timed-out attempt was a zombie that actually settled the turn
-      // (completed/failed/cancelled it) after the server gave up on its
-      // heartbeats. Whatever it recorded is the truth; nothing to redo.
+    // Reaching this activity PROVES the session workflow classified the turn's
+    // failure as a WORKER DEATH (heartbeat / schedule-to-start timeout): a
+    // deliberate user interrupt never gets here — it resolves the workflow's
+    // interrupt branch and runs interruptActiveTurn instead. So the only ways
+    // the turn is already terminal here are:
+    //   • completed / failed — the zombie genuinely finished (or errored) the
+    //     work after the server gave up on its heartbeats. That outcome is the
+    //     truth; nothing to redo.
+    //   • cancelled — the zombie's OWN CancelledFailure cleanup (agent-turn's
+    //     generic-cancel catch) marked it as it died. That IS the death, not a
+    //     real settle. Requeue it, or the turn — and any goal awaiting it — is
+    //     orphaned until a human intervenes (the 76e2f2ee/Vern 16h stall).
+    const deathArtifactCancel = turn?.status === "cancelled";
+    if (!turn || (turn.status !== "running" && turn.status !== "requires_action" && !deathArtifactCancel)) {
       return { action: "stale" };
     }
     const redispatches = await incrementTurnWorkerDeathRedispatches(db, input.workspaceId, input.turnId);
@@ -158,7 +168,16 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       },
     ]);
     try {
-      await requeuePreemptedTurn(db, input.workspaceId, turn.id, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+      // Worker-death redispatch may reset a turn the dying attempt already
+      // stamped `cancelled` (death artifact, see above), so the reset must
+      // match that status too — not only running/requires_action.
+      await requeuePreemptedTurn(
+        db,
+        input.workspaceId,
+        turn.id,
+        resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId,
+        ["running", "requires_action", "cancelled"],
+      );
     } catch (requeueError) {
       // The zombie attempt can settle the turn between the status check above
       // and this requeue (it keeps executing until it notices the timeout).

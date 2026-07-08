@@ -9720,7 +9720,16 @@ export async function finishTurn(db: Database, workspaceId: string, turnId: stri
  * without a fresh claim, so the row still carries the approval-wait status
  * while the rerun activity executes.
  */
-export async function requeuePreemptedTurn(db: Database, workspaceId: string, turnId: string, triggerEventId: string): Promise<void> {
+export async function requeuePreemptedTurn(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  triggerEventId: string,
+  // Prior statuses the reset is allowed to match. Defaults to the live-turn
+  // set; the worker-death redispatch also passes "cancelled" so it can reset a
+  // turn the dying attempt stamped `cancelled` in its CancelledFailure cleanup.
+  fromStatuses: string[] = ["running", "requires_action"],
+): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.update(schema.sessionTurns).set({
       status: "queued",
@@ -9728,7 +9737,7 @@ export async function requeuePreemptedTurn(db: Database, workspaceId: string, tu
       startedAt: null,
       finishedAt: null,
       updatedAt: new Date(),
-    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, ["running", "requires_action"]))).returning({ id: schema.sessionTurns.id });
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, fromStatuses))).returning({ id: schema.sessionTurns.id });
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
