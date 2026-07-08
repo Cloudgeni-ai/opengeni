@@ -1898,6 +1898,11 @@ describe("API component integration", () => {
       workflowClient: new FakeWorkflowClient(),
     });
 
+    // opengeni_http_requests_total is recorded after the response for each
+    // request finishes, so a fresh app's very first request (this /metrics
+    // scrape itself) can never see its own count. Warm the counter with a
+    // prior request first, same as any real deployment's traffic would.
+    await app.request("/healthz");
     const response = await app.request("/metrics");
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("opengeni_http_requests_total");
@@ -2283,7 +2288,7 @@ describe("API component integration", () => {
     // enablement; the returned capability installation is the pack:{id} row.
     const storedAfterUnifiedEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
     expect(storedAfterUnifiedEnable?.status).toBe("active");
-    expect(storedAfterUnifiedEnable?.metadata.environmentId).toBe(environment.id);
+    expect(storedAfterUnifiedEnable?.metadata.variableSetId).toBe(environment.id);
 
     // A bogus environmentId on the unified path is rejected up front.
     const capabilityEnableUnknownEnvironment = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
@@ -2302,7 +2307,7 @@ describe("API component integration", () => {
     const installation = await enabled.json() as { status: string; metadata: Record<string, unknown> };
     expect(installation.status).toBe("active");
     expect(installation.metadata.packVersion).toBe("0.1.1");
-    expect(installation.metadata.environmentId).toBe(environment.id);
+    expect(installation.metadata.variableSetId).toBe(environment.id);
 
     const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
     expect(catalogResponse.status).toBe(200);
@@ -2322,7 +2327,7 @@ describe("API component integration", () => {
     });
     expect(capabilityEnable.status).toBe(201);
     const installationAfterCapabilityEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
-    expect(installationAfterCapabilityEnable?.metadata.environmentId).toBe(environment.id);
+    expect(installationAfterCapabilityEnable?.metadata.variableSetId).toBe(environment.id);
 
     const deletedBuiltIn = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis"), { method: "DELETE" });
     expect(deletedBuiltIn.status).toBe(409);
@@ -3996,8 +4001,8 @@ describe("API component integration", () => {
     expect(JSON.stringify(rotatedBody)).not.toContain("tok-rotated-654321");
 
     const storedRows = await dbClient.db.execute(dbSql<{ value_encrypted: string }>`
-      select value_encrypted from workspace_environment_variables
-      where environment_id = ${created.id} and name = 'API_TOKEN'
+      select value_encrypted from workspace_variable_set_variables
+      where variable_set_id = ${created.id} and name = 'API_TOKEN'
     `);
     expect(storedRows[0]?.value_encrypted).toStartWith("v1:");
     expect(storedRows[0]?.value_encrypted).not.toContain("tok-rotated-654321");
@@ -4020,7 +4025,7 @@ describe("API component integration", () => {
 
     const audited = await dbClient.db.execute(dbSql<{ count: string }>`
       select count(*)::text as count from audit_events
-      where target_id = ${created.id} and action like 'environment.%'
+      where target_id = ${created.id} and action like 'variable_set.%'
     `);
     expect(Number(audited[0]?.count ?? 0)).toBeGreaterThanOrEqual(4);
     const auditedPayloads = await dbClient.db.execute(dbSql<{ metadata: unknown }>`
@@ -4075,7 +4080,7 @@ describe("API component integration", () => {
       body: JSON.stringify({ initialMessage: "attach", environmentId: crypto.randomUUID() }),
     });
     expect(unknownAttachment.status).toBe(422);
-    expect(await unknownAttachment.text()).toContain("unknown environmentId");
+    expect(await unknownAttachment.text()).toContain("unknown variableSetId");
 
     const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
@@ -4088,7 +4093,7 @@ describe("API component integration", () => {
 
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     const createdEvent = events.find((event) => event.type === "session.created");
-    expect(createdEvent?.payload).toMatchObject({ environmentId: environment.id, environmentName: environment.name });
+    expect(createdEvent?.payload).toMatchObject({ variableSetId: environment.id, variableSetName: environment.name });
     expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
 
     // Attached queued sessions block environment deletion; idle ones detach.
@@ -4303,7 +4308,7 @@ describe("API component integration", () => {
       schedule: { type: "interval", everySeconds: 3600 },
       agentConfig: { prompt: "inspect" },
       environmentId: environment.id,
-    })).rejects.toThrow("missing permission: environments:use");
+    })).rejects.toThrow("missing permission: variable-sets:use");
 
     const created = await callMcpTool<{ id: string; environmentId: string | null }>(adminMcp, "scheduled_tasks_create", {
       name: `mcp-attach-${crypto.randomUUID()}`,
@@ -4316,15 +4321,15 @@ describe("API component integration", () => {
     await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
       id: created.id,
       environmentId: environment.id,
-    })).rejects.toThrow("missing permission: environments:use");
+    })).rejects.toThrow("missing permission: variable-sets:use");
     await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
       id: created.id,
       environmentId: null,
-    })).rejects.toThrow("missing permission: environments:use");
+    })).rejects.toThrow("missing permission: variable-sets:use");
     await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
       id: created.id,
       agentConfig: { prompt: "exfiltrate the injected secrets" },
-    })).rejects.toThrow("missing permission: environments:use");
+    })).rejects.toThrow("missing permission: variable-sets:use");
   });
 
   test("registers manager orchestration MCP tools gated by session permissions", async () => {
@@ -5133,7 +5138,7 @@ describe("API component integration", () => {
       initialMessage: "exfiltrate",
       model: "scripted-model",
       environmentId: environment.id,
-    })).rejects.toThrow("missing permission: environments:use");
+    })).rejects.toThrow("missing permission: variable-sets:use (deprecated alias: environments:use)");
 
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const attached = await callMcpTool<{ id: string; environmentId: string | null }>(mcp, "session_create", {
@@ -5146,7 +5151,7 @@ describe("API component integration", () => {
       initialMessage: "unknown environment",
       model: "scripted-model",
       environmentId: crypto.randomUUID(),
-    })).rejects.toThrow("unknown environmentId");
+    })).rejects.toThrow("unknown variableSetId");
 
     // The successful create recorded one agent_run.created usage event, so a
     // one-run monthly cap now blocks both spawn and send-message.
@@ -5427,7 +5432,7 @@ describe("API component integration", () => {
     });
     expect([200, 201]).toContain(enabled.status);
     const installation = await enabled.json() as { metadata: Record<string, unknown> };
-    expect(installation.metadata.environmentId).toBe(environment.id);
+    expect(installation.metadata.variableSetId).toBe(environment.id);
 
     // Re-enabling without environmentId keeps the stored attachment.
     const reenabled = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"), {
@@ -5437,7 +5442,7 @@ describe("API component integration", () => {
     });
     expect(reenabled.status).toBe(200);
     const reenabledInstallation = await reenabled.json() as { metadata: Record<string, unknown> };
-    expect(reenabledInstallation.metadata.environmentId).toBe(environment.id);
+    expect(reenabledInstallation.metadata.variableSetId).toBe(environment.id);
   });
 
   test("file download MCP tool reports unconfigured object storage", async () => {
