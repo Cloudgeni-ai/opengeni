@@ -726,7 +726,12 @@ export function FileBrowser({
           // Virtualized: only the rows in/near the viewport mount, so a 3k-node
           // tree stays responsive. The flat item list already carries the
           // expanded subtree + synthetic (create/skeleton/residue) rows.
-          <VList ref={vlistRef} className="min-h-0 flex-1" itemSize={24}>
+          <VList
+            ref={vlistRef}
+            className="min-h-0 flex-1"
+            itemSize={24}
+            ssrCount={Math.min(32, renderItems.length)}
+          >
             {renderItems.map((item) => (
               <div key={itemKey(item)} className="min-w-0">
                 {renderItem(item)}

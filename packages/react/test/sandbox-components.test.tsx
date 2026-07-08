@@ -9,6 +9,7 @@ import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeCapabilities, fakeFileDiff, fakeHeadlessCapabilities } from "./sandbox-fixtures";
 import { DesktopViewer } from "../src/components/desktop-viewer";
 import { DiffView } from "../src/components/diff-view";
+import { PierreDiff } from "../src/components/pierre-diff";
 import { FileBrowser } from "../src/components/file-browser";
 import type { UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
 
@@ -67,21 +68,23 @@ describe("FileBrowser", () => {
   });
 });
 
-describe("DiffView", () => {
-  test("renders unified hunks with add/del lines", async () => {
+describe("DiffView (@deprecated alias)", () => {
+  // DiffView is now a thin alias over the ONE renderer, PierreDiff — the
+  // hand-rolled hunk renderer was removed (D3). It delegates to Pierre for a
+  // non-empty diff and still shows the empty/no-repo states directly.
+  test("delegates a non-empty diff to the Pierre renderer", async () => {
     const r = await renderComponent(<DiffView diff={[fakeFileDiff()]} />);
     await flush();
-    const diff = r.container.querySelector("[data-opengeni-diff]");
-    expect(diff).not.toBeNull();
-    expect(r.container.textContent).toContain("src/app.ts");
-    expect(r.container.textContent).toContain("const b = 3;");
+    expect(r.container.querySelector("[data-opengeni-pierre-diff]")).not.toBeNull();
+    // The removed hand-rolled renderer's marker is gone.
+    expect(r.container.querySelector("[data-opengeni-diff]")).toBeNull();
     await r.unmount();
   });
 
-  test("renders split layout (side-by-side) without crashing", async () => {
+  test("delegates a split-layout diff to the Pierre renderer", async () => {
     const r = await renderComponent(<DiffView diff={[fakeFileDiff()]} layout="split" />);
     await flush();
-    expect(r.container.querySelector("[data-opengeni-diff]")).not.toBeNull();
+    expect(r.container.querySelector("[data-opengeni-pierre-diff]")).not.toBeNull();
     await r.unmount();
   });
 
@@ -96,11 +99,23 @@ describe("DiffView", () => {
     expect(noRepo.container.textContent).toContain("No repository mounted");
     await noRepo.unmount();
   });
+});
 
-  test("binary files are not rendered as text", async () => {
-    const r = await renderComponent(<DiffView diff={[fakeFileDiff({ isBinary: true, hunks: [] })]} />);
+describe("PierreDiff (the one renderer)", () => {
+  // The plain degrade is the deterministic surface for a host without
+  // `@pierre/diffs` (or opting out) — a text patch, NOT a second hunk renderer.
+  test("plain degrade renders the reconstructed patch text", async () => {
+    const r = await renderComponent(<PierreDiff diff={[fakeFileDiff()]} plain />);
     await flush();
-    expect(r.container.textContent).toContain("Binary file not shown");
+    expect(r.container.textContent).toContain("src/app.ts");
+    expect(r.container.textContent).toContain("const b = 3;");
+    await r.unmount();
+  });
+
+  test("plain degrade with an empty diff says 'No changes' (never crashes)", async () => {
+    const r = await renderComponent(<PierreDiff diff={[]} plain />);
+    await flush();
+    expect(r.container.textContent).toContain("No changes");
     await r.unmount();
   });
 });

@@ -82,9 +82,10 @@ export type WindowedSections = {
   offsets: number[];
   /** Total content height (px) — set on the spacer so scroll length is stable. */
   totalHeight: number;
-  /** Callback ref for a MOUNTED section: measures its real height and refines the
-   *  layout. Never call for an unmounted section (its node has no diff body). */
-  measure: (index: number, node: HTMLElement | null) => void;
+  /** Report a MOUNTED section's real height (px) so the layout refines as async
+   *  content — e.g. Pierre's Shiki render — grows. Drive it from a ResizeObserver;
+   *  a zero/idle value is ignored so a headless pass keeps the estimate. */
+  measure: (index: number, height: number) => void;
   /** Scroll section `index` to the top of the pane (the rail-jump). */
   scrollToIndex: (index: number) => void;
 };
@@ -159,14 +160,12 @@ export function useWindowedSections(opts: {
     };
   }, [recompute, count]);
 
-  const measure = useCallback((index: number, node: HTMLElement | null) => {
-    if (!node) return;
-    const h = node.offsetHeight;
-    if (h <= 0) return; // zero-layout pass — keep the estimate
+  const measure = useCallback((index: number, height: number) => {
+    if (height <= 0) return; // zero-layout pass — keep the estimate
     setHeights((prev) => {
-      if (Math.abs((prev[index] ?? 0) - h) < 1) return prev;
+      if (Math.abs((prev[index] ?? 0) - height) < 1) return prev;
       const next = prev.slice();
-      next[index] = h;
+      next[index] = height;
       return next;
     });
   }, []);

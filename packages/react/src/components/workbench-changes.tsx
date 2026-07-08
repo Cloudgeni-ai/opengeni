@@ -1,6 +1,6 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import { FileWarningIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VList } from "virtua";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
@@ -75,8 +75,8 @@ type RailRow =
 
 /** Order the files and build the rail rows (grouped past the threshold). The
  *  returned `orderedFiles` drives BOTH the rail and the diff pane so a rail row's
- *  `index` addresses the matching pane section. */
-function buildRail(files: GitFileDiff[]): { orderedFiles: GitFileDiff[]; rows: RailRow[] } {
+ *  `index` addresses the matching pane section. Exported for tests. */
+export function buildRail(files: GitFileDiff[]): { orderedFiles: GitFileDiff[]; rows: RailRow[] } {
   if (files.length <= GROUP_THRESHOLD) {
     return { orderedFiles: files, rows: files.map((file, index) => ({ kind: "file", file, index })) };
   }
@@ -203,11 +203,12 @@ export function WorkbenchChanges({
       <div className="flex min-h-0 flex-1">
         {/* File rail — virtualized (virtua): a dense change set is fine. */}
         <div className="w-[240px] shrink-0 border-r border-og-border max-[560px]:w-[168px]">
-          <VList className="h-full" itemSize={26}>
+          <VList className="h-full" itemSize={26} ssrCount={Math.min(30, rows.length)}>
             {rows.map((row) =>
               row.kind === "group" ? (
                 <div
                   key={`g:${row.label}`}
+                  data-rail-group
                   className="flex items-center gap-1.5 px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wide text-og-fg-subtle"
                 >
                   <span className="min-w-0 truncate">{row.label}</span>
@@ -238,15 +239,14 @@ export function WorkbenchChanges({
             {orderedFiles.map((file, index) => {
               if (index < windowed.range.start || index >= windowed.range.end) return null;
               return (
-                <div
+                <MeasuredSection
                   key={file.path}
-                  ref={(node) => windowed.measure(index, node)}
-                  data-diff-section
-                  data-diff-index={index}
-                  style={{ position: "absolute", top: windowed.offsets[index] ?? 0, left: 0, right: 0 }}
+                  index={index}
+                  top={windowed.offsets[index] ?? 0}
+                  onMeasure={windowed.measure}
                 >
                   <DiffSection file={file} layout={layout} themeType={resolvedTheme} />
-                </div>
+                </MeasuredSection>
               );
             })}
           </div>
@@ -286,6 +286,7 @@ function RailFileRow({
       type="button"
       onClick={onClick}
       title={file.path}
+      data-rail-file
       className={cn(
         "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-10",
         grouped && "pl-3",
@@ -304,6 +305,42 @@ function RailFileRow({
   );
 }
 
+/** A windowed section wrapper. Absolutely positioned at `top`; a ResizeObserver
+ *  reports its real height back so the layout refines as Pierre's async Shiki
+ *  render grows (else short estimates would overlap sections). */
+function MeasuredSection({
+  index,
+  top,
+  onMeasure,
+  children,
+}: {
+  index: number;
+  top: number;
+  onMeasure: (index: number, height: number) => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const report = () => onMeasure(index, el.offsetHeight);
+    report();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(report) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, [index, onMeasure]);
+  return (
+    <div
+      ref={ref}
+      data-diff-section
+      data-diff-index={index}
+      style={{ position: "absolute", top, left: 0, right: 0 }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function DiffSection({
   file,
   layout,
@@ -313,23 +350,29 @@ function DiffSection({
   layout: "unified" | "split";
   themeType: "dark" | "light";
 }) {
-  const renamed = file.oldPath && file.oldPath !== file.path;
+  // The guard files (binary / over-cap) get a minimal header + "open live" body
+  // since Pierre has nothing to render; real diffs use Pierre's own sticky file
+  // header (one header — no redundant chrome).
+  if (isGuarded(file)) {
+    const renamed = file.oldPath && file.oldPath !== file.path;
+    return (
+      <section className="border-b border-og-border pb-1">
+        <header className="flex items-center justify-between gap-2 bg-og-surface-1 px-3 py-1.5 text-og-sm">
+          <span className="min-w-0 truncate font-og-mono text-og-xs">
+            {renamed ? `${file.oldPath} → ${file.path}` : file.path}
+          </span>
+          <span className="flex shrink-0 items-center gap-2 font-og-mono text-2xs">
+            <span className="text-og-status-idle">+{file.additions}</span>
+            <span className="text-og-status-failed">−{file.deletions}</span>
+          </span>
+        </header>
+        <GuardBody file={file} />
+      </section>
+    );
+  }
   return (
     <section className="border-b border-og-border pb-2">
-      <header className="flex items-center justify-between gap-2 bg-og-surface-1/80 px-3 py-1.5 text-og-sm backdrop-blur">
-        <span className="min-w-0 truncate font-og-mono text-og-xs">
-          {renamed ? `${file.oldPath} → ${file.path}` : file.path}
-        </span>
-        <span className="flex shrink-0 items-center gap-2 font-og-mono text-2xs">
-          <span className="text-og-status-idle">+{file.additions}</span>
-          <span className="text-og-status-failed">−{file.deletions}</span>
-        </span>
-      </header>
-      {isGuarded(file) ? (
-        <GuardBody file={file} />
-      ) : (
-        <PierreDiff diff={[file]} layout={layout} themeType={themeType} className="px-1" />
-      )}
+      <PierreDiff diff={[file]} layout={layout} themeType={themeType} className="px-1" />
     </section>
   );
 }
