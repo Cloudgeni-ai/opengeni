@@ -2,18 +2,16 @@ import type { GitFileDiff } from "@opengeni/sdk";
 import { useState } from "react";
 import { cn } from "../lib/cn";
 import { useThemeType } from "../lib/use-theme-type";
-import { DiffView } from "../components/diff-view";
 import { PierreDiff } from "../components/pierre-diff";
 
 /* ----------------------------------------------------------------------------
    Tool diff
 
    Renders parsed `GitFileDiff[]` (from the V4A apply_patch parser) through the
-   EXACT same diff stack the Files tab uses: `DiffView` with `PierreDiff` wired
-   into its `fallback` seam, so a host with `@pierre/diffs` installed gets the
-   Shiki-highlighted Pierre renderer and everyone else gets the hand-rolled
-   one — a single data contract, zero divergence. A per-block Unified/Split
-   toggle sits in the header.
+   EXACT same diff stack the Files/Changes tabs use: `PierreDiff` (Shiki-
+   highlighted), with a built-in plain-text degrade for a host without
+   `@pierre/diffs` — one renderer, a single data contract. A per-block
+   Unified/Split toggle sits in the header.
    -------------------------------------------------------------------------- */
 
 export function ToolDiff({ files }: { files: GitFileDiff[] }) {
@@ -22,20 +20,12 @@ export function ToolDiff({ files }: { files: GitFileDiff[] }) {
   // the Files tab uses, then thread it into Pierre. Without it Pierre falls back
   // to its hard dark default and renders a github-dark slab inside a light page.
   const themeType = useThemeType(undefined);
-  // The fallback chain reads top-down: try Pierre's Shiki renderer, and if it's
-  // not installed fall back to the built-in DiffView. The plain node is named
-  // once and reused, so the same props aren't threaded through three JSX nodes.
-  const plain = <DiffView diff={files} layout={layout} />;
   return (
     <div className="min-w-0">
       <div className="mb-1.5 flex justify-end">
         <LayoutToggle layout={layout} onChange={setLayout} />
       </div>
-      <DiffView
-        diff={files}
-        layout={layout}
-        fallback={<PierreDiff diff={files} layout={layout} themeType={themeType} fallback={plain} />}
-      />
+      <PierreDiff diff={files} layout={layout} themeType={themeType} />
     </div>
   );
 }

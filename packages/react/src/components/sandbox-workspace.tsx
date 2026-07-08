@@ -21,7 +21,7 @@ import {
   useState,
 } from "react";
 import { Popover } from "radix-ui";
-import type { GitFileDiff, MachineState, SessionEvent } from "@opengeni/sdk";
+import type { MachineState, SessionEvent } from "@opengeni/sdk";
 import { CpuIcon, LaptopIcon, RefreshCwIcon } from "lucide-react";
 
 import { type ClientOverride, useOpenGeni } from "../provider";
@@ -39,6 +39,7 @@ import { connectionStatusForState } from "../types/machines";
 import { ConnectionStatusPill } from "./machine-status-pill";
 import { SharedMachineDisclosure } from "./machine-dock-bar";
 import { SandboxFiles } from "./sandbox-files";
+import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { DesktopViewer } from "./desktop-viewer";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
@@ -244,6 +245,7 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
         <ChangesTabBody
           git={git}
           captureAvailable={captureAvailable}
+          captureRevision={captureState.revision}
           capabilitiesState={caps.state}
           capabilitiesError={caps.error}
           onRetry={caps.renegotiate}
@@ -544,34 +546,23 @@ function DockActionButton({ onClick, children }: { onClick: () => void; children
   );
 }
 
-const STATUS_GLYPH: Record<GitFileDiff["status"], { glyph: string; className: string }> = {
-  added: { glyph: "A", className: "text-og-status-running" },
-  untracked: { glyph: "U", className: "text-og-status-running" },
-  modified: { glyph: "M", className: "text-og-status-idle" },
-  typechange: { glyph: "T", className: "text-og-status-idle" },
-  renamed: { glyph: "R", className: "text-og-fg-muted" },
-  copied: { glyph: "C", className: "text-og-fg-muted" },
-  deleted: { glyph: "D", className: "text-og-status-danger" },
-  conflicted: { glyph: "!", className: "text-og-status-danger" },
-  ignored: { glyph: "I", className: "text-og-fg-subtle" },
-};
-
 /**
- * The Changes tab body — a MINIMAL placeholder (M4). It consumes the same
- * capture + git sources M5 will, and renders the changed-file list with counts +
- * a source badge; M5 replaces this with the file rail + windowed Pierre diff pane
- * without touching the dock frame. It also carries the honest connecting/offline
- * states so the default tab is never a blank surface.
+ * The Changes tab body: the real PR-review surface (`WorkbenchChanges` — file
+ * rail + windowed Pierre diff pane) when there are changes, wrapped in the honest
+ * connecting/offline/empty states so the default tab is never a blank surface.
+ * The dock frame is untouched; this is the M5 seam.
  */
 function ChangesTabBody({
   git,
   captureAvailable,
+  captureRevision,
   capabilitiesState,
   capabilitiesError,
   onRetry,
 }: {
   git: UseSandboxGitResult;
   captureAvailable: boolean;
+  captureRevision: number | null;
   capabilitiesState: string;
   capabilitiesError: Error | null;
   onRetry: () => void;
@@ -579,40 +570,13 @@ function ChangesTabBody({
   const diff = git.diff;
 
   if (diff.length > 0) {
-    const additions = diff.reduce((sum, f) => sum + f.additions, 0);
-    const deletions = diff.reduce((sum, f) => sum + f.deletions, 0);
-    const sourceLabel =
-      git.source === "capture" && git.capturedAt ? `as of ${formatAsOf(git.capturedAt, Date.now())}` : "live";
     return (
-      <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-3 py-2">
-          <span className="text-og-xs text-og-fg-muted">
-            {diff.length} {diff.length === 1 ? "file" : "files"}
-            <span className="ml-2 text-og-status-running">+{additions}</span>
-            <span className="ml-1 text-og-status-danger">-{deletions}</span>
-          </span>
-          <span className="shrink-0 rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle">
-            {sourceLabel}
-          </span>
-        </div>
-        <ul className="min-h-0 flex-1 overflow-auto py-1">
-          {diff.map((file) => {
-            const meta = STATUS_GLYPH[file.status] ?? STATUS_GLYPH.modified;
-            return (
-              <li key={file.path} className="flex items-center gap-2 px-3 py-1 text-og-sm">
-                <span className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", meta.className)}>
-                  {meta.glyph}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-og-fg">{file.path}</span>
-                <span className="shrink-0 font-og-mono text-2xs text-og-fg-subtle">
-                  <span className="text-og-status-running">+{file.additions}</span>
-                  <span className="ml-1 text-og-status-danger">-{file.deletions}</span>
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
+      <WorkbenchChanges
+        diff={diff}
+        source={git.source}
+        capturedAt={git.capturedAt}
+        captureRevision={captureRevision}
+      />
     );
   }
 

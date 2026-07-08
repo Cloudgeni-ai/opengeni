@@ -37,6 +37,9 @@ export type PierreDiffProps = {
   loading?: ReactNode | undefined;
   /** Rendered if `@pierre/diffs/react` is not installed / fails to import. */
   fallback?: ReactNode | undefined;
+  /** Skip the Shiki renderer entirely and show the plain-text degrade (the old
+   *  `usePierre={false}` path — one renderer, opted out of highlighting). */
+  plain?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -54,8 +57,8 @@ const LazyPatchDiff = lazy(async () => {
 /**
  * The Pierre-backed diff: Shiki-highlighted, virtualized, unified/split. Renders
  * one `PatchDiff` per changed file (a reconstructed unified patch from the
- * `GitFileDiff` hunks). This sits behind `DiffView`'s `fallback` seam so a host
- * that lacks `@pierre/diffs` keeps the hand-rolled renderer.
+ * `GitFileDiff` hunks). The ONE workbench diff renderer; a host without
+ * `@pierre/diffs` gets the built-in plain-text degrade (`PlainPatch`).
  */
 export function PierreDiff({
   diff,
@@ -65,13 +68,15 @@ export function PierreDiff({
   disableWorkerPool,
   loading,
   fallback,
+  plain,
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
-  // rather than a Suspense boundary that never resolves.
+  // rather than a Suspense boundary that never resolves. Skipped when `plain`.
   useEffect(() => {
+    if (plain) return;
     let cancelled = false;
     void import("@pierre/diffs/react").catch(() => {
       if (!cancelled) setFailed(true);
@@ -79,10 +84,13 @@ export function PierreDiff({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [plain]);
 
-  if (failed && fallback !== undefined) {
-    return <div className={className}>{fallback}</div>;
+  if (plain || failed) {
+    // `plain` opts out of highlighting; `failed` = `@pierre/diffs` not installed.
+    // Render the caller's fallback, or a plain (unhighlighted) patch dump — NOT a
+    // second hunk renderer. One highlighted renderer (Pierre) + a text degrade.
+    return <div className={className}>{fallback ?? <PlainPatch diff={diff} />}</div>;
   }
 
   // Default to the dark theme: the host UI is dark-first, and Pierre's own
@@ -134,6 +142,47 @@ function DiffSkeleton() {
   return (
     <div className="p-3 text-og-sm text-og-fg-subtle">
       Loading diff…
+    </div>
+  );
+}
+
+/**
+ * The unhighlighted degrade for a host without `@pierre/diffs`: the reconstructed
+ * unified patch as monospace text with +/−/@@ tinting. Deliberately NOT a
+ * structured hunk renderer — the workbench keeps exactly one of those (Pierre).
+ */
+function PlainPatch({ diff }: { diff: GitFileDiff[] }) {
+  if (diff.length === 0) {
+    return <div className="p-3 text-og-sm text-og-fg-subtle">No changes</div>;
+  }
+  return (
+    <div className="min-w-0">
+      {diff.map((file) => (
+        <pre
+          key={file.path}
+          className="mb-2 overflow-auto whitespace-pre rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-og-xs leading-5"
+        >
+          {gitFileDiffToPatch(file)
+            .split("\n")
+            .map((line, index) => (
+              <span
+                key={index}
+                className={cn(
+                  "block",
+                  line.startsWith("@@")
+                    ? "text-og-accent"
+                    : line.startsWith("+")
+                      ? "text-og-status-idle"
+                      : line.startsWith("-")
+                        ? "text-og-status-failed"
+                        : "text-og-fg-muted",
+                )}
+              >
+                {line || " "}
+              </span>
+            ))}
+        </pre>
+      ))}
     </div>
   );
 }

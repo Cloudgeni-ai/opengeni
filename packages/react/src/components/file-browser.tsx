@@ -4,7 +4,6 @@ import {
   FilePlusIcon,
   FolderIcon,
   FolderPlusIcon,
-  Loader2Icon,
   PencilIcon,
   RefreshCwIcon,
   Trash2Icon,
@@ -18,6 +17,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { VList, type VListHandle } from "virtua";
 import { cn } from "../lib/cn";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 
@@ -69,6 +69,20 @@ function joinPath(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name;
 }
 
+/** A stable React key for a flat render item. */
+function itemKey(item: RenderItem): string {
+  switch (item.type) {
+    case "node":
+      return item.node.path;
+    case "create":
+      return `create:${item.parent}`;
+    case "skeleton":
+      return `skeleton:${item.path}`;
+    case "residue":
+      return `residue:${item.path}`;
+  }
+}
+
 /** Walk the tree to find a node by path. */
 function findNode(nodes: FileTreeNode[], path: string): FileTreeNode | undefined {
   for (const node of nodes) {
@@ -86,6 +100,14 @@ type DraftCreate = { parent: string; kind: "file" | "dir" };
 /** A pending inline-rename of an existing node. */
 type DraftRename = { path: string };
 type ContextMenuState = { node: FileTreeNode | null; x: number; y: number };
+
+/** One virtualized row. Nodes plus the synthetic rows the recursive renderer
+ *  used to nest inline. */
+type RenderItem =
+  | { type: "node"; node: FileTreeNode; depth: number }
+  | { type: "create"; parent: string; kind: "file" | "dir"; depth: number }
+  | { type: "skeleton"; path: string; depth: number }
+  | { type: "residue"; path: string; depth: number };
 
 /**
  * The file MANAGER, fed by the FileSystem service via `useSandboxFiles`. This is
@@ -122,6 +144,7 @@ export function FileBrowser({
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [busy, setBusy] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const vlistRef = useRef<VListHandle>(null);
 
   // The keyboard cursor: an explicitly-navigated node falls back to the
   // externally-selected file so arrow keys pick up where the preview pane is.
@@ -169,20 +192,46 @@ export function FileBrowser({
     [expanded, expand],
   );
 
-  // The visible rows in DOM order — drives keyboard up/down navigation.
-  const flatRows = useMemo(() => {
-    const rows: { node: FileTreeNode; depth: number }[] = [];
+  // Flatten the VISIBLE (expanded) tree into a single ordered render list — the
+  // input to the virtualizer. Interleaves the synthetic rows the recursive
+  // renderer used to nest (inline create input, lazy-expand skeleton, and the
+  // cold residue "contents on machine" row) so every visual row is one list item.
+  const cold = result.source !== "live";
+  const renderItems = useMemo(() => {
+    const items: RenderItem[] = [];
+    if (draftCreate && draftCreate.parent === "") {
+      items.push({ type: "create", parent: "", kind: draftCreate.kind, depth: 0 });
+    }
     const walk = (nodes: FileTreeNode[], depth: number) => {
       for (const node of nodes) {
-        rows.push({ node, depth });
-        if (node.kind === "dir" && expanded.has(node.path) && node.children?.length) {
+        items.push({ type: "node", node, depth });
+        if (node.kind !== "dir" || !expanded.has(node.path)) continue;
+        if (draftCreate && draftCreate.parent === node.path) {
+          items.push({ type: "create", parent: node.path, kind: draftCreate.kind, depth: depth + 1 });
+        }
+        const childless = node.children === undefined || node.children.length === 0;
+        const isLoading = loadingPaths.has(node.path) || result.expandingPaths.has(node.path);
+        // A collapsed residue dir (node_modules, .git, …) can't list children from
+        // the cold capture — offer to open it live rather than a dead skeleton.
+        if (node.truncated && childless && cold && !isLoading) {
+          items.push({ type: "residue", path: node.path, depth: depth + 1 });
+        } else if (node.children && node.children.length > 0) {
           walk(node.children, depth + 1);
+        } else if (isLoading && childless) {
+          items.push({ type: "skeleton", path: node.path, depth: depth + 1 });
         }
       }
     };
     walk(result.tree, 0);
-    return rows;
-  }, [result.tree, expanded]);
+    return items;
+  }, [result.tree, expanded, draftCreate, loadingPaths, result.expandingPaths, cold]);
+
+  // The visible NODE rows in order — drives keyboard up/down navigation.
+  const flatRows = useMemo(
+    () =>
+      renderItems.flatMap((item) => (item.type === "node" ? [{ node: item.node, depth: item.depth }] : [])),
+    [renderItems],
+  );
 
   const supportsMutation = editable;
 
@@ -401,10 +450,12 @@ export function FileBrowser({
   const showEmpty = !result.loading && result.tree.length === 0 && !draftCreate;
   const showToolbar = supportsMutation || Boolean(result.error) || result.loading;
 
-  const renderRow = (node: FileTreeNode, depth: number): ReactNode => {
+  // Render a SINGLE node row (no recursion — children are separate flat items the
+  // virtualizer renders). Returns the row element; the caller assigns the key.
+  const renderNodeRow = (node: FileTreeNode, depth: number): ReactNode => {
     const isOpen = expanded.has(node.path);
     if (renderNode) {
-      return <div key={node.path}>{renderNode(node, depth, isOpen)}</div>;
+      return <div>{renderNode(node, depth, isOpen)}</div>;
     }
     const isDir = node.kind === "dir";
     const isSelected = node.path === selectedPath || node.path === active;
@@ -412,12 +463,10 @@ export function FileBrowser({
     const isLoading = loadingPaths.has(node.path) || result.expandingPaths.has(node.path);
     const isRenaming = draftRename?.path === node.path;
     const isDropTarget = dragOver === (isDir ? node.path : parentOf(node.path));
-    const showSkeleton = isDir && isOpen && isLoading && (node.children === undefined || node.children.length === 0);
     const dropDir = isDir ? node.path : parentOf(node.path);
 
     return (
       <div
-        key={node.path}
         role="treeitem"
         aria-expanded={isDir ? isOpen : undefined}
         aria-selected={isCursor || undefined}
@@ -483,24 +532,26 @@ export function FileBrowser({
               setMenu({ node, x: e.clientX, y: e.clientY });
             }}
             className={cn(
-              "group flex w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-10",
+              "group relative flex w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-10",
               "hover:bg-og-surface-2",
               isSelected && "bg-og-surface-2",
               isCursor && "outline outline-1 -outline-offset-1 outline-og-accent",
               isDropTarget && "bg-og-accent-soft ring-1 ring-inset ring-og-accent",
+              // A thin progress shimmer on the expanding row — no per-node spinner.
+              isLoading &&
+                "after:pointer-events-none after:absolute after:inset-x-1 after:bottom-0 after:h-px after:animate-pulse after:rounded-full after:bg-og-accent-soft",
               node.status ? STATUS_TINT[node.status] : undefined,
             )}
             style={{ paddingLeft: `${depth * 12 + 4}px` }}
           >
             {isDir ? (
-              isLoading ? (
-                <Loader2Icon
-                  className="size-3 shrink-0 animate-spin text-og-fg-subtle"
-                  aria-label="Loading"
-                />
-              ) : (
-                <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform", isOpen && "rotate-90")} />
-              )
+              <ChevronRightIcon
+                className={cn(
+                  "size-3 shrink-0 transition-transform",
+                  isOpen && "rotate-90",
+                  isLoading && "text-og-accent",
+                )}
+              />
             ) : (
               <span className="inline-block w-3 shrink-0" />
             )}
@@ -525,23 +576,31 @@ export function FileBrowser({
             )}
           </button>
         )}
+      </div>
+    );
+  };
 
-        {/* Inline create input nested directly under an expanded directory. */}
-        {draftCreate?.parent === node.path && isDir && isOpen && (
+  // Render one flat list item (node row or a synthetic create/skeleton/residue row).
+  const renderItem = (item: RenderItem): ReactNode => {
+    switch (item.type) {
+      case "node":
+        return renderNodeRow(item.node, item.depth);
+      case "create":
+        return (
           <InlineInput
-            depth={depth + 1}
-            kind={draftCreate.kind}
+            depth={item.depth}
+            kind={item.kind}
             initialValue=""
             onCommit={(name) => void commitCreate(name)}
             onCancel={() => setDraftCreate(null)}
           />
-        )}
-
-        {showSkeleton && (
+        );
+      case "skeleton":
+        return (
           <div
             role="group"
             aria-hidden
-            style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
+            style={{ paddingLeft: `${item.depth * 12 + 4}px` }}
             className="space-y-1 py-1"
           >
             {[0, 1, 2].map((i) => (
@@ -552,16 +611,29 @@ export function FileBrowser({
               />
             ))}
           </div>
-        )}
-        {isDir && isOpen && node.children && node.children.length > 0 && (
-          <div role="group">{node.children.map((child) => renderRow(child, depth + 1))}</div>
-        )}
-      </div>
-    );
+        );
+      case "residue":
+        return (
+          <div
+            style={{ paddingLeft: `${item.depth * 12 + 4}px` }}
+            className="flex items-center gap-1.5 py-0.5 pr-1 text-og-xs italic text-og-fg-subtle"
+          >
+            <span className="inline-block w-3 shrink-0" />
+            <span className="min-w-0 truncate">contents on machine — open when live</span>
+          </div>
+        );
+    }
   };
 
+  // Keep the keyboard cursor's row on screen even though off-screen rows unmount.
+  useEffect(() => {
+    if (!cursor) return;
+    const index = renderItems.findIndex((it) => it.type === "node" && it.node.path === cursor);
+    if (index >= 0) vlistRef.current?.scrollToIndex(index);
+  }, [cursor, renderItems]);
+
   return (
-    <div className={cn("flex min-w-0 flex-col", className)}>
+    <div className={cn("flex min-h-0 min-w-0 flex-col", className)}>
       {showToolbar && (
         <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-og-border px-1 py-1">
           {supportsMutation ? (
@@ -628,21 +700,11 @@ export function FileBrowser({
             : undefined
         }
         className={cn(
-          "min-w-0 flex-1 overflow-auto p-1 outline-none",
+          "flex min-h-0 min-w-0 flex-1 flex-col p-1 outline-none",
           dragOver === "" && "ring-1 ring-inset ring-og-accent",
         )}
         data-opengeni-file-tree
       >
-        {/* A root-level create input sits above the rows. */}
-        {draftCreate?.parent === "" && (
-          <InlineInput
-            depth={0}
-            kind={draftCreate.kind}
-            initialValue=""
-            onCommit={(name) => void commitCreate(name)}
-            onCancel={() => setDraftCreate(null)}
-          />
-        )}
         {showErrorEmpty ? (
           <div className="flex flex-col items-start gap-2 p-2 text-og-sm text-og-fg-subtle">
             <div>{fallback ?? `Could not load files: ${result.error?.message ?? "refresh the file list to try again"}`}</div>
@@ -661,7 +723,16 @@ export function FileBrowser({
             {emptyState ?? "This directory is empty"}
           </div>
         ) : (
-          result.tree.map((node) => renderRow(node, 0))
+          // Virtualized: only the rows in/near the viewport mount, so a 3k-node
+          // tree stays responsive. The flat item list already carries the
+          // expanded subtree + synthetic (create/skeleton/residue) rows.
+          <VList ref={vlistRef} className="min-h-0 flex-1" itemSize={24}>
+            {renderItems.map((item) => (
+              <div key={itemKey(item)} className="min-w-0">
+                {renderItem(item)}
+              </div>
+            ))}
+          </VList>
         )}
       </div>
 

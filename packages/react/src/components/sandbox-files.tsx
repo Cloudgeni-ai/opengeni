@@ -7,7 +7,6 @@ import type { UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
-import { DiffView } from "./diff-view";
 import { PierreDiff } from "./pierre-diff";
 import { PierreFile } from "./pierre-file";
 
@@ -153,17 +152,18 @@ export function SandboxFiles({
 
       <div className={cn("flex min-h-0 flex-1", wide ? "flex-row" : "flex-col")}>
         {/* Tree pane: Changes group + full tree. A fixed left column when wide,
-            a top band when narrow. */}
+            a top band when narrow. A flex column so the virtualized tree below
+            owns a bounded scroll viewport (the Changes group scrolls separately). */}
         <div
           className={cn(
-            "min-h-0 overflow-auto",
+            "flex min-h-0 flex-col",
             wide
               ? "w-[280px] shrink-0 border-r border-og-border"
               : "flex-1",
           )}
         >
           {changed.length > 0 && (
-            <div className="border-b border-og-border">
+            <div className="max-h-[45%] shrink-0 overflow-auto border-b border-og-border">
               <div className="px-2 py-1 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">
                 Changes · {changed.length}
               </div>
@@ -203,7 +203,7 @@ export function SandboxFiles({
             </div>
           )}
 
-          <div className="px-2 py-1 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">
+          <div className="shrink-0 px-2 py-1 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">
             Files
           </div>
           <FileBrowser
@@ -211,7 +211,7 @@ export function SandboxFiles({
             selectedPath={effectiveSelected ?? undefined}
             onSelectFile={selectFile}
             emptyState="This directory is empty"
-            className="min-w-0"
+            className="min-w-0 flex-1"
           />
         </div>
 
@@ -269,20 +269,16 @@ export function SandboxFiles({
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {selectedDiff ? (
-              // A changed file -> diff pane (HEAD vs working/staged).
-              usePierre ? (
-                <PierreDiff
-                  diff={[selectedDiff]}
-                  layout={layout}
-                  themeType={resolvedTheme}
-                  fallback={
-                    <DiffView diff={[selectedDiff]} layout={layout} isRepo={git.isRepo} className="p-1" />
-                  }
-                  className="p-1"
-                />
-              ) : (
-                <DiffView diff={[selectedDiff]} layout={layout} isRepo={git.isRepo} className="p-1" />
-              )
+              // A changed file -> diff pane (HEAD vs working/staged). One renderer:
+              // Pierre (Shiki), with a plain-text degrade; `usePierre={false}`
+              // opts out of highlighting via the same renderer.
+              <PierreDiff
+                diff={[selectedDiff]}
+                layout={layout}
+                themeType={resolvedTheme}
+                plain={!usePierre}
+                className="p-1"
+              />
             ) : viewPath ? (
               // Any other tree file -> editable editor (Edit mode) or read-only
               // single-file viewer (fs.read). This works with NO repo — viewing

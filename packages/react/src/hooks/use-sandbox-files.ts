@@ -23,6 +23,10 @@ export type FileTreeNode = {
   children?: FileTreeNode[] | undefined;
   size?: number | null | undefined;
   status?: FileTreeStatus | undefined;
+  /** A residue dir the capture COLLAPSED (node_modules, .git, dist, …): its
+   *  contents were never indexed. Cold, expanding it can't list children — the
+   *  UI shows an inline "contents on machine" row until the box is warm. */
+  truncated?: boolean | undefined;
 };
 
 export type UseSandboxFilesOptions = ClientOverride & {
@@ -130,6 +134,9 @@ function fsNodeToTree(node: FsTreeNode): FileTreeNode {
     kind,
     size: node.sizeBytes,
     ...(kind === "dir" ? { children: mappedChildren } : {}),
+    // A collapsed residue dir from the capture index — carried through so the
+    // tree can show an inline "contents on machine" row cold instead of nothing.
+    ...(kind === "dir" && node.truncated ? { truncated: true } : {}),
   };
 }
 
