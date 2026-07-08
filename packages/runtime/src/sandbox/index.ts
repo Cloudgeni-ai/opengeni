@@ -762,6 +762,12 @@ export async function establishSandboxSessionFromEnvelope(
         throw createCallbackError;
       }
     }
+    // Whether an archive was ACTUALLY applied to /workspace — drives `origin`
+    // (and the worker's sandbox.box.created `hydrated` field). A clean-box
+    // fallback, a backend without hydrateWorkspace, or an all-archives-failed
+    // path leaves this false so we never report `hydrated: "archive"` for an
+    // empty workspace.
+    let hydrationApplied = false;
     if (!skipWorkspaceHydrate && (workspaceArchive || workspaceArchives.previous)) {
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
       if (typeof hydrate === "function") {
@@ -797,6 +803,7 @@ export async function establishSandboxSessionFromEnvelope(
           await terminateCreatedSandbox(client, restored, restoredState);
           return await coldRestore(resumeFallbackState, true);
         }
+        hydrationApplied = true;
         const hydratedState = (restored as { state?: unknown }).state;
         const hydratedInstanceId = readInstanceId(restored);
         if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
@@ -825,7 +832,7 @@ export async function establishSandboxSessionFromEnvelope(
       sessionState: restoredState ?? resumeFallbackState,
       instanceId: readInstanceId(restored),
       backendId: client.backendId,
-      origin: workspaceArchive ? "restored" as const : "created" as const,
+      origin: hydrationApplied ? "restored" as const : "created" as const,
     };
   };
 

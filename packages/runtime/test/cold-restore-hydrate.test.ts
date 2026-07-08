@@ -200,6 +200,9 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       expect(deleteCalls[0]).toMatchObject({ sandboxId: "sb-fresh" });
       expect(createArgs).toHaveLength(2);
       expect(hydrateCalls).toHaveLength(0);
+      // Nothing was actually hydrated → must NOT report as restored-from-archive
+      // (else sandbox.box.created would claim hydrated:"archive" on an empty box).
+      expect(established.origin).toBe("created");
     } finally {
       hydrateWorkspaceFailuresRemaining = 0;
     }
