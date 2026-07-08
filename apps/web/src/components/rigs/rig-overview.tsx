@@ -43,13 +43,19 @@ export function RigOverview({
     .filter((change) => change.resultVersionId === active.id && change.verification)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.verification ?? null;
 
+  // Use the server-derived activeVersionHealth (same source the list cards use —
+  // it also reflects audit-recorded active-version re-verifications), so the
+  // detail overview never disagrees with the list dot. Fall back to the local
+  // change-derived reading only if the field is absent. The no-checks case still
+  // shows no health chip (a version with no checks has nothing to be "unknown").
   const health = !versionHasChecks(active)
     ? null
-    : latestVerification
-      ? latestVerification.passed === false
-        ? "failing"
-        : "passing"
-      : "unknown";
+    : rig.activeVersionHealth?.checkHealth
+      ?? (latestVerification
+        ? latestVerification.passed === false
+          ? "failing"
+          : "passing"
+        : "unknown");
 
   return (
     <div className="grid gap-5">
