@@ -1,15 +1,15 @@
-// The subagent-lineage surface: everything that renders a session's spawned
-// workers. It is deliberately DECOUPLED from goals — a session's agent tree is
-// orthogonal to whether it carries a goal — and one compact tree component backs
-// two sibling homes:
-//   - SessionAgentsChip — the header "N agents" chip that EXPANDS into a floating
-//     panel, mirroring the goal pill's click-to-expand interaction + elevated
-//     visual family (the glanceable, quick-jump hero).
+// The subagent-lineage surface: the shared pieces that render a session's
+// spawned workers. It is deliberately DECOUPLED from goals — a session's agent
+// tree is orthogonal to whether it carries a goal — and one compact tree
+// component ({@link SubagentTree}) backs every home:
+//   - ComposerAgentsPill (./composer-agents-pill.tsx) — the floating "N agents"
+//     pill above the composer that EXPANDS upward into the lineage popover (the
+//     glanceable, front-and-center hero); reuses {@link SubagentTree} +
+//     {@link SubagentsLabel} from here.
 //   - AgentsPanel — the persistent, roomy "Agents" right-dock tab (the deep view
 //     a manager watches while orchestrating many workers).
-// Both render {@link SubagentTree}: the compact form in the popover, the
-// full-height form in the dock. SpawnedByBreadcrumb is the inverse link a child
-// session shows back to the manager that spawned it.
+// SpawnedByBreadcrumb is the inverse link a child session shows back to the
+// manager that spawned it.
 //
 // Design language: one dense line per agent — a single status-tone dot + a
 // truncated title + a quiet relative-time hint — the whole row a hover-lit
@@ -22,7 +22,6 @@ import { formatRelativeTime } from "@opengeni/react";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { BotIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
-import { Popover } from "radix-ui";
 import { useState, type ReactNode } from "react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -152,7 +151,7 @@ function SubagentRow({
 }
 
 /** The quiet section label both homes wear above the tree. */
-function SubagentsLabel({ count }: { count: number }) {
+export function SubagentsLabel({ count }: { count: number }) {
   return (
     <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
       <BotIcon className="size-3.5" />
@@ -210,67 +209,6 @@ export function AgentsPanel({
         )}
       </div>
     </ScrollArea>
-  );
-}
-
-/* --- header "N agents" chip → expands into the goal-pill-family panel -------- */
-
-export function SessionAgentsChip({
-  workspaceId,
-  nodes,
-}: {
-  workspaceId: string;
-  /** Direct children; presentational — the header owns the single lineage read.
-   *  The chip only renders when there ARE children (count>0), so it has no
-   *  loading/empty state of its own. */
-  nodes: LineageNode[];
-}) {
-  const [open, setOpen] = useState(false);
-  const count = nodes.length;
-  if (count === 0) {
-    return null;
-  }
-  return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-0.5 text-2xs font-medium text-fg-muted",
-            "outline-none transition-colors hover:border-border-strong hover:text-fg focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:border-border-strong data-[state=open]:text-fg",
-          )}
-        >
-          <BotIcon className="size-3" />
-          {count} agent{count === 1 ? "" : "s"}
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          side="bottom"
-          align="end"
-          sideOffset={8}
-          collisionPadding={12}
-          className={cn(
-            // Same elevated family as the goal-pill panel (rounded-xl / border /
-            // shadow-lg / surface), just opening DOWNWARD from the header; a tall
-            // lineage scrolls inside rather than overflowing the viewport.
-            "z-50 flex max-h-[min(28rem,var(--radix-popover-content-available-height))] w-[min(22rem,calc(100vw-2rem))] flex-col overflow-y-auto overscroll-contain",
-            "rounded-xl border border-border bg-surface shadow-lg outline-none",
-            "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-            "data-[side=bottom]:slide-in-from-top-1",
-          )}
-        >
-          <div className="p-2.5">
-            <SubagentsLabel count={count} />
-            {/* count > 0 here (the chip/popover only renders with children), so
-                the tree always has rows — no loading/empty branch to guard. */}
-            <div className="mt-2">
-              <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={() => setOpen(false)} />
-            </div>
-          </div>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
   );
 }
 
