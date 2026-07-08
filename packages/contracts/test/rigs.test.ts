@@ -76,12 +76,14 @@ describe("rig contracts", () => {
       description: null,
       createdBy: "user:alice",
       activeVersion: version,
+      activeVersionHealth: null,
       versionCount: 1,
       createdAt: "2026-07-08T00:00:00.000Z",
       updatedAt: "2026-07-08T00:00:00.000Z",
     };
     expect(Rig.safeParse(rig).success).toBe(true);
     expect(Rig.safeParse({ ...rig, activeVersion: null }).success).toBe(true);
+    expect(Rig.safeParse({ ...rig, activeVersionHealth: { checkHealth: "passing", lastVerifiedAt: "2026-07-08T00:00:00.000Z" } }).success).toBe(true);
 
     const change = {
       id: "55555555-5555-4555-8555-555555555555",
