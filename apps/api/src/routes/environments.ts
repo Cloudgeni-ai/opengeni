@@ -51,7 +51,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateVariableSetRequest.parse(await c.req.json());
     const name = trimmedVariableSetName(payload.name);
     if (payload.variables.length > MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new HTTPException(422, { message: `an variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
+      throw new HTTPException(422, { message: `a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
     }
     const variableNames = new Set<string>();
     for (const variable of payload.variables) {
@@ -135,7 +135,7 @@ export function registerVariableSetRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = SetVariableSetVariableRequest.parse(await c.req.json());
     const exists = variableSet.variables.some((variable) => variable.name === name);
     if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new HTTPException(422, { message: `an variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
+      throw new HTTPException(422, { message: `a variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
     }
     const metadata = await setVariableSetVariable(db, {
       accountId: grant.accountId,
