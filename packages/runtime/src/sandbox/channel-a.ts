@@ -136,6 +136,7 @@ export type SandboxChannelAServiceOptions = {
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
+const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
 
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
@@ -602,7 +603,7 @@ export class SandboxChannelAService {
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
     const r = await this.run({
       cmd: req.command,
-      workdir: this.repoWorkdir(req.cwd),
+      workdir: this.terminalWorkdir(req.cwd),
       yieldTimeMs: req.timeoutMs,
     });
     const running = r.exitCode === null && typeof r.sessionId === "number";
@@ -632,7 +633,7 @@ export class SandboxChannelAService {
     const shell = req.shell ?? "/bin/bash";
     const r = await this.run({
       cmd: shell,
-      workdir: this.repoWorkdir(req.cwd),
+      workdir: this.terminalWorkdir(req.cwd),
       tty: true,
       login: true,
       yieldTimeMs: 250,
@@ -701,6 +702,16 @@ export class SandboxChannelAService {
     const safe = normalizeRelPath(rel);
     const joined = this.joinRoot(safe);
     return joined === "." ? this.workspaceRoot || undefined : joined;
+  }
+
+  private terminalWorkdir(cwd: string): string | undefined {
+    // Model-facing terminal tools may send the manifest-rooted virtual frame.
+    // Preserve it for sessions like selfhosted whose own adapter maps it onto
+    // the real machine working dir; repo-relative dock fs/git still use repoWorkdir.
+    if (cwd === SELFHOSTED_VIRTUAL_ROOT || cwd.startsWith(`${SELFHOSTED_VIRTUAL_ROOT}/`)) {
+      return cwd;
+    }
+    return this.repoWorkdir(cwd);
   }
 
   private async emitEvents(events: { type: SessionEventType; payload: unknown }[]): Promise<void> {

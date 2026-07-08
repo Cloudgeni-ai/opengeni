@@ -11,6 +11,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
   SandboxChannelAService,
+  MockAgentResponder,
+  SelfhostedSession,
   parsePorcelainV2,
   parseNumstatZ,
   parseUnifiedPatch,
@@ -347,6 +349,135 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
     expect(opened.response.ptyId).toBe(ptyId);
     expect(opened.response.streamVia).toBe("sse-events");
     expect(opened.response.supportsInput).toBe(true);
+  });
+});
+
+describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
+  const RELAY = { host: "relay.test", port: 443, tls: true } as const;
+  const WS = "11111111-1111-1111-1111-111111111111";
+  const AGENT = "agent-abc";
+
+  test("selfhosted terminalExec preserves virtual '/workspace' so the machine cwd is workingDir", async () => {
+    const seen: Array<{ command: string; cwd: string }> = [];
+    const mock = new MockAgentResponder({
+      exec: (req) => {
+        seen.push({ command: req.command.join(" "), cwd: req.cwd });
+        expect(req.cwd).toBe("/home/u/proj");
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode("README.md\n"),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
+      },
+    });
+    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir: "/home/u/proj" });
+    const svc = new SandboxChannelAService({ session });
+
+    const out = await svc.terminalExec({ command: "ls", cwd: "/workspace", timeoutMs: 10000, emitStream: false });
+
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toContain("README.md");
+    expect(seen).toEqual([{ command: "ls", cwd: "/home/u/proj" }]);
+  });
+
+  test("selfhosted terminalExec preserves virtual '/workspace/sub' so compound commands run in workingDir/sub", async () => {
+    const seen: Array<{ command: string; cwd: string }> = [];
+    const mock = new MockAgentResponder({
+      exec: (req) => {
+        seen.push({ command: req.command.join(" "), cwd: req.cwd });
+        expect(req.cwd).toBe("/home/u/proj/sub");
+        return {
+          exitCode: 0,
+          stdout: new TextEncoder().encode(`${req.cwd}\ntotal 0\n`),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
+      },
+    });
+    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir: "/home/u/proj" });
+    const svc = new SandboxChannelAService({ session });
+
+    const out = await svc.terminalExec({ command: "pwd && ls -la", cwd: "/workspace/sub", timeoutMs: 10000, emitStream: false });
+
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toContain("/home/u/proj/sub");
+    expect(seen).toEqual([{ command: "pwd && ls -la", cwd: "/home/u/proj/sub" }]);
+  });
+
+  test("selfhosted ptyOpen preserves virtual cwd before the session maps it", async () => {
+    let seenCwd: string | undefined;
+    const mock = new MockAgentResponder({
+      exec: (req) => {
+        seenCwd = req.cwd;
+        expect(req.command).toEqual(["/bin/bash"]);
+        return {
+          exitCode: null,
+          stdout: new TextEncoder().encode("root@machine:/home/u/proj/sub# "),
+          stderr: new Uint8Array(0),
+          timedOut: false,
+          durationMs: "1",
+        };
+      },
+    });
+    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir: "/home/u/proj" });
+    const svc = new SandboxChannelAService({ session });
+
+    const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "/workspace/sub" }, "pty-selfhosted");
+
+    expect(opened.response.ptyId).toBe("pty-selfhosted");
+    expect(opened.response.supportsInput).toBe(false);
+    expect(seenCwd).toBe("/home/u/proj/sub");
+  });
+
+  test("provisioned-box terminal cwd behavior still joins repo-relative paths under workspaceRoot", async () => {
+    const seen: Array<{ cmd: string; workdir: string | undefined; tty?: boolean }> = [];
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      exec: async (args) => {
+        seen.push({ cmd: args.cmd, workdir: args.workdir, tty: args.tty });
+        return { stdout: "", stderr: "", exitCode: args.tty ? null : 0, sessionId: args.tty ? 12 : undefined };
+      },
+      writeStdin: async () => "",
+    };
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
+
+    await svc.terminalExec({ command: "pwd", cwd: "", timeoutMs: 10000, emitStream: false });
+    await svc.terminalExec({ command: "pwd", cwd: "sub", timeoutMs: 10000, emitStream: false });
+    await svc.ptyOpen({ cols: 80, rows: 24, cwd: "sub" }, "pty-provisioned");
+    await svc.terminalExec({ command: "pwd", cwd: "/workspace/sub", timeoutMs: 10000, emitStream: false });
+
+    expect(seen).toEqual([
+      { cmd: "pwd", workdir: "/workspace", tty: undefined },
+      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
+      { cmd: "/bin/bash", workdir: "/workspace/sub", tty: true },
+      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
+    ]);
+  });
+
+  test("dock fs/git operations still use repo-relative workspaceRoot mapping", async () => {
+    const paths: string[] = [];
+    const session: ChannelASession = {
+      readFile: async ({ path }) => {
+        paths.push(path);
+        return "file";
+      },
+      exec: async ({ cmd, workdir }) => {
+        paths.push(workdir ?? "");
+        return cmd.startsWith("git status")
+          ? { stdout: "", stderr: "", exitCode: 128 }
+          : { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
+
+    await svc.fsRead({ path: "file.txt", encoding: "utf8", maxBytes: 16 });
+    await svc.gitStatus({ path: "repo" });
+
+    expect(paths).toContain("/workspace/file.txt");
+    expect(paths).toContain("/workspace/repo");
   });
 });
 
