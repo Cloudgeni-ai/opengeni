@@ -131,6 +131,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     computerUseEnabled: true,
     computerUseReadOnly: false,
     recordingEnabled: true,
+    workspaceCaptureEnabled: true,
     recordingDefaultCodec: "h264-mp4",
     recordingFramerate: 15,
     recordingMaxSeconds: 600,

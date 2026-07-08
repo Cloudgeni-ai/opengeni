@@ -409,6 +409,13 @@ const SettingsSchema = z.object({
   // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
   recordingEnabled: EnvBoolean.default(true),
   recordingDefaultCodec: z.enum(["h264-mp4", "vp9-webm"]).default("h264-mp4"),
+  // Workbench v2 turn-end workspace capture (dossier §10.1). When on, the turn
+  // activity probes the box's changed files off the live box at turn end and
+  // persists a capture revision (blobs in @opengeni/storage) so the workbench
+  // paints cold/offline sessions with zero machine round-trips. Best-effort and
+  // fully behind this flag: off ⇒ capture is skipped and reads fall back to the
+  // live/wake path (status-quo behavior). Default on; explicit per environment.
+  workspaceCaptureEnabled: EnvBoolean.default(true),
   recordingFramerate: z.coerce.number().int().positive().default(15),
   recordingMaxSeconds: z.coerce.number().int().positive().default(600),
   recordingMaxBytes: z.coerce.number().int().positive().default(268_435_456), // 256 MB
@@ -1003,6 +1010,7 @@ export function getSettings(): Settings {
     computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),
     computerUseReadOnly: optional("OPENGENI_COMPUTER_USE_READONLY"),
     recordingEnabled: optional("OPENGENI_RECORDING_ENABLED"),
+    workspaceCaptureEnabled: optional("OPENGENI_WORKSPACE_CAPTURE"),
     recordingDefaultCodec: optional("OPENGENI_RECORDING_DEFAULT_CODEC"),
     recordingFramerate: optional("OPENGENI_RECORDING_FRAMERATE"),
     recordingMaxSeconds: optional("OPENGENI_RECORDING_MAX_SECONDS"),

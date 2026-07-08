@@ -98,6 +98,8 @@ import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorksp
 import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
 import { recordCreditMicros, runtimeMetricsHooksForObservability, turnLifecycleMetricsFor, type TurnOutcome } from "../observability-metrics";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
+import { captureWorkspaceRevision } from "./workspace-capture";
+import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
 import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
@@ -2465,6 +2467,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (persisted && publish) {
             await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "turn-end" } }]).catch(() => undefined);
           }
+          // Workbench v2 turn-end workspace capture (dossier §10.1). Runs AFTER
+          // the warm snapshot (box still live, lease still pins the refcount) and
+          // BEFORE release(). External module, self-capped at 60s, best-effort —
+          // never throws, never closes the box. The emitted
+          // workspace.revision.captured event is ANNOUNCE-ONLY: it must never
+          // gain a timeline projection case without regenerating the goldens.
+          await captureWorkspaceRevision({
+            db, objectStorage, settings, publish,
+            session: setupBoxSession as ChannelASession,
+            leaseEpoch: resolvedSandbox.leaseEpoch,
+            sandboxGroupId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turnId ?? null,
+            observability,
+          });
         }
         await resolvedSandbox.release().catch((releaseError) => {
           console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);

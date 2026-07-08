@@ -472,6 +472,9 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.box.terminated",
   "sandbox.box.snapshot",
   "sandbox.env.drift",
+  // Workbench v2 turn-end workspace capture (announce-only; mirror of contracts
+  // SessionEventType — the contract-parity test asserts sorted equality).
+  "workspace.revision.captured",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];

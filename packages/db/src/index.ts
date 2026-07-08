@@ -6369,6 +6369,195 @@ export async function persistWarmSnapshot(db: Database, input: {
     });
 }
 
+// ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
+// The durable index for turn-end workspace captures. `insertWorkspaceCapture`
+// mirrors persistWarmSnapshot's epoch-CAS discipline: the write is fenced on the
+// live lease's epoch so a capture whose lease was superseded (a newer turn
+// re-armed the box under a fresh epoch) writes ZERO rows. `revision` is assigned
+// monotonically per session inside the same statement (max+1), unique on
+// (session_id, revision).
+
+export type WorkspaceCaptureRow = {
+  id: string;
+  sessionId: string;
+  turnId: string | null;
+  revision: number;
+  leaseEpoch: number;
+  state: string;
+  manifestKey: string | null;
+  treeIndexKey: string | null;
+  blobKeys: string[];
+  sizeBytes: number | null;
+  stats: Record<string, unknown>;
+  capturedAt: string;
+};
+
+const WORKSPACE_CAPTURE_COLUMNS = sql`
+  id, session_id, turn_id, revision, lease_epoch, state,
+  manifest_key, tree_index_key, blob_keys, size_bytes, stats, captured_at
+`;
+
+function mapWorkspaceCaptureRow(row: {
+  id: string; session_id: string; turn_id: string | null; revision: number | string;
+  lease_epoch: number | string; state: string; manifest_key: string | null;
+  tree_index_key: string | null; blob_keys: unknown; size_bytes: number | string | null;
+  stats: unknown; captured_at: string;
+}): WorkspaceCaptureRow {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    turnId: row.turn_id,
+    revision: Number(row.revision),
+    leaseEpoch: Number(row.lease_epoch),
+    state: row.state,
+    manifestKey: row.manifest_key,
+    treeIndexKey: row.tree_index_key,
+    blobKeys: Array.isArray(row.blob_keys) ? row.blob_keys as string[] : [],
+    sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
+    stats: (row.stats && typeof row.stats === "object" ? row.stats : {}) as Record<string, unknown>,
+    capturedAt: row.captured_at,
+  };
+}
+
+/**
+ * Fenced insert of a capture revision at an EXPLICIT revision (the caller
+ * assigns it as prevRevision+1 so the manifest blob — written before this insert
+ * — can embed the same number). Writes ONLY when a warm lease with the expected
+ * epoch still exists for the sandbox group (the same supersession guard
+ * persistWarmSnapshot uses, expressed as an EXISTS on sandbox_leases). Returns
+ * the assigned revision, or null when the fence rejected the write (superseded /
+ * released lease). Captures for one session are serialized (one turn at a time),
+ * so the explicit revision never races the unique (session_id, revision) index.
+ */
+export async function insertWorkspaceCapture(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  revision: number;
+  manifestKey: string;
+  treeIndexKey: string;
+  blobKeys: string[];
+  sizeBytes: number;
+  stats: Record<string, unknown>;
+}): Promise<{ revision: number } | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ revision: number | string }>(sql`
+        insert into workspace_captures
+          (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
+           manifest_key, tree_index_key, blob_keys, size_bytes, stats)
+        select
+          ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
+          ${input.revision}, ${input.expectedEpoch}, 'available',
+          ${input.manifestKey}, ${input.treeIndexKey},
+          ${JSON.stringify(input.blobKeys)}::jsonb, ${input.sizeBytes}, ${JSON.stringify(input.stats)}::jsonb
+        where exists (
+          select 1 from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+        )
+        returning revision
+      `);
+      if (rows.length === 0) return null;
+      return { revision: Number(rows[0]!.revision) };
+    });
+}
+
+/** The newest capture for a session (highest revision), or null if none. */
+export async function latestWorkspaceCapture(db: Database, workspaceId: string, sessionId: string): Promise<WorkspaceCaptureRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
+      select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
+      where session_id = ${sessionId}
+      order by revision desc
+      limit 1
+    `);
+    return rows.length ? mapWorkspaceCaptureRow(rows[0]!) : null;
+  });
+}
+
+/**
+ * Plan the keep-latest-N GC for a session. Pure read + set-difference (no
+ * mutation): returns the evicted rows' ids, the per-revision manifest/tree blob
+ * keys (unshared — always deletable), and the after-image blob keys owned ONLY
+ * by evicted revisions (union(evicted) minus union(surviving) — a content-
+ * addressed blob shared with a surviving revision is NEVER deleted). The caller
+ * deletes storage first (idempotent), then deletes the rows (F9 ordering — the
+ * new revision is already committed by the time GC runs).
+ */
+export type WorkspaceCaptureGcRow = {
+  id: string;
+  manifestKey: string | null;
+  treeIndexKey: string | null;
+  blobKeys: string[];
+};
+export type WorkspaceCaptureGcPlan = {
+  evictedRowIds: string[];
+  deleteBlobKeys: string[];
+  deletePerRevisionKeys: string[];
+};
+
+/**
+ * Pure keep-latest-N set-difference (extracted for direct unit testing). `rows`
+ * MUST be ordered newest-revision-first. The first keepN survive; the rest are
+ * evicted. A content-addressed after-image blob key owned by an evicted revision
+ * is deleted ONLY when NO surviving revision also references it (shared blobs are
+ * never deleted); per-revision manifest/tree keys are unshared → always deleted.
+ */
+export function computeWorkspaceCaptureGcPlan(rows: WorkspaceCaptureGcRow[], keepN: number): WorkspaceCaptureGcPlan {
+  const survivors = rows.slice(0, Math.max(0, keepN));
+  const evicted = rows.slice(Math.max(0, keepN));
+  const survivingBlobKeys = new Set<string>();
+  for (const r of survivors) for (const k of r.blobKeys) survivingBlobKeys.add(k);
+  const deleteBlobKeys = new Set<string>();
+  const deletePerRevisionKeys: string[] = [];
+  const evictedRowIds: string[] = [];
+  for (const r of evicted) {
+    evictedRowIds.push(r.id);
+    if (r.manifestKey) deletePerRevisionKeys.push(r.manifestKey);
+    if (r.treeIndexKey) deletePerRevisionKeys.push(r.treeIndexKey);
+    for (const k of r.blobKeys) if (!survivingBlobKeys.has(k)) deleteBlobKeys.add(k);
+  }
+  return { evictedRowIds, deleteBlobKeys: [...deleteBlobKeys], deletePerRevisionKeys };
+}
+
+export async function planWorkspaceCaptureGc(db: Database, input: { workspaceId: string; sessionId: string; keepN: number }): Promise<WorkspaceCaptureGcPlan> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string; revision: number | string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }>(sql`
+      select id, revision, manifest_key, tree_index_key, blob_keys
+      from workspace_captures
+      where session_id = ${input.sessionId}
+      order by revision desc
+    `);
+    return computeWorkspaceCaptureGcPlan(
+      rows.map((r: { id: string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }) => ({
+        id: r.id,
+        manifestKey: r.manifest_key,
+        treeIndexKey: r.tree_index_key,
+        blobKeys: Array.isArray(r.blob_keys) ? r.blob_keys as string[] : [],
+      })),
+      input.keepN,
+    );
+  });
+}
+
+/** Delete evicted capture rows by id (call AFTER their storage blobs are gone). */
+export async function deleteWorkspaceCaptureRows(db: Database, input: { workspaceId: string; rowIds: string[] }): Promise<number> {
+  if (input.rowIds.length === 0) return 0;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const result = await scopedDb.execute<{ id: string }>(sql`
+      delete from workspace_captures
+      where id in (${sql.join(input.rowIds.map((id) => sql`${id}`), sql`, `)})
+      returning id
+    `);
+    return result.length;
+  });
+}
+
 // §4.9 — non-locking snapshot for the API handshake & health.
 export async function readLease(db: Database, workspaceId: string, sandboxGroupId: string): Promise<LeaseSnapshot | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {

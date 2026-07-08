@@ -2557,6 +2557,13 @@ export const SessionEventType = z.enum([
   "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
   "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
   "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
+  // Workbench v2 turn-end workspace capture (dossier §10.1). ANNOUNCE-ONLY: a new
+  // capture revision was persisted at turn end; the client refetches the latest
+  // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
+  // never file content. Hits the timeline projection default case (ignored) — it
+  // must NEVER gain a rendered timeline item without regenerating the golden
+  // snapshots (dossier §7.3 golden-grammar gate).
+  "workspace.revision.captured",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
@@ -2933,6 +2940,96 @@ export const GitDiffResponse = z.object({
   revision: z.number().int().nonnegative(),
 });
 export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
+
+// ─── Workbench v2 turn-end workspace capture (dossier §10.1/§10.2) ────────────
+// A capture is a point-in-time snapshot of the session workspace's CHANGES,
+// probed live off the box at turn end (detectRepos → gitStatus/gitDiff → fsRead
+// after-images → fsList tree index). It is the cold/offline read source that
+// lets the workbench paint instantly with zero machine round-trips. Live always
+// wins when the box is warm; a capture is a labelled cache, never a replacement.
+// This is the shape the M1 worker writes and the M2 API serves inline.
+
+// One touched file in the capture. `contentRef` is the content-addressed storage
+// key of its after-image blob (shared across revisions → the GC set-difference
+// key). Deleted / binary / >5MB (tooLarge) files carry no contentRef; the UI
+// renders "too large — open live" for tooLarge, and the diff hunks for the rest.
+export const WorkspaceCaptureFile = z.object({
+  path: z.string(),
+  status: GitFileStatusCode,
+  // sha256 of the captured after-image bytes; null when deleted / tooLarge.
+  hash: z.string().nullable(),
+  // git blob sha of the HEAD version — the wake-on-edit flush guard (dossier
+  // §10.1). null when the path is new/untracked (no HEAD blob).
+  baseHash: z.string().nullable(),
+  // Content-addressed storage key of the after-image; null when deleted /
+  // tooLarge / binary (no inline content captured).
+  contentRef: z.string().nullable(),
+  sizeBytes: z.number().int().nonnegative(),
+  isBinary: z.boolean().default(false),
+  // >5MB per-file content guard tripped: content NOT captured, render "open live".
+  tooLarge: z.boolean().default(false),
+  deleted: z.boolean().default(false),
+});
+export type WorkspaceCaptureFile = z.infer<typeof WorkspaceCaptureFile>;
+
+// One repo discovered in the workspace. `diff` is `git diff HEAD` (combined
+// staged+unstaged tracked changes vs HEAD — the review diff); `status` is the
+// full porcelain file list (drives the rail glyphs incl. untracked, which the
+// HEAD diff omits). root "" = the workspace root repo.
+export const WorkspaceCaptureRepo = z.object({
+  root: z.string(),
+  head: z.string().nullable(),
+  detached: z.boolean().default(false),
+  upstream: z.string().nullable(),
+  ahead: z.number().int().nonnegative().default(0),
+  behind: z.number().int().nonnegative().default(0),
+  status: z.array(GitFileStatus),
+  diff: z.array(GitFileDiff),
+});
+export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
+
+// Rollup counters — carried on the row (jsonb) and the announce event so the UI
+// can reserve layout (dossier §12 no-layout-shift) before fetching the manifest.
+export const WorkspaceCaptureStats = z.object({
+  repoCount: z.number().int().nonnegative(),
+  fileCount: z.number().int().nonnegative(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  tooLargeCount: z.number().int().nonnegative(),
+  binaryCount: z.number().int().nonnegative(),
+  treeEntryCount: z.number().int().nonnegative(),
+  treeTruncated: z.boolean().default(false),
+  durationMs: z.number().int().nonnegative(),
+});
+export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
+
+// The single manifest blob (one per revision). Holds everything the workbench
+// needs for a cold paint: the tree index, per-repo status+diff, and the file
+// index (after-image refs). The M2 API serves this inline when small (≤2MB).
+export const WorkspaceCaptureManifest = z.object({
+  version: z.literal(1),
+  revision: z.number().int().nonnegative(),
+  capturedAt: z.string(),
+  turnId: z.string().nullable(),
+  leaseEpoch: z.number().int().nonnegative(),
+  treeIndex: FsTreeNode,
+  treeTruncated: z.boolean().default(false),
+  repos: z.array(WorkspaceCaptureRepo),
+  files: z.array(WorkspaceCaptureFile),
+  stats: WorkspaceCaptureStats,
+});
+export type WorkspaceCaptureManifest = z.infer<typeof WorkspaceCaptureManifest>;
+
+// Announce-only event payload (dossier §10.1). Metadata only — never content.
+export const WorkspaceRevisionCapturedPayload = z.object({
+  revision: z.number().int().nonnegative(),
+  turnId: z.string().nullable(),
+  capturedAt: z.string(),
+  leaseEpoch: z.number().int().nonnegative(),
+  stats: WorkspaceCaptureStats,
+});
+export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
 
 export const GitLogRequest = z.object({
   path: z.string().default(""),

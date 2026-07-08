@@ -781,6 +781,46 @@ export const sessionRecordings = pgTable("session_recordings", {
   sessionIdx: index("session_recordings_session_idx").on(table.workspaceId, table.sessionId, table.createdAt),
 }));
 
+// Workbench v2 turn-end workspace capture (dossier §10.2; model: sessionRecordings).
+// One row per capture revision — a point-in-time snapshot of a session's changed
+// files, probed off the live box at turn end. The manifest (tree index + per-repo
+// status/diff + file index) and each after-image blob live in @opengeni/storage;
+// this row is the durable index the read routes serve from. `revision` is
+// monotonic per session (unique (session_id, revision)); `blob_keys` records the
+// content-addressed after-image keys this revision references so the keep-latest-10
+// GC can delete only blobs no surviving revision shares (set-difference GC without
+// a storage read). `lease_epoch` fences a write: an insert whose lease was
+// superseded writes zero rows (see insertWorkspaceCapture).
+export const workspaceCaptures = pgTable("workspace_captures", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+
+  revision: bigint("revision", { mode: "number" }).notNull(),
+  leaseEpoch: integer("lease_epoch").notNull(),
+  // 'available' on a committed capture. 'failed' reserved for a future two-phase
+  // write; the current synchronous capture only ever inserts 'available'.
+  state: text("state", { enum: ["available", "failed"] }).notNull().default("available"),
+
+  // Single JSON manifest blob (tree index + repos + file refs) — the cold-paint payload.
+  manifestKey: text("manifest_key"),
+  // The fs tree index blob, kept separate from the manifest so the API can inline
+  // or sign it independently of the (usually small) manifest metadata.
+  treeIndexKey: text("tree_index_key"),
+  // Content-addressed after-image blob keys this revision references (GC input).
+  blobKeys: jsonb("blob_keys").$type<string[]>().notNull().default([]),
+
+  sizeBytes: bigint("size_bytes", { mode: "number" }),
+  stats: jsonb("stats").$type<Record<string, unknown>>().notNull().default({}),
+
+  capturedAt: timestamp("captured_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  sessionRevision: uniqueIndex("workspace_captures_session_revision_idx").on(table.sessionId, table.revision),
+  latest: index("workspace_captures_latest_idx").on(table.workspaceId, table.sessionId, table.revision),
+}));
+
 // Channel-A interactive PTY sessions (P4.4 / modules/08-channel-a.md §3.1). The
 // ONLY new persistent state Channel A needs — FS/Git reads are stateless point
 // queries; an interactive PTY is a live in-box process keyed by the SDK's numeric
