@@ -2844,6 +2844,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             .catch(() => undefined);
         }
       }
+      // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
+      // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
+      // tool ran before this finally, so /workspace is already final; capture is
+      // FS-equivalent whether it runs before or after recording-finalize / the
+      // warm snapshot (neither mutates workspace files). Running it here — BEFORE
+      // preparedTools.close() (which tears down tools / computer-use / the display
+      // stack and is what starts the Modal box exiting a few seconds later) —
+      // gives capture the full live-box margin instead of racing the teardown
+      // tail, which was dropping 100% of captures on real Modal desktop boxes
+      // ("request cancelled due to container exiting", 0 rows). External module:
+      // self-capped at 60s, best-effort (never throws past its boundary),
+      // epoch-fenced, and it NEVER closes the box. The emitted
+      // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
+      // content).
+      if (resolvedSandbox && setupBoxSession && sandboxGroupId) {
+        // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
+        // start concurrently with capture, then drain any in-flight snapshot
+        // (bounded) — capture and the warm snapshot both exec on the box, so
+        // sequence them, exactly as the turn-end snapshot placement did.
+        if (leaseHeartbeatTimer) {
+          clearInterval(leaseHeartbeatTimer);
+          leaseHeartbeatTimer = undefined;
+        }
+        if (snapshotInFlight) {
+          await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
+        }
+        await captureWorkspaceRevision({
+          db, objectStorage, settings, publish,
+          session: setupBoxSession as ChannelASession,
+          leaseEpoch: resolvedSandbox.leaseEpoch,
+          sandboxGroupId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turnId ?? null,
+          observability,
+        });
+      }
       await preparedTools?.close().catch(() => undefined);
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
@@ -2931,23 +2969,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (persisted && publish) {
             await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "turn-end" } }]).catch(() => undefined);
           }
-          // Workbench v2 turn-end workspace capture (dossier §10.1). Runs AFTER
-          // the warm snapshot (box still live, lease still pins the refcount) and
-          // BEFORE release(). External module, self-capped at 60s, best-effort —
-          // never throws, never closes the box. The emitted
-          // workspace.revision.captured event is ANNOUNCE-ONLY: it must never
-          // gain a timeline projection case without regenerating the goldens.
-          await captureWorkspaceRevision({
-            db, objectStorage, settings, publish,
-            session: setupBoxSession as ChannelASession,
-            leaseEpoch: resolvedSandbox.leaseEpoch,
-            sandboxGroupId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turnId ?? null,
-            observability,
-          });
+          // NB workspace capture (dossier §10.1) no longer runs here — it moved to
+          // the TOP of this finally (before preparedTools.close) so it completes
+          // while the box is still solidly alive, instead of racing the turn-end
+          // teardown that was killing 100% of captures on real Modal desktop boxes.
         }
         await resolvedSandbox.release().catch((releaseError) => {
           console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
