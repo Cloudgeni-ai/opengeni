@@ -148,14 +148,16 @@ describe("workspace isolation matrix", () => {
     const environmentsVisibleToB = await app.request(workspacePath(b.workspaceId, "/environments"), { headers: authB });
     expect(environmentsVisibleToB.status).toBe(200);
     expect((await environmentsVisibleToB.json() as Array<{ id: string }>).some((item) => item.id === environment.id)).toBe(false);
-    // Cross-workspace attachment is indistinguishable from a missing environment.
+    // Cross-workspace attachment is indistinguishable from a missing variable set.
+    // Request still uses the deprecated `environmentId` alias field on purpose (alias coverage);
+    // the canonical error message names the variable set.
     const crossAttachment = await app.request(workspacePath(b.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({ initialMessage: "cross-workspace attach", environmentId: environment.id }),
       headers: { ...authB, "content-type": "application/json" },
     });
     expect(crossAttachment.status).toBe(422);
-    expect(await crossAttachment.text()).toContain("unknown environmentId");
+    expect(await crossAttachment.text()).toContain("unknown variableSetId");
 
     const apiKeyResponse = await app.request(workspacePath(a.workspaceId, "/api-keys"), {
       method: "POST",
