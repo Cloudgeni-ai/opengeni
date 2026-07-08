@@ -7298,10 +7298,16 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
   livenessGuard: "draining" | "warm";
   priorCurrentArchive?: string | null;
   clearPreviousArchive?: boolean;
+  /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
+   *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
+   *  land time — a late, older capture is superseded (persistWarmSnapshot's
+   *  monotonic guard). Absent (drain) → now(). */
+  archiveAtIso?: string;
 }): Promise<void> {
   const livenessGuard = input.livenessGuard === "draining"
     ? sql`liveness = 'draining' and refcount = 0`
     : sql`liveness = 'warm'`;
+  const archiveAt = input.archiveAtIso ? sql`to_jsonb(${input.archiveAtIso}::text)` : sql`to_jsonb(now()::timestamptz::text)`;
   await scopedDb.execute(sql`
     update sandbox_leases set
       resume_state = jsonb_set(
@@ -7315,7 +7321,7 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
                 then resume_state -> 'sessionState' else '{}'::jsonb end)
             || jsonb_build_object(
               'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-              'workspaceArchiveAt', to_jsonb(now()::timestamptz::text),
+              'workspaceArchiveAt', ${archiveAt},
               'workspaceArchivePrev', case
                 when ${input.clearPreviousArchive ? "yes" : "no"}::text = 'yes' then null::jsonb
                 when ${input.priorCurrentArchive ?? null}::text is null then null::jsonb
@@ -7349,7 +7355,14 @@ export async function persistWarmSnapshot(db: Database, input: {
   workspaceArchive: string;
   /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
   minIntervalMs: number;
-}): Promise<{ wrote: boolean; throttled: boolean; priorArchiveForGc: string | null }> {
+  /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
+   *  NOT land time: a capture that started at or before the archive already on
+   *  the lease is SUPERSEDED (a stale heartbeat capture that timed out its wait
+   *  and landed late must never overwrite a fresher turn-end snapshot or refresh
+   *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
+  capturedAtMs?: number;
+}): Promise<{ wrote: boolean; throttled: boolean; superseded: boolean; priorArchiveForGc: string | null }> {
+  const capturedAtMs = input.capturedAtMs ?? Date.now();
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null; prior_archive_at: string | null }>(sql`
@@ -7363,17 +7376,24 @@ export async function persistWarmSnapshot(db: Database, input: {
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, priorArchiveForGc: null };
+        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
+      // MONOTONIC guard: a capture whose start is at/before the stored archive's
+      // capture is stale (a slower-but-earlier heartbeat capture landing after a
+      // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
+      // throttle clock. This is what makes the bounded snapshot wait safe.
+      if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
+        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+      }
       if (
         input.minIntervalMs > 0
         && Number.isFinite(priorAtMs)
-        && Date.now() - priorAtMs < input.minIntervalMs
+        && capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, priorArchiveForGc: null };
+        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -7382,8 +7402,9 @@ export async function persistWarmSnapshot(db: Database, input: {
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "warm",
         priorCurrentArchive: priorArchive,
+        archiveAtIso: new Date(capturedAtMs).toISOString(),
       });
-      return { wrote: true, throttled: false, priorArchiveForGc: priorArchivePrev };
+      return { wrote: true, throttled: false, superseded: false, priorArchiveForGc: priorArchivePrev };
   });
 }
 

@@ -305,6 +305,11 @@ export async function maybePersistWarmWorkspaceSnapshot(
       return false;
     }
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
+    // by capture-initiation, not land time, so a slower heartbeat capture that
+    // started earlier can never overwrite a fresher turn-end capture that landed
+    // first (the bounded-wait race Bugbot flagged).
+    const capturedAtMs = Date.now();
     // On timeout the race settles on `undefined` while persistWorkspace() keeps
     // running orphaned. Swallow its LATE settlement: an un-awaited rejection
     // after the race resolved would surface as an unhandledRejection and can
@@ -335,6 +340,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
       expectedEpoch: leaseEpoch,
       workspaceArchive: Buffer.from(bytes).toString("base64"),
       minIntervalMs: intervalMs,
+      capturedAtMs,
     });
     if (!wrote) {
       return false;
