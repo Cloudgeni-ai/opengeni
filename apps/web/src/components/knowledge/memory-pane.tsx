@@ -296,6 +296,31 @@ export function MemoryPane({
     }
   }
 
+  const renderMemoryCard = (memory: KnowledgeMemory) => (
+    <MemoryCard
+      key={memory.id}
+      workspaceId={workspaceId}
+      memory={memory}
+      highlighted={focusedId === memory.id}
+      innerRef={(el) => {
+        const map = cardRefs.current;
+        if (el) map.set(memory.id, el);
+        else map.delete(memory.id);
+      }}
+      busy={busyIds.has(memory.id)}
+      editing={editingId === memory.id}
+      editText={editText}
+      onEditTextChange={setEditText}
+      onStartEdit={() => { setEditingId(memory.id); setEditText(memory.text); }}
+      onCancelEdit={() => setEditingId(null)}
+      onSaveEdit={() => void saveEdit(memory)}
+      onTogglePin={() => void runUpdate(memory, { pinned: !memory.pinned }, memory.pinned ? "Unpinned" : "Pinned", false)}
+      onArchive={() => void runUpdate(memory, { status: "archived" }, "Memory archived", true)}
+      onApprove={() => void runUpdate(memory, { status: "approved" }, "Memory approved", true)}
+      onReject={() => void runUpdate(memory, { status: "rejected" }, "Memory rejected", true)}
+    />
+  );
+
   return (
     <div className="mt-6 border-t border-[color:var(--color-border)] pt-4">
       <div className="flex items-center justify-between gap-2">
@@ -446,45 +471,30 @@ export function MemoryPane({
                 <Loader2Icon className="size-3.5 animate-spin" />
                 Loading memory
               </div>
-            ) : error ? (
-              <Notice
-                tone="failed"
-                title="Couldn't load memory"
-                action={<Button type="button" variant="ghost" size="xs" onClick={() => void refresh()}>Retry</Button>}
-              >
-                {error.message}
-              </Notice>
-            ) : memories.length > 0 ? (
-              memories.map((memory) => (
-                <MemoryCard
-                  key={memory.id}
-                  workspaceId={workspaceId}
-                  memory={memory}
-                  highlighted={focusedId === memory.id}
-                  innerRef={(el) => {
-                    const map = cardRefs.current;
-                    if (el) map.set(memory.id, el);
-                    else map.delete(memory.id);
-                  }}
-                  busy={busyIds.has(memory.id)}
-                  editing={editingId === memory.id}
-                  editText={editText}
-                  onEditTextChange={setEditText}
-                  onStartEdit={() => { setEditingId(memory.id); setEditText(memory.text); }}
-                  onCancelEdit={() => setEditingId(null)}
-                  onSaveEdit={() => void saveEdit(memory)}
-                  onTogglePin={() => void runUpdate(memory, { pinned: !memory.pinned }, memory.pinned ? "Unpinned" : "Pinned", false)}
-                  onArchive={() => void runUpdate(memory, { status: "archived" }, "Memory archived", true)}
-                  onApprove={() => void runUpdate(memory, { status: "approved" }, "Memory approved", true)}
-                  onReject={() => void runUpdate(memory, { status: "rejected" }, "Memory rejected", true)}
-                />
-              ))
             ) : (
-              <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-                {statusFilter === "active"
-                  ? "No memory yet. Agents add facts as they work, or seed one with the + above."
-                  : `No ${STATUS_LABEL[statusFilter].toLowerCase()} memory${kindFilter ? ` of this kind` : ""}.`}
-              </div>
+              <>
+                {/* A list error is a banner, not a takeover: cards below still
+                    render — so a deep-linked record (injected even when the
+                    browse list fails) still mounts, scrolls, and highlights. */}
+                {error ? (
+                  <Notice
+                    tone="failed"
+                    title="Couldn't load memory"
+                    action={<Button type="button" variant="ghost" size="xs" onClick={() => void refresh()}>Retry</Button>}
+                  >
+                    {error.message}
+                  </Notice>
+                ) : null}
+                {memories.length > 0 ? (
+                  memories.map(renderMemoryCard)
+                ) : error ? null : (
+                  <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                    {statusFilter === "active"
+                      ? "No memory yet. Agents add facts as they work, or seed one with the + above."
+                      : `No ${STATUS_LABEL[statusFilter].toLowerCase()} memory${kindFilter ? ` of this kind` : ""}.`}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </>
