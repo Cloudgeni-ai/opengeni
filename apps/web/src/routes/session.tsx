@@ -295,6 +295,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       onLoadOlder={loadOlder}
       onClearView={clearView}
       onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
+      onMemoryClick={(memoryId) => void navigate({ to: "/workspaces/$workspaceId/documents", params: { workspaceId }, search: { memory: memoryId } })}
       onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -410,6 +411,8 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
+  /** Deep-link a timeline memory step to its record in the Documents memory pane. */
+  onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
@@ -529,6 +532,7 @@ function SessionChatPane(props: {
               status={props.session.status}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
+              onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}
               resolveProviderLogo={props.resolveProviderLogo}
               hasOlder={props.hasOlder}

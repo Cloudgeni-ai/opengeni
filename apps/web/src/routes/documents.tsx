@@ -18,7 +18,7 @@ import type { DocumentBase, DocumentSearchMode, DocumentSearchResult, IndexedDoc
 
 const sourceKindOptions: KnowledgeSourceKind[] = ["manual_upload", "meeting_transcript", "repository", "email", "chat", "document", "web", "other"];
 
-export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
+export function DocumentsRoute({ workspaceId, focusMemoryId }: { workspaceId: string; focusMemoryId?: string | undefined }) {
   const context = useAppContext();
   const client = context.client;
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
@@ -544,7 +544,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
               )}
             </div>
 
-            <MemoryPane workspaceId={workspaceId} memoryEnabled={memoryEnabled} />
+            <MemoryPane workspaceId={workspaceId} memoryEnabled={memoryEnabled} focusMemoryId={focusMemoryId} />
           </aside>
         </div>
       </section>

@@ -20,7 +20,7 @@ import {
   SearchIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -72,7 +72,16 @@ function sortMemories(memories: KnowledgeMemory[]): KnowledgeMemory[] {
   });
 }
 
-export function MemoryPane({ workspaceId, memoryEnabled }: { workspaceId: string; memoryEnabled: boolean }) {
+export function MemoryPane({
+  workspaceId,
+  memoryEnabled,
+  focusMemoryId,
+}: {
+  workspaceId: string;
+  memoryEnabled: boolean;
+  /** A memory record to reveal + highlight, deep-linked from a timeline memory step (`?memory=<id>`). */
+  focusMemoryId?: string | undefined;
+}) {
   const client = useAppContext().client;
 
   const [memories, setMemories] = useState<KnowledgeMemory[]>([]);
@@ -80,6 +89,15 @@ export function MemoryPane({ workspaceId, memoryEnabled }: { workspaceId: string
   const [error, setError] = useState<Error | null>(null);
   const [statusFilter, setStatusFilter] = useState<KnowledgeMemoryStatus>("active");
   const [kindFilter, setKindFilter] = useState<KnowledgeMemoryKind | "">("");
+
+  // Deep-link focus (from `?memory=<id>`): reveal the record even when the
+  // filters would hide it, scroll it into view, and ring it briefly. `pending`
+  // is the id awaiting reveal; `focusedId` drives the transient highlight;
+  // `fallback` is the fetched record we inject if it lands outside the list.
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [focusFallback, setFocusFallback] = useState<KnowledgeMemory | null>(null);
+  const cardRefs = useRef(new Map<string, HTMLDivElement>());
 
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
@@ -103,6 +121,58 @@ export function MemoryPane({ workspaceId, memoryEnabled }: { workspaceId: string
     setEditingId(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, statusFilter, kindFilter]);
+
+  // A deep-link arrived: leave any search, fetch the record to learn its
+  // status/kind, and align the browse filters so it comes into view. Filter
+  // changes ride the effect above (which refetches the list).
+  useEffect(() => {
+    if (!focusMemoryId) return;
+    let cancelled = false;
+    setSearchResults(null);
+    setPendingFocusId(focusMemoryId);
+    void (async () => {
+      try {
+        const record = await client.getKnowledgeMemory(workspaceId, focusMemoryId);
+        if (cancelled) return;
+        setFocusFallback(record);
+        setKindFilter((current) => (current && current !== record.kind ? "" : current));
+        setStatusFilter((current) => (current !== record.status ? record.status : current));
+      } catch {
+        // Not found / no access — drop the pending focus so nothing dead-highlights.
+        if (!cancelled) setPendingFocusId(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusMemoryId, workspaceId]);
+
+  // Once the list has settled, scroll the focused card into view and ring it. If
+  // the record fell outside the (filtered, capped) list, inject the fetched copy
+  // so the deep-link never dead-ends, then this effect re-runs and reveals it.
+  useEffect(() => {
+    if (!pendingFocusId || loading || searchResults !== null) return;
+    const node = cardRefs.current.get(pendingFocusId);
+    if (node) {
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
+      setFocusedId(pendingFocusId);
+      setPendingFocusId(null);
+      return;
+    }
+    if (focusFallback && focusFallback.id === pendingFocusId) {
+      setMemories((current) =>
+        current.some((item) => item.id === pendingFocusId) ? current : sortMemories([focusFallback, ...current]),
+      );
+    }
+  }, [pendingFocusId, loading, memories, searchResults, focusFallback]);
+
+  // The highlight ring is transient — fade it after ~2s.
+  useEffect(() => {
+    if (!focusedId) return;
+    const timer = setTimeout(() => setFocusedId(null), 2000);
+    return () => clearTimeout(timer);
+  }, [focusedId]);
 
   async function refresh() {
     setLoading(true);
@@ -381,6 +451,12 @@ export function MemoryPane({ workspaceId, memoryEnabled }: { workspaceId: string
                   key={memory.id}
                   workspaceId={workspaceId}
                   memory={memory}
+                  highlighted={focusedId === memory.id}
+                  innerRef={(el) => {
+                    const map = cardRefs.current;
+                    if (el) map.set(memory.id, el);
+                    else map.delete(memory.id);
+                  }}
                   busy={busyIds.has(memory.id)}
                   editing={editingId === memory.id}
                   editText={editText}
@@ -412,6 +488,10 @@ function MemoryCard(props: {
   workspaceId: string;
   memory: KnowledgeMemory;
   score?: number;
+  /** Ring the card briefly — set while it is the deep-link's focused record. */
+  highlighted?: boolean;
+  /** Registers the card node so the pane can scroll it into view on a deep-link. */
+  innerRef?: (el: HTMLDivElement | null) => void;
   busy: boolean;
   editing: boolean;
   editText: string;
@@ -429,7 +509,15 @@ function MemoryCard(props: {
   const canArchive = memory.status === "active" || memory.status === "approved" || memory.status === "proposed";
 
   return (
-    <div className={cn("rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3", faded && "opacity-70")}>
+    <div
+      ref={props.innerRef}
+      className={cn(
+        "scroll-mt-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 transition-shadow duration-300",
+        faded && "opacity-70",
+        props.highlighted &&
+          "ring-2 ring-[color:var(--color-brand)] ring-offset-2 ring-offset-[color:var(--color-bg)]",
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
           {memory.pinned ? <PinIcon className="size-3 shrink-0 text-[color:var(--color-brand)]" /> : null}
