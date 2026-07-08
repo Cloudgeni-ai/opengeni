@@ -13,6 +13,12 @@ Thanks for considering a contribution.
 bun run dev
 ```
 
+## Toolchain
+
+Package manager is Bun everywhere (one intentional npm exception for release publishing).
+Typecheck runs on tsgo, not `tsc`. See [`docs/toolchain.md`](docs/toolchain.md) for what runs
+typecheck/lint/format and why.
+
 ## Checks
 
 Run the normal PR check before opening a pull request:
