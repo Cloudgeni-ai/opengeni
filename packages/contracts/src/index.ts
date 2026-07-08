@@ -494,6 +494,13 @@ export const Permission = z.enum([
   // admin-shaped action. workspace:admin is the super-wildcard over both.
   "enrollments:read",
   "enrollments:manage",
+  // Rigs (workspace-scoped, versioned sandbox machine definitions). rigs:use is
+  // read + propose-change (the agent-native, additive path a sandboxed session
+  // is trusted with); rigs:manage is create/edit/activate/promote/delete (the
+  // admin-shaped path that mints or rolls versions). workspace:admin is the
+  // super-wildcard over both.
+  "rigs:use",
+  "rigs:manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -1939,6 +1946,134 @@ export type SetVariableSetVariableRequest = z.infer<typeof SetVariableSetVariabl
 export const SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
 /** @deprecated use SetVariableSetVariableRequest */
 export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
+
+// --- Rigs ---------------------------------------------------------------------
+// Workspace-scoped, versioned sandbox machine definitions. A rig is the named
+// truth; each sandbox is a disposable fork of a rig version. Versions are
+// append-only and content-immutable; exactly one is active per rig.
+
+// A self-declared health check: a name + the shell command that must exit 0.
+export const RigCheck = z.object({
+  name: z.string().min(1).max(120),
+  command: z.string().min(1).max(8192),
+});
+export type RigCheck = z.infer<typeof RigCheck>;
+
+export const RigVersion = z.object({
+  id: z.string().uuid(),
+  rigId: z.string().uuid(),
+  version: z.number().int().positive(),
+  image: z.string().nullable(),
+  setupScript: z.string().nullable(),
+  checks: z.array(RigCheck),
+  credentialHooks: z.array(z.string()),
+  defaultVariableSetIds: z.array(z.string().uuid()),
+  changelog: z.string().nullable(),
+  // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
+  createdBy: z.string().nullable(),
+  active: z.boolean(),
+  createdAt: z.string(),
+});
+export type RigVersion = z.infer<typeof RigVersion>;
+
+export const Rig = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdBy: z.string().nullable(),
+  // The rig's currently-active version (present after create; nullable so a
+  // partial/list read can omit it without a schema change).
+  activeVersion: RigVersion.nullable(),
+  versionCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Rig = z.infer<typeof Rig>;
+
+export const RigChangeKind = z.enum(["setup_append", "definition_edit"]);
+export type RigChangeKind = z.infer<typeof RigChangeKind>;
+
+export const RigChangeStatus = z.enum(["proposed", "verifying", "merged", "rejected", "failed"]);
+export type RigChangeStatus = z.infer<typeof RigChangeStatus>;
+
+// A single check's outcome inside a verification run (populated in M4).
+export const RigCheckResult = z.object({
+  name: z.string(),
+  command: z.string(),
+  exitCode: z.number().int().nullable(),
+  output: z.string().optional(),
+});
+export type RigCheckResult = z.infer<typeof RigCheckResult>;
+
+// The verification record a rig-CI run writes onto a change (M4). Open-ended
+// (passthrough) so M4 can enrich it without a contracts break.
+export const RigChangeVerification = z.object({
+  startedAt: z.string().optional(),
+  finishedAt: z.string().optional(),
+  log: z.string().optional(),
+  checkResults: z.array(RigCheckResult).optional(),
+}).passthrough();
+export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
+
+export const RigChange = z.object({
+  id: z.string().uuid(),
+  rigId: z.string().uuid(),
+  baseVersionId: z.string().uuid().nullable(),
+  kind: RigChangeKind,
+  payload: z.record(z.string(), z.unknown()),
+  status: RigChangeStatus,
+  proposedBy: z.string().nullable(),
+  verification: RigChangeVerification.nullable(),
+  resultVersionId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type RigChange = z.infer<typeof RigChange>;
+
+export const CreateRigRequest = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).optional(),
+  // Initial (version 1) content, inline.
+  image: z.string().max(1024).optional(),
+  setupScript: z.string().max(131072).optional(),
+  checks: z.array(RigCheck).max(100).default([]),
+  credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
+  defaultVariableSetIds: z.array(z.string().uuid()).max(25).default([]),
+});
+export type CreateRigRequest = z.infer<typeof CreateRigRequest>;
+
+export const UpdateRigRequest = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+export type UpdateRigRequest = z.infer<typeof UpdateRigRequest>;
+
+// setup_append: the exact command that already worked (+ an optional note).
+export const RigSetupAppendPayload = z.object({
+  command: z.string().min(1).max(8192),
+  note: z.string().max(2000).optional(),
+});
+export type RigSetupAppendPayload = z.infer<typeof RigSetupAppendPayload>;
+
+// definition_edit: the full next-version content (all fields optional; unset
+// fields inherit from the base version at promote time).
+export const RigDefinitionEditPayload = z.object({
+  image: z.string().max(1024).nullish(),
+  setupScript: z.string().max(131072).nullish(),
+  checks: z.array(RigCheck).max(100).optional(),
+  credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),
+  defaultVariableSetIds: z.array(z.string().uuid()).max(25).optional(),
+  changelog: z.string().max(4096).nullish(),
+});
+export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
+
+export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
+  z.object({ kind: z.literal("definition_edit"), payload: RigDefinitionEditPayload }),
+]);
+export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
 export const ScheduledTaskStatus = z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;

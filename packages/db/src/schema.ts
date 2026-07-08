@@ -34,6 +34,12 @@ export const workspaces = pgTable("workspaces", {
   // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
   // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
   settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+  // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
+  // created without an explicit rig ride no rig (today's behavior exactly). FK
+  // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle
+  // .references(), because `rigs` is declared later in this file (same
+  // forward-reference pattern as sessions.activeSandboxId). Consumed in M3.
+  defaultRigId: uuid("default_rig_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -302,6 +308,13 @@ export const sessions = pgTable("sessions", {
   // so an unset working_dir is a byte-identical no-op. Create-time only (Stage A).
   workingDir: text("working_dir"),
   variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, { onDelete: "set null" }),
+  // The rig this session rides + the exact rig version frozen at create time
+  // (migration 0047). NULL ⇒ the session rides no rig (today's behavior). FKs
+  // (-> rigs(id)/rig_versions(id) ON DELETE SET NULL) live in migration 0047,
+  // not Drizzle .references(), because those tables are declared later in this
+  // file (forward-reference pattern, same as activeSandboxId). Consumed in M3.
+  rigId: uuid("rig_id"),
+  rigVersionId: uuid("rig_version_id"),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.
   firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -1050,6 +1063,10 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
   reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, { onDelete: "set null" }),
   variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, { onDelete: "restrict" }),
+  // The rig this task's runs ride; the active version is resolved per fire
+  // (migration 0047). NULL ⇒ no rig. FK (-> rigs(id) ON DELETE SET NULL) lives
+  // in migration 0047 (forward-reference pattern). Consumed in M3.
+  rigId: uuid("rig_id"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1310,4 +1327,72 @@ export const socialPosts = pgTable("social_posts", {
   connectionExternalPost: uniqueIndex("social_posts_workspace_connection_external_post_idx").on(table.workspaceId, table.connectionId, table.externalPostId),
   connectionPublished: index("social_posts_workspace_connection_published_idx").on(table.workspaceId, table.connectionId, table.publishedAt),
   providerPublished: index("social_posts_workspace_provider_published_idx").on(table.workspaceId, table.provider, table.publishedAt),
+}));
+
+// Rigs (migration 0047): workspace-scoped, versioned sandbox machine definitions.
+// A rig is the named truth; each sandbox is a disposable fork of a rig version.
+export const rigs = pgTable("rigs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  // Attribution string: 'user:<subject>' | 'session:<id>' | 'system'.
+  createdBy: text("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceName: uniqueIndex("rigs_workspace_name_idx").on(table.workspaceId, table.name),
+  workspaceCreated: index("rigs_workspace_created_idx").on(table.workspaceId, table.createdAt),
+}));
+
+// Append-only, content-immutable rig versions. Exactly one active per rig
+// (partial unique index). The domain layer never UPDATEs a content column; only
+// the `active` flag flips (activateRigVersion).
+export const rigVersions = pgTable("rig_versions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  rigId: uuid("rig_id").notNull().references(() => rigs.id, { onDelete: "cascade" }),
+  version: integer("version").notNull(),
+  image: text("image"),
+  setupScript: text("setup_script"),
+  // Self-declared health checks: [{ name, command }].
+  checks: jsonb("checks").$type<Array<{ name: string; command: string }>>().notNull().default([]),
+  // Registered credential-hook names (resolved to hook implementations in M3).
+  credentialHooks: jsonb("credential_hooks").$type<string[]>().notNull().default([]),
+  // Variable-set ids layered below the session's variable set at run time (M3).
+  defaultVariableSetIds: jsonb("default_variable_set_ids").$type<string[]>().notNull().default([]),
+  changelog: text("changelog"),
+  createdBy: text("created_by"),
+  active: boolean("active").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  rigVersion: uniqueIndex("rig_versions_rig_version_idx").on(table.rigId, table.version),
+  // At most one active version per rig — the single-active invariant, in the DB.
+  rigActive: uniqueIndex("rig_versions_rig_active_idx").on(table.rigId).where(sql`${table.active}`),
+  workspaceRig: index("rig_versions_workspace_rig_idx").on(table.workspaceId, table.rigId, table.version),
+}));
+
+// Proposed/verified rig changes (M4 substrate). M2 creates the table + CRUD only;
+// verification/auto-merge/promotion land in M4.
+export const rigChanges = pgTable("rig_changes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  rigId: uuid("rig_id").notNull().references(() => rigs.id, { onDelete: "cascade" }),
+  baseVersionId: uuid("base_version_id").references(() => rigVersions.id, { onDelete: "set null" }),
+  // 'setup_append' | 'definition_edit' (CHECK in migration 0047).
+  kind: text("kind").notNull(),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  // 'proposed' | 'verifying' | 'merged' | 'rejected' | 'failed' (CHECK in 0047).
+  status: text("status").notNull().default("proposed"),
+  proposedBy: text("proposed_by"),
+  verification: jsonb("verification").$type<Record<string, unknown>>(),
+  resultVersionId: uuid("result_version_id").references(() => rigVersions.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceRig: index("rig_changes_workspace_rig_idx").on(table.workspaceId, table.rigId, table.createdAt),
+  workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
 }));

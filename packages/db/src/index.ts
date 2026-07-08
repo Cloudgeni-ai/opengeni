@@ -60,6 +60,12 @@ import type {
   VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
+  Rig,
+  RigVersion,
+  RigChange,
+  RigChangeKind,
+  RigChangeStatus,
+  RigCheck,
 } from "@opengeni/contracts";
 import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB, resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
@@ -3849,6 +3855,431 @@ export async function deleteVariableSetVariable(db: Database, workspaceId: strin
         .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)));
     }
     return rows.length > 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rigs (migration 0047). Workspace-scoped, versioned sandbox machine definitions.
+// Versions are append-only + content-immutable: NO function below ever UPDATEs a
+// content column of rig_versions — only activateRigVersion flips the `active`
+// boolean. Every function runs through withWorkspaceRls / withRlsContext.
+// ---------------------------------------------------------------------------
+
+// Thrown when a rig_change status transition is illegal (merged/rejected are
+// terminal). The domain/route layer maps this to a 409.
+export class RigChangeTransitionError extends Error {
+  constructor(
+    public readonly changeId: string,
+    public readonly fromStatus: string,
+    public readonly toStatus: string,
+  ) {
+    super(`Rig change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`);
+    this.name = "RigChangeTransitionError";
+  }
+}
+
+export type RigVersionContentInput = {
+  image?: string | null;
+  setupScript?: string | null;
+  checks?: RigCheck[];
+  credentialHooks?: string[];
+  defaultVariableSetIds?: string[];
+  changelog?: string | null;
+  createdBy?: string | null;
+};
+
+function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion {
+  return {
+    id: row.id,
+    rigId: row.rigId,
+    version: row.version,
+    image: row.image,
+    setupScript: row.setupScript,
+    checks: row.checks,
+    credentialHooks: row.credentialHooks,
+    defaultVariableSetIds: row.defaultVariableSetIds,
+    changelog: row.changelog,
+    createdBy: row.createdBy,
+    active: row.active,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function mapRig(row: typeof schema.rigs.$inferSelect, activeVersion: RigVersion | null, versionCount: number): Rig {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    description: row.description,
+    createdBy: row.createdBy,
+    activeVersion,
+    versionCount,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapRigChange(row: typeof schema.rigChanges.$inferSelect): RigChange {
+  return {
+    id: row.id,
+    rigId: row.rigId,
+    baseVersionId: row.baseVersionId,
+    kind: row.kind as RigChangeKind,
+    payload: row.payload,
+    status: row.status as RigChangeStatus,
+    proposedBy: row.proposedBy,
+    verification: (row.verification ?? null) as RigChange["verification"],
+    resultVersionId: row.resultVersionId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// Load a rig's active version + total version count within an existing RLS scope.
+async function loadRigActiveAndCount(scopedDb: Database, workspaceId: string, rigId: string): Promise<{ activeVersion: RigVersion | null; versionCount: number }> {
+  const [activeRow] = await scopedDb.select().from(schema.rigVersions)
+    .where(and(
+      eq(schema.rigVersions.workspaceId, workspaceId),
+      eq(schema.rigVersions.rigId, rigId),
+      eq(schema.rigVersions.active, true),
+    ))
+    .limit(1);
+  const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+    .from(schema.rigVersions)
+    .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+  return { activeVersion: activeRow ? mapRigVersion(activeRow) : null, versionCount: Number(count) };
+}
+
+// Creates the rig row AND its version 1 (active) in one transaction: a failure
+// leaves nothing behind. version-1 content comes from `initialVersion`.
+export async function createRig(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description?: string | null;
+  createdBy?: string | null;
+  initialVersion?: RigVersionContentInput;
+}): Promise<Rig> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [rigRow] = await scopedDb.insert(schema.rigs).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      name: input.name,
+      description: input.description ?? null,
+      createdBy: input.createdBy ?? null,
+    }).returning();
+    if (!rigRow) {
+      throw new Error("Failed to create rig");
+    }
+    const content = input.initialVersion ?? {};
+    const [versionRow] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      rigId: rigRow.id,
+      version: 1,
+      image: content.image ?? null,
+      setupScript: content.setupScript ?? null,
+      checks: content.checks ?? [],
+      credentialHooks: content.credentialHooks ?? [],
+      defaultVariableSetIds: content.defaultVariableSetIds ?? [],
+      changelog: content.changelog ?? null,
+      createdBy: content.createdBy ?? input.createdBy ?? null,
+      active: true,
+    }).returning();
+    if (!versionRow) {
+      throw new Error("Failed to create initial rig version");
+    }
+    return mapRig(rigRow, mapRigVersion(versionRow), 1);
+  });
+}
+
+export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigs)
+      .where(eq(schema.rigs.workspaceId, workspaceId))
+      .orderBy(asc(schema.rigs.createdAt));
+    if (rows.length === 0) {
+      return [];
+    }
+    const activeRows = await scopedDb.select().from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.active, true)));
+    const activeByRig = new Map(activeRows.map((row) => [row.rigId, mapRigVersion(row)]));
+    const countRows = await scopedDb.select({
+      rigId: schema.rigVersions.rigId,
+      count: sql<number>`count(*)::int`,
+    }).from(schema.rigVersions)
+      .where(eq(schema.rigVersions.workspaceId, workspaceId))
+      .groupBy(schema.rigVersions.rigId);
+    const countByRig = new Map(countRows.map((row) => [row.rigId, Number(row.count)]));
+    return rows.map((row) => mapRig(row, activeByRig.get(row.id) ?? null, countByRig.get(row.id) ?? 0));
+  });
+}
+
+export async function getRig(db: Database, workspaceId: string, rigId: string): Promise<Rig | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
+    return mapRig(row, activeVersion, versionCount);
+  });
+}
+
+export async function getRigByName(db: Database, workspaceId: string, name: string): Promise<Rig | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.name, name)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, row.id);
+    return mapRig(row, activeVersion, versionCount);
+  });
+}
+
+// name/description only — never touches versions (content immutability).
+export async function updateRig(db: Database, workspaceId: string, rigId: string, input: {
+  name?: string;
+  description?: string | null;
+}): Promise<Rig> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.rigs).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId))).returning();
+    if (!row) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
+    return mapRig(row, activeVersion, versionCount);
+  });
+}
+
+export async function deleteRig(db: Database, workspaceId: string, rigId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .returning({ id: schema.rigs.id });
+    return rows.length > 0;
+  });
+}
+
+export async function countRigs(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.rigs).where(eq(schema.rigs.workspaceId, workspaceId));
+    return Number(count);
+  });
+}
+
+export async function countSessionsUsingRig(db: Database, workspaceId: string, rigId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.rigId, rigId)));
+    return Number(count);
+  });
+}
+
+// Mints the next version for a rig (promote/rollback-mint paths, M4). Row-locks
+// the rig so concurrent mints get strictly-monotonic version numbers. When
+// `activate` is set, atomically deactivates the current active version first.
+export async function createRigVersion(db: Database, workspaceId: string, rigId: string, input: RigVersionContentInput, options: { activate?: boolean } = {}): Promise<RigVersion> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [{ max } = { max: 0 }] = await scopedDb.select({
+      max: sql<number>`coalesce(max(${schema.rigVersions.version}), 0)::int`,
+    }).from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+    const nextVersion = Number(max) + 1;
+    if (options.activate) {
+      await scopedDb.update(schema.rigVersions).set({ active: false })
+        .where(and(
+          eq(schema.rigVersions.workspaceId, workspaceId),
+          eq(schema.rigVersions.rigId, rigId),
+          eq(schema.rigVersions.active, true),
+        ));
+    }
+    const [row] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: rig.accountId,
+      workspaceId,
+      rigId,
+      version: nextVersion,
+      image: input.image ?? null,
+      setupScript: input.setupScript ?? null,
+      checks: input.checks ?? [],
+      credentialHooks: input.credentialHooks ?? [],
+      defaultVariableSetIds: input.defaultVariableSetIds ?? [],
+      changelog: input.changelog ?? null,
+      createdBy: input.createdBy ?? null,
+      active: options.activate ?? false,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create rig version");
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return mapRigVersion(row);
+  });
+}
+
+export async function listRigVersions(db: Database, workspaceId: string, rigId: string): Promise<RigVersion[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)))
+      .orderBy(desc(schema.rigVersions.version));
+    return rows.map(mapRigVersion);
+  });
+}
+
+export async function getRigVersion(db: Database, workspaceId: string, rigId: string, versionId: string): Promise<RigVersion | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    return row ? mapRigVersion(row) : null;
+  });
+}
+
+// Flips which version is active (rollback / promote-activate). Row-locks the rig
+// to serialize concurrent activations, deactivates the current active, activates
+// the target. Only touches the `active` flag — never content.
+export async function activateRigVersion(db: Database, workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id }).from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [target] = await scopedDb.select({ id: schema.rigVersions.id }).from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    if (!target) {
+      throw new Error(`Rig version not found: ${versionId}`);
+    }
+    await scopedDb.update(schema.rigVersions).set({ active: false })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ));
+    const [row] = await scopedDb.update(schema.rigVersions).set({ active: true })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      )).returning();
+    if (!row) {
+      throw new Error(`Rig version not found: ${versionId}`);
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return mapRigVersion(row);
+  });
+}
+
+export async function createRigChange(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  rigId: string;
+  baseVersionId?: string | null;
+  kind: RigChangeKind;
+  payload: Record<string, unknown>;
+  proposedBy?: string | null;
+}): Promise<RigChange> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.rigChanges).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      rigId: input.rigId,
+      baseVersionId: input.baseVersionId ?? null,
+      kind: input.kind,
+      payload: input.payload,
+      status: "proposed",
+      proposedBy: input.proposedBy ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create rig change");
+    }
+    return mapRigChange(row);
+  });
+}
+
+export async function listRigChanges(db: Database, workspaceId: string, rigId: string, limit = 100): Promise<RigChange[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)))
+      .orderBy(desc(schema.rigChanges.createdAt))
+      .limit(limit);
+    return rows.map(mapRigChange);
+  });
+}
+
+export async function getRigChange(db: Database, workspaceId: string, changeId: string): Promise<RigChange | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .limit(1);
+    return row ? mapRigChange(row) : null;
+  });
+}
+
+// Advances a change's lifecycle. merged/rejected are terminal (any different
+// target throws RigChangeTransitionError). A supplied verification payload is
+// shallow-merged onto the existing one so a status bump can enrich it (M4).
+export async function updateRigChangeStatus(db: Database, workspaceId: string, changeId: string, input: {
+  status: RigChangeStatus;
+  verification?: Record<string, unknown> | null;
+  resultVersionId?: string | null;
+}): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    const terminal = current.status === "merged" || current.status === "rejected";
+    if (terminal && current.status !== input.status) {
+      throw new RigChangeTransitionError(changeId, current.status, input.status);
+    }
+    const mergedVerification = input.verification
+      ? { ...((current.verification as Record<string, unknown> | null) ?? {}), ...input.verification }
+      : undefined;
+    const [row] = await scopedDb.update(schema.rigChanges).set({
+      status: input.status,
+      ...(mergedVerification !== undefined ? { verification: mergedVerification } : {}),
+      ...(input.resultVersionId !== undefined ? { resultVersionId: input.resultVersionId } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
   });
 }
 
