@@ -1,40 +1,32 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { SessionStatus as SessionStatusValue } from "@opengeni/sdk";
 import {
   ChatComposer,
-  DesktopViewer,
   FleetTile,
   MessageTimeline,
   OpenGeniProvider,
-  SandboxFiles,
-  SandboxTerminal,
+  SandboxWorkspace,
   SessionStatus,
   useAvailableModels,
   useComposer,
   useOpenGeni,
-  useSandboxFiles,
-  useSandboxGit,
-  useSandboxTerminal,
   useScheduledTasks,
   useSession,
-  useSessionCapabilities,
   useSessionEvents,
   useWorkspaceSessions,
-  WorkspaceDock,
-  xtermThemeFromTokens,
-  type WorkspaceTab,
-  type XtermTheme,
 } from "../src/index";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
-import { fakeRfbFactory } from "./fake-desktop";
 import "./styles.css";
 
 const ALL_STATUSES: SessionStatusValue[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
 
 function Harness() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const sandboxTabs = useSandboxTabs(MANAGER_SESSION_ID);
+  // Mount the whole workbench through its public `<SandboxWorkspace>` surface —
+  // the exact integration an external embedder (cloudgeni #1577) uses. This is
+  // the F2 embedder proof: provider + styles + mock client, no app plumbing.
+  const { events } = useSessionEvents(MANAGER_SESSION_ID);
   return (
     <div className="og-root min-h-full bg-og-bg" data-og-theme={theme === "light" ? "light" : undefined}>
       <div className="mx-auto flex h-dvh max-w-7xl flex-col px-4 sm:px-6">
@@ -57,7 +49,9 @@ function Harness() {
           </div>
         </header>
         <main className="min-h-0 flex-1 py-5">
-          <WorkspaceDock
+          <SandboxWorkspace
+            sessionId={MANAGER_SESSION_ID}
+            events={events}
             autoSaveId="og.demo.dock"
             primary={
               <div className="grid h-full min-h-0 gap-6 overflow-hidden lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)]">
@@ -68,7 +62,6 @@ function Harness() {
                 </aside>
               </div>
             }
-            tabs={sandboxTabs}
           />
         </main>
       </div>
@@ -134,68 +127,6 @@ function OpsChannel() {
       </div>
     </section>
   );
-}
-
-/**
- * Build the three capability-gated Workspace tabs against the mock client, so
- * the headless harness exercises Files (review-first git), Terminal (xterm), and
- * Desktop (noVNC chrome) end-to-end.
- */
-function useSandboxTabs(sessionId: string): WorkspaceTab[] {
-  const { events } = useSessionEvents(sessionId);
-  const caps = useSessionCapabilities(sessionId, { events, attachDesktop: true });
-  const capabilities = caps.capabilities;
-  const fsOn = capabilities?.FileSystem.available ?? false;
-  const gitOn = capabilities?.Git.available ?? false;
-  const terminalOn = (capabilities?.Terminal.transport ?? null) !== null;
-  const desktopOn = (capabilities?.DesktopStream.transport ?? null) !== null;
-
-  const files = useSandboxFiles(sessionId, { events, enabled: fsOn });
-  const git = useSandboxGit(sessionId, { events, enabled: gitOn });
-  const stagedGit = useSandboxGit(sessionId, { events, enabled: gitOn, staged: true });
-  const terminal = useSandboxTerminal(sessionId, { events });
-
-  const [xtermTheme, setXtermTheme] = useState<XtermTheme | undefined>(undefined);
-  useEffect(() => {
-    const derive = () => setXtermTheme(xtermThemeFromTokens());
-    derive();
-    const observer = new MutationObserver(derive);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-og-theme"] });
-    return () => observer.disconnect();
-  }, []);
-
-  return useMemo(() => {
-    const tabs: WorkspaceTab[] = [];
-    if (fsOn) {
-      tabs.push({
-        id: "files",
-        label: "Files",
-        ...(git.diff.length > 0
-          ? { badge: <span className="rounded-og-xs bg-og-accent-soft px-1 text-[9px] text-og-fg-muted">{git.diff.length}</span> }
-          : {}),
-        content: <SandboxFiles files={files} git={git} stagedGit={stagedGit} fileSystemAvailable={fsOn} className="h-full" />,
-      });
-    }
-    if (terminalOn) {
-      tabs.push({
-        id: "terminal",
-        label: "Terminal",
-        content: (
-          <div className="h-full bg-og-bg p-1">
-            <SandboxTerminal result={terminal} showHeader shell={capabilities?.Terminal.shell ?? undefined} {...(xtermTheme ? { theme: xtermTheme } : {})} />
-          </div>
-        ),
-      });
-    }
-    if (desktopOn) {
-      tabs.push({
-        id: "desktop",
-        label: "Desktop",
-        content: <DesktopViewer capability={capabilities?.DesktopStream ?? null} viewerCapReached={caps.viewerCapReached} rfbFactory={fakeRfbFactory} className="h-full" />,
-      });
-    }
-    return tabs;
-  }, [fsOn, terminalOn, desktopOn, files, git, stagedGit, terminal, xtermTheme, capabilities, caps.viewerCapReached]);
 }
 
 function Fleet() {

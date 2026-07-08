@@ -39,12 +39,12 @@ import {
 import { GoalCard, GoalChip } from "@/components/session/goal-card";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
-import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
+import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
+import type { WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
@@ -224,45 +224,36 @@ function SessionDock(props: {
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
 }) {
-  // Track the dock's active tab so the Files surface can hold the box WARM only
-  // while it's actually on screen (fast ~100ms Channel-A ops instead of a cold
-  // ~5s resume per list/write). Default to the dock's first tab ("run").
-  const [activeTab, setActiveTab] = useState<string>("run");
-  const { tabs: sandboxTabs } = useSandboxWorkspaceTabs({
-    workspaceId: props.workspaceId,
-    sessionId: props.sessionId,
-    events: props.events,
-    filesActive: !props.dockCollapsed && activeTab === "files",
-  });
-
-  const tabs: WorkspaceTab[] = [
-    {
-      id: "run",
-      label: "Run",
-      content: (
-        <ScrollArea className="h-full min-w-0">
-          <div className="min-w-0 space-y-5 p-3">
-            <QueueRail queue={props.queue} sessionStatus={props.session.status} />
-            <GoalCard goal={props.goal} events={props.events} />
-          </div>
-        </ScrollArea>
-      ),
-    },
-    ...sandboxTabs,
-    {
-      id: "debug",
-      label: "Debug",
-      content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
-    },
-  ];
+  // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
+  // the package now; the app injects its Run + Debug tabs around it. The Files
+  // warm-hold + active-tab tracking are handled inside <SandboxWorkspace>.
+  const runTab: WorkspaceTab = {
+    id: "run",
+    label: "Run",
+    content: (
+      <ScrollArea className="h-full min-w-0">
+        <div className="min-w-0 space-y-5 p-3">
+          <QueueRail queue={props.queue} sessionStatus={props.session.status} />
+          <GoalCard goal={props.goal} events={props.events} />
+        </div>
+      </ScrollArea>
+    ),
+  };
+  const debugTab: WorkspaceTab = {
+    id: "debug",
+    label: "Debug",
+    content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
+  };
 
   return (
-    <WorkspaceDock
+    <SessionWorkspace
+      workspaceId={props.workspaceId}
+      sessionId={props.sessionId}
+      events={props.events}
       primary={props.primary}
-      tabs={tabs}
-      autoSaveId="og.session.dock"
-      activeTab={activeTab}
-      onActiveTabChange={setActiveTab}
+      leadingTabs={[runTab]}
+      trailingTabs={[debugTab]}
+      initialTab="run"
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
     />

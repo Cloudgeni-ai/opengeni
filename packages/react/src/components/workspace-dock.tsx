@@ -34,6 +34,10 @@ export type WorkspaceDockProps = {
   /** Controlled collapsed state for hosts that expose their own dock toggle. */
   collapsed?: boolean | undefined;
   onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
+  /** A status accessory pinned to the right of the tab strip, left of the
+   *  maximize/collapse controls (e.g. the machine-state chip). Renders in both
+   *  the docked header and the full-screen overlay header. */
+  headerAccessory?: ReactNode | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -94,6 +98,7 @@ export function WorkspaceDock({
   onActiveTabChange,
   collapsed: collapsedProp,
   onCollapsedChange,
+  headerAccessory,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -203,6 +208,7 @@ export function WorkspaceDock({
               tabs={tabs}
               current={current}
               onTab={setTab}
+              accessory={headerAccessory}
               controls={
                 <ChromeButton onClick={collapse} title="Close workspace" label="Close workspace">
                   <XIcon className="size-4" />
@@ -220,6 +226,7 @@ export function WorkspaceDock({
       tabs={tabs}
       current={current}
       onTab={setTab}
+      accessory={headerAccessory}
       controls={
         <>
           <ChromeButton
@@ -337,11 +344,14 @@ function DockChrome({
   tabs,
   current,
   onTab,
+  accessory,
   controls,
 }: {
   tabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
+  /** A status accessory (machine chip) between the tab strip and the controls. */
+  accessory?: ReactNode | undefined;
   /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
   controls: ReactNode;
 }) {
@@ -375,6 +385,7 @@ function DockChrome({
             </button>
           ))}
         </div>
+        {accessory ? <div className="flex shrink-0 items-center">{accessory}</div> : null}
         <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
       </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel">

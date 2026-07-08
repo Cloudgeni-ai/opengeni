@@ -248,6 +248,23 @@ export type { DesktopViewerProps } from "./components/desktop-viewer";
 export { WorkspaceDock } from "./components/workspace-dock";
 export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
 
+// The embeddable dock "brain" (Workbench v2, M4): the whole session workspace as
+// one component + the tab-building hook + the pre-paint default-tab helper.
+export {
+  SandboxWorkspace,
+  useSandboxWorkspaceTabs,
+  initialWorkspaceTab,
+  WORKBENCH_TAB_CHANGES,
+  WORKBENCH_TAB_FILES,
+} from "./components/sandbox-workspace";
+export type {
+  SandboxWorkspaceProps,
+  UseSandboxWorkspaceTabsOptions,
+  UseSandboxWorkspaceTabsResult,
+  WorkspaceMachine,
+  WorkspaceNotification,
+} from "./components/sandbox-workspace";
+
 // Connected-machine UI moved to the "@opengeni/react/machines" subpath; re-exported
 // here for back-compat (#144).
 export * from "./machines";

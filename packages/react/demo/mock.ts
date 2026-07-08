@@ -58,6 +58,7 @@ import type {
   WorkspaceRegisteredPack,
 } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/index";
+import type { MachinesResponse } from "../src/machines";
 
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
@@ -692,6 +693,32 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async getWorkspaceCaptureFile(_workspaceId: string, _sessionId: string, _path: string): Promise<GetWorkspaceCaptureFileResponse> {
     throw new Error("no capture in the demo mock");
+  }
+
+  // The machine fleet backing the dock-header chip: one live session-group box.
+  async listMachines(): Promise<MachinesResponse> {
+    return {
+      activeSandboxId: "demo-sandbox",
+      activeEpoch: 1,
+      machines: [
+        {
+          sandboxId: "demo-sandbox",
+          enrollmentId: null,
+          name: "Cloud sandbox",
+          kind: "modal",
+          state: "online",
+          active: true,
+          isSessionGroup: true,
+          os: "linux",
+          arch: "x86_64",
+          hasDisplay: true,
+          allowScreenControl: false,
+          sharedSessionCount: 1,
+          lastSeenAt: new Date().toISOString(),
+          metrics: null,
+        },
+      ],
+    };
   }
 
   async terminalExec(): Promise<TerminalExecResponse> {
