@@ -2317,7 +2317,7 @@ export async function loadConnectionCredentialForBroker(db: Database, settings: 
     try {
       credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
     } catch (error) {
-      throw new Error(`connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
     if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
       throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
@@ -2685,7 +2685,7 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
         throw error;
       }
       const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
-      throw new Error(visibleTextHashConflictMessage(duplicate));
+      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -3927,7 +3927,7 @@ export async function loadWorkspaceEnvironmentForRun(
       values[name] = decryptEnvironmentValue(key, encrypted);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`);
+      throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`, { cause: error });
     }
   }
   return {
@@ -4090,7 +4090,7 @@ export async function loadCodexCredentialForRun(
       tokens = { accessToken: parsed.access_token, refreshToken: parsed.refresh_token, idToken: parsed.id_token };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`);
+      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`, { cause: error });
     }
     return {
       id: row.id,

@@ -101,10 +101,6 @@ function leafOf(path: string): string {
 }
 
 /** Join a parent dir with a leaf name (handles the root "" parent). */
-function joinPath(parent: string, name: string): string {
-  return parent ? `${parent}/${name}` : name;
-}
-
 /** Stable sibling ordering: dirs before files, then case-insensitive by name —
  *  matches a typical depth-1 list so an optimistic insert lands where a real
  *  re-list would put it (no jump when the server reconciles). */

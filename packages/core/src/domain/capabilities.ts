@@ -8,7 +8,6 @@ import {
   type AccessGrant,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
-  type CapabilityKind,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
   type McpServerConnectionRef,

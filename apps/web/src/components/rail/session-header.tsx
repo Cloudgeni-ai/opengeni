@@ -17,7 +17,6 @@ import { ConnectionPill } from "@/components/common";
 import { SpawnedByBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { SESSION_TITLE_MAX_LENGTH, sessionDisplayTitle, useInlineRename } from "@/lib/session-rename";
-import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
 export function SessionHeader({

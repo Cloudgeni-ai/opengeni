@@ -15,7 +15,6 @@ import type { Settings } from "@opengeni/config";
 import {
   getEnrollment,
   getSandbox,
-  listEnrollments,
   listSandboxes,
   readActiveSandbox,
   requireSession,

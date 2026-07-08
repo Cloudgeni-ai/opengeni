@@ -3,7 +3,6 @@ import type { FileAsset } from "@opengeni/contracts";
 import {
   BlobSASPermissions,
   BlobServiceClient,
-  BlockBlobClient,
   generateBlobSASQueryParameters,
   StorageSharedKeyCredential,
   type BlobDownloadResponseParsed,

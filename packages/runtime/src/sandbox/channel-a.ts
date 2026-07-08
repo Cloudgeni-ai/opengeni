@@ -39,7 +39,6 @@ import type {
   GitChangedPayload,
   GitCommit,
   GitDiffHunk,
-  GitDiffLine,
   GitDiffRequest,
   GitDiffResponse,
   GitFileDiff,

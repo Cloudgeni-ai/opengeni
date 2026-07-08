@@ -12,7 +12,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import { hasPermission, requireAccessGrant, requirePermission } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";

@@ -105,7 +105,7 @@ async function startTestServicesAttempt(options: { temporal?: boolean; objectSto
   } catch (error) {
     const logs = await composeLogs(projectName, composeFile);
     await services.down();
-    throw new Error(`test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}`);
+    throw new Error(`test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}`, { cause: error });
   }
 }
 

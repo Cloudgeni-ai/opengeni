@@ -1,0 +1,47 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "react-hooks", "typescript", "import"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "es2024": true
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "dist",
+    "build",
+    ".output",
+    "packages/db/drizzle",
+    "**/*.gen.ts",
+    "**/*.gen.tsx"
+  ],
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "no-await-in-loop": "off",
+    "no-underscore-dangle": "off",
+    "import/no-unassigned-import": "off",
+    "react-hooks/exhaustive-deps": "warn",
+    "no-control-regex": "off"
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/*.integration.ts",
+        "**/*.e2e.ts",
+        "**/test/**",
+        "test/**"
+      ],
+      "rules": {
+        "no-unsafe-optional-chaining": "warn",
+        "no-this-alias": "off"
+      }
+    }
+  ]
+}

@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -142,7 +141,7 @@ async function waitForReady(url: string): Promise<void> {
       }
     } catch (err) {
       if (Date.now() > deadline) {
-        throw new Error(`shared-pg: postgres did not become ready in time: ${String(err)}`);
+        throw new Error(`shared-pg: postgres did not become ready in time: ${String(err)}`, { cause: err });
       }
       await Bun.sleep(500);
     }

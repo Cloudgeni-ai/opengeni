@@ -1757,7 +1757,7 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`);
+    throw new Error(`OPENGENI_MCP_SERVERS must be a JSON array: ${message}`, { cause: error });
   }
 }
 
@@ -1770,7 +1770,7 @@ export function parseModelPricingJson(raw: string): Record<string, ModelPricing>
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name");
@@ -1798,7 +1798,7 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be a JSON object keyed by backend name");
@@ -1838,7 +1838,7 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!Array.isArray(parsed)) {
     throw new Error("OPENGENI_MODEL_PROVIDERS_JSON must be a JSON array of providers");
@@ -1861,7 +1861,7 @@ export function parseIntegrationsOauthClientsJson(raw: string | undefined): Reco
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, { cause: error });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be a JSON object keyed by authorization-server issuer or URL");
@@ -1889,7 +1889,7 @@ export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`, { cause: error });
   }
   return StaticUsageLimits.parse(parsed);
 }
@@ -1903,7 +1903,7 @@ export function parseStaticEntitlementsJson(raw: string): EntitlementsConfig {
     parsed = JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`, { cause: error });
   }
   return Entitlements.parse(parsed);
 }
@@ -2416,7 +2416,7 @@ function parseGcsCredentialsJson(raw: string): unknown {
     return JSON.parse(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`);
+    throw new Error(`OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON must be valid JSON: ${message}`, { cause: error });
   }
 }
 

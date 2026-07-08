@@ -283,7 +283,7 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
         // Surface the server's reason to make a failure diagnosable.
         const log = await nats.serverLog();
         const tail = log.split("\n").slice(-15).join("\n");
-        throw new Error(`round-trip failed: ${String(e)}\n--- nats-server log tail ---\n${tail}`);
+        throw new Error(`round-trip failed: ${String(e)}\n--- nats-server log tail ---\n${tail}`, { cause: e });
       }
       expect(new TextDecoder().decode(reply.data)).toBe("pong-from-agent-A");
     } finally {

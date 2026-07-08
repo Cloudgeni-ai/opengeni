@@ -7,7 +7,7 @@ import {
   matchCommand,
   parseCommandLine,
 } from "../commands/registry";
-import type { CommandContext, Notice, SlashCommand } from "../commands/types";
+import type { CommandContext, SlashCommand } from "../commands/types";
 
 /**
  * Context the composer supplies for command execution and visibility. The

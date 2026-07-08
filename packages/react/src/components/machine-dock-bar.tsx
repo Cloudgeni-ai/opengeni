@@ -22,10 +22,9 @@ export type MachineDockBarProps = {
  * render IDENTICALLY regardless of backend — this bar is the only backend-aware
  * chrome (the dock-parity contract: selfhosted == Modal for the surfaces).
  */
-export function MachineDockBar({ name, kind, state, sharedSessionCount, className }: MachineDockBarProps) {
+export function MachineDockBar({ name, kind, state, className }: MachineDockBarProps) {
   const Icon = kind === "selfhosted" ? LaptopIcon : CpuIcon;
   const stateBadge = MACHINE_STATE_BADGE_META[state];
-  const shared = (sharedSessionCount ?? 0) > 1;
   return (
     <div
       data-machine-dock-bar

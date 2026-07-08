@@ -19,7 +19,7 @@ import { FILE_ONLY_MESSAGE_TEXT, useEnvironments, useWorkspaceSessions, type Com
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import { BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";

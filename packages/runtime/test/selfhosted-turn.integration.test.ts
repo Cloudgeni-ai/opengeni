@@ -207,7 +207,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // (which run it through the SDK manager); here we pin the load-bearing property.
     const self = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: new MockAgentResponder(), relay: RELAY, environment: ENV });
     expect(self.state.environment).toEqual(ENV);
-    expect(Object.entries(self.state.environment)).not.toThrow;
+    expect(() => Object.entries(self.state.environment)).not.toThrow();
     // The negotiation/test path (no env) still yields a defined object, never undefined.
     const bare = new SelfhostedSession({ workspaceId: WS, agentId: "enroll-1", controlRpc: new MockAgentResponder(), relay: RELAY });
     expect(bare.state.environment).toEqual({});

@@ -7,7 +7,7 @@
    (no-flicker, §12-D1), the wake-on-edit state machine (happy + conflict + offline
    + warming, §12-C), and the machine-chip derivation.
    -------------------------------------------------------------------------- */
-import { afterEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type {
   FsTreeNode,
   GetWorkspaceCaptureResponse,
@@ -20,7 +20,7 @@ import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { fakeEvent } from "./sandbox-fixtures";
 import { useWorkspaceCapture } from "../src/hooks/use-workspace-capture";
-import { useSandboxFiles, type FileTreeNode } from "../src/hooks/use-sandbox-files";
+import { useSandboxFiles } from "../src/hooks/use-sandbox-files";
 import { useSandboxGit } from "../src/hooks/use-sandbox-git";
 import { useWorkspaceEdit } from "../src/hooks/use-workspace-edit";
 import { deriveMachineChip } from "../src/hooks/use-machine-chip";

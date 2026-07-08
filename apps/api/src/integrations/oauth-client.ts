@@ -15,7 +15,6 @@ import {
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
-  replaceIntegrationOAuthClient,
   storeIntegrationOAuthClient,
   updateConnection,
   type Database,

@@ -206,7 +206,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       return json({ repositories: visible.map((repository) => repositoryWithScheduledTaskResource(repository)) });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
-        throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`);
+        throw new Error(`GitHub App is not configured: ${error.missing.join(", ")}`, { cause: error });
       }
       throw error;
     }

@@ -29,7 +29,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 const githubStateCookie = "opengeni_github_state";
 
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { db, settings, githubStateSecret } = deps;
+  const { settings, githubStateSecret } = deps;
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");

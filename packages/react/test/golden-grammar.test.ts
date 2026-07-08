@@ -34,7 +34,7 @@ describe("golden event grammar", () => {
       try {
         expect(actual).toEqual(expected);
       } catch (error) {
-        throw new Error(`${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`${CONTRACT_CHANGED}\nFixture: ${file}\n${error instanceof Error ? error.message : String(error)}`, { cause: error });
       }
     });
   }
@@ -45,7 +45,7 @@ describe("golden event grammar", () => {
     try {
       expect(compact).toEqual(raw);
     } catch (error) {
-      throw new Error(`${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`${CONTRACT_CHANGED}\nFixture: 05-coalesced-compact.json\n${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
   });
 });

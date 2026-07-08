@@ -28,7 +28,6 @@ import {
   loadWorkspaceEnvironmentForRun,
   readLease,
   releaseLeaseHolder,
-  SandboxLeaseSupersededError,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
@@ -84,7 +83,7 @@ export async function withChannelA<T>(
   fn: (handle: ChannelAHandle) => Promise<T>,
 ): Promise<T> {
   const { db, settings, bus } = services;
-  const { accountId, workspaceId, session, subjectId } = ctx;
+  const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
     throw new HTTPException(409, { message: "sandbox not available" });

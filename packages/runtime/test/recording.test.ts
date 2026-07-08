@@ -7,7 +7,6 @@ import {
   recordingStorageKey,
   contentTypeForCodec,
   extForCodec,
-  RecordingError,
   RecordingUnavailableError,
   type RecordingProcess,
 } from "../src/sandbox/recording";

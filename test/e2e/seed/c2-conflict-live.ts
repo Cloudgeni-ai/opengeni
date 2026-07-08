@@ -30,7 +30,7 @@ console.log(`[c2] session=${sid} settled`);
 let base;
 for (let i = 0; i < 20; i++) {
   try { base = await client.fsRead(ws, sid, { path: "conflict.txt" }); break; }
-  catch (e) { await new Promise((r) => setTimeout(r, 1500)); }
+  catch { await new Promise((r) => setTimeout(r, 1500)); }
 }
 if (!base) throw new Error("could not warm box / read base");
 console.log(`[c2] base read from live box: ${JSON.stringify(base.content)} (== capture base ${JSON.stringify(BASE)}: ${base.content === BASE})`);

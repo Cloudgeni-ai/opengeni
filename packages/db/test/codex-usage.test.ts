@@ -53,7 +53,7 @@ async function waitForReady(): Promise<void> {
       const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
       try { await probe`SELECT 1`; return; } finally { await probe.end(); }
     } catch (err) {
-      if (Date.now() > deadline) throw new Error(`postgres not ready: ${String(err)}`);
+      if (Date.now() > deadline) throw new Error(`postgres not ready: ${String(err)}`, { cause: err });
       await new Promise((r) => setTimeout(r, 500));
     }
   }

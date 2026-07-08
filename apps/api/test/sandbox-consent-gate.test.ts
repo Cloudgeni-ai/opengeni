@@ -304,7 +304,7 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
 
   test("sharedSessionIds exposes IDS ONLY: a viewer of A (stream:view, NO sessions:read) is DENIED a cross-session-events probe on B", async () => {
     if (!available) return;
-    const { accountId, workspaceId, a, b } = await sharedPair();
+    const { accountId, workspaceId, b } = await sharedPair();
     // The viewer is authorized to WATCH A (stream:view + stream:acknowledge) but
     // has NO sessions:read — so even knowing B's id (from sharedSessionIds), it
     // cannot subscribe to B's conversation/events.

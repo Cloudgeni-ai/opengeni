@@ -67,7 +67,7 @@ async function waitForReady(): Promise<void> {
       }
     } catch (err) {
       if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
+        throw new Error(`postgres did not become ready in time: ${String(err)}`, { cause: err });
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }

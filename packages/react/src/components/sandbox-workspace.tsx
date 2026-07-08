@@ -21,7 +21,7 @@ import {
   useState,
 } from "react";
 import { Popover } from "radix-ui";
-import type { MachineState, SessionEvent } from "@opengeni/sdk";
+import type { SessionEvent } from "@opengeni/sdk";
 import { CpuIcon, LaptopIcon, RefreshCwIcon } from "lucide-react";
 
 import { type ClientOverride, useOpenGeni } from "../provider";
