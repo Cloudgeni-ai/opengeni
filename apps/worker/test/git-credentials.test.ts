@@ -37,6 +37,7 @@ describe("sandbox git credentials", () => {
     expect(calls).toEqual([{
       accountId: scope.accountId,
       workspaceId: scope.workspaceId,
+      purpose: "token",
       installationId: 123,
       repositoryIds: [456],
       repositoryRefs: [{
@@ -99,6 +100,7 @@ describe("sandbox git credentials", () => {
         accountId: scope.accountId,
         workspaceId: scope.workspaceId,
         provider: "gitlab",
+        purpose: "token",
         installationId: 0,
         repositoryIds: [],
         repositoryRefs: [{
@@ -113,6 +115,7 @@ describe("sandbox git credentials", () => {
         accountId: scope.accountId,
         workspaceId: scope.workspaceId,
         provider: "azure_devops",
+        purpose: "token",
         installationId: 0,
         repositoryIds: [],
         repositoryRefs: [{

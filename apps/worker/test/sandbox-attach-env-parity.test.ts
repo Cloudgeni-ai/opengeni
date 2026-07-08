@@ -21,7 +21,7 @@ import { describe, expect, test } from "bun:test";
 import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
-import type { ResourceRef } from "@opengeni/contracts";
+import type { ConnectionCredentialsPort, ResourceRef } from "@opengeni/contracts";
 import { mintRunGitToken, sandboxEnvironmentForRun } from "../src/activities/environment";
 
 // The exact SDK delta predicate (validateNoEnvironmentDelta): true iff every key
@@ -293,5 +293,56 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     );
     expect(env.GIT_AUTHOR_NAME).toBe("opengeni-test[bot]");
     expect(env.GIT_AUTHOR_EMAIL).toBe("12345+opengeni-test[bot]@users.noreply.github.com");
+  });
+
+  test("lazy defer uses BYO gitCredentials identity before provision while token value waits for mint", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+    const repoResource: ResourceRef = {
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    };
+    const calls: Array<{ purpose?: string }> = [];
+    const gitCredentials: NonNullable<ConnectionCredentialsPort["gitCredentials"]> = async (input) => {
+      calls.push({ purpose: input.purpose });
+      if (input.purpose === "identity") {
+        return {
+          workspaceId: input.workspaceId,
+          identity: { name: "Host Git Bot", email: "host-git@example.com" },
+        };
+      }
+      return {
+        workspaceId: input.workspaceId,
+        token: "ghs_lazy_mint",
+        identity: { name: "Host Git Bot", email: "host-git@example.com" },
+      };
+    };
+    const scope = { accountId: "acct-1", workspaceId: "ws-1" };
+
+    const { environment: lazyEnv, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource], {}, {
+      deferGitHubToken: true,
+      scope,
+      gitCredentials,
+    });
+
+    expect(gitToken).toBeUndefined();
+    expect(lazyEnv.GIT_AUTHOR_NAME).toBe("Host Git Bot");
+    expect(lazyEnv.GIT_AUTHOR_EMAIL).toBe("host-git@example.com");
+    expect(lazyEnv.GIT_COMMITTER_NAME).toBe("Host Git Bot");
+    expect(lazyEnv.GIT_COMMITTER_EMAIL).toBe("host-git@example.com");
+    expect(Object.values(lazyEnv)).not.toContain("ghs_lazy_mint");
+    expect(calls).toEqual([{ purpose: "identity" }]);
+
+    const token = await mintRunGitToken(settings, [repoResource], { scope, gitCredentials });
+    expect(token).toBe("ghs_lazy_mint");
+    expect(calls).toEqual([{ purpose: "identity" }, { purpose: "token" }]);
   });
 });

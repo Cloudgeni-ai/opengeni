@@ -177,7 +177,7 @@ export async function sandboxEnvironmentForRun(
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   if (options.deferGitHubToken) {
-    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
+    applyGitAuthPointerEnvironment(environment, await resolveRunGitIdentityWithSelections(settings, selections, options));
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   // Run-scoped sandbox preparation for repository resources. GitHub retains the
@@ -231,6 +231,21 @@ export async function mintRunGitToken(
   return (await mintRunGitTokens(settings, resources, options))?.github;
 }
 
+export async function resolveRunGitIdentity(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<{ name: string; email: string } | null> {
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
+    return null;
+  }
+  return await resolveRunGitIdentityWithSelections(settings, selections, options);
+}
+
 async function mintRunGitTokensWithIdentity(
   settings: Settings,
   selections: GitCredentialSelection[],
@@ -244,11 +259,14 @@ async function mintRunGitTokensWithIdentity(
   for (const selection of selections) {
     let token: string | null = null;
     if (options?.gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(options.scope, selection);
+      const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
       const minted: GitCredentials = await options.gitCredentials(request);
       // FORK-7: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
+      if (!minted.token) {
+        throw new Error("connection-credential provider (gitCredentials) did not return a token for a token request");
+      }
       token = minted.token;
       if (minted.identity) {
         identity = minted.identity;
@@ -269,6 +287,33 @@ async function mintRunGitTokensWithIdentity(
   return { gitTokens, identity };
 }
 
+async function resolveRunGitIdentityWithSelections(
+  settings: Settings,
+  selections: GitCredentialSelection[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  },
+): Promise<{ name: string; email: string } | null> {
+  let identity: { name: string; email: string } | null = null;
+  for (const selection of selections) {
+    if (options.gitCredentials && options.scope) {
+      const resolved: GitCredentials = await options.gitCredentials(
+        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
+      );
+      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
+      if (resolved.identity) {
+        identity = resolved.identity;
+      } else if (selection.provider === "github") {
+        identity = githubAppBotIdentity(settings);
+      }
+    } else if (selection.provider === "github" && selection.installationId > 0) {
+      identity = githubAppBotIdentity(settings);
+    }
+  }
+  return identity;
+}
+
 type GitCredentialSelection = {
   provider: GitCredentialProvider;
   installationId: number;
@@ -279,10 +324,12 @@ type GitCredentialSelection = {
 function gitCredentialsRequestForSelection(
   scope: ConnectionScope,
   selection: GitCredentialSelection,
+  purpose?: "token" | "identity",
 ): Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0] {
   const legacy = {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
+    ...(purpose ? { purpose } : {}),
     installationId: selection.installationId,
     repositoryIds: selection.repositoryIds,
   };

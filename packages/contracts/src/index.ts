@@ -1153,6 +1153,10 @@ export type GitCredentialsRequest = {
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.
   provider?: GitCredentialProvider;
+  // Token requests are the existing behavior. Identity requests let lazy
+  // sandbox provisioning resolve stable git author/committer identity before
+  // the box exists while deferring the rotating token value to first provision.
+  purpose?: "token" | "identity";
   // Provider-neutral repository refs for hosts that broker non-GitHub tokens.
   // For GitHub requests these are additive to the legacy fields below.
   repositoryRefs?: GitCredentialRepositoryRef[];
@@ -1162,9 +1166,10 @@ export type GitCredentialsRequest = {
 };
 
 export type GitCredentials = {
-  // The minted provider token the activity writes into provider-specific
-  // sandbox token files. The value never enters the manifest.
-  token: string;
+  // The minted provider token. Required for purpose="token"; optional for
+  // purpose="identity" so hosts can return only stable git identity before lazy
+  // sandbox provision. The value never enters the manifest.
+  token?: string;
   // FORK-7 echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
