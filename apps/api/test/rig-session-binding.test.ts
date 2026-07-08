@@ -234,6 +234,28 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     })).rejects.toThrow(/different rig/);
   }, 60_000);
 
+  test("EXPLICIT shared join rejects a legacy MIXED-rig group deterministically", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const rigA = await seedRig(accountId, workspaceId, "rig-a-mixed");
+    const rigB = await seedRig(accountId, workspaceId, "rig-b-mixed");
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "a", rigId: rigA.rigId, sandboxBackend: "modal",
+    });
+    // Simulate a legacy/corrupt rig-blind share: force a B-rig member row into
+    // A's group directly. Today the create gate must compare the joiner against
+    // ALL members, not just parent A.
+    await admin`
+      insert into sessions (account_id, workspace_id, initial_message, rig_id, rig_version_id, sandbox_group_id, model, sandbox_backend)
+      values (${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId}, ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
+      initialMessage: "joiner matching parent only",
+      rigId: rigA.rigId,
+      sandbox: "shared",
+    })).rejects.toThrow(/same rig/);
+  }, 60_000);
+
   test("rig-less sessions still share (null rig on both sides is compatible)", async () => {
     if (!available) return;
     const bus = new MemoryEventBus();

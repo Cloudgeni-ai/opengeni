@@ -807,7 +807,11 @@ export async function createSessionForRequest(
     }
     const parentBoxed = parent.sandboxBackend !== "none";
     const variableSetMismatch = parentBoxed && !variableSetMatchesGroup(parent.variableSetId ?? null);
-    const rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
+    let rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
+    if (parentBoxed && !rigMismatch) {
+      const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(db, workspaceId, parent.sandboxGroupId);
+      rigMismatch = !memberRigVersionIds.every((memberRigVersionId) => rigVersionMatchesGroup(memberRigVersionId));
+    }
     if (variableSetMismatch || rigMismatch) {
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
