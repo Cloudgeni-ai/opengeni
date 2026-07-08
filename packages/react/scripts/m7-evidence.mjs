@@ -27,8 +27,19 @@ const stateFilter = (() => {
 const outDir = join(__dirname, `../.agent/ui-evidence/pass-${pass}`);
 
 // Widths where dock layout meaningfully differs. The dock becomes a full-screen
-// overlay below 1024px (DOCK_OVERLAY_BREAKPOINT), so `narrow` exercises that.
-const WIDTHS = { wide: 1440, medium: 1120, narrow: 900 };
+// overlay below 1024px (DOCK_OVERLAY_BREAKPOINT) → `narrow`/`phone` exercise that;
+// `phone` also drops the Files tree+diff to STACKED (container <720) and shrinks the
+// Changes rail (max-[560px]).
+const WIDTHS = { wide: 1440, medium: 1120, narrow: 900, phone: 520 };
+
+// Pass 4 sweeps widths for a CURATED set (the states where responsive/density
+// actually differ), rather than the whole matrix — keeps the review set readable.
+const RESPONSIVE = [
+  { state: "warm-live", tabs: ["changes", "files", "terminal"] },
+  { state: "dense", tabs: ["changes", "files"] },
+  { state: "cold-instant", tabs: ["changes"] },
+  { state: "selfhosted-offline", tabs: ["files"] },
+];
 
 // The matrix. `tabs` lists which surface tabs to capture for that state.
 const MATRIX = [
@@ -101,16 +112,23 @@ async function shotChip(state, theme) {
   await page.close();
 }
 
-for (const row of MATRIX) {
-  if (stateFilter && !stateFilter.includes(row.state)) continue;
-  for (const theme of ["dark", "light"]) {
-    for (const tab of row.tabs) {
-      // Pass 4 (responsive) sweeps all widths for the primary tab; other passes
-      // capture medium only (the review width) to keep the set readable.
-      const widths = pass === "4" ? ["wide", "medium", "narrow"] : ["medium"];
-      for (const w of widths) await shot(row.state, tab, theme, w);
+if (pass === "4") {
+  // Responsive/density sweep: curated states × widths, both themes.
+  for (const row of RESPONSIVE) {
+    if (stateFilter && !stateFilter.includes(row.state)) continue;
+    for (const theme of ["dark", "light"]) {
+      for (const tab of row.tabs) {
+        for (const w of ["wide", "medium", "narrow", "phone"]) await shot(row.state, tab, theme, w);
+      }
     }
-    if (row.chip) await shotChip(row.state, theme);
+  }
+} else {
+  for (const row of MATRIX) {
+    if (stateFilter && !stateFilter.includes(row.state)) continue;
+    for (const theme of ["dark", "light"]) {
+      for (const tab of row.tabs) await shot(row.state, tab, theme, "medium");
+      if (row.chip) await shotChip(row.state, theme);
+    }
   }
 }
 
