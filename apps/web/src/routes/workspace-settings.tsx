@@ -1,6 +1,6 @@
 // Workspace settings: workspace name/rename, "People with access" (workspace
 // members on the workspace_memberships model), the workspace-scoped API keys
-// (moved here out of the old account page), a link to Environments, and a
+// (moved here out of the old account page), a link to Variable sets, and a
 // danger zone with workspace deletion. The org/billing console lives at
 // Organization settings.
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -297,20 +297,20 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         {/* People with access (workspace members) */}
         <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
 
-        {/* Environments link */}
+        {/* Variable sets link */}
         <section className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4">
           <div className="min-w-0">
             <h2 className="flex items-center gap-1.5 text-sm font-medium">
               <BoxIcon className="size-3.5 text-brand" />
-              Environments
+              Variable sets
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
               Variable sets injected into sandboxes at session start.
             </p>
           </div>
           <Button asChild type="button" variant="secondary" size="sm">
-            <Link to="/workspaces/$workspaceId/environments" params={{ workspaceId }}>
-              Manage environments
+            <Link to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }}>
+              Manage variable sets
             </Link>
           </Button>
         </section>

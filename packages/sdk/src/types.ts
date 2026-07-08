@@ -374,7 +374,13 @@ export type Session = {
   sandboxGroupId: string;
   activeSandboxId: string | null;
   activeEpoch: number;
+  variableSetId: string | null;
+  /** @deprecated use variableSetId */
   environmentId: string | null;
+  // The rig + frozen rig version this session rides (M3). Both null for a
+  // rig-less session. Frozen at create; a later rig promote never moves them.
+  rigId: string | null;
+  rigVersionId: string | null;
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
@@ -459,6 +465,10 @@ export const SESSION_EVENT_TYPES = [
   "agent.model.usage",
   "tool.auth_needed",
   "agent.updated",
+  "rig.setup.started",
+  "rig.setup.completed",
+  "rig.setup.skipped",
+  "rig.setup.failed",
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
@@ -603,13 +613,7 @@ export type SandboxCommandOutputDeltaPayload = {
 };
 export type FsChangeKind = "created" | "modified" | "deleted" | "renamed";
 export type FsChangedPayload = {
-  changes: {
-    path: string;
-    kind: FsChangeKind;
-    isDir: boolean;
-    sizeBytes: number | null;
-    oldPath?: string | undefined;
-  }[];
+  changes: { path: string; kind: FsChangeKind; isDir: boolean; sizeBytes: number | null; oldPath?: string | undefined }[];
   source: "write" | "watch" | "agent";
   revision: number;
   leaseEpoch: number;
@@ -624,24 +628,9 @@ export type GitChangedPayload = {
   revision: number;
   leaseEpoch: number;
 };
-export type TerminalPtyStartedPayload = {
-  ptyId: string;
-  cols: number;
-  rows: number;
-  shell: string;
-  cwd: string;
-};
-export type TerminalPtyOutputDeltaPayload = {
-  ptyId: string;
-  stream: "stdout" | "stderr";
-  chunk: string;
-  seq: number;
-};
-export type TerminalPtyExitedPayload = {
-  ptyId: string;
-  exitCode: number | null;
-  reason: "exit" | "killed" | "owner_gone" | "timeout";
-};
+export type TerminalPtyStartedPayload = { ptyId: string; cols: number; rows: number; shell: string; cwd: string };
+export type TerminalPtyOutputDeltaPayload = { ptyId: string; stream: "stdout" | "stderr"; chunk: string; seq: number };
+export type TerminalPtyExitedPayload = { ptyId: string; exitCode: number | null; reason: "exit" | "killed" | "owner_gone" | "timeout" };
 
 // A2 FileSystem request/response.
 export type FsNodeType = "file" | "dir" | "symlink" | "other";
@@ -656,115 +645,31 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
-export type FsListRequest = {
-  path?: string;
-  depth?: number;
-  maxEntries?: number;
-  includeHidden?: boolean;
-};
+export type FsListRequest = { path?: string; depth?: number; maxEntries?: number; includeHidden?: boolean };
 export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
 export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
-export type FsReadResponse = {
-  path: string;
-  encoding: FsEncoding;
-  content: string;
-  sizeBytes: number;
-  truncated: boolean;
-  isBinary: boolean;
-  revision: number;
-};
-export type FsWriteRequest = {
-  path: string;
-  encoding?: FsEncoding;
-  content: string;
-  overwrite?: boolean;
-  createParents?: boolean;
-};
+export type FsReadResponse = { path: string; encoding: FsEncoding; content: string; sizeBytes: number; truncated: boolean; isBinary: boolean; revision: number };
+export type FsWriteRequest = { path: string; encoding?: FsEncoding; content: string; overwrite?: boolean; createParents?: boolean };
 export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
-export type FsMoveRequest = {
-  path: string;
-  newPath: string;
-  overwrite?: boolean;
-  createParents?: boolean;
-};
+export type FsMoveRequest = { path: string; newPath: string; overwrite?: boolean; createParents?: boolean };
 export type FsMoveResponse = { path: string; newPath: string; revision: number };
 export type FsMkdirRequest = { path: string; recursive?: boolean };
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
-export type GitFileStatusCode =
-  | "added"
-  | "modified"
-  | "deleted"
-  | "renamed"
-  | "copied"
-  | "untracked"
-  | "ignored"
-  | "conflicted"
-  | "typechange";
-export type GitFileStatus = {
-  path: string;
-  oldPath: string | null;
-  index: GitFileStatusCode | null;
-  worktree: GitFileStatusCode | null;
-  isConflicted: boolean;
-};
+export type GitFileStatusCode = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "ignored" | "conflicted" | "typechange";
+export type GitFileStatus = { path: string; oldPath: string | null; index: GitFileStatusCode | null; worktree: GitFileStatusCode | null; isConflicted: boolean };
 export type GitStatusRequest = { path?: string };
-export type GitStatusResponse = {
-  isRepo: boolean;
-  head: string | null;
-  detached: boolean;
-  upstream: string | null;
-  ahead: number;
-  behind: number;
-  files: GitFileStatus[];
-  revision: number;
-};
+export type GitStatusResponse = { isRepo: boolean; head: string | null; detached: boolean; upstream: string | null; ahead: number; behind: number; files: GitFileStatus[]; revision: number };
 export type GitDiffLineType = "context" | "add" | "del" | "meta";
-export type GitDiffLine = {
-  type: GitDiffLineType;
-  oldNo: number | null;
-  newNo: number | null;
-  text: string;
-};
-export type GitDiffHunk = {
-  oldStart: number;
-  oldLines: number;
-  newStart: number;
-  newLines: number;
-  header: string;
-  lines: GitDiffLine[];
-};
-export type GitFileDiff = {
-  path: string;
-  oldPath: string | null;
-  status: GitFileStatusCode;
-  isBinary: boolean;
-  isImage: boolean;
-  additions: number;
-  deletions: number;
-  hunks: GitDiffHunk[];
-  truncated: boolean;
-};
-export type GitDiffRequest = {
-  path?: string;
-  staged?: boolean;
-  fromRef?: string;
-  toRef?: string;
-  pathspec?: string[];
-  contextLines?: number;
-  maxBytesPerFile?: number;
-};
+export type GitDiffLine = { type: GitDiffLineType; oldNo: number | null; newNo: number | null; text: string };
+export type GitDiffHunk = { oldStart: number; oldLines: number; newStart: number; newLines: number; header: string; lines: GitDiffLine[] };
+export type GitFileDiff = { path: string; oldPath: string | null; status: GitFileStatusCode; isBinary: boolean; isImage: boolean; additions: number; deletions: number; hunks: GitDiffHunk[]; truncated: boolean };
+export type GitDiffRequest = { path?: string; staged?: boolean; fromRef?: string; toRef?: string; pathspec?: string[]; contextLines?: number; maxBytesPerFile?: number };
 export type GitDiffResponse = { files: GitFileDiff[]; revision: number };
-export type GitLogRequest = {
-  path?: string;
-  ref?: string;
-  maxCount?: number;
-  skip?: number;
-  pathspec?: string[];
-};
+export type GitLogRequest = { path?: string; ref?: string; maxCount?: number; skip?: number; pathspec?: string[] };
 export type GitCommit = {
   sha: string;
   shortSha: string;
@@ -776,19 +681,8 @@ export type GitCommit = {
   refs: string[];
 };
 export type GitLogResponse = { commits: GitCommit[]; hasMore: boolean };
-export type GitShowRequest = {
-  path?: string;
-  ref: string;
-  filePath?: string;
-  encoding?: FsEncoding;
-  maxBytesPerFile?: number;
-};
-export type GitShowResponse = {
-  commit: GitCommit | null;
-  files: GitFileDiff[];
-  blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null;
-  revision: number;
-};
+export type GitShowRequest = { path?: string; ref: string; filePath?: string; encoding?: FsEncoding; maxBytesPerFile?: number };
+export type GitShowResponse = { commit: GitCommit | null; files: GitFileDiff[]; blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null; revision: number };
 
 // Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
 // + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
@@ -878,19 +772,8 @@ export type GetWorkspaceCaptureFileResponse = {
 };
 
 // A2 Terminal exec + PTY.
-export type TerminalExecRequest = {
-  command: string;
-  cwd?: string;
-  timeoutMs?: number;
-  emitStream?: boolean;
-};
-export type TerminalExecResponse = {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  running: boolean;
-  wallTimeSeconds: number;
-};
+export type TerminalExecRequest = { command: string; cwd?: string; timeoutMs?: number; emitStream?: boolean };
+export type TerminalExecResponse = { stdout: string; stderr: string; exitCode: number | null; running: boolean; wallTimeSeconds: number };
 export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
 export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
 export type PtyWriteRequest = { ptyId: string; data: string };
@@ -957,7 +840,11 @@ export type ScheduledTask = {
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
+  variableSetId: string | null;
+  /** @deprecated use variableSetId */
   environmentId: string | null;
+  // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
+  rigId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -982,7 +869,12 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
+  variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
   environmentId?: string | undefined;
+  // The rig to bind this session to (M3). Its active version is frozen onto the
+  // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
+  rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
@@ -1036,11 +928,15 @@ export const KNOWN_PERMISSIONS = [
   "connections:write",
   "environments:manage",
   "environments:use",
+  "variable-sets:manage",
+  "variable-sets:use",
   "mcp_servers:attach",
   "toolspace:call",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "rigs:use",
+  "rigs:manage",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
@@ -1116,18 +1012,8 @@ export type CodexUsagePayload = {
   fetchedAt: string;
   /** Present only on an auth/refresh failure path. */
   reason?: "needs_relogin";
-  additionalLimits?: Array<{
-    limitName: string;
-    meteredFeature: string;
-    fiveHour: CodexUsageWindow | null;
-    weekly: CodexUsageWindow | null;
-  }>;
-  credits?: {
-    hasCredits: boolean;
-    unlimited: boolean;
-    overageLimitReached: boolean;
-    balance: string;
-  };
+  additionalLimits?: Array<{ limitName: string; meteredFeature: string; fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null }>;
+  credits?: { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string };
 };
 
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
@@ -1192,10 +1078,7 @@ export type CodexConnectPoll =
   | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
-export type CodexUsage = {
-  status: "ok" | "limit_reached" | "error" | "no-data";
-  usage: CodexUsagePayload | null;
-};
+export type CodexUsage = { status: "ok" | "limit_reached" | "error" | "no-data"; usage: CodexUsagePayload | null };
 
 /** Batched live-refresh response, keyed by credential id; each entry independently statused. */
 export type CodexUsageMap = Record<string, CodexUsage>;
@@ -1275,6 +1158,7 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
+  defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -1287,6 +1171,10 @@ export type WorkspaceSettings = {
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   [key: string]: unknown;
+};
+
+export type SetWorkspaceDefaultRigRequest = {
+  rigId: string | null;
 };
 
 export type CreateWorkspaceRequest = {
@@ -1441,7 +1329,11 @@ export type CreateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
+  variableSetId?: string | null | undefined;
+  /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
+  // The rig each run binds to (M3); active version resolved per fire.
+  rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1452,7 +1344,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
+  variableSetId?: string | null | undefined;
+  /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
+  // The rig each run binds to (M3); active version resolved per fire.
+  rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1476,42 +1372,170 @@ export type ScheduledTaskRun = {
   updatedAt: string;
 };
 
-// --- Environments -------------------------------------------------------------
+// --- VariableSets -------------------------------------------------------------
 
 /**
  * Variable values are write-only by design: the API never returns a value, so
  * reads expose name + version metadata only. Values are decrypted exclusively
  * inside the worker at sandbox materialization time.
  */
-export type WorkspaceEnvironmentVariableMetadata = {
+export type VariableSetVariableMetadata = {
   name: string;
   version: number;
   createdAt: string;
   updatedAt: string;
 };
 
-export type WorkspaceEnvironment = {
+export type VariableSet = {
   id: string;
   accountId: string;
   workspaceId: string;
   name: string;
   description: string | null;
-  variables: WorkspaceEnvironmentVariableMetadata[];
+  variables: VariableSetVariableMetadata[];
   createdAt: string;
   updatedAt: string;
 };
 
-export type CreateWorkspaceEnvironmentRequest = {
+/** @deprecated use VariableSetVariableMetadata */
+export type WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
+
+/** @deprecated use VariableSet */
+export type WorkspaceEnvironment = VariableSet;
+
+export type CreateVariableSetRequest = {
   name: string;
   description?: string | undefined;
   /** Initial variables. Values are write-only: they never come back on reads. */
   variables?: { name: string; value: string }[] | undefined;
 };
 
-export type UpdateWorkspaceEnvironmentRequest = {
+/** @deprecated use CreateVariableSetRequest */
+export type CreateWorkspaceEnvironmentRequest = CreateVariableSetRequest;
+
+export type UpdateVariableSetRequest = {
   name?: string | undefined;
   description?: string | null | undefined;
 };
+
+/** @deprecated use UpdateVariableSetRequest */
+export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
+
+export type SetVariableSetVariableRequest = {
+  value: string;
+};
+
+/** @deprecated use SetVariableSetVariableRequest */
+export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
+
+// --- Rigs ---------------------------------------------------------------------
+// Workspace-scoped, versioned sandbox machine definitions. Versions are
+// append-only and content-immutable; exactly one is active per rig.
+
+export type RigCheck = {
+  name: string;
+  command: string;
+};
+
+export type RigVersion = {
+  id: string;
+  rigId: string;
+  version: number;
+  image: string | null;
+  setupScript: string | null;
+  checks: RigCheck[];
+  credentialHooks: string[];
+  defaultVariableSetIds: string[];
+  changelog: string | null;
+  createdBy: string | null;
+  active: boolean;
+  createdAt: string;
+};
+
+export type RigVerificationHealth = {
+  checkHealth: "passing" | "failing" | "unknown";
+  lastVerifiedAt: string | null;
+};
+
+export type Rig = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  activeVersion: RigVersion | null;
+  activeVersionHealth?: RigVerificationHealth | null;
+  versionCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RigChangeKind = "setup_append" | "definition_edit";
+
+export type RigChangeStatus = "proposed" | "verifying" | "merged" | "rejected" | "failed";
+
+export type RigCheckResult = {
+  name: string;
+  command: string;
+  exitCode: number | null;
+  output?: string | undefined;
+};
+
+export type RigChangeVerification = {
+  startedAt?: string | undefined;
+  finishedAt?: string | undefined;
+  log?: string | undefined;
+  checkResults?: RigCheckResult[] | undefined;
+  [key: string]: unknown;
+};
+
+export type RigChange = {
+  id: string;
+  rigId: string;
+  baseVersionId: string | null;
+  kind: RigChangeKind;
+  payload: Record<string, unknown>;
+  status: RigChangeStatus;
+  proposedBy: string | null;
+  verification: RigChangeVerification | null;
+  resultVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateRigRequest = {
+  name: string;
+  description?: string | undefined;
+  image?: string | undefined;
+  setupScript?: string | undefined;
+  checks?: RigCheck[] | undefined;
+  credentialHooks?: string[] | undefined;
+  defaultVariableSetIds?: string[] | undefined;
+};
+
+export type UpdateRigRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+};
+
+export type RigSetupAppendPayload = {
+  command: string;
+  note?: string | undefined;
+};
+
+export type RigDefinitionEditPayload = {
+  image?: string | null | undefined;
+  setupScript?: string | null | undefined;
+  checks?: RigCheck[] | undefined;
+  credentialHooks?: string[] | undefined;
+  defaultVariableSetIds?: string[] | undefined;
+  changelog?: string | null | undefined;
+};
+
+export type ProposeRigChangeRequest =
+  | { kind: "setup_append"; payload: RigSetupAppendPayload }
+  | { kind: "definition_edit"; payload: RigDefinitionEditPayload };
 
 // --- Files ---------------------------------------------------------------------
 
@@ -1572,15 +1596,7 @@ export type UploadFileInput = {
 // --- Documents -------------------------------------------------------------------
 
 export type DocumentStatus = "queued" | "indexing" | "ready" | "failed";
-export type KnowledgeSourceKind =
-  | "manual_upload"
-  | "meeting_transcript"
-  | "repository"
-  | "email"
-  | "chat"
-  | "document"
-  | "web"
-  | "other";
+export type KnowledgeSourceKind = "manual_upload" | "meeting_transcript" | "repository" | "email" | "chat" | "document" | "web" | "other";
 export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
 export type DocumentBase = {
@@ -1672,19 +1688,8 @@ export type DocumentSearchResponse = {
   results: DocumentSearchResult[];
 };
 
-export type KnowledgeMemoryStatus =
-  | "proposed"
-  | "approved"
-  | "rejected"
-  | "active"
-  | "superseded"
-  | "archived";
-export type KnowledgeMemoryKind =
-  | "semantic"
-  | "episodic"
-  | "procedural"
-  | "decision"
-  | "preference";
+export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected" | "active" | "superseded" | "archived";
+export type KnowledgeMemoryKind = "semantic" | "episodic" | "procedural" | "decision" | "preference";
 
 export type KnowledgeSourceRef = {
   kind: "document_chunk" | "document" | "session_event" | "memory" | "external";
@@ -1820,7 +1825,7 @@ export type CapabilityPackSkill = {
   files: CapabilityPackSkillFile[];
 };
 
-export type CapabilityPackEnvironmentSpec = {
+export type CapabilityPackVariableSetSpec = {
   description: string;
   requiredVariables: string[];
   required: boolean;
@@ -1839,7 +1844,7 @@ export type CapabilityPack = {
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
   scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
-  environment?: CapabilityPackEnvironmentSpec | undefined;
+  variableSet?: CapabilityPackVariableSetSpec | undefined;
   metadata: Record<string, unknown>;
 };
 
@@ -1852,53 +1857,43 @@ export type RegisterCapabilityPackRequest = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
-  skills?:
-    | {
-        name: string;
-        description?: string | undefined;
-        files: CapabilityPackSkillFile[];
-      }[]
-    | undefined;
+  skills?: {
+    name: string;
+    description?: string | undefined;
+    files: CapabilityPackSkillFile[];
+  }[] | undefined;
   tools?: ToolRef[] | undefined;
-  connectors?:
-    | {
-        id: string;
-        name: string;
-        category: string;
-        authModel: CapabilityPackConnectorAuthModel;
-        providers?: string[] | undefined;
-        scopes?: string[] | undefined;
-        required?: boolean | undefined;
-        metadata?: Record<string, unknown> | undefined;
-      }[]
-    | undefined;
-  knowledge?:
-    | {
-        type: "document_base";
-        id: string;
-        name: string;
-        description?: string | null | undefined;
-        required?: boolean | undefined;
-      }[]
-    | undefined;
-  scheduledTaskTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        defaultSchedule: ScheduledTaskScheduleSpec;
-        defaultRunMode?: ScheduledTaskRunMode | undefined;
-        defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
-        prompt?: string | undefined;
-      }[]
-    | undefined;
-  environment?:
-    | {
-        description: string;
-        requiredVariables?: string[] | undefined;
-        required?: boolean | undefined;
-      }
-    | undefined;
+  connectors?: {
+    id: string;
+    name: string;
+    category: string;
+    authModel: CapabilityPackConnectorAuthModel;
+    providers?: string[] | undefined;
+    scopes?: string[] | undefined;
+    required?: boolean | undefined;
+    metadata?: Record<string, unknown> | undefined;
+  }[] | undefined;
+  knowledge?: {
+    type: "document_base";
+    id: string;
+    name: string;
+    description?: string | null | undefined;
+    required?: boolean | undefined;
+  }[] | undefined;
+  scheduledTaskTemplates?: {
+    id: string;
+    name: string;
+    description: string;
+    defaultSchedule: ScheduledTaskScheduleSpec;
+    defaultRunMode?: ScheduledTaskRunMode | undefined;
+    defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+    prompt?: string | undefined;
+  }[] | undefined;
+  variableSet?: {
+    description: string;
+    requiredVariables?: string[] | undefined;
+    required?: boolean | undefined;
+  } | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1924,6 +1919,8 @@ export type PackInstallation = {
 };
 
 export type EnablePackRequest = {
+  variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
   environmentId?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
@@ -1942,12 +1939,7 @@ export type GetPackResponse = {
 
 export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
-export type CapabilitySource =
-  | "built_in"
-  | "configured"
-  | "public_registry"
-  | "registry"
-  | "manual";
+export type CapabilitySource = "built_in" | "configured" | "public_registry" | "registry" | "manual";
 
 export type CapabilityInstallationStatus = "active" | "disabled";
 
@@ -2043,10 +2035,12 @@ export type EnableCapabilityRequest = {
    */
   headers?: Record<string, string> | undefined;
   /**
-   * Initial environment attachment for kind=pack capabilities — mirrors the
+   * Initial variableSet attachment for kind=pack capabilities — mirrors the
    * dedicated POST /packs/:id/enable body. Required to enable an
-   * environment.required pack through this unified path; ignored otherwise.
-   */
+   * variableSet.required pack through this unified path; ignored otherwise.
+  */
+  variableSetId?: string | undefined;
+  /** @deprecated use variableSetId */
   environmentId?: string | undefined;
 };
 

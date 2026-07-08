@@ -11,6 +11,7 @@ import { createGoalActivities } from "./activities/goals";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
+import { createRigVerificationActivities } from "./activities/rig-verification";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
 import {
   observabilityEventLogger,
@@ -117,6 +118,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
     ...createGoalActivities(services),
+    ...createRigVerificationActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
     ...createSandboxLeaseActivities(services),
@@ -137,3 +139,5 @@ export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskR
 export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
 export const pauseGoalForInterrupt = defaultActivities.pauseGoalForInterrupt;
 export const reapSandboxLeases = defaultActivities.reapSandboxLeases;
+export const verifyRigChange = defaultActivities.verifyRigChange;
+export const verifyRigVersion = defaultActivities.verifyRigVersion;

@@ -2,6 +2,7 @@ import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
   ListWorkspaceMembersResponse,
+  SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
@@ -23,6 +24,8 @@ import {
   listWorkspacesForSubject,
   removeWorkspaceMember,
   requireWorkspace,
+  getRig,
+  setWorkspaceDefaultRig,
   updateWorkspace,
   updateWorkspaceSettings,
 } from "@opengeni/db";
@@ -124,6 +127,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid workspace settings patch" });
     }
     const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
+    return c.json(Workspace.parse(workspace));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
+    const payload = SetWorkspaceDefaultRigRequest.parse(await c.req.json());
+    if (payload.rigId) {
+      const rig = await getRig(deps.db, workspaceId, payload.rigId);
+      if (!rig) {
+        throw new HTTPException(422, { message: `unknown rigId: ${payload.rigId}` });
+      }
+    }
+    const workspace = await setWorkspaceDefaultRig(deps.db, workspaceId, payload.rigId);
     return c.json(Workspace.parse(workspace));
   });
 

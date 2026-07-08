@@ -1,7 +1,7 @@
-// Environments: named, workspace-scoped sets of secret variables that the
-// worker decrypts and injects into the sandbox as environment variables at
+// Variable sets: named, workspace-scoped sets of secret variables that the
+// worker decrypts and injects into the sandbox as variable set variables at
 // session start. Values are write-only by design — set or rotate, never read.
-import { useEnvironments, useScheduledTasks, useWorkspaceSessions } from "@opengeni/react";
+import { useVariableSets, useScheduledTasks, useWorkspaceSessions } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
@@ -27,20 +27,16 @@ import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
-import type { ScheduledTask, Session, WorkspaceEnvironment } from "@/types";
+import type { ScheduledTask, Session, WorkspaceVariableSet } from "@/types";
 
-export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
-  const environments = useEnvironments();
-  // Attachment views: which sessions and scheduled tasks carry each environment.
-  const {
-    sessions,
-    loading: sessionsLoading,
-    error: sessionsError,
-  } = useWorkspaceSessions({ limit: 100 });
+export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
+  const variableSets = useVariableSets();
+  // Attachment views: which sessions and scheduled tasks carry each variableSet.
+  const { sessions, loading: sessionsLoading, error: sessionsError } = useWorkspaceSessions({ limit: 100 });
   const { tasks, loading: tasksLoading, error: tasksError } = useScheduledTasks();
-  // Fail closed: never delete an environment while its attachment set is
+  // Fail closed: never delete a variable set while its attachment set is
   // unknown (initial load or a failed read) — a false-empty attachment view
-  // could otherwise let a still-referenced environment be removed.
+  // could otherwise let a still-referenced variableSet be removed.
   const attachmentsUnknown =
     sessionsError !== null ||
     tasksError !== null ||
@@ -50,20 +46,16 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   // Honest list state: a failed load renders as an error with retry, never as
-  // the "No environments yet…" empty state.
-  const environmentsView = listViewState({
-    loading: environments.loading,
-    error: environments.error,
-    count: environments.environments.length,
-  });
+  // the "No variable sets yet…" empty state.
+  const variableSetsView = listViewState({ loading: variableSets.loading, error: variableSets.error, count: variableSets.variableSets.length });
 
-  async function createEnvironment() {
+  async function createVariableSet() {
     const name = createName.trim();
     if (!name) {
-      toast.error("Environment name is required");
+      toast.error("Variable set name is required");
       return;
     }
-    const created = await environments.create({
+    const created = await variableSets.create({
       name,
       ...(createDescription.trim() ? { description: createDescription.trim() } : {}),
     });
@@ -71,11 +63,9 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
       setCreateOpen(false);
       setCreateName("");
       setCreateDescription("");
-      toast.success("Environment created");
-    } else if (environments.mutationError) {
-      toast.error("Failed to create environment", {
-        description: environments.mutationError.message,
-      });
+      toast.success("Variable set created");
+    } else if (variableSets.mutationError) {
+      toast.error("Failed to create variableSet", { description: variableSets.mutationError.message });
     }
   }
 
@@ -83,71 +73,35 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
       <PageHeader
         icon={<BoxIcon className="size-4" />}
-        title="Environments"
+        title="Variable sets"
         description="Named secret sets injected into the sandbox as environment variables at session start. Values are write-only: set or rotate them here; nothing ever reads them back."
-        actions={
+        actions={(
           <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => void environments.refresh()}
-              disabled={environments.loading}
-              className="h-9"
-            >
-              <RefreshCwIcon
-                className={environments.loading ? "size-3.5 animate-spin" : "size-3.5"}
-              />
+            <Button type="button" variant="ghost" size="sm" onClick={() => void variableSets.refresh()} disabled={variableSets.loading} className="h-9">
+              <RefreshCwIcon className={variableSets.loading ? "size-3.5 animate-spin" : "size-3.5"} />
               Refresh
             </Button>
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setCreateOpen((open) => !open)}
-              className="h-9"
-            >
+            <Button type="button" size="sm" onClick={() => setCreateOpen((open) => !open)} className="h-9">
               <PlusIcon className="size-3.5" />
-              New environment
+              New variable set
             </Button>
           </>
-        }
+        )}
       />
 
       {createOpen ? (
         <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
           <div className="grid gap-1.5">
-            <Label htmlFor="environment-name">Name</Label>
-            <Input
-              id="environment-name"
-              value={createName}
-              onChange={(event) => setCreateName(event.target.value)}
-              placeholder="staging-aws"
-              className="h-9"
-              autoFocus
-            />
+            <Label htmlFor="variableSet-name">Name</Label>
+            <Input id="variableSet-name" value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="staging-aws" className="h-9" autoFocus />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="environment-description">Description</Label>
-            <Input
-              id="environment-description"
-              value={createDescription}
-              onChange={(event) => setCreateDescription(event.target.value)}
-              placeholder="What these credentials reach"
-              className="h-9"
-            />
+            <Label htmlFor="variableSet-description">Description</Label>
+            <Input id="variableSet-description" value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="What these credentials reach" className="h-9" />
           </div>
           <div className="flex items-end">
-            <Button
-              type="button"
-              disabled={environments.mutating || !createName.trim()}
-              onClick={() => void createEnvironment()}
-              className="h-9"
-            >
-              {environments.mutating ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
-              ) : (
-                <CheckIcon className="size-3.5" />
-              )}
+            <Button type="button" disabled={variableSets.mutating || !createName.trim()} onClick={() => void createVariableSet()} className="h-9">
+              {variableSets.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
               Create
             </Button>
           </div>
@@ -155,7 +109,7 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="mt-5 grid gap-3">
-        {environmentsView === "loading" ? (
+        {variableSetsView === "loading" ? (
           <>
             {[0, 1].map((key) => (
               <div key={key} className="rounded-lg border border-border bg-surface/45 p-3">
@@ -170,64 +124,53 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
               </div>
             ))}
           </>
-        ) : environmentsView === "error" ? (
-          <LoadErrorState
-            title="Couldn't load environments"
-            error={environments.error}
-            onRetry={() => void environments.refresh()}
-          />
-        ) : environmentsView === "empty" ? (
+        ) : variableSetsView === "error" ? (
+          <LoadErrorState title="Couldn't load variable sets" error={variableSets.error} onRetry={() => void variableSets.refresh()} />
+        ) : variableSetsView === "empty" ? (
           <EmptyState
             icon={<BoxIcon className="size-4" />}
-            title="No environments yet"
+            title="No variable sets yet"
             description="Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts."
-            action={
+            action={(
               <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
                 <PlusIcon className="size-3.5" />
-                New environment
+                New variable set
               </Button>
-            }
+            )}
           />
         ) : (
-          environments.environments.map((environment) => (
-            <EnvironmentCard
-              key={environment.id}
+          variableSets.variableSets.map((variableSet) => (
+            <VariableSetCard
+              key={variableSet.id}
               workspaceId={workspaceId}
-              environment={environment}
-              attachedSessions={sessions.filter(
-                (session) => session.environmentId === environment.id,
-              )}
-              attachedTasks={tasks.filter((task) => task.environmentId === environment.id)}
+              variableSet={variableSet}
+              attachedSessions={sessions.filter((session) => session.variableSetId === variableSet.id)}
+              attachedTasks={tasks.filter((task) => task.variableSetId === variableSet.id)}
               attachmentsUnknown={attachmentsUnknown}
-              mutating={environments.mutating}
-              onUpdate={(patch) => environments.update(environment.id, patch)}
+              mutating={variableSets.mutating}
+              onUpdate={(patch) => variableSets.update(variableSet.id, patch)}
               onDelete={async () => {
-                const removed = await environments.remove(environment.id);
+                const removed = await variableSets.remove(variableSet.id);
                 if (removed) {
-                  toast.success("Environment deleted");
+                  toast.success("Variable set deleted");
                 }
                 return removed;
               }}
-              onSetVariable={(name, value) => environments.setVariable(environment.id, name, value)}
-              onDeleteVariable={(name) => environments.deleteVariable(environment.id, name)}
+              onSetVariable={(name, value) => variableSets.setVariable(variableSet.id, name, value)}
+              onDeleteVariable={(name) => variableSets.deleteVariable(variableSet.id, name)}
             />
           ))
         )}
-        {environments.mutationError ? (
+        {variableSets.mutationError ? (
           <Notice
             tone="failed"
-            action={
-              <Button
-                type="button"
-                variant="ghost"
-                size="xs"
-                onClick={environments.clearMutationError}
-              >
+            action={(
+              <Button type="button" variant="ghost" size="xs" onClick={variableSets.clearMutationError}>
                 Dismiss
               </Button>
-            }
+            )}
           >
-            {environments.mutationError.message}
+            {variableSets.mutationError.message}
           </Notice>
         ) : null}
       </div>
@@ -235,49 +178,46 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function EnvironmentCard(props: {
+function VariableSetCard(props: {
   workspaceId: string;
-  environment: WorkspaceEnvironment;
+  variableSet: WorkspaceVariableSet;
   attachedSessions: Session[];
   attachedTasks: ScheduledTask[];
   attachmentsUnknown: boolean;
   mutating: boolean;
-  onUpdate: (patch: {
-    name?: string;
-    description?: string | null;
-  }) => Promise<WorkspaceEnvironment | null>;
+  onUpdate: (patch: { name?: string; description?: string | null }) => Promise<WorkspaceVariableSet | null>;
   onDelete: () => Promise<boolean>;
   onSetVariable: (name: string, value: string) => Promise<unknown>;
   onDeleteVariable: (name: string) => Promise<boolean>;
 }) {
-  const { environment } = props;
+  const { variableSet } = props;
   const [editing, setEditing] = useState(false);
-  const [nameDraft, setNameDraft] = useState(environment.name);
-  const [descriptionDraft, setDescriptionDraft] = useState(environment.description ?? "");
+  const [nameDraft, setNameDraft] = useState(variableSet.name);
+  const [descriptionDraft, setDescriptionDraft] = useState(variableSet.description ?? "");
   const [variableName, setVariableName] = useState("");
   const [variableValue, setVariableValue] = useState("");
   // Per-variable rotate drafts (write-only value entry).
   const [rotatingName, setRotatingName] = useState<string | null>(null);
   const [rotateValue, setRotateValue] = useState("");
-  // Destructive confirms (D5): delete the environment, or one of its variables.
+  // Destructive confirms (D5): delete the variableSet, or one of its variables.
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteVariable, setConfirmDeleteVariable] = useState<string | null>(null);
   const attachmentCount = props.attachedSessions.length + props.attachedTasks.length;
   const deleteBlocked = attachmentCount > 0 || props.attachmentsUnknown;
   const deleteBlockedReason = props.attachmentsUnknown
-    ? "Checking where this environment is used…"
+    ? "Checking where this variable set is used…"
     : attachmentCount > 0
       ? "Detach it from sessions and tasks first"
       : undefined;
 
   async function saveDetails() {
     const result = await props.onUpdate({
-      name: nameDraft.trim() || environment.name,
+      name: nameDraft.trim() || variableSet.name,
       description: descriptionDraft.trim() ? descriptionDraft.trim() : null,
     });
     if (result) {
       setEditing(false);
-      toast.success("Environment updated");
+      toast.success("Variable set updated");
     }
   }
 
@@ -313,78 +253,46 @@ function EnvironmentCard(props: {
       <div className="flex min-w-0 items-start justify-between gap-3">
         {editing ? (
           <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
-            <Input
-              value={nameDraft}
-              onChange={(event) => setNameDraft(event.target.value)}
-              aria-label="Environment name"
-              className="h-8 text-sm"
-            />
-            <Input
-              value={descriptionDraft}
-              onChange={(event) => setDescriptionDraft(event.target.value)}
-              placeholder="Description"
-              aria-label="Environment description"
-              className="h-8 text-sm"
-            />
+            <Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} aria-label="Variable set name" className="h-8 text-sm" />
+            <Input value={descriptionDraft} onChange={(event) => setDescriptionDraft(event.target.value)} placeholder="Description" aria-label="Variable set description" className="h-8 text-sm" />
           </div>
         ) : (
           <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{environment.name}</div>
+            <div className="truncate text-sm font-medium">{variableSet.name}</div>
             <div className="mt-0.5 text-xs text-fg-muted">
-              {environment.description ?? "No description"}
+              {variableSet.description ?? "No description"}
             </div>
             <div className="mt-1 text-2xs text-fg-subtle">
-              {environment.variables.length} variable{environment.variables.length === 1 ? "" : "s"}{" "}
-              · updated {formatTimestamp(environment.updatedAt)}
+              {variableSet.variables.length} variable{variableSet.variables.length === 1 ? "" : "s"} · updated {formatTimestamp(variableSet.updatedAt)}
             </div>
           </div>
         )}
         <div className="flex shrink-0 items-center gap-1.5">
           {editing ? (
             <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8"
-                onClick={() => setEditing(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="h-8"
-                disabled={props.mutating}
-                onClick={() => void saveDetails()}
-              >
+              <Button type="button" variant="ghost" size="sm" className="h-8" onClick={() => setEditing(false)}>Cancel</Button>
+              <Button type="button" size="sm" className="h-8" disabled={props.mutating} onClick={() => void saveDetails()}>
                 <CheckIcon className="size-3.5" />
                 Save
               </Button>
             </>
           ) : (
             <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Edit environment"
-                onClick={() => {
-                  setNameDraft(environment.name);
-                  setDescriptionDraft(environment.description ?? "");
-                  setEditing(true);
-                }}
-              >
+              <Button type="button" variant="ghost" size="icon-sm" aria-label="Edit variable set" onClick={() => {
+                setNameDraft(variableSet.name);
+                setDescriptionDraft(variableSet.description ?? "");
+                setEditing(true);
+              }}>
                 <PencilIcon className="size-3.5" />
               </Button>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                aria-label="Delete environment"
+                aria-label="Delete variable set"
                 className="hover:text-status-failed"
                 disabled={props.mutating || deleteBlocked}
-                title={deleteBlockedReason ?? "Delete environment"}
+                title={deleteBlockedReason ?? "Delete variable set"}
                 onClick={() => setConfirmDelete(true)}
               >
                 <Trash2Icon className="size-3.5" />
@@ -395,26 +303,18 @@ function EnvironmentCard(props: {
       </div>
 
       <div className="mt-3 space-y-1.5">
-        {environment.variables.length === 0 ? (
-          <p className="text-xs text-fg-subtle">
-            No variables yet — add one below to inject it into the sandbox.
-          </p>
+        {variableSet.variables.length === 0 ? (
+          <p className="text-xs text-fg-subtle">No variables yet — add one below to inject it into the sandbox.</p>
         ) : (
-          environment.variables.map((variable) => (
-            <div
-              key={variable.name}
-              className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
-            >
+          variableSet.variables.map((variable) => (
+            <div key={variable.name} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
               <div className="flex min-w-0 items-center gap-2">
                 <KeyRoundIcon className="size-3 shrink-0 text-fg-subtle" />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs">{variable.name}</span>
                 <span className="shrink-0 text-2xs text-fg-subtle">
                   v{variable.version} · {formatTimestamp(variable.updatedAt)}
                 </span>
-                <span
-                  className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
-                  title="Values are write-only and never returned by the API"
-                >
+                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle" title="Values are write-only and never returned by the API">
                   ••••••
                 </span>
                 <Button
@@ -424,9 +324,7 @@ function EnvironmentCard(props: {
                   className="h-6 shrink-0 text-2xs"
                   disabled={props.mutating}
                   onClick={() => {
-                    setRotatingName((current) =>
-                      current === variable.name ? null : variable.name,
-                    );
+                    setRotatingName((current) => current === variable.name ? null : variable.name);
                     setRotateValue("");
                   }}
                 >
@@ -455,13 +353,7 @@ function EnvironmentCard(props: {
                     className="h-8 flex-1 text-xs"
                     autoFocus
                   />
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-8"
-                    disabled={props.mutating || !rotateValue}
-                    onClick={() => void rotateVariable(variable.name)}
-                  >
+                  <Button type="button" size="sm" className="h-8" disabled={props.mutating || !rotateValue} onClick={() => void rotateVariable(variable.name)}>
                     <CheckIcon className="size-3.5" />
                     Set
                   </Button>
@@ -488,14 +380,7 @@ function EnvironmentCard(props: {
           aria-label="New variable value"
           className="h-8 text-xs"
         />
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="h-8"
-          disabled={props.mutating || !variableName.trim() || !variableValue}
-          onClick={() => void addVariable()}
-        >
+        <Button type="button" variant="secondary" size="sm" className="h-8" disabled={props.mutating || !variableName.trim() || !variableValue} onClick={() => void addVariable()}>
           <PlusIcon className="size-3.5" />
           Set variable
         </Button>
@@ -533,16 +418,16 @@ function EnvironmentCard(props: {
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title={`Delete environment “${environment.name}”?`}
+        title={`Delete variable set “${variableSet.name}”?`}
         description="Its variables are removed and sessions can no longer use them. This can't be undone."
-        confirmLabel="Delete environment"
+        confirmLabel="Delete variable set"
         onConfirm={() => props.onDelete()}
       />
       <ConfirmDialog
         open={confirmDeleteVariable !== null}
         onOpenChange={(next) => setConfirmDeleteVariable(next ? confirmDeleteVariable : null)}
         title={`Delete variable “${confirmDeleteVariable ?? ""}”?`}
-        description="Sessions using this environment can no longer read it. This can't be undone."
+        description="Sessions using this variable set can no longer read it. This can't be undone."
         confirmLabel="Delete variable"
         onConfirm={async () => {
           const name = confirmDeleteVariable;

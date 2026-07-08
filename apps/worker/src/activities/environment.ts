@@ -14,9 +14,9 @@ import {
   type SandboxSecrets,
 } from "@opengeni/contracts";
 import {
-  loadWorkspaceEnvironmentForRun as loadWorkspaceEnvironmentForRunFromDb,
+  loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
   type Database,
-  type WorkspaceEnvironmentForRun,
+  type VariableSetForRun as WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
 import { createGitHubAppInstallationToken, githubAppBotIdentity } from "@opengeni/github";
 
@@ -65,7 +65,7 @@ export async function loadWorkspaceEnvironmentForRunWithCredentials(
   const secrets: SandboxSecrets = await sandboxSecrets({
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
-    environmentId,
+    variableSetId: environmentId,
   });
   // FORK-7: the provider must echo THIS run's workspace before we apply its
   // decrypted values into the sandbox.

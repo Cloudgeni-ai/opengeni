@@ -52,6 +52,7 @@ export * from "./billing/limits";
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
 export * from "./domain/environments";
+export * from "./rigs";
 export * from "./domain/packs";
 export * from "./domain/resources";
 export * from "./domain/scheduled-tasks";

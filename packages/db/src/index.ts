@@ -56,36 +56,25 @@ import type {
   ReasoningEffort,
   UsageEvent,
   Workspace,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
+  Rig,
+  RigVersion,
+  RigVerificationHealth,
+  RigChange,
+  RigChangeKind,
+  RigChangeStatus,
+  RigCheck,
 } from "@opengeni/contracts";
-import {
-  reasoningEffortForMetadata,
-  CLEARED_RUN_STATE_BLOB,
-  resolveWorkspaceMemoryEnabled,
-} from "@opengeni/contracts";
+import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB, resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  gt,
-  gte,
-  inArray,
-  isNull,
-  lt,
-  ne,
-  or,
-  sql,
-  type SQL,
-} from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -111,7 +100,12 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export {
+  decryptEnvironmentValue as decryptVariableSetValue,
+  encryptEnvironmentValue as encryptVariableSetValue,
+} from "./environment-crypto";
 export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
+export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
 // db:migrate script use it). Re-exporting does NOT run migrate.ts's
@@ -120,11 +114,7 @@ export { migrate, runMigrations } from "./migrate";
 // Step I SDK entry points for the embedded topology: a host drives migration +
 // role provisioning over an explicit admin connection + target schema. Importing
 // these does NOT run the modules' `import.meta.main` CLI blocks.
-export {
-  provisionRoles,
-  type ProvisionResult,
-  type ProvisionRolesOptions,
-} from "./provision-roles";
+export { provisionRoles, type ProvisionResult, type ProvisionRolesOptions } from "./provision-roles";
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
 
@@ -292,10 +282,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
  * injected, rather than via `createDb`). Lets the same WeakMap-backed lookups
  * work for injected handles. Standalone never calls this (it uses `createDb`).
  */
-export function registerDbBinding(
-  db: Database,
-  binding: { rlsStrategy?: RlsStrategy; userLookup?: UserLookup },
-): void {
+export function registerDbBinding(db: Database, binding: { rlsStrategy?: RlsStrategy; userLookup?: UserLookup }): void {
   dbBindings.set(db as unknown as object, {
     rlsStrategy: binding.rlsStrategy ?? "force",
     ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
@@ -311,9 +298,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
     throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
   }
   await db.execute(sql`select set_config('opengeni.account_id', ${context.accountId}, true)`);
-  await db.execute(
-    sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
-  );
+  await db.execute(sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`);
 }
 
 export async function withRlsContext<T>(
@@ -346,12 +331,8 @@ export async function withRlsContext<T>(
   });
 }
 
-export async function rlsContextForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<RlsContext> {
-  const [row] = await db
-    .select({ accountId: schema.workspaces.accountId })
+export async function rlsContextForWorkspace(db: Database, workspaceId: string): Promise<RlsContext> {
+  const [row] = await db.select({ accountId: schema.workspaces.accountId })
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
@@ -407,8 +388,8 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
-  "environments:manage",
-  "environments:use",
+  "variable-sets:manage",
+  "variable-sets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -438,189 +419,150 @@ export type BootstrapWorkspaceInput = {
   workspacePermissions?: Permission[];
 };
 
-export async function bootstrapWorkspace(
-  db: Database,
-  input: BootstrapWorkspaceInput,
-): Promise<AccessContext> {
+export async function bootstrapWorkspace(db: Database, input: BootstrapWorkspaceInput): Promise<AccessContext> {
   return await db.transaction(async (tx) => {
-    const [account] = await tx
-      .insert(schema.managedAccounts)
-      .values({
+    const [account] = await tx.insert(schema.managedAccounts).values({
+      name: input.accountName,
+      externalSource: input.accountExternalSource,
+      externalId: input.accountExternalId,
+    }).onConflictDoUpdate({
+      target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
+      set: {
         name: input.accountName,
-        externalSource: input.accountExternalSource,
-        externalId: input.accountExternalId,
-      })
-      .onConflictDoUpdate({
-        target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
-        set: {
-          name: input.accountName,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+        updatedAt: new Date(),
+      },
+    }).returning();
     if (!account) {
       throw new Error("Failed to bootstrap account");
     }
-    const [workspace] = await tx
-      .insert(schema.workspaces)
-      .values({
-        accountId: account.id,
+    const [workspace] = await tx.insert(schema.workspaces).values({
+      accountId: account.id,
+      name: input.workspaceName,
+      externalSource: input.workspaceExternalSource,
+      externalId: input.workspaceExternalId,
+    }).onConflictDoUpdate({
+      target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+      set: {
         name: input.workspaceName,
-        externalSource: input.workspaceExternalSource,
-        externalId: input.workspaceExternalId,
-      })
-      .onConflictDoUpdate({
-        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-        set: {
-          name: input.workspaceName,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+        updatedAt: new Date(),
+      },
+    }).returning();
     if (!workspace) {
       throw new Error("Failed to bootstrap workspace");
     }
     const workspacePermissions = input.workspacePermissions ?? allWorkspacePermissions;
-    await tx
-      .insert(schema.workspaceMemberships)
-      .values({
-        accountId: account.id,
-        workspaceId: workspace.id,
-        subjectId: input.subjectId,
+    await tx.insert(schema.workspaceMemberships).values({
+      accountId: account.id,
+      workspaceId: workspace.id,
+      subjectId: input.subjectId,
+      subjectLabel: input.subjectLabel ?? null,
+      role: "owner",
+      permissions: workspacePermissions,
+    }).onConflictDoUpdate({
+      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+      set: {
         subjectLabel: input.subjectLabel ?? null,
         role: "owner",
         permissions: workspacePermissions,
-      })
-      .onConflictDoUpdate({
-        target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
-        set: {
-          subjectLabel: input.subjectLabel ?? null,
-          role: "owner",
-          permissions: workspacePermissions,
-          updatedAt: new Date(),
-        },
-      });
+        updatedAt: new Date(),
+      },
+    });
     return {
       mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
       subjectId: input.subjectId,
       ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-      accountGrants: [
-        {
-          accountId: account.id,
-          subjectId: input.subjectId,
-          ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-          role: "owner",
-          permissions: input.accountPermissions ?? allAccountPermissions,
-        },
-      ],
-      workspaceGrants: [
-        {
-          workspaceId: workspace.id,
-          accountId: account.id,
-          subjectId: input.subjectId,
-          ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
-          permissions: workspacePermissions,
-        },
-      ],
+      accountGrants: [{
+        accountId: account.id,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        role: "owner",
+        permissions: input.accountPermissions ?? allAccountPermissions,
+      }],
+      workspaceGrants: [{
+        workspaceId: workspace.id,
+        accountId: account.id,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        permissions: workspacePermissions,
+      }],
       defaultAccountId: account.id,
       defaultWorkspaceId: workspace.id,
     };
   });
 }
 
-export async function ensureManagedAccessForUser(
-  db: Database,
-  input: {
-    userId: string;
-    email: string;
-    name: string;
-  },
-): Promise<AccessContext> {
+export async function ensureManagedAccessForUser(db: Database, input: {
+  userId: string;
+  email: string;
+  name: string;
+}): Promise<AccessContext> {
   const subjectId = `user:${input.userId}`;
   const subjectLabel = input.email || input.name;
   return await db.transaction(async (tx) => {
-    const [account] = await tx
-      .insert(schema.managedAccounts)
-      .values({
+    const [account] = await tx.insert(schema.managedAccounts).values({
+      name: input.name || input.email,
+      externalSource: "better-auth:user",
+      externalId: input.userId,
+    }).onConflictDoUpdate({
+      target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
+      set: {
         name: input.name || input.email,
-        externalSource: "better-auth:user",
-        externalId: input.userId,
-      })
-      .onConflictDoUpdate({
-        target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
-        set: {
-          name: input.name || input.email,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+        updatedAt: new Date(),
+      },
+    }).returning();
     if (!account) {
       throw new Error("Failed to ensure managed account");
     }
-    const [defaultWorkspace] = await tx
-      .insert(schema.workspaces)
-      .values({
-        accountId: account.id,
+    const [defaultWorkspace] = await tx.insert(schema.workspaces).values({
+      accountId: account.id,
+      name: "Default workspace",
+      slug: "default",
+      externalSource: "better-auth:user",
+      externalId: `${input.userId}:default`,
+    }).onConflictDoUpdate({
+      target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+      set: {
         name: "Default workspace",
-        slug: "default",
-        externalSource: "better-auth:user",
-        externalId: `${input.userId}:default`,
-      })
-      .onConflictDoUpdate({
-        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-        set: {
-          name: "Default workspace",
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+        updatedAt: new Date(),
+      },
+    }).returning();
     if (!defaultWorkspace) {
       throw new Error("Failed to ensure default workspace");
     }
-    await tx
-      .insert(schema.workspaceMemberships)
-      .values({
-        accountId: account.id,
-        workspaceId: defaultWorkspace.id,
-        subjectId,
+    await tx.insert(schema.workspaceMemberships).values({
+      accountId: account.id,
+      workspaceId: defaultWorkspace.id,
+      subjectId,
+      subjectLabel,
+      role: "owner",
+      permissions: allWorkspacePermissions,
+    }).onConflictDoUpdate({
+      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+      set: {
         subjectLabel,
         role: "owner",
         permissions: allWorkspacePermissions,
-      })
-      .onConflictDoUpdate({
-        target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
-        set: {
-          subjectLabel,
-          role: "owner",
-          permissions: allWorkspacePermissions,
-          updatedAt: new Date(),
-        },
-      });
-    const memberships = await tx
-      .select({
-        membership: schema.workspaceMemberships,
-        workspace: schema.workspaces,
-      })
-      .from(schema.workspaceMemberships)
-      .innerJoin(
-        schema.workspaces,
-        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
-      )
+        updatedAt: new Date(),
+      },
+    });
+    const memberships = await tx.select({
+      membership: schema.workspaceMemberships,
+      workspace: schema.workspaces,
+    }).from(schema.workspaceMemberships)
+      .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
       .where(eq(schema.workspaceMemberships.subjectId, subjectId))
       .orderBy(desc(schema.workspaces.createdAt));
     return {
       mode: "managed",
       subjectId,
       subjectLabel,
-      accountGrants: [
-        {
-          accountId: account.id,
-          subjectId,
-          subjectLabel,
-          role: "owner",
-          permissions: allAccountPermissions,
-        },
-      ],
+      accountGrants: [{
+        accountId: account.id,
+        subjectId,
+        subjectLabel,
+        role: "owner",
+        permissions: allAccountPermissions,
+      }],
       workspaceGrants: memberships.map((row) => ({
         workspaceId: row.workspace.id,
         accountId: row.workspace.accountId,
@@ -635,23 +577,12 @@ export async function ensureManagedAccessForUser(
 }
 
 export async function getWorkspace(db: Database, workspaceId: string): Promise<Workspace | null> {
-  const [row] = await db
-    .select()
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, workspaceId))
-    .limit(1);
+  const [row] = await db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).limit(1);
   return row ? mapWorkspace(row) : null;
 }
 
-export async function getManagedAccount(
-  db: Database,
-  accountId: string,
-): Promise<ManagedAccount | null> {
-  const [row] = await db
-    .select()
-    .from(schema.managedAccounts)
-    .where(eq(schema.managedAccounts.id, accountId))
-    .limit(1);
+export async function getManagedAccount(db: Database, accountId: string): Promise<ManagedAccount | null> {
+  const [row] = await db.select().from(schema.managedAccounts).where(eq(schema.managedAccounts.id, accountId)).limit(1);
   return row ? mapAccount(row) : null;
 }
 
@@ -663,14 +594,8 @@ export async function requireWorkspace(db: Database, workspaceId: string): Promi
   return workspace;
 }
 
-export async function listWorkspacesForSubject(
-  db: Database,
-  subjectId: string,
-  limit = 100,
-): Promise<Workspace[]> {
-  const rows = await db
-    .select({ workspace: schema.workspaces })
-    .from(schema.workspaceMemberships)
+export async function listWorkspacesForSubject(db: Database, subjectId: string, limit = 100): Promise<Workspace[]> {
+  const rows = await db.select({ workspace: schema.workspaces }).from(schema.workspaceMemberships)
     .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
     .where(eq(schema.workspaceMemberships.subjectId, subjectId))
     .orderBy(desc(schema.workspaces.createdAt))
@@ -679,96 +604,71 @@ export async function listWorkspacesForSubject(
 }
 
 export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
-  const [{ count } = { count: 0 }] = await db
-    .select({
-      count: sql<number>`count(*)::int`,
-    })
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.accountId, accountId));
+  const [{ count } = { count: 0 }] = await db.select({
+    count: sql<number>`count(*)::int`,
+  }).from(schema.workspaces).where(eq(schema.workspaces.accountId, accountId));
   return Number(count);
 }
 
-export async function createWorkspace(
-  db: Database,
-  input: {
-    accountId: string;
-    name: string;
-    slug?: string | null;
-    externalSource?: string | null;
-    externalId?: string | null;
-    agentInstructions?: string | null;
-  },
-): Promise<Workspace> {
-  const [row] = await db
-    .insert(schema.workspaces)
-    .values({
-      accountId: input.accountId,
-      name: input.name,
-      slug: input.slug ?? null,
-      externalSource: input.externalSource ?? null,
-      externalId: input.externalId ?? null,
-      agentInstructions: input.agentInstructions ?? null,
-    })
-    .returning();
+export async function createWorkspace(db: Database, input: {
+  accountId: string;
+  name: string;
+  slug?: string | null;
+  externalSource?: string | null;
+  externalId?: string | null;
+  agentInstructions?: string | null;
+}): Promise<Workspace> {
+  const [row] = await db.insert(schema.workspaces).values({
+    accountId: input.accountId,
+    name: input.name,
+    slug: input.slug ?? null,
+    externalSource: input.externalSource ?? null,
+    externalId: input.externalId ?? null,
+    agentInstructions: input.agentInstructions ?? null,
+  }).returning();
   if (!row) {
     throw new Error("Failed to create workspace");
   }
   return mapWorkspace(row);
 }
 
-export async function grantWorkspaceAccess(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    subjectLabel?: string;
-    role?: string;
-    permissions: Permission[];
-  },
-): Promise<void> {
-  await db
-    .insert(schema.workspaceMemberships)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
+export async function grantWorkspaceAccess(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  subjectLabel?: string;
+  role?: string;
+  permissions: Permission[];
+}): Promise<void> {
+  await db.insert(schema.workspaceMemberships).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    subjectLabel: input.subjectLabel ?? null,
+    role: input.role ?? "member",
+    permissions: input.permissions,
+  }).onConflictDoUpdate({
+    target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+    set: {
       subjectLabel: input.subjectLabel ?? null,
       role: input.role ?? "member",
       permissions: input.permissions,
-    })
-    .onConflictDoUpdate({
-      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
-      set: {
-        subjectLabel: input.subjectLabel ?? null,
-        role: input.role ?? "member",
-        permissions: input.permissions,
-        updatedAt: new Date(),
-      },
-    });
+      updatedAt: new Date(),
+    },
+  });
 }
 
-export async function updateWorkspace(
-  db: Database,
-  workspaceId: string,
-  input: {
-    name?: string;
-    slug?: string | null;
-    agentInstructions?: string | null;
-  },
-): Promise<Workspace> {
-  const [row] = await db
-    .update(schema.workspaces)
-    .set({
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.slug !== undefined ? { slug: input.slug } : {}),
-      ...(input.agentInstructions !== undefined
-        ? { agentInstructions: input.agentInstructions }
-        : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.workspaces.id, workspaceId))
-    .returning();
+export async function updateWorkspace(db: Database, workspaceId: string, input: {
+  name?: string;
+  slug?: string | null;
+  agentInstructions?: string | null;
+}): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.slug !== undefined ? { slug: input.slug } : {}),
+    ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
@@ -778,83 +678,58 @@ export async function updateWorkspace(
 // Deep-merge (top-level) a settings patch into workspaces.settings, atomically.
 // jsonb `||` overwrites matching keys and preserves unknown ones, so a newer
 // setting a caller doesn't know about survives the write.
-export async function updateWorkspaceSettings(
-  db: Database,
-  workspaceId: string,
-  patch: Record<string, unknown>,
-): Promise<Workspace> {
-  const [row] = await db
-    .update(schema.workspaces)
-    .set({
-      settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.workspaces.id, workspaceId))
-    .returning();
+export async function updateWorkspaceSettings(db: Database, workspaceId: string, patch: Record<string, unknown>): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
   return mapWorkspace(row);
 }
 
-export async function getWorkspaceGrant(
-  db: Database,
-  subjectId: string,
-  workspaceId: string,
-): Promise<AccessGrant | null> {
-  const [row] = await db
-    .select({
-      membership: schema.workspaceMemberships,
-      workspace: schema.workspaces,
-    })
-    .from(schema.workspaceMemberships)
-    .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
-    .where(
-      and(
-        eq(schema.workspaceMemberships.subjectId, subjectId),
-        eq(schema.workspaceMemberships.workspaceId, workspaceId),
-      ),
-    )
-    .limit(1);
-  return row
-    ? {
-        workspaceId: row.workspace.id,
-        accountId: row.workspace.accountId,
-        subjectId: row.membership.subjectId,
-        ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
-        permissions: row.membership.permissions as Permission[],
-      }
-    : null;
+export async function setWorkspaceDefaultRig(db: Database, workspaceId: string, rigId: string | null): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    defaultRigId: rigId,
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return mapWorkspace(row);
 }
 
-export async function listWorkspaceMembers(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceMember[]> {
+export async function getWorkspaceGrant(db: Database, subjectId: string, workspaceId: string): Promise<AccessGrant | null> {
+  const [row] = await db.select({
+    membership: schema.workspaceMemberships,
+    workspace: schema.workspaces,
+  }).from(schema.workspaceMemberships)
+    .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
+    .where(and(eq(schema.workspaceMemberships.subjectId, subjectId), eq(schema.workspaceMemberships.workspaceId, workspaceId)))
+    .limit(1);
+  return row ? {
+    workspaceId: row.workspace.id,
+    accountId: row.workspace.accountId,
+    subjectId: row.membership.subjectId,
+    ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
+    permissions: row.membership.permissions as Permission[],
+  } : null;
+}
+
+export async function listWorkspaceMembers(db: Database, workspaceId: string): Promise<WorkspaceMember[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceMemberships)
+    const rows = await scopedDb.select().from(schema.workspaceMemberships)
       .where(eq(schema.workspaceMemberships.workspaceId, workspaceId))
       .orderBy(asc(schema.workspaceMemberships.createdAt));
     return rows.map(mapWorkspaceMember);
   });
 }
 
-export async function removeWorkspaceMember(
-  db: Database,
-  workspaceId: string,
-  subjectId: string,
-): Promise<boolean> {
+export async function removeWorkspaceMember(db: Database, workspaceId: string, subjectId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspaceMemberships)
-      .where(
-        and(
-          eq(schema.workspaceMemberships.workspaceId, workspaceId),
-          eq(schema.workspaceMemberships.subjectId, subjectId),
-        ),
-      )
+    const rows = await scopedDb.delete(schema.workspaceMemberships)
+      .where(and(eq(schema.workspaceMemberships.workspaceId, workspaceId), eq(schema.workspaceMemberships.subjectId, subjectId)))
       .returning({ id: schema.workspaceMemberships.id });
     return rows.length > 0;
   });
@@ -885,95 +760,64 @@ export async function getManagedUserByEmail(db: Database, email: string): Promis
   const rows = await db.execute(sql<{ id: string }>`
     select id from auth_users where lower(email) = lower(${email}) limit 1
   `);
-  return (rows as unknown as Array<{ id?: string }>)[0]?.id ?? null;
+  return ((rows as unknown as Array<{ id?: string }>)[0]?.id) ?? null;
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
   await db.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
 }
 
-export async function createApiKey(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    name: string;
-    prefix: string;
-    keyHash: string;
-    permissions: Permission[];
-    expiresAt?: Date | null;
-  },
-): Promise<ApiKey> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.apiKeys)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          name: input.name,
-          prefix: input.prefix,
-          keyHash: input.keyHash,
-          permissions: input.permissions,
-          expiresAt: input.expiresAt ?? null,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create API key");
-      }
-      return mapApiKey(row);
-    },
-  );
+export async function createApiKey(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  name: string;
+  prefix: string;
+  keyHash: string;
+  permissions: Permission[];
+  expiresAt?: Date | null;
+}): Promise<ApiKey> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.apiKeys).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      name: input.name,
+      prefix: input.prefix,
+      keyHash: input.keyHash,
+      permissions: input.permissions,
+      expiresAt: input.expiresAt ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create API key");
+    }
+    return mapApiKey(row);
+  });
 }
 
 export async function listApiKeys(db: Database, workspaceId: string): Promise<ApiKey[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.apiKeys)
+    const rows = await scopedDb.select().from(schema.apiKeys)
       .where(eq(schema.apiKeys.workspaceId, workspaceId))
       .orderBy(desc(schema.apiKeys.createdAt));
     return rows.map(mapApiKey);
   });
 }
 
-export async function countActiveApiKeysForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<number> {
+export async function countActiveApiKeysForWorkspace(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.apiKeys)
-      .where(
-        and(
-          eq(schema.apiKeys.workspaceId, workspaceId),
-          sql`${schema.apiKeys.revokedAt} is null`,
-          sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
-        ),
-      );
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.workspaceId, workspaceId), sql`${schema.apiKeys.revokedAt} is null`, sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`));
     return Number(count);
   });
 }
 
-export async function revokeApiKey(
-  db: Database,
-  workspaceId: string,
-  apiKeyId: string,
-): Promise<ApiKey> {
+export async function revokeApiKey(db: Database, workspaceId: string, apiKeyId: string): Promise<ApiKey> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.apiKeys)
-      .set({
-        revokedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(schema.apiKeys.workspaceId, workspaceId), eq(schema.apiKeys.id, apiKeyId)))
-      .returning();
+    const [row] = await scopedDb.update(schema.apiKeys).set({
+      revokedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.apiKeys.workspaceId, workspaceId), eq(schema.apiKeys.id, apiKeyId))).returning();
     if (!row) {
       throw new Error(`API key not found: ${apiKeyId}`);
     }
@@ -981,31 +825,17 @@ export async function revokeApiKey(
   });
 }
 
-export async function findActiveApiKeyByHash(
-  db: Database,
-  keyHash: string,
-): Promise<ApiKey | null> {
+export async function findActiveApiKeyByHash(db: Database, keyHash: string): Promise<ApiKey | null> {
   return await db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
-    const [row] = await tx
-      .select()
-      .from(schema.apiKeys)
-      .where(
-        and(
-          eq(schema.apiKeys.keyHash, keyHash),
-          sql`${schema.apiKeys.revokedAt} is null`,
-          sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
-        ),
-      )
+    const [row] = await tx.select().from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.keyHash, keyHash), sql`${schema.apiKeys.revokedAt} is null`, sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`))
       .limit(1);
     if (!row) {
       return null;
     }
     const now = new Date();
-    await tx
-      .update(schema.apiKeys)
-      .set({ lastUsedAt: now, updatedAt: now })
-      .where(eq(schema.apiKeys.id, row.id));
+    await tx.update(schema.apiKeys).set({ lastUsedAt: now, updatedAt: now }).where(eq(schema.apiKeys.id, row.id));
     return mapApiKey({ ...row, lastUsedAt: now });
   });
 }
@@ -1021,71 +851,48 @@ export type GitHubInstallation = {
   updatedAt: string;
 };
 
-export async function upsertGitHubInstallation(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    installationId: number;
-    accountLogin?: string | null;
-    accountType?: string | null;
-  },
-): Promise<GitHubInstallation> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.githubInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          installationId: input.installationId,
-          accountLogin: input.accountLogin ?? null,
-          accountType: input.accountType ?? null,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.githubInstallations.workspaceId,
-            schema.githubInstallations.installationId,
-          ],
-          set: {
-            accountId: input.accountId,
-            accountLogin: input.accountLogin ?? null,
-            accountType: input.accountType ?? null,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to upsert GitHub installation");
-      }
-      return mapGitHubInstallation(row);
-    },
-  );
+export async function upsertGitHubInstallation(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  installationId: number;
+  accountLogin?: string | null;
+  accountType?: string | null;
+}): Promise<GitHubInstallation> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.githubInstallations).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      installationId: input.installationId,
+      accountLogin: input.accountLogin ?? null,
+      accountType: input.accountType ?? null,
+    }).onConflictDoUpdate({
+      target: [schema.githubInstallations.workspaceId, schema.githubInstallations.installationId],
+      set: {
+        accountId: input.accountId,
+        accountLogin: input.accountLogin ?? null,
+        accountType: input.accountType ?? null,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to upsert GitHub installation");
+    }
+    return mapGitHubInstallation(row);
+  });
 }
 
-export async function listGitHubInstallationsForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<GitHubInstallation[]> {
+export async function listGitHubInstallationsForWorkspace(db: Database, workspaceId: string): Promise<GitHubInstallation[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.githubInstallations)
+    const rows = await scopedDb.select().from(schema.githubInstallations)
       .where(eq(schema.githubInstallations.workspaceId, workspaceId))
       .orderBy(desc(schema.githubInstallations.updatedAt));
     return rows.map(mapGitHubInstallation);
   });
 }
 
-export async function listGitHubInstallationIdsForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<number[]> {
+export async function listGitHubInstallationIdsForWorkspace(db: Database, workspaceId: string): Promise<number[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({ installationId: schema.githubInstallations.installationId })
+    const rows = await scopedDb.select({ installationId: schema.githubInstallations.installationId })
       .from(schema.githubInstallations)
       .where(eq(schema.githubInstallations.workspaceId, workspaceId))
       .orderBy(desc(schema.githubInstallations.updatedAt));
@@ -1093,96 +900,64 @@ export async function listGitHubInstallationIdsForWorkspace(
   });
 }
 
-export async function recordUsageEvent(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId?: string | null;
-    eventType: string;
-    quantity: number;
-    unit: string;
-    sourceResourceType?: string | null;
-    sourceResourceId?: string | null;
-    idempotencyKey: string;
-    occurredAt?: Date;
-  },
-): Promise<UsageEvent> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.usageEvents)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          eventType: input.eventType,
-          quantity: input.quantity,
-          unit: input.unit,
-          sourceResourceType: input.sourceResourceType ?? null,
-          sourceResourceId: input.sourceResourceId ?? null,
-          idempotencyKey: input.idempotencyKey,
-          occurredAt: input.occurredAt ?? new Date(),
-        })
-        .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
-        .returning();
-      if (row) {
-        return mapUsageEvent(row);
-      }
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.usageEvents)
-        .where(eq(schema.usageEvents.idempotencyKey, input.idempotencyKey))
-        .limit(1);
-      if (!existing) {
-        throw new Error("Failed to record usage event");
-      }
-      return mapUsageEvent(existing);
-    },
-  );
+export async function recordUsageEvent(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId?: string | null;
+  eventType: string;
+  quantity: number;
+  unit: string;
+  sourceResourceType?: string | null;
+  sourceResourceId?: string | null;
+  idempotencyKey: string;
+  occurredAt?: Date;
+}): Promise<UsageEvent> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.usageEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      eventType: input.eventType,
+      quantity: input.quantity,
+      unit: input.unit,
+      sourceResourceType: input.sourceResourceType ?? null,
+      sourceResourceId: input.sourceResourceId ?? null,
+      idempotencyKey: input.idempotencyKey,
+      occurredAt: input.occurredAt ?? new Date(),
+    }).onConflictDoNothing({ target: schema.usageEvents.idempotencyKey }).returning();
+    if (row) {
+      return mapUsageEvent(row);
+    }
+    const [existing] = await scopedDb.select().from(schema.usageEvents).where(eq(schema.usageEvents.idempotencyKey, input.idempotencyKey)).limit(1);
+    if (!existing) {
+      throw new Error("Failed to record usage event");
+    }
+    return mapUsageEvent(existing);
+  });
 }
 
-export async function listUsageEvents(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string;
-    limit?: number;
-  },
-): Promise<UsageEvent[]> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .select()
-        .from(schema.usageEvents)
-        .where(
-          input.workspaceId
-            ? and(
-                eq(schema.usageEvents.accountId, input.accountId),
-                eq(schema.usageEvents.workspaceId, input.workspaceId),
-              )
-            : eq(schema.usageEvents.accountId, input.accountId),
-        )
-        .orderBy(desc(schema.usageEvents.occurredAt), desc(schema.usageEvents.recordedAt))
-        .limit(input.limit ?? 100);
-      return rows.map(mapUsageEvent);
-    },
-  );
+export async function listUsageEvents(db: Database, input: {
+  accountId: string;
+  workspaceId?: string;
+  limit?: number;
+}): Promise<UsageEvent[]> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.usageEvents)
+      .where(input.workspaceId
+        ? and(eq(schema.usageEvents.accountId, input.accountId), eq(schema.usageEvents.workspaceId, input.workspaceId))
+        : eq(schema.usageEvents.accountId, input.accountId))
+      .orderBy(desc(schema.usageEvents.occurredAt), desc(schema.usageEvents.recordedAt))
+      .limit(input.limit ?? 100);
+    return rows.map(mapUsageEvent);
+  });
 }
 
-export async function sumUsageQuantity(
-  db: Database,
-  input: {
-    accountId?: string;
-    workspaceId?: string;
-    eventType: string;
-    since?: Date;
-  },
-): Promise<number> {
+export async function sumUsageQuantity(db: Database, input: {
+  accountId?: string;
+  workspaceId?: string;
+  eventType: string;
+  since?: Date;
+}): Promise<number> {
   const context = input.workspaceId
     ? await rlsContextForWorkspace(db, input.workspaceId)
     : input.accountId
@@ -1198,211 +973,148 @@ export async function sumUsageQuantity(
       ...(input.workspaceId ? [eq(schema.usageEvents.workspaceId, input.workspaceId)] : []),
       ...(input.since ? [gt(schema.usageEvents.occurredAt, input.since)] : []),
     ];
-    const [{ total } = { total: 0 }] = await scopedDb
-      .select({
-        total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
-      })
-      .from(schema.usageEvents)
-      .where(and(...clauses));
+    const [{ total } = { total: 0 }] = await scopedDb.select({
+      total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+    }).from(schema.usageEvents).where(and(...clauses));
     return Number(total);
   });
 }
 
-export async function applyCreditLedgerEntry(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    amountMicros: number;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-  },
-): Promise<BillingBalance> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      await scopedDb
-        .insert(schema.creditLedgerEntries)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId ?? null,
-          type: input.type,
-          amountMicros: input.amountMicros,
-          sourceType: input.sourceType ?? null,
-          sourceId: input.sourceId ?? null,
-          idempotencyKey: input.idempotencyKey,
-          metadata: input.metadata ?? {},
-          occurredAt: input.occurredAt ?? new Date(),
-        })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
-      return await getBillingBalance(scopedDb, input.accountId);
-    },
-  );
+export async function applyCreditLedgerEntry(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  amountMicros: number;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+}): Promise<BillingBalance> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.insert(schema.creditLedgerEntries).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: input.amountMicros,
+      sourceType: input.sourceType ?? null,
+      sourceId: input.sourceId ?? null,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+    }).onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+    return await getBillingBalance(scopedDb, input.accountId);
+  });
 }
 
-export async function applyCreditDebitUpToBalance(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    requestedAmountMicros: number;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-  },
-): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+export async function applyCreditDebitUpToBalance(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  requestedAmountMicros: number;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+}): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (input.requestedAmountMicros <= 0) {
     return { balance: await getBillingBalance(db, input.accountId), debitedMicros: 0 };
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const debitedMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      if (debitedMicros > 0) {
-        await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -debitedMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
-      }
-      return { balance: await getBillingBalance(scopedDb, input.accountId), debitedMicros };
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+    const before = await getBillingBalance(scopedDb, input.accountId);
+    const debitedMicros = Math.min(input.requestedAmountMicros, Math.max(0, before.balanceMicros));
+    if (debitedMicros > 0) {
+      await scopedDb.insert(schema.creditLedgerEntries).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId ?? null,
+        type: input.type,
+        amountMicros: -debitedMicros,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+        idempotencyKey: input.idempotencyKey,
+        metadata: {
+          ...input.metadata,
+          requestedAmountMicros: input.requestedAmountMicros,
+          debitedMicros,
+        },
+        occurredAt: input.occurredAt ?? new Date(),
+      }).onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+    }
+    return { balance: await getBillingBalance(scopedDb, input.accountId), debitedMicros };
+  });
 }
 
-export async function hasCreditLedgerEntry(
-  db: Database,
-  accountId: string,
-  idempotencyKey: string,
-): Promise<boolean> {
+export async function hasCreditLedgerEntry(db: Database, accountId: string, idempotencyKey: string): Promise<boolean> {
   return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({ id: schema.creditLedgerEntries.id })
+    const [row] = await scopedDb.select({ id: schema.creditLedgerEntries.id })
       .from(schema.creditLedgerEntries)
-      .where(
-        and(
-          eq(schema.creditLedgerEntries.accountId, accountId),
-          eq(schema.creditLedgerEntries.idempotencyKey, idempotencyKey),
-        ),
-      )
+      .where(and(eq(schema.creditLedgerEntries.accountId, accountId), eq(schema.creditLedgerEntries.idempotencyKey, idempotencyKey)))
       .limit(1);
     return Boolean(row);
   });
 }
 
-export async function getBillingCustomer(
-  db: Database,
-  accountId: string,
-  provider = "stripe",
-): Promise<{
+export async function getBillingCustomer(db: Database, accountId: string, provider = "stripe"): Promise<{
   accountId: string;
   provider: string;
   providerCustomerId: string;
   email: string | null;
 } | null> {
   return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.billingCustomers)
-      .where(
-        and(
-          eq(schema.billingCustomers.accountId, accountId),
-          eq(schema.billingCustomers.provider, provider),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.billingCustomers)
+      .where(and(eq(schema.billingCustomers.accountId, accountId), eq(schema.billingCustomers.provider, provider)))
       .limit(1);
-    return row
-      ? {
-          accountId: row.accountId,
-          provider: row.provider,
-          providerCustomerId: row.providerCustomerId,
-          email: row.email,
-        }
-      : null;
+    return row ? {
+      accountId: row.accountId,
+      provider: row.provider,
+      providerCustomerId: row.providerCustomerId,
+      email: row.email,
+    } : null;
   });
 }
 
-export async function upsertBillingCustomer(
-  db: Database,
-  input: {
-    accountId: string;
-    provider?: string;
-    providerCustomerId: string;
-    email?: string | null;
-  },
-): Promise<void> {
+export async function upsertBillingCustomer(db: Database, input: {
+  accountId: string;
+  provider?: string;
+  providerCustomerId: string;
+  email?: string | null;
+}): Promise<void> {
   await withAccountRls(db, input.accountId, async (scopedDb) => {
-    await scopedDb
-      .insert(schema.billingCustomers)
-      .values({
-        accountId: input.accountId,
-        provider: input.provider ?? "stripe",
+    await scopedDb.insert(schema.billingCustomers).values({
+      accountId: input.accountId,
+      provider: input.provider ?? "stripe",
+      providerCustomerId: input.providerCustomerId,
+      email: input.email ?? null,
+    }).onConflictDoUpdate({
+      target: [schema.billingCustomers.accountId, schema.billingCustomers.provider],
+      set: {
         providerCustomerId: input.providerCustomerId,
         email: input.email ?? null,
-      })
-      .onConflictDoUpdate({
-        target: [schema.billingCustomers.accountId, schema.billingCustomers.provider],
-        set: {
-          providerCustomerId: input.providerCustomerId,
-          email: input.email ?? null,
-          updatedAt: new Date(),
-        },
-      });
+        updatedAt: new Date(),
+      },
+    });
   });
 }
 
-export async function recordStripeWebhookEvent(
-  db: Database,
-  input: {
-    id: string;
-    type: string;
-    livemode: boolean;
-    payload: unknown;
-  },
-): Promise<boolean> {
-  const [row] = await db
-    .insert(schema.stripeWebhookEvents)
-    .values({
-      id: input.id,
-      type: input.type,
-      livemode: String(input.livemode),
-      payload: input.payload,
-    })
-    .onConflictDoNothing({ target: schema.stripeWebhookEvents.id })
-    .returning({ id: schema.stripeWebhookEvents.id });
+export async function recordStripeWebhookEvent(db: Database, input: {
+  id: string;
+  type: string;
+  livemode: boolean;
+  payload: unknown;
+}): Promise<boolean> {
+  const [row] = await db.insert(schema.stripeWebhookEvents).values({
+    id: input.id,
+    type: input.type,
+    livemode: String(input.livemode),
+    payload: input.payload,
+  }).onConflictDoNothing({ target: schema.stripeWebhookEvents.id }).returning({ id: schema.stripeWebhookEvents.id });
   return Boolean(row);
 }
 
 export async function isStripeWebhookProcessed(db: Database, id: string): Promise<boolean> {
-  const [row] = await db
-    .select({ processedAt: schema.stripeWebhookEvents.processedAt })
+  const [row] = await db.select({ processedAt: schema.stripeWebhookEvents.processedAt })
     .from(schema.stripeWebhookEvents)
     .where(eq(schema.stripeWebhookEvents.id, id))
     .limit(1);
@@ -1410,20 +1122,14 @@ export async function isStripeWebhookProcessed(db: Database, id: string): Promis
 }
 
 export async function markStripeWebhookProcessed(db: Database, id: string): Promise<void> {
-  await db
-    .update(schema.stripeWebhookEvents)
-    .set({ processedAt: new Date() })
-    .where(eq(schema.stripeWebhookEvents.id, id));
+  await db.update(schema.stripeWebhookEvents).set({ processedAt: new Date() }).where(eq(schema.stripeWebhookEvents.id, id));
 }
 
 export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
   return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
+    const [{ balance } = { balance: 0 }] = await scopedDb.select({
+      balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
+    }).from(schema.creditLedgerEntries).where(eq(schema.creditLedgerEntries.accountId, accountId));
     return {
       accountId,
       balanceMicros: Number(balance),
@@ -1433,17 +1139,11 @@ export async function getBillingBalance(db: Database, accountId: string): Promis
   });
 }
 
-export async function countScheduledTasksForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<number> {
+export async function countScheduledTasksForWorkspace(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.scheduledTasks)
-      .where(eq(schema.scheduledTasks.workspaceId, workspaceId));
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.scheduledTasks).where(eq(schema.scheduledTasks.workspaceId, workspaceId));
     return Number(count);
   });
 }
@@ -1469,7 +1169,9 @@ export type CreateScheduledTaskInput = {
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
-  environmentId?: string | null;
+  variableSetId?: string | null;
+  // The rig each run binds to (M3); active version resolved per fire at dispatch.
+  rigId?: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -1481,7 +1183,8 @@ export type UpdateScheduledTaskInput = Partial<{
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
-  environmentId: string | null;
+  variableSetId: string | null;
+  rigId: string | null;
   metadata: Record<string, unknown>;
 }>;
 
@@ -1748,7 +1451,7 @@ export type EnabledMcpCapabilityServer = {
   cacheToolsList?: boolean;
   /**
    * Credential request headers stored encrypted at enable time
-   * (AES-256-GCM under the workspace-environments key). Decrypted only at
+   * (AES-256-GCM under the workspace-variableSets key). Decrypted only at
    * the runtime boundary that builds the MCP client; never exposed by the
    * capability API surface.
    */
@@ -1811,88 +1514,62 @@ export type UpdateQueuedSessionTurnInput = Partial<{
   metadata: Record<string, unknown>;
 }>;
 
-export async function createFileUpload(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    fileId: string;
-    filename: string;
-    safeFilename: string;
-    contentType: string;
-    sizeBytes: number;
-    sha256?: string | null;
-    bucket: string;
-    objectKey: string;
-    expiresAt: Date;
-  },
-): Promise<{ file: FileAsset; uploadId: string; expiresAt: string }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [fileRow] = await tx
-          .insert(schema.files)
-          .values({
-            id: input.fileId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            filename: input.filename,
-            safeFilename: input.safeFilename,
-            contentType: input.contentType,
-            sizeBytes: input.sizeBytes,
-            sha256: input.sha256 ?? null,
-            bucket: input.bucket,
-            objectKey: input.objectKey,
-            status: "pending_upload",
-          })
-          .returning();
-        if (!fileRow) {
-          throw new Error("Failed to create file");
-        }
-        const [uploadRow] = await tx
-          .insert(schema.fileUploads)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            fileId: fileRow.id,
-            status: "pending",
-            expiresAt: input.expiresAt,
-          })
-          .returning({ id: schema.fileUploads.id, expiresAt: schema.fileUploads.expiresAt });
-        if (!uploadRow) {
-          throw new Error("Failed to create file upload");
-        }
-        return {
-          file: mapFile(fileRow),
-          uploadId: uploadRow.id,
-          expiresAt: uploadRow.expiresAt.toISOString(),
-        };
-      }),
-  );
+export async function createFileUpload(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  fileId: string;
+  filename: string;
+  safeFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256?: string | null;
+  bucket: string;
+  objectKey: string;
+  expiresAt: Date;
+}): Promise<{ file: FileAsset; uploadId: string; expiresAt: string }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [fileRow] = await tx.insert(schema.files).values({
+      id: input.fileId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      filename: input.filename,
+      safeFilename: input.safeFilename,
+      contentType: input.contentType,
+      sizeBytes: input.sizeBytes,
+      sha256: input.sha256 ?? null,
+      bucket: input.bucket,
+      objectKey: input.objectKey,
+      status: "pending_upload",
+    }).returning();
+    if (!fileRow) {
+      throw new Error("Failed to create file");
+    }
+    const [uploadRow] = await tx.insert(schema.fileUploads).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      fileId: fileRow.id,
+      status: "pending",
+      expiresAt: input.expiresAt,
+    }).returning({ id: schema.fileUploads.id, expiresAt: schema.fileUploads.expiresAt });
+    if (!uploadRow) {
+      throw new Error("Failed to create file upload");
+    }
+    return {
+      file: mapFile(fileRow),
+      uploadId: uploadRow.id,
+      expiresAt: uploadRow.expiresAt.toISOString(),
+    };
+  }));
 }
 
-export async function getFile(
-  db: Database,
-  workspaceId: string,
-  fileId: string,
-): Promise<FileAsset | null> {
+export async function getFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.files)
-      .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId)))
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.files).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId))).limit(1);
     return row ? mapFile(row) : null;
   });
 }
 
-export async function requireFile(
-  db: Database,
-  workspaceId: string,
-  fileId: string,
-): Promise<FileAsset> {
+export async function requireFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset> {
   const file = await getFile(db, workspaceId, fileId);
   if (!file) {
     throw new Error(`File not found: ${fileId}`);
@@ -1900,233 +1577,115 @@ export async function requireFile(
   return file;
 }
 
-export async function getFileUpload(
-  db: Database,
-  workspaceId: string,
-  uploadId: string,
-): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
+export async function getFileUpload(db: Database, workspaceId: string, uploadId: string): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        id: schema.fileUploads.id,
-        status: schema.fileUploads.status,
-        expiresAt: schema.fileUploads.expiresAt,
-        file: schema.files,
-      })
-      .from(schema.fileUploads)
+    const [row] = await scopedDb.select({
+      id: schema.fileUploads.id,
+      status: schema.fileUploads.status,
+      expiresAt: schema.fileUploads.expiresAt,
+      file: schema.files,
+    }).from(schema.fileUploads)
       .innerJoin(schema.files, eq(schema.fileUploads.fileId, schema.files.id))
-      .where(
-        and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)),
-      )
+      .where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)))
       .limit(1);
-    return row
-      ? {
-          id: row.id,
-          status: row.status as FileUploadStatus,
-          expiresAt: row.expiresAt,
-          file: mapFile(row.file),
-        }
-      : null;
+    return row ? {
+      id: row.id,
+      status: row.status as FileUploadStatus,
+      expiresAt: row.expiresAt,
+      file: mapFile(row.file),
+    } : null;
   });
 }
 
-export async function completeFileUpload(
-  db: Database,
-  workspaceId: string,
-  uploadId: string,
-): Promise<FileAsset> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [uploadRow] = await tx
-          .select()
-          .from(schema.fileUploads)
-          .where(
-            and(
-              eq(schema.fileUploads.workspaceId, workspaceId),
-              eq(schema.fileUploads.id, uploadId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!uploadRow) {
-          throw new Error(`File upload not found: ${uploadId}`);
-        }
-        const [fileRow] = await tx
-          .select()
-          .from(schema.files)
-          .where(
-            and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, uploadRow.fileId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!fileRow) {
-          throw new Error(`File not found for upload: ${uploadId}`);
-        }
-        const now = new Date();
-        const [updatedFile] = await tx
-          .update(schema.files)
-          .set({
-            status: "ready",
-            updatedAt: now,
-          })
-          .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id)))
-          .returning();
-        await tx
-          .update(schema.fileUploads)
-          .set({
-            status: "completed",
-            completedAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.fileUploads.workspaceId, workspaceId),
-              eq(schema.fileUploads.id, uploadId),
-            ),
-          );
-        if (!updatedFile) {
-          throw new Error("Failed to complete file upload");
-        }
-        return mapFile(updatedFile);
-      }),
-  );
+export async function completeFileUpload(db: Database, workspaceId: string, uploadId: string): Promise<FileAsset> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [uploadRow] = await tx.select().from(schema.fileUploads).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId))).for("update").limit(1);
+    if (!uploadRow) {
+      throw new Error(`File upload not found: ${uploadId}`);
+    }
+    const [fileRow] = await tx.select().from(schema.files).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, uploadRow.fileId))).for("update").limit(1);
+    if (!fileRow) {
+      throw new Error(`File not found for upload: ${uploadId}`);
+    }
+    const now = new Date();
+    const [updatedFile] = await tx.update(schema.files).set({
+      status: "ready",
+      updatedAt: now,
+    }).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id))).returning();
+    await tx.update(schema.fileUploads).set({
+      status: "completed",
+      completedAt: now,
+      updatedAt: now,
+    }).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)));
+    if (!updatedFile) {
+      throw new Error("Failed to complete file upload");
+    }
+    return mapFile(updatedFile);
+  }));
 }
 
-export async function markFileUploadFailed(
-  db: Database,
-  workspaceId: string,
-  uploadId: string,
-  fileId: string,
-): Promise<void> {
+export async function markFileUploadFailed(db: Database, workspaceId: string, uploadId: string, fileId: string): Promise<void> {
   const now = new Date();
-  await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await tx
-          .update(schema.fileUploads)
-          .set({ status: "failed", updatedAt: now })
-          .where(
-            and(
-              eq(schema.fileUploads.workspaceId, workspaceId),
-              eq(schema.fileUploads.id, uploadId),
-            ),
-          );
-        await tx
-          .update(schema.files)
-          .set({ status: "failed", updatedAt: now })
-          .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId)));
-      }),
-  );
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)));
+    await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId)));
+  }));
 }
 
-export async function enablePackInstallation(
-  db: Database,
-  input: CreatePackInstallationInput,
-): Promise<PackInstallation> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const existing = await getPackInstallation(scopedDb, input.workspaceId, input.packId);
-      if (existing) {
-        const [row] = await scopedDb
-          .update(schema.packInstallations)
-          .set({
-            status: "active",
-            metadata: input.metadata ?? existing.metadata,
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.packInstallations.workspaceId, input.workspaceId),
-              eq(schema.packInstallations.packId, input.packId),
-            ),
-          )
-          .returning();
-        if (!row) {
-          throw new Error(`Pack installation not found: ${input.packId}`);
-        }
-        return mapPackInstallation(row);
-      }
-      const [row] = await scopedDb
-        .insert(schema.packInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          packId: input.packId,
-          status: "active",
-          metadata: input.metadata ?? {},
-        })
-        .returning();
+export async function enablePackInstallation(db: Database, input: CreatePackInstallationInput): Promise<PackInstallation> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const existing = await getPackInstallation(scopedDb, input.workspaceId, input.packId);
+    if (existing) {
+      const [row] = await scopedDb.update(schema.packInstallations).set({
+        status: "active",
+        metadata: input.metadata ?? existing.metadata,
+        enabledAt: now,
+        updatedAt: now,
+      }).where(and(eq(schema.packInstallations.workspaceId, input.workspaceId), eq(schema.packInstallations.packId, input.packId))).returning();
       if (!row) {
-        throw new Error("Failed to enable pack installation");
+        throw new Error(`Pack installation not found: ${input.packId}`);
       }
       return mapPackInstallation(row);
-    },
-  );
+    }
+    const [row] = await scopedDb.insert(schema.packInstallations).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      packId: input.packId,
+      status: "active",
+      metadata: input.metadata ?? {},
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to enable pack installation");
+    }
+    return mapPackInstallation(row);
+  });
 }
 
-export async function listPackInstallations(
-  db: Database,
-  workspaceId: string,
-): Promise<PackInstallation[]> {
+export async function listPackInstallations(db: Database, workspaceId: string): Promise<PackInstallation[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.packInstallations)
+    const rows = await scopedDb.select().from(schema.packInstallations)
       .where(eq(schema.packInstallations.workspaceId, workspaceId))
       .orderBy(desc(schema.packInstallations.updatedAt));
     return rows.map(mapPackInstallation);
   });
 }
 
-export async function getPackInstallation(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<PackInstallation | null> {
+export async function getPackInstallation(db: Database, workspaceId: string, packId: string): Promise<PackInstallation | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.packInstallations)
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, workspaceId),
-          eq(schema.packInstallations.packId, packId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.packInstallations)
+      .where(and(eq(schema.packInstallations.workspaceId, workspaceId), eq(schema.packInstallations.packId, packId)))
       .limit(1);
     return row ? mapPackInstallation(row) : null;
   });
 }
 
-export async function updatePackInstallationStatus(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-  status: PackInstallationStatus,
-): Promise<PackInstallation> {
+export async function updatePackInstallationStatus(db: Database, workspaceId: string, packId: string, status: PackInstallationStatus): Promise<PackInstallation> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.packInstallations)
-      .set({
-        status,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, workspaceId),
-          eq(schema.packInstallations.packId, packId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.packInstallations).set({
+      status,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.packInstallations.workspaceId, workspaceId), eq(schema.packInstallations.packId, packId))).returning();
     if (!row) {
       throw new Error(`Pack installation not found: ${packId}`);
     }
@@ -2134,90 +1693,52 @@ export async function updatePackInstallationStatus(
   });
 }
 
-export async function registerWorkspacePack(
-  db: Database,
-  input: RegisterWorkspacePackInput,
-): Promise<{ pack: WorkspaceRegisteredPack; created: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.workspacePacks)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          packId: input.pack.id,
+export async function registerWorkspacePack(db: Database, input: RegisterWorkspacePackInput): Promise<{ pack: WorkspaceRegisteredPack; created: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const [row] = await scopedDb.insert(schema.workspacePacks).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      packId: input.pack.id,
+      manifest: input.pack as unknown as Record<string, unknown>,
+    })
+      .onConflictDoUpdate({
+        target: [schema.workspacePacks.workspaceId, schema.workspacePacks.packId],
+        set: {
           manifest: input.pack as unknown as Record<string, unknown>,
-        })
-        .onConflictDoUpdate({
-          target: [schema.workspacePacks.workspaceId, schema.workspacePacks.packId],
-          set: {
-            manifest: input.pack as unknown as Record<string, unknown>,
-            updatedAt: now,
-          },
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to register workspace pack");
-      }
-      return {
-        pack: mapWorkspacePack(row),
-        created: row.createdAt.getTime() === row.updatedAt.getTime(),
-      };
-    },
-  );
+          updatedAt: now,
+        },
+      })
+      .returning();
+    if (!row) {
+      throw new Error("Failed to register workspace pack");
+    }
+    return { pack: mapWorkspacePack(row), created: row.createdAt.getTime() === row.updatedAt.getTime() };
+  });
 }
 
-export async function listWorkspacePacks(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceRegisteredPack[]> {
+export async function listWorkspacePacks(db: Database, workspaceId: string): Promise<WorkspaceRegisteredPack[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspacePacks)
+    const rows = await scopedDb.select().from(schema.workspacePacks)
       .where(eq(schema.workspacePacks.workspaceId, workspaceId))
       .orderBy(asc(schema.workspacePacks.packId));
     return rows.map(mapWorkspacePack);
   });
 }
 
-export async function getWorkspacePack(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<WorkspaceRegisteredPack | null> {
+export async function getWorkspacePack(db: Database, workspaceId: string, packId: string): Promise<WorkspaceRegisteredPack | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspacePacks)
-      .where(
-        and(
-          eq(schema.workspacePacks.workspaceId, workspaceId),
-          eq(schema.workspacePacks.packId, packId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.workspacePacks)
+      .where(and(eq(schema.workspacePacks.workspaceId, workspaceId), eq(schema.workspacePacks.packId, packId)))
       .limit(1);
     return row ? mapWorkspacePack(row) : null;
   });
 }
 
-export async function deleteWorkspacePack(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<boolean> {
+export async function deleteWorkspacePack(db: Database, workspaceId: string, packId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspacePacks)
-      .where(
-        and(
-          eq(schema.workspacePacks.workspaceId, workspaceId),
-          eq(schema.workspacePacks.packId, packId),
-        ),
-      )
+    const rows = await scopedDb.delete(schema.workspacePacks)
+      .where(and(eq(schema.workspacePacks.workspaceId, workspaceId), eq(schema.workspacePacks.packId, packId)))
       .returning({ id: schema.workspacePacks.id });
     return rows.length > 0;
   });
@@ -2225,59 +1746,42 @@ export async function deleteWorkspacePack(
 
 const registryCapabilitySource = "registry" as CapabilitySource;
 
-export async function createImportBatch(
-  db: Database,
-  input: CreateImportBatchInput,
-): Promise<ImportBatch> {
-  const [row] = await db
-    .insert(schema.importBatches)
-    .values({
-      source: input.source,
-      snapshotDate: input.snapshotDate,
-      snapshotRef: input.snapshotRef ?? null,
-      attributionNote: input.attributionNote,
-      importedCount: input.importedCount ?? 0,
-      skippedCount: input.skippedCount ?? 0,
-      quarantinedCount: input.quarantinedCount ?? 0,
-      logoFailureCount: input.logoFailureCount ?? 0,
-      staleCount: input.staleCount ?? 0,
-      details: input.details ?? {},
-    })
-    .returning();
+export async function createImportBatch(db: Database, input: CreateImportBatchInput): Promise<ImportBatch> {
+  const [row] = await db.insert(schema.importBatches).values({
+    source: input.source,
+    snapshotDate: input.snapshotDate,
+    snapshotRef: input.snapshotRef ?? null,
+    attributionNote: input.attributionNote,
+    importedCount: input.importedCount ?? 0,
+    skippedCount: input.skippedCount ?? 0,
+    quarantinedCount: input.quarantinedCount ?? 0,
+    logoFailureCount: input.logoFailureCount ?? 0,
+    staleCount: input.staleCount ?? 0,
+    details: input.details ?? {},
+  }).returning();
   if (!row) {
     throw new Error("Failed to create import batch");
   }
   return mapImportBatch(row);
 }
 
-export async function updateImportBatchCounts(
-  db: Database,
-  id: string,
-  input: UpdateImportBatchCountsInput,
-): Promise<ImportBatch> {
-  const [row] = await db
-    .update(schema.importBatches)
-    .set({
-      importedCount: input.importedCount,
-      skippedCount: input.skippedCount,
-      quarantinedCount: input.quarantinedCount,
-      logoFailureCount: input.logoFailureCount,
-      staleCount: input.staleCount,
-      ...(input.details ? { details: input.details } : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.importBatches.id, id))
-    .returning();
+export async function updateImportBatchCounts(db: Database, id: string, input: UpdateImportBatchCountsInput): Promise<ImportBatch> {
+  const [row] = await db.update(schema.importBatches).set({
+    importedCount: input.importedCount,
+    skippedCount: input.skippedCount,
+    quarantinedCount: input.quarantinedCount,
+    logoFailureCount: input.logoFailureCount,
+    staleCount: input.staleCount,
+    ...(input.details ? { details: input.details } : {}),
+    updatedAt: new Date(),
+  }).where(eq(schema.importBatches.id, id)).returning();
   if (!row) {
     throw new Error(`Import batch not found: ${id}`);
   }
   return mapImportBatch(row);
 }
 
-export async function upsertRegistryCapabilityCatalogItem(
-  db: Database,
-  input: RegistryCapabilityCatalogItemInput,
-): Promise<CapabilityCatalogItem> {
+export async function upsertRegistryCapabilityCatalogItem(db: Database, input: RegistryCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
   const now = new Date();
   const metadata = {
     registry: "integrations.sh",
@@ -2338,9 +1842,7 @@ export async function upsertRegistryCapabilityCatalogItem(
     metadata: values.metadata,
     updatedAt: values.updatedAt,
   };
-  const [row] = await db
-    .insert(schema.capabilityCatalogItems)
-    .values(values)
+  const [row] = await db.insert(schema.capabilityCatalogItems).values(values)
     .onConflictDoUpdate({
       target: [
         schema.capabilityCatalogItems.source,
@@ -2356,29 +1858,19 @@ export async function upsertRegistryCapabilityCatalogItem(
   return mapCapabilityCatalogItem(row);
 }
 
-export async function listRegistryCatalogSurfaceKeys(
-  db: Database,
-): Promise<RegistryCatalogSurfaceKey[]> {
-  const rows = await db
-    .select({
-      id: schema.capabilityCatalogItems.id,
-      providerDomain: schema.capabilityCatalogItems.providerDomain,
-      mcpUrl: schema.capabilityCatalogItems.mcpUrl,
-    })
-    .from(schema.capabilityCatalogItems)
+export async function listRegistryCatalogSurfaceKeys(db: Database): Promise<RegistryCatalogSurfaceKey[]> {
+  const rows = await db.select({
+    id: schema.capabilityCatalogItems.id,
+    providerDomain: schema.capabilityCatalogItems.providerDomain,
+    mcpUrl: schema.capabilityCatalogItems.mcpUrl,
+  }).from(schema.capabilityCatalogItems)
     .where(eq(schema.capabilityCatalogItems.source, registryCapabilitySource));
-  return rows.flatMap((row) =>
-    row.providerDomain && row.mcpUrl
-      ? [{ id: row.id, providerDomain: row.providerDomain, mcpUrl: row.mcpUrl }]
-      : [],
-  );
+  return rows.flatMap((row) => row.providerDomain && row.mcpUrl
+    ? [{ id: row.id, providerDomain: row.providerDomain, mcpUrl: row.mcpUrl }]
+    : []);
 }
 
-export async function markStaleRegistryCatalogItems(
-  db: Database,
-  activeKeys: Iterable<{ providerDomain: string; mcpUrl: string }>,
-  importBatchId: string,
-): Promise<number> {
+export async function markStaleRegistryCatalogItems(db: Database, activeKeys: Iterable<{ providerDomain: string; mcpUrl: string }>, importBatchId: string): Promise<number> {
   const active = new Set([...activeKeys].map((key) => `${key.providerDomain}\n${key.mcpUrl}`));
   const existing = await listRegistryCatalogSurfaceKeys(db);
   const stale = existing.filter((row) => !active.has(`${row.providerDomain}\n${row.mcpUrl}`));
@@ -2386,239 +1878,164 @@ export async function markStaleRegistryCatalogItems(
     return 0;
   }
   const now = new Date();
-  const updated = await db
-    .update(schema.capabilityCatalogItems)
-    .set({
-      stale: true,
-      staleAt: now,
-      importBatchId,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(schema.capabilityCatalogItems.source, registryCapabilitySource),
-        inArray(
-          schema.capabilityCatalogItems.id,
-          stale.map((row) => row.id),
-        ),
-      ),
-    )
-    .returning({ id: schema.capabilityCatalogItems.id });
+  const updated = await db.update(schema.capabilityCatalogItems).set({
+    stale: true,
+    staleAt: now,
+    importBatchId,
+    updatedAt: now,
+  }).where(and(
+    eq(schema.capabilityCatalogItems.source, registryCapabilitySource),
+    inArray(schema.capabilityCatalogItems.id, stale.map((row) => row.id)),
+  )).returning({ id: schema.capabilityCatalogItems.id });
   return updated.length;
 }
 
-export async function upsertCapabilityCatalogItem(
-  db: Database,
-  input: CreateCapabilityCatalogItemInput,
-): Promise<CapabilityCatalogItem> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const values = {
-        id: input.id,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        kind: input.kind,
-        source: input.source,
-        name: input.name,
-        description: input.description ?? null,
-        category: input.category ?? "custom",
-        tags: input.tags ?? [],
-        homepageUrl: input.homepageUrl ?? null,
-        endpointUrl: input.endpointUrl ?? null,
-        installUrl: input.installUrl ?? null,
-        authModel: input.authModel ?? null,
-        providerDomain: null,
-        surfaceType: null,
-        transport: null,
-        mcpUrl: null,
-        authKind: null,
-        credentialFacts: [],
-        tier: null,
-        provenance: null,
-        logoAssetPath: null,
-        importBatchId: null,
-        stale: false,
-        staleAt: null,
-        metadata: input.metadata ?? {},
-        updatedAt: now,
-      };
-      const updateValues = {
-        kind: values.kind,
-        source: values.source,
-        name: values.name,
-        description: values.description,
-        category: values.category,
-        tags: values.tags,
-        homepageUrl: values.homepageUrl,
-        endpointUrl: values.endpointUrl,
-        installUrl: values.installUrl,
-        authModel: values.authModel,
-        providerDomain: values.providerDomain,
-        surfaceType: values.surfaceType,
-        transport: values.transport,
-        mcpUrl: values.mcpUrl,
-        authKind: values.authKind,
-        credentialFacts: values.credentialFacts,
-        tier: values.tier,
-        provenance: values.provenance,
-        logoAssetPath: values.logoAssetPath,
-        importBatchId: values.importBatchId,
-        stale: values.stale,
-        staleAt: values.staleAt,
-        metadata: values.metadata,
-        updatedAt: values.updatedAt,
-      };
-      const [row] = await scopedDb
-        .insert(schema.capabilityCatalogItems)
-        .values(values)
-        .onConflictDoUpdate({
-          target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
-          set: updateValues,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to upsert capability catalog item");
-      }
-      return mapCapabilityCatalogItem(row);
-    },
-  );
+export async function upsertCapabilityCatalogItem(db: Database, input: CreateCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const values = {
+      id: input.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      source: input.source,
+      name: input.name,
+      description: input.description ?? null,
+      category: input.category ?? "custom",
+      tags: input.tags ?? [],
+      homepageUrl: input.homepageUrl ?? null,
+      endpointUrl: input.endpointUrl ?? null,
+      installUrl: input.installUrl ?? null,
+      authModel: input.authModel ?? null,
+      providerDomain: null,
+      surfaceType: null,
+      transport: null,
+      mcpUrl: null,
+      authKind: null,
+      credentialFacts: [],
+      tier: null,
+      provenance: null,
+      logoAssetPath: null,
+      importBatchId: null,
+      stale: false,
+      staleAt: null,
+      metadata: input.metadata ?? {},
+      updatedAt: now,
+    };
+    const updateValues = {
+      kind: values.kind,
+      source: values.source,
+      name: values.name,
+      description: values.description,
+      category: values.category,
+      tags: values.tags,
+      homepageUrl: values.homepageUrl,
+      endpointUrl: values.endpointUrl,
+      installUrl: values.installUrl,
+      authModel: values.authModel,
+      providerDomain: values.providerDomain,
+      surfaceType: values.surfaceType,
+      transport: values.transport,
+      mcpUrl: values.mcpUrl,
+      authKind: values.authKind,
+      credentialFacts: values.credentialFacts,
+      tier: values.tier,
+      provenance: values.provenance,
+      logoAssetPath: values.logoAssetPath,
+      importBatchId: values.importBatchId,
+      stale: values.stale,
+      staleAt: values.staleAt,
+      metadata: values.metadata,
+      updatedAt: values.updatedAt,
+    };
+    const [row] = await scopedDb.insert(schema.capabilityCatalogItems).values(values)
+      .onConflictDoUpdate({
+        target: [schema.capabilityCatalogItems.workspaceId, schema.capabilityCatalogItems.id],
+        set: updateValues,
+      })
+      .returning();
+    if (!row) {
+      throw new Error("Failed to upsert capability catalog item");
+    }
+    return mapCapabilityCatalogItem(row);
+  });
 }
 
-export async function listCapabilityCatalogItems(
-  db: Database,
-  workspaceId: string,
-): Promise<CapabilityCatalogItem[]> {
+export async function listCapabilityCatalogItems(db: Database, workspaceId: string): Promise<CapabilityCatalogItem[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.capabilityCatalogItems)
-      .where(
-        or(
-          eq(schema.capabilityCatalogItems.workspaceId, workspaceId),
-          and(
-            isNull(schema.capabilityCatalogItems.workspaceId),
-            or(
-              ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
-              eq(schema.capabilityCatalogItems.stale, false),
-            ),
+    const rows = await scopedDb.select().from(schema.capabilityCatalogItems)
+      .where(or(
+        eq(schema.capabilityCatalogItems.workspaceId, workspaceId),
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          or(
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            eq(schema.capabilityCatalogItems.stale, false),
           ),
         ),
-      )
+      ))
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
     return rows.map(mapCapabilityCatalogItem);
   });
 }
 
-export async function getCapabilityCatalogItem(
-  db: Database,
-  workspaceId: string,
-  capabilityId: string,
-): Promise<CapabilityCatalogItem | null> {
+export async function getCapabilityCatalogItem(db: Database, workspaceId: string, capabilityId: string): Promise<CapabilityCatalogItem | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.capabilityCatalogItems)
-      .where(
-        and(
-          eq(schema.capabilityCatalogItems.id, capabilityId),
-          or(
-            eq(schema.capabilityCatalogItems.workspaceId, workspaceId),
-            isNull(schema.capabilityCatalogItems.workspaceId),
-          ),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.capabilityCatalogItems)
+      .where(and(
+        eq(schema.capabilityCatalogItems.id, capabilityId),
+        or(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), isNull(schema.capabilityCatalogItems.workspaceId)),
+      ))
       .orderBy(asc(sql`(${schema.capabilityCatalogItems.workspaceId} is null)`))
       .limit(1);
     return row ? mapCapabilityCatalogItem(row) : null;
   });
 }
 
-export async function enableCapabilityInstallation(
-  db: Database,
-  input: EnableCapabilityInstallationInput,
-): Promise<CapabilityInstallation> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      // Read the raw row (not the redacted mapping) so an omitted config
-      // preserves stored credential-header ciphertext instead of the redaction.
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.capabilityInstallations)
-        .where(
-          and(
-            eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
-            eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
-          ),
-        )
-        .limit(1);
-      if (existing) {
-        const [row] = await scopedDb
-          .update(schema.capabilityInstallations)
-          .set({
-            kind: input.kind,
-            status: "active",
-            config: input.config ?? existing.config,
-            metadata: input.metadata ?? existing.metadata,
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.capabilityInstallations.workspaceId, input.workspaceId),
-              eq(schema.capabilityInstallations.capabilityId, input.capabilityId),
-            ),
-          )
-          .returning();
-        if (!row) {
-          throw new Error(`Capability installation not found: ${input.capabilityId}`);
-        }
-        return mapCapabilityInstallation(row);
-      }
-      const [row] = await scopedDb
-        .insert(schema.capabilityInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          capabilityId: input.capabilityId,
-          kind: input.kind,
-          status: "active",
-          config: input.config ?? {},
-          metadata: input.metadata ?? {},
-        })
-        .returning();
+export async function enableCapabilityInstallation(db: Database, input: EnableCapabilityInstallationInput): Promise<CapabilityInstallation> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    // Read the raw row (not the redacted mapping) so an omitted config
+    // preserves stored credential-header ciphertext instead of the redaction.
+    const [existing] = await scopedDb.select().from(schema.capabilityInstallations)
+      .where(and(eq(schema.capabilityInstallations.workspaceId, input.workspaceId), eq(schema.capabilityInstallations.capabilityId, input.capabilityId)))
+      .limit(1);
+    if (existing) {
+      const [row] = await scopedDb.update(schema.capabilityInstallations).set({
+        kind: input.kind,
+        status: "active",
+        config: input.config ?? existing.config,
+        metadata: input.metadata ?? existing.metadata,
+        enabledAt: now,
+        updatedAt: now,
+      }).where(and(eq(schema.capabilityInstallations.workspaceId, input.workspaceId), eq(schema.capabilityInstallations.capabilityId, input.capabilityId))).returning();
       if (!row) {
-        throw new Error("Failed to enable capability installation");
+        throw new Error(`Capability installation not found: ${input.capabilityId}`);
       }
       return mapCapabilityInstallation(row);
-    },
-  );
+    }
+    const [row] = await scopedDb.insert(schema.capabilityInstallations).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      capabilityId: input.capabilityId,
+      kind: input.kind,
+      status: "active",
+      config: input.config ?? {},
+      metadata: input.metadata ?? {},
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to enable capability installation");
+    }
+    return mapCapabilityInstallation(row);
+  });
 }
 
-export async function disableCapabilityInstallation(
-  db: Database,
-  workspaceId: string,
-  capabilityId: string,
-): Promise<CapabilityInstallation> {
+export async function disableCapabilityInstallation(db: Database, workspaceId: string, capabilityId: string): Promise<CapabilityInstallation> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.capabilityInstallations)
-      .set({
-        status: "disabled",
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.capabilityInstallations.workspaceId, workspaceId),
-          eq(schema.capabilityInstallations.capabilityId, capabilityId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.capabilityInstallations).set({
+      status: "disabled",
+      updatedAt: new Date(),
+    }).where(and(eq(schema.capabilityInstallations.workspaceId, workspaceId), eq(schema.capabilityInstallations.capabilityId, capabilityId))).returning();
     if (!row) {
       throw new Error(`Capability installation not found: ${capabilityId}`);
     }
@@ -2626,76 +2043,42 @@ export async function disableCapabilityInstallation(
   });
 }
 
-export async function listCapabilityInstallations(
-  db: Database,
-  workspaceId: string,
-): Promise<CapabilityInstallation[]> {
+export async function listCapabilityInstallations(db: Database, workspaceId: string): Promise<CapabilityInstallation[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.capabilityInstallations)
+    const rows = await scopedDb.select().from(schema.capabilityInstallations)
       .where(eq(schema.capabilityInstallations.workspaceId, workspaceId))
       .orderBy(desc(schema.capabilityInstallations.updatedAt));
     return rows.map(mapCapabilityInstallation);
   });
 }
 
-export async function getCapabilityInstallation(
-  db: Database,
-  workspaceId: string,
-  capabilityId: string,
-): Promise<CapabilityInstallation | null> {
+export async function getCapabilityInstallation(db: Database, workspaceId: string, capabilityId: string): Promise<CapabilityInstallation | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.capabilityInstallations)
-      .where(
-        and(
-          eq(schema.capabilityInstallations.workspaceId, workspaceId),
-          eq(schema.capabilityInstallations.capabilityId, capabilityId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.capabilityInstallations)
+      .where(and(eq(schema.capabilityInstallations.workspaceId, workspaceId), eq(schema.capabilityInstallations.capabilityId, capabilityId)))
       .limit(1);
     return row ? mapCapabilityInstallation(row) : null;
   });
 }
 
-export async function listEnabledMcpCapabilityServers(
-  db: Database,
-  workspaceId: string,
-): Promise<EnabledMcpCapabilityServer[]> {
-  const rows = await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb
-        .select({
-          item: schema.capabilityCatalogItems,
-          installation: schema.capabilityInstallations,
-        })
-        .from(schema.capabilityInstallations)
-        .innerJoin(
-          schema.capabilityCatalogItems,
-          and(
-            or(
-              eq(
-                schema.capabilityInstallations.workspaceId,
-                schema.capabilityCatalogItems.workspaceId,
-              ),
-              isNull(schema.capabilityCatalogItems.workspaceId),
-            ),
-            eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.capabilityInstallations.workspaceId, workspaceId),
-            eq(schema.capabilityInstallations.kind, "mcp"),
-            eq(schema.capabilityInstallations.status, "active"),
-          ),
-        )
-        .orderBy(asc(schema.capabilityCatalogItems.name)),
-  );
+export async function listEnabledMcpCapabilityServers(db: Database, workspaceId: string): Promise<EnabledMcpCapabilityServer[]> {
+  const rows = await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.select({
+    item: schema.capabilityCatalogItems,
+    installation: schema.capabilityInstallations,
+  }).from(schema.capabilityInstallations)
+    .innerJoin(schema.capabilityCatalogItems, and(
+      or(
+        eq(schema.capabilityInstallations.workspaceId, schema.capabilityCatalogItems.workspaceId),
+        isNull(schema.capabilityCatalogItems.workspaceId),
+      ),
+      eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
+    ))
+    .where(and(
+      eq(schema.capabilityInstallations.workspaceId, workspaceId),
+      eq(schema.capabilityInstallations.kind, "mcp"),
+      eq(schema.capabilityInstallations.status, "active"),
+    ))
+    .orderBy(asc(schema.capabilityCatalogItems.name)));
 
   // A workspace-scoped catalog row and a global registry row can share the
   // same capability id; the join then matches one installation twice. Keep
@@ -2726,19 +2109,17 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    return [
-      {
-        capabilityId: item.id,
-        id: mcpServerIdForCapability(item.id, metadata),
-        name: item.name,
-        url: item.endpointUrl,
-        ...(allowedTools ? { allowedTools } : {}),
-        ...(timeoutMs ? { timeoutMs } : {}),
-        ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
-        ...(headersEncrypted ? { headersEncrypted } : {}),
-        ...(connectionRef ? { connectionRef } : {}),
-      },
-    ];
+    return [{
+      capabilityId: item.id,
+      id: mcpServerIdForCapability(item.id, metadata),
+      name: item.name,
+      url: item.endpointUrl,
+      ...(allowedTools ? { allowedTools } : {}),
+      ...(timeoutMs ? { timeoutMs } : {}),
+      ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+      ...(headersEncrypted ? { headersEncrypted } : {}),
+      ...(connectionRef ? { connectionRef } : {}),
+    }];
   });
 }
 
@@ -2759,12 +2140,7 @@ export function decryptedCapabilityHeaders(
     return "unavailable";
   }
   try {
-    return Object.fromEntries(
-      Object.entries(server.headersEncrypted).map(([name, value]) => [
-        name,
-        decryptEnvironmentValue(encryptionKey, value),
-      ]),
-    );
+    return Object.fromEntries(Object.entries(server.headersEncrypted).map(([name, value]) => [name, decryptEnvironmentValue(encryptionKey, value)]));
   } catch {
     return "unavailable";
   }
@@ -2776,41 +2152,26 @@ export function decryptedCapabilityHeaders(
  * the ciphertext besides listEnabledMcpCapabilityServers; the generic
  * installation mapping redacts it to header names.
  */
-export async function getStoredCapabilityHeaderCiphertext(
-  db: Database,
-  workspaceId: string,
-  capabilityId: string,
-): Promise<Record<string, string> | null> {
+export async function getStoredCapabilityHeaderCiphertext(db: Database, workspaceId: string, capabilityId: string): Promise<Record<string, string> | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({ config: schema.capabilityInstallations.config })
-      .from(schema.capabilityInstallations)
-      .where(
-        and(
-          eq(schema.capabilityInstallations.workspaceId, workspaceId),
-          eq(schema.capabilityInstallations.capabilityId, capabilityId),
-        ),
-      )
+    const [row] = await scopedDb.select({ config: schema.capabilityInstallations.config }).from(schema.capabilityInstallations)
+      .where(and(eq(schema.capabilityInstallations.workspaceId, workspaceId), eq(schema.capabilityInstallations.capabilityId, capabilityId)))
       .limit(1);
-    return row ? (encryptedHeadersConfig(row.config.headersEncrypted) ?? null) : null;
+    return row ? encryptedHeadersConfig(row.config.headersEncrypted) ?? null : null;
   });
 }
 
-export function mcpServerIdForCapability(
-  capabilityId: string,
-  metadata: Record<string, unknown> = {},
-): string {
+export function mcpServerIdForCapability(capabilityId: string, metadata: Record<string, unknown> = {}): string {
   const explicit = typeof metadata.mcpServerId === "string" ? metadata.mcpServerId.trim() : "";
   if (/^[A-Za-z0-9_-]+$/.test(explicit)) {
     return explicit;
   }
-  const body =
-    capabilityId
-      .replace(/^[^:]+:/, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 44) || "mcp";
+  const body = capabilityId
+    .replace(/^[^:]+:/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 44) || "mcp";
   return `cap-${body}-${shortHash(capabilityId)}`;
 }
 
@@ -2841,85 +2202,52 @@ function connectionSubjectVisibility(subjectId?: string | null): SQL {
     : isNull(schema.connections.subjectId);
 }
 
-export async function createConnection(
-  db: Database,
-  input: CreateConnectionInput,
-): Promise<ConnectionMetadata> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.connections)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId ?? null,
-          providerDomain: input.providerDomain,
-          kind: input.kind,
-          status: input.status ?? "active",
-          credentialEncrypted: input.credentialEncrypted,
-          grantedScopes: input.grantedScopes ?? [],
-          expiresAt: input.expiresAt ?? null,
-          metadata: input.metadata ?? {},
-          createdBySubjectId: input.createdBySubjectId ?? null,
-          updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
-        })
-        .returning(connectionMetadataColumns);
-      if (!row) {
-        throw new Error("Failed to create connection");
-      }
-      return mapConnectionMetadata(row);
-    },
-  );
+export async function createConnection(db: Database, input: CreateConnectionInput): Promise<ConnectionMetadata> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.connections).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      providerDomain: input.providerDomain,
+      kind: input.kind,
+      status: input.status ?? "active",
+      credentialEncrypted: input.credentialEncrypted,
+      grantedScopes: input.grantedScopes ?? [],
+      expiresAt: input.expiresAt ?? null,
+      metadata: input.metadata ?? {},
+      createdBySubjectId: input.createdBySubjectId ?? null,
+      updatedBySubjectId: input.updatedBySubjectId ?? input.createdBySubjectId ?? null,
+    }).returning(connectionMetadataColumns);
+    if (!row) {
+      throw new Error("Failed to create connection");
+    }
+    return mapConnectionMetadata(row);
+  });
 }
 
-export async function listConnectionsMetadata(
-  db: Database,
-  workspaceId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadata[]> {
+export async function listConnectionsMetadata(db: Database, workspaceId: string, subjectId?: string | null): Promise<ConnectionMetadata[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
+    const rows = await scopedDb.select(connectionMetadataColumns).from(schema.connections)
+      .where(and(eq(schema.connections.workspaceId, workspaceId), connectionSubjectVisibility(subjectId)))
       .orderBy(desc(schema.connections.createdAt));
     return rows.map(mapConnectionMetadata);
   });
 }
 
-export async function getConnectionMetadata(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadata | null> {
+export async function getConnectionMetadata(db: Database, workspaceId: string, connectionId: string, subjectId?: string | null): Promise<ConnectionMetadata | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
+    const [row] = await scopedDb.select(connectionMetadataColumns).from(schema.connections)
+      .where(and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        connectionSubjectVisibility(subjectId),
+      ))
       .limit(1);
     return row ? mapConnectionMetadata(row) : null;
   });
 }
 
-export async function updateConnection(
-  db: Database,
-  input: UpdateConnectionInput,
-): Promise<ConnectionMetadata | null> {
+export async function updateConnection(db: Database, input: UpdateConnectionInput): Promise<ConnectionMetadata | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const set = {
       updatedAt: new Date(),
@@ -2929,85 +2257,62 @@ export async function updateConnection(
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.credentialEncrypted !== undefined
         ? {
-            credentialEncrypted: input.credentialEncrypted,
-            version: sql`${schema.connections.version} + 1`,
-            lastError: null,
-          }
+          credentialEncrypted: input.credentialEncrypted,
+          version: sql`${schema.connections.version} + 1`,
+          lastError: null,
+        }
         : {}),
       ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
       ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      ...(input.updatedBySubjectId !== undefined
-        ? { updatedBySubjectId: input.updatedBySubjectId }
-        : {}),
+      ...(input.updatedBySubjectId !== undefined ? { updatedBySubjectId: input.updatedBySubjectId } : {}),
     };
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.id, input.connectionId),
-          connectionSubjectVisibility(input.visibleToSubjectId),
-          ...(input.expectedVersion !== undefined
-            ? [eq(schema.connections.version, input.expectedVersion)]
-            : []),
-        ),
-      )
+    const [row] = await scopedDb.update(schema.connections).set(set)
+      .where(and(
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.id, input.connectionId),
+        connectionSubjectVisibility(input.visibleToSubjectId),
+        ...(input.expectedVersion !== undefined ? [eq(schema.connections.version, input.expectedVersion)] : []),
+      ))
       .returning(connectionMetadataColumns);
     return row ? mapConnectionMetadata(row) : null;
   });
 }
 
-export async function revokeConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  updatedBySubjectId?: string | null,
-): Promise<ConnectionMetadata | null> {
+export async function revokeConnection(db: Database, workspaceId: string, connectionId: string, updatedBySubjectId?: string | null): Promise<ConnectionMetadata | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.connections)
-      .set({
-        status: "revoked",
-        // The version bump invalidates any in-flight refresh's (id, version) CAS,
-        // so a racing refresh cannot commit and flip the row back to active.
-        version: sql`${schema.connections.version} + 1`,
-        updatedBySubjectId: updatedBySubjectId ?? null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          // Same visibility rule as get/update: shared rows plus the caller's own
-          // subject rows. Cross-subject revocation (admin janitorial) arrives with
-          // the subject-connections UX in I5, deliberately not before.
-          connectionSubjectVisibility(updatedBySubjectId),
-        ),
-      )
+    const [row] = await scopedDb.update(schema.connections).set({
+      status: "revoked",
+      // The version bump invalidates any in-flight refresh's (id, version) CAS,
+      // so a racing refresh cannot commit and flip the row back to active.
+      version: sql`${schema.connections.version} + 1`,
+      updatedBySubjectId: updatedBySubjectId ?? null,
+      updatedAt: new Date(),
+    })
+      .where(and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        // Same visibility rule as get/update: shared rows plus the caller's own
+        // subject rows. Cross-subject revocation (admin janitorial) arrives with
+        // the subject-connections UX in I5, deliberately not before.
+        connectionSubjectVisibility(updatedBySubjectId),
+      ))
       .returning(connectionMetadataColumns);
     return row ? mapConnectionMetadata(row) : null;
   });
 }
 
-export async function loadConnectionCredentialForBroker(
-  db: Database,
-  settings: Settings,
-  input: {
-    workspaceId: string;
-    connectionId?: string;
-    providerDomain: string;
-    kind?: ConnectionKind;
-    subjectId?: string | null;
-    allowSubjectOwned?: boolean;
-  },
-): Promise<ConnectionCredentialForBroker | null> {
+export async function loadConnectionCredentialForBroker(db: Database, settings: Settings, input: {
+  workspaceId: string;
+  connectionId?: string;
+  providerDomain: string;
+  kind?: ConnectionKind;
+  subjectId?: string | null;
+  allowSubjectOwned?: boolean;
+}): Promise<ConnectionCredentialForBroker | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new Error(
-      "connection credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-    );
+    throw new Error("connection credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
   }
   const subjectPredicate = input.allowSubjectOwned
     ? connectionSubjectVisibility(input.subjectId)
@@ -3027,14 +2332,9 @@ export async function loadConnectionCredentialForBroker(
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
     // freshly revoked connection shadow an active replacement for the provider.
-    const [row] = await scopedDb
-      .select()
-      .from(schema.connections)
+    const [row] = await scopedDb.select().from(schema.connections)
       .where(and(...conditions))
-      .orderBy(
-        desc(sql`(${schema.connections.status} = 'active')`),
-        desc(schema.connections.updatedAt),
-      )
+      .orderBy(desc(sql`(${schema.connections.status} = 'active')`), desc(schema.connections.updatedAt))
       .limit(1);
     if (!row) {
       return null;
@@ -3043,10 +2343,7 @@ export async function loadConnectionCredentialForBroker(
     try {
       credential = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted));
     } catch (error) {
-      throw new Error(
-        `connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
+      throw new Error(`connection credential could not be decrypted for ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
       throw new Error(`connection credential bundle for ${row.id} is not a JSON object`);
@@ -3069,18 +2366,15 @@ export async function loadConnectionCredentialForBroker(
   });
 }
 
-export async function recordConnectionTokenRefresh(
-  db: Database,
-  input: {
-    id: string;
-    version: number;
-    workspaceId: string;
-    credentialEncrypted: string;
-    expiresAt: Date | null;
-    grantedScopes?: string[];
-    lastRefreshAt: Date;
-  },
-): Promise<boolean> {
+export async function recordConnectionTokenRefresh(db: Database, input: {
+  id: string;
+  version: number;
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  lastRefreshAt: Date;
+}): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const set = {
       credentialEncrypted: input.credentialEncrypted,
@@ -3092,70 +2386,42 @@ export async function recordConnectionTokenRefresh(
       updatedAt: new Date(),
       ...(input.grantedScopes !== undefined ? { grantedScopes: input.grantedScopes } : {}),
     };
-    const updated = await scopedDb
-      .update(schema.connections)
-      .set(set)
-      .where(
-        and(
-          eq(schema.connections.id, input.id),
-          eq(schema.connections.workspaceId, input.workspaceId),
-          eq(schema.connections.version, input.version),
-          // A refresh may only ever renew a live credential; revoked/errored rows
-          // stay dead even if a status change somewhere forgot to bump version.
-          eq(schema.connections.status, "active"),
-        ),
-      )
+    const updated = await scopedDb.update(schema.connections).set(set)
+      .where(and(
+        eq(schema.connections.id, input.id),
+        eq(schema.connections.workspaceId, input.workspaceId),
+        eq(schema.connections.version, input.version),
+        // A refresh may only ever renew a live credential; revoked/errored rows
+        // stay dead even if a status change somewhere forgot to bump version.
+        eq(schema.connections.status, "active"),
+      ))
       .returning({ id: schema.connections.id });
     return updated.length > 0;
   });
 }
 
-export async function setConnectionStatus(
-  db: Database,
-  workspaceId: string,
-  status: ConnectionStatus,
-  lastError: string | null,
-  guard: { id: string; version: number },
-): Promise<boolean> {
+export async function setConnectionStatus(db: Database, workspaceId: string, status: ConnectionStatus, lastError: string | null, guard: { id: string; version: number }): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.connections)
-      .set({
-        status,
-        lastError,
-        version: sql`${schema.connections.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, guard.id),
-          eq(schema.connections.version, guard.version),
-        ),
-      )
-      .returning({ id: schema.connections.id });
+    const updated = await scopedDb.update(schema.connections).set({
+      status,
+      lastError,
+      version: sql`${schema.connections.version} + 1`,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(schema.connections.workspaceId, workspaceId),
+      eq(schema.connections.id, guard.id),
+      eq(schema.connections.version, guard.version),
+    )).returning({ id: schema.connections.id });
     return updated.length > 0;
   });
 }
 
-export async function recordConnectionUsed(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-): Promise<void> {
+export async function recordConnectionUsed(db: Database, workspaceId: string, connectionId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.connections)
-      .set({
-        lastUsedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-        ),
-      );
+    await scopedDb.update(schema.connections).set({
+      lastUsedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)));
   });
 }
 
@@ -3164,9 +2430,7 @@ export async function loadIntegrationOAuthClient(
   settings: Settings,
   issuer: string,
 ): Promise<IntegrationOAuthClientForUse | null> {
-  const [row] = await db
-    .select()
-    .from(schema.integrationOauthClients)
+  const [row] = await db.select().from(schema.integrationOauthClients)
     .where(eq(schema.integrationOauthClients.issuer, issuer))
     .limit(1);
   if (!row) {
@@ -3176,9 +2440,7 @@ export async function loadIntegrationOAuthClient(
   if (row.clientSecretEncrypted) {
     const key = environmentsEncryptionKeyBytes(settings);
     if (!key) {
-      throw new Error(
-        "OAuth client secret present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-      );
+      throw new Error("OAuth client secret present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
     clientSecret = decryptEnvironmentValue(key, row.clientSecretEncrypted);
   }
@@ -3199,32 +2461,24 @@ export async function storeIntegrationOAuthClient(
   db: Database,
   input: StoreIntegrationOAuthClientInput,
 ): Promise<StoredIntegrationOAuthClient> {
-  const [inserted] = await db
-    .insert(schema.integrationOauthClients)
-    .values({
-      issuer: input.issuer,
-      authorizationServer: input.authorizationServer,
-      clientId: input.clientId,
-      clientSecretEncrypted: input.clientSecretEncrypted ?? null,
-      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
-      metadata: input.metadata ?? {},
-    })
-    .onConflictDoNothing({
-      target: schema.integrationOauthClients.issuer,
-    })
-    .returning();
+  const [inserted] = await db.insert(schema.integrationOauthClients).values({
+    issuer: input.issuer,
+    authorizationServer: input.authorizationServer,
+    clientId: input.clientId,
+    clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+    tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+    metadata: input.metadata ?? {},
+  }).onConflictDoNothing({
+    target: schema.integrationOauthClients.issuer,
+  }).returning();
   if (inserted) {
     return mapStoredIntegrationOAuthClient(inserted);
   }
-  const [winner] = await db
-    .select()
-    .from(schema.integrationOauthClients)
+  const [winner] = await db.select().from(schema.integrationOauthClients)
     .where(eq(schema.integrationOauthClients.issuer, input.issuer))
     .limit(1);
   if (!winner) {
-    throw new Error(
-      `OAuth client registration conflict winner not found for issuer ${input.issuer}`,
-    );
+    throw new Error(`OAuth client registration conflict winner not found for issuer ${input.issuer}`);
   }
   return mapStoredIntegrationOAuthClient(winner);
 }
@@ -3233,37 +2487,31 @@ export async function replaceIntegrationOAuthClient(
   db: Database,
   input: ReplaceIntegrationOAuthClientInput,
 ): Promise<StoredIntegrationOAuthClient> {
-  const [row] = await db
-    .insert(schema.integrationOauthClients)
-    .values({
-      issuer: input.issuer,
+  const [row] = await db.insert(schema.integrationOauthClients).values({
+    issuer: input.issuer,
+    authorizationServer: input.authorizationServer,
+    clientId: input.clientId,
+    clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+    tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+    metadata: input.metadata ?? {},
+  }).onConflictDoUpdate({
+    target: schema.integrationOauthClients.issuer,
+    set: {
       authorizationServer: input.authorizationServer,
       clientId: input.clientId,
       clientSecretEncrypted: input.clientSecretEncrypted ?? null,
       tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
       metadata: input.metadata ?? {},
-    })
-    .onConflictDoUpdate({
-      target: schema.integrationOauthClients.issuer,
-      set: {
-        authorizationServer: input.authorizationServer,
-        clientId: input.clientId,
-        clientSecretEncrypted: input.clientSecretEncrypted ?? null,
-        tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
-        metadata: input.metadata ?? {},
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
+      updatedAt: new Date(),
+    },
+  }).returning();
   if (!row) {
     throw new Error(`OAuth client registration replacement failed for issuer ${input.issuer}`);
   }
   return mapStoredIntegrationOAuthClient(row);
 }
 
-function mapStoredIntegrationOAuthClient(
-  row: typeof schema.integrationOauthClients.$inferSelect,
-): StoredIntegrationOAuthClient {
+function mapStoredIntegrationOAuthClient(row: typeof schema.integrationOauthClients.$inferSelect): StoredIntegrationOAuthClient {
   return {
     id: row.id,
     issuer: row.issuer,
@@ -3281,85 +2529,57 @@ export async function consumeIntegrationOAuthStateNonce(
   db: Database,
   input: ConsumeOAuthStateNonceInput,
 ): Promise<boolean> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb
-        .delete(schema.integrationOauthStateNonces)
-        .where(
-          and(
-            eq(schema.integrationOauthStateNonces.workspaceId, input.workspaceId),
-            lt(schema.integrationOauthStateNonces.expiresAt, input.now),
-          ),
-        );
-      const inserted = await scopedDb
-        .insert(schema.integrationOauthStateNonces)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          subjectId: input.subjectId,
-          nonce: input.nonce,
-          expiresAt: input.expiresAt,
-          usedAt: input.now,
-        })
-        .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
-        .returning({ nonce: schema.integrationOauthStateNonces.nonce });
-      return inserted.length > 0;
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.delete(schema.integrationOauthStateNonces)
+      .where(and(
+        eq(schema.integrationOauthStateNonces.workspaceId, input.workspaceId),
+        lt(schema.integrationOauthStateNonces.expiresAt, input.now),
+      ));
+    const inserted = await scopedDb.insert(schema.integrationOauthStateNonces).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      nonce: input.nonce,
+      expiresAt: input.expiresAt,
+      usedAt: input.now,
+    }).onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+      .returning({ nonce: schema.integrationOauthStateNonces.nonce });
+    return inserted.length > 0;
+  });
 }
 
-export async function createKnowledgeMemory(
-  db: Database,
-  input: CreateKnowledgeMemoryInput,
-): Promise<KnowledgeMemory> {
+export async function createKnowledgeMemory(db: Database, input: CreateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
   const text = requireDbString(input.text, "knowledge memory text");
   const scope = cleanDbString(input.scope) ?? "workspace";
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.knowledgeMemories)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          status: input.status ?? "proposed",
-          kind: input.kind ?? "semantic",
-          scope,
-          text,
-          textHash: hashMemoryText(text),
-          sourceRefs: input.sourceRefs ?? [],
-          confidence: confidenceToStorage(input.confidence ?? 0.5),
-          metadata: input.metadata ?? {},
-          createdBySessionId: input.createdBySessionId ?? null,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create knowledge memory");
-      }
-      return mapKnowledgeMemory(row);
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.knowledgeMemories).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      status: input.status ?? "proposed",
+      kind: input.kind ?? "semantic",
+      scope,
+      text,
+      textHash: hashMemoryText(text),
+      sourceRefs: input.sourceRefs ?? [],
+      confidence: confidenceToStorage(input.confidence ?? 0.5),
+      metadata: input.metadata ?? {},
+      createdBySessionId: input.createdBySessionId ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create knowledge memory");
+    }
+    return mapKnowledgeMemory(row);
+  });
 }
 
-export async function updateKnowledgeMemory(
-  db: Database,
-  workspaceId: string,
-  memoryId: string,
-  input: UpdateKnowledgeMemoryInput,
-  embedder?: MemoryEmbedder,
-): Promise<KnowledgeMemory> {
+export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput, embedder?: MemoryEmbedder): Promise<KnowledgeMemory> {
   const reviewStatus = input.status === "approved" || input.status === "rejected";
-  const scope =
-    input.scope !== undefined ? requireDbString(input.scope, "knowledge memory scope") : undefined;
-  const reviewedBy =
-    input.reviewedBy === null
-      ? null
-      : input.reviewedBy !== undefined
-        ? requireDbString(input.reviewedBy, "knowledge memory reviewer")
-        : undefined;
+  const scope = input.scope !== undefined ? requireDbString(input.scope, "knowledge memory scope") : undefined;
+  const reviewedBy = input.reviewedBy === null
+    ? null
+    : input.reviewedBy !== undefined
+      ? requireDbString(input.reviewedBy, "knowledge memory reviewer")
+      : undefined;
 
   // A text edit is a human audit action: it bypasses the dedup/cap gates (an
   // authorized curator's edit is intentional) but still sanitizes + redacts,
@@ -3371,9 +2591,7 @@ export async function updateKnowledgeMemory(
     embeddingModel: string | null;
     updateEmbedding: boolean;
   };
-  const embedForMemoryUpdate = async (
-    sanitizedText: string,
-  ): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
+  const embedForMemoryUpdate = async (sanitizedText: string): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
     let embedding: number[] | null = null;
     let embeddingModel: string | null = null;
     if (embedder) {
@@ -3400,64 +2618,39 @@ export async function updateKnowledgeMemory(
       throw new Error("Memory text is empty after sanitization; nothing to save.");
     }
     if (isMemoryTextTooLong(sanitizedText)) {
-      throw new Error(
-        `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
-      );
+      throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
     }
     const { embedding, embeddingModel } = await embedForMemoryUpdate(sanitizedText);
-    textUpdate = {
-      text: sanitizedText,
-      textHash: hashMemoryText(sanitizedText),
-      embedding,
-      embeddingModel,
-      updateEmbedding: true,
-    };
+    textUpdate = { text: sanitizedText, textHash: hashMemoryText(sanitizedText), embedding, embeddingModel, updateEmbedding: true };
   }
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [existing] = await scopedDb
-      .select({
-        id: schema.knowledgeMemories.id,
-        status: schema.knowledgeMemories.status,
-        text: schema.knowledgeMemories.text,
-        textHash: schema.knowledgeMemories.textHash,
-        embedding: schema.knowledgeMemories.embedding,
-      })
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, workspaceId),
-          eq(schema.knowledgeMemories.id, memoryId),
-        ),
-      )
+    const [existing] = await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      status: schema.knowledgeMemories.status,
+      text: schema.knowledgeMemories.text,
+      textHash: schema.knowledgeMemories.textHash,
+      embedding: schema.knowledgeMemories.embedding,
+    }).from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
       .limit(1);
     if (!existing) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
     const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
-    const wasVisible = agentVisibleMemoryStatuses.includes(
-      existing.status as (typeof agentVisibleMemoryStatuses)[number],
-    );
-    const willBeVisible = agentVisibleMemoryStatuses.includes(
-      nextStatus as (typeof agentVisibleMemoryStatuses)[number],
-    );
+    const wasVisible = agentVisibleMemoryStatuses.includes(existing.status as (typeof agentVisibleMemoryStatuses)[number]);
+    const willBeVisible = agentVisibleMemoryStatuses.includes(nextStatus as (typeof agentVisibleMemoryStatuses)[number]);
     if (willBeVisible) {
-      const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb
-        .select({
-          visibleCount: sql<number>`count(*)::int`,
-        })
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, workspaceId),
-            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-            ne(schema.knowledgeMemories.id, memoryId),
-          ),
-        );
+      const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+        visibleCount: sql<number>`count(*)::int`,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          ne(schema.knowledgeMemories.id, memoryId),
+        ));
       if (Number(visibleCount) >= MEMORY_VISIBLE_RECORD_CAP) {
-        throw new Error(
-          `Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`,
-        );
+        throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
       }
     }
     if (!wasVisible && willBeVisible && textUpdate === undefined) {
@@ -3466,16 +2659,13 @@ export async function updateKnowledgeMemory(
         throw new Error("Memory text is empty after sanitization; nothing to save.");
       }
       if (isMemoryTextTooLong(sanitizedText)) {
-        throw new Error(
-          `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`,
-        );
+        throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
       }
       const textChanged = sanitizedText !== existing.text;
       const missingEmbedding = existing.embedding == null;
-      const { embedding, embeddingModel } =
-        textChanged || missingEmbedding
-          ? await embedForMemoryUpdate(sanitizedText)
-          : { embedding: null, embeddingModel: null };
+      const { embedding, embeddingModel } = textChanged || missingEmbedding
+        ? await embedForMemoryUpdate(sanitizedText)
+        : { embedding: null, embeddingModel: null };
       textUpdate = {
         text: sanitizedText,
         textHash: hashMemoryText(sanitizedText),
@@ -3486,71 +2676,42 @@ export async function updateKnowledgeMemory(
     }
     const nextTextHash = textUpdate?.textHash ?? existing.textHash;
     if (!wasVisible && willBeVisible && nextTextHash) {
-      const duplicate = await findVisibleMemoryByTextHash(
-        scopedDb,
-        workspaceId,
-        nextTextHash,
-        memoryId,
-      );
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
       if (duplicate) {
         throw new Error(visibleTextHashConflictMessage(duplicate));
       }
     }
     let row: typeof schema.knowledgeMemories.$inferSelect | undefined;
     try {
-      const rows = await scopedDb.transaction(
-        async (tx) =>
-          await tx
-            .update(schema.knowledgeMemories)
-            .set({
-              ...(input.status !== undefined ? { status: input.status } : {}),
-              ...(input.kind !== undefined ? { kind: input.kind } : {}),
-              ...(scope !== undefined ? { scope } : {}),
-              ...(textUpdate !== undefined
-                ? {
-                    text: textUpdate.text,
-                    textHash: textUpdate.textHash,
-                    ...(textUpdate.updateEmbedding
-                      ? {
-                          embedding: textUpdate.embedding,
-                          embeddingModel: textUpdate.embeddingModel,
-                        }
-                      : {}),
-                  }
-                : {}),
-              ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
-              ...(input.confidence !== undefined
-                ? { confidence: confidenceToStorage(input.confidence) }
-                : {}),
-              ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-              ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-              // Re-proposing clears review metadata; an explicit reviewedBy in the same
-              // update still wins via the later spread.
-              ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
-              ...(reviewedBy !== undefined ? { reviewedBy } : {}),
-              ...(reviewStatus ? { reviewedAt: new Date() } : {}),
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(schema.knowledgeMemories.workspaceId, workspaceId),
-                eq(schema.knowledgeMemories.id, memoryId),
-              ),
-            )
-            .returning(),
-      );
+      const rows = await scopedDb.transaction(async (tx) => await tx.update(schema.knowledgeMemories).set({
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(scope !== undefined ? { scope } : {}),
+        ...(textUpdate !== undefined
+          ? {
+            text: textUpdate.text,
+            textHash: textUpdate.textHash,
+            ...(textUpdate.updateEmbedding ? { embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
+          }
+          : {}),
+        ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        // Re-proposing clears review metadata; an explicit reviewedBy in the same
+        // update still wins via the later spread.
+        ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
+        ...(reviewedBy !== undefined ? { reviewedBy } : {}),
+        ...(reviewStatus ? { reviewedAt: new Date() } : {}),
+        updatedAt: new Date(),
+      }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning());
       row = rows[0];
     } catch (error) {
       if (!isVisibleTextHashUniqueViolation(error) || !nextTextHash) {
         throw error;
       }
-      const duplicate = await findVisibleMemoryByTextHash(
-        scopedDb,
-        workspaceId,
-        nextTextHash,
-        memoryId,
-      );
-      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
+      throw new Error(visibleTextHashConflictMessage(duplicate));
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -3559,39 +2720,22 @@ export async function updateKnowledgeMemory(
   });
 }
 
-export async function getKnowledgeMemory(
-  db: Database,
-  workspaceId: string,
-  memoryId: string,
-): Promise<KnowledgeMemory | null> {
+export async function getKnowledgeMemory(db: Database, workspaceId: string, memoryId: string): Promise<KnowledgeMemory | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, workspaceId),
-          eq(schema.knowledgeMemories.id, memoryId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
       .limit(1);
     return row ? mapKnowledgeMemory(row) : null;
   });
 }
 
-export async function listKnowledgeMemories(
-  db: Database,
-  workspaceId: string,
-  options: ListKnowledgeMemoryOptions = {},
-): Promise<KnowledgeMemory[]> {
+export async function listKnowledgeMemories(db: Database, workspaceId: string, options: ListKnowledgeMemoryOptions = {}): Promise<KnowledgeMemory[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
     if (options.status) {
-      conditions.push(
-        Array.isArray(options.status)
-          ? inArray(schema.knowledgeMemories.status, options.status)
-          : eq(schema.knowledgeMemories.status, options.status),
-      );
+      conditions.push(Array.isArray(options.status)
+        ? inArray(schema.knowledgeMemories.status, options.status)
+        : eq(schema.knowledgeMemories.status, options.status));
     }
     if (options.kind) {
       conditions.push(eq(schema.knowledgeMemories.kind, options.kind));
@@ -3602,14 +2746,10 @@ export async function listKnowledgeMemories(
     }
     const query = cleanDbString(options.query);
     if (query) {
-      conditions.push(
-        sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
-      );
+      conditions.push(sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`);
     }
     const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
-    const rows = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
+    const rows = await scopedDb.select().from(schema.knowledgeMemories)
       .where(and(...conditions))
       .orderBy(desc(schema.knowledgeMemories.updatedAt))
       .limit(limit);
@@ -3702,13 +2842,7 @@ const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
 const visibleTextHashUniqueIndexName = "knowledge_memories_workspace_visible_text_hash_uq";
 
 function isVisibleTextHashUniqueViolation(error: unknown): boolean {
-  const candidate = error as {
-    code?: unknown;
-    constraint?: unknown;
-    constraint_name?: unknown;
-    message?: unknown;
-    cause?: unknown;
-  } | null;
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown; cause?: unknown } | null;
   if (!candidate || typeof candidate !== "object") {
     return false;
   }
@@ -3717,10 +2851,9 @@ function isVisibleTextHashUniqueViolation(error: unknown): boolean {
     return true;
   }
   if (
-    typeof candidate.message === "string" &&
-    candidate.message.includes(visibleTextHashUniqueIndexName) &&
-    (candidate.code === "23505" ||
-      candidate.message.includes("duplicate key value violates unique constraint"))
+    typeof candidate.message === "string"
+    && candidate.message.includes(visibleTextHashUniqueIndexName)
+    && (candidate.code === "23505" || candidate.message.includes("duplicate key value violates unique constraint"))
   ) {
     return true;
   }
@@ -3741,18 +2874,14 @@ async function findVisibleMemoryByTextHash(
   if (excludeId) {
     filters.push(ne(schema.knowledgeMemories.id, excludeId));
   }
-  const [row] = await scopedDb
-    .select()
-    .from(schema.knowledgeMemories)
+  const [row] = await scopedDb.select().from(schema.knowledgeMemories)
     .where(and(...filters))
     .orderBy(desc(schema.knowledgeMemories.updatedAt))
     .limit(1);
   return row ?? null;
 }
 
-function visibleTextHashConflictMessage(
-  existing: Pick<KnowledgeMemory, "id"> | { id: string } | null,
-): string {
+function visibleTextHashConflictMessage(existing: Pick<KnowledgeMemory, "id"> | { id: string } | null): string {
   const suffix = existing ? ` Existing memory id: ${existing.id}.` : "";
   return `Memory text duplicates an existing visible memory.${suffix} Search memory and update, archive, or supersede the existing record instead.`;
 }
@@ -3792,48 +2921,34 @@ function inPlaceSaveMemoryMetadata(
 // clear terminal-row result; prefix lookup is restricted to non-terminal rows
 // because short ids are shown only for records an agent can legitimately target.
 // Returns null when nothing matches; throws on an ambiguous live prefix.
-async function resolveWorkspaceMemoryId(
-  scopedDb: Database,
-  workspaceId: string,
-  rawId: string,
-): Promise<string | null> {
+async function resolveWorkspaceMemoryId(scopedDb: Database, workspaceId: string, rawId: string): Promise<string | null> {
   const candidate = rawId.trim().toLowerCase();
   if (!/^[0-9a-f-]{4,36}$/.test(candidate)) {
     return null;
   }
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate)) {
-    const [match] = await scopedDb
-      .select({ id: schema.knowledgeMemories.id })
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, workspaceId),
-          eq(schema.knowledgeMemories.id, candidate),
-        ),
-      )
+    const [match] = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        eq(schema.knowledgeMemories.id, candidate),
+      ))
       .limit(1);
     return match?.id ?? null;
   }
-  const matches = await scopedDb
-    .select({ id: schema.knowledgeMemories.id })
-    .from(schema.knowledgeMemories)
-    .where(
-      and(
-        eq(schema.knowledgeMemories.workspaceId, workspaceId),
-        sql`${schema.knowledgeMemories.id}::text like ${`${candidate}%`}`,
-        ne(schema.knowledgeMemories.status, "archived"),
-        ne(schema.knowledgeMemories.status, "superseded"),
-        ne(schema.knowledgeMemories.status, "rejected"),
-      ),
-    )
+  const matches = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+    .where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      sql`${schema.knowledgeMemories.id}::text like ${`${candidate}%`}`,
+      ne(schema.knowledgeMemories.status, "archived"),
+      ne(schema.knowledgeMemories.status, "superseded"),
+      ne(schema.knowledgeMemories.status, "rejected"),
+    ))
     .limit(2);
   if (matches.length === 0) {
     return null;
   }
   if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous memory id "${rawId}": it matches multiple live memory records. Run memory_search and use the full id from the intended record.`,
-    );
+    throw new Error(`Ambiguous memory id "${rawId}": it matches multiple live memory records. Run memory_search and use the full id from the intended record.`);
   }
   return matches[0]!.id;
 }
@@ -3848,9 +2963,7 @@ export async function saveWorkspaceMemory(
     throw new Error("Memory text is empty after sanitization; nothing to save.");
   }
   if (isMemoryTextTooLong(sanitizedText)) {
-    throw new Error(
-      `Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`,
-    );
+    throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`);
   }
   const textHash = hashMemoryText(sanitizedText);
   const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
@@ -3880,30 +2993,15 @@ export async function saveWorkspaceMemory(
     let replacesFullId: string | null = null;
     let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
     if (input.replacesId) {
-      replacesFullId = await resolveWorkspaceMemoryId(
-        scopedDb,
-        input.workspaceId,
-        input.replacesId,
-      );
+      replacesFullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.replacesId);
       if (!replacesFullId) {
-        throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-        );
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
       }
-      const [row] = await scopedDb
-        .select()
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
-          ),
-        )
+      const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, replacesFullId)))
         .limit(1);
       if (!row) {
-        throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-        );
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
       }
       replacesRow = row;
     }
@@ -3916,45 +3014,31 @@ export async function saveWorkspaceMemory(
       // that same row. In that case there is no supersession target; keep the
       // row live and update its text/vector metadata so the call still has an
       // observable effect.
-      const normalizedTextChanged = replacesRow
-        ? hashMemoryText(replacesRow.text) !== textHash
-        : true;
-      const metadata = replacesRow
-        ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input)
-        : undefined;
-      const [updated] = await scopedDb
-        .update(schema.knowledgeMemories)
-        .set({
-          text: sanitizedText,
-          textHash,
-          ...(normalizedTextChanged
-            ? {
-                // New text with no fresh vector must clear the old vector. Keeping a
-                // stale vector would make vector search return this row for the old
-                // text's meaning; keyword search still covers the new text.
-                embedding,
-                embeddingModel,
-              }
-            : {}),
-          ...(input.kind !== undefined ? { kind } : {}),
-          ...(input.confidence !== undefined
-            ? { confidence: confidenceToStorage(input.confidence) }
-            : {}),
-          ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-          ...(metadata !== undefined ? { metadata } : {}),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
-          ),
-        )
-        .returning();
+      const normalizedTextChanged = replacesRow ? hashMemoryText(replacesRow.text) !== textHash : true;
+      const metadata = replacesRow ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input) : undefined;
+      const [updated] = await scopedDb.update(schema.knowledgeMemories).set({
+        text: sanitizedText,
+        textHash,
+        ...(normalizedTextChanged
+          ? {
+            // New text with no fresh vector must clear the old vector. Keeping a
+            // stale vector would make vector search return this row for the old
+            // text's meaning; keyword search still covers the new text.
+            embedding,
+            embeddingModel,
+          }
+          : {}),
+        ...(input.kind !== undefined ? { kind } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
       if (!updated) {
-        throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-        );
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
       }
       return {
         memory: mapKnowledgeMemory(updated),
@@ -3977,25 +3061,17 @@ export async function saveWorkspaceMemory(
       }
       let superseded: KnowledgeMemory | null = null;
       if (replacesFullId) {
-        const [old] = await scopedDb
-          .update(schema.knowledgeMemories)
-          .set({
-            status: "superseded",
-            supersededById: row.id,
-            validUntil: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-              eq(schema.knowledgeMemories.id, replacesFullId),
-            ),
-          )
-          .returning();
+        const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+          status: "superseded",
+          supersededById: row.id,
+          validUntil: new Date(),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          eq(schema.knowledgeMemories.id, replacesFullId),
+        )).returning();
         if (!old) {
-          throw new Error(
-            `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-          );
+          throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
         }
         superseded = mapKnowledgeMemory(old);
       }
@@ -4012,21 +3088,15 @@ export async function saveWorkspaceMemory(
     };
 
     // Exact-dup gate: same normalized text among agent-visible rows → NOOP.
-    const exactMatches = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.textHash, textHash),
-          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-        ),
-      )
-      .orderBy(
-        replacesFullId
-          ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
-          : schema.knowledgeMemories.updatedAt,
-      )
+    const exactMatches = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.textHash, textHash),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+      ))
+      .orderBy(replacesFullId
+        ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
+        : schema.knowledgeMemories.updatedAt)
       .limit(replacesFullId ? 2 : 1);
     const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
     if (exact) {
@@ -4039,37 +3109,23 @@ export async function saveWorkspaceMemory(
     // the exact text_hash gate below.
     if (embedding && embeddingModel) {
       const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
-      const neighbours = await scopedDb
-        .select({
-          id: schema.knowledgeMemories.id,
-          distance,
-        })
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-            eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
-            sql`${schema.knowledgeMemories.embedding} is not null`,
-          ),
-        )
+      const neighbours = await scopedDb.select({
+        id: schema.knowledgeMemories.id,
+        distance,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
+          sql`${schema.knowledgeMemories.embedding} is not null`,
+        ))
         .orderBy(distance)
         .limit(MEMORY_NEAR_DUP_NEIGHBORS);
-      const duplicateNeighbours = neighbours.filter(
-        (row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD,
-      );
-      const nearest =
-        duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
+      const duplicateNeighbours = neighbours.filter((row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD);
+      const nearest = duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
       if (nearest) {
-        const [row] = await scopedDb
-          .select()
-          .from(schema.knowledgeMemories)
-          .where(
-            and(
-              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-              eq(schema.knowledgeMemories.id, nearest.id),
-            ),
-          )
+        const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+          .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, nearest.id)))
           .limit(1);
         if (row) {
           return await dedupeToExisting(row, "near");
@@ -4078,27 +3134,19 @@ export async function saveWorkspaceMemory(
     }
 
     // Per-workspace visible-record cap: fail actionably rather than silently drop.
-    const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb
-      .select({
-        visibleCount: sql<number>`count(*)::int`,
-      })
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-        ),
-      );
+    const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+      visibleCount: sql<number>`count(*)::int`,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+      ));
     const replacesVisible = replacesRow
-      ? agentVisibleMemoryStatuses.includes(
-          replacesRow.status as (typeof agentVisibleMemoryStatuses)[number],
-        )
+      ? agentVisibleMemoryStatuses.includes(replacesRow.status as (typeof agentVisibleMemoryStatuses)[number])
       : false;
     const effectiveVisibleCount = Number(visibleCount) - (replacesVisible ? 1 : 0);
     if (effectiveVisibleCount >= MEMORY_VISIBLE_RECORD_CAP) {
-      throw new Error(
-        `Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`,
-      );
+      throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
     }
 
     const sourceRefs: KnowledgeSourceRef[] = input.sessionId
@@ -4106,28 +3154,22 @@ export async function saveWorkspaceMemory(
       : [];
     let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
     try {
-      const rows = await scopedDb.transaction(
-        async (tx) =>
-          await tx
-            .insert(schema.knowledgeMemories)
-            .values({
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              status: "active",
-              kind,
-              scope: "workspace",
-              text: sanitizedText,
-              textHash,
-              sourceRefs,
-              confidence: confidenceToStorage(input.confidence ?? 0.5),
-              pinned: input.pinned ?? false,
-              metadata: saveMemoryMetadata(input),
-              createdBySessionId: input.sessionId ?? null,
-              supersedesId: replacesFullId,
-              ...(embedding ? { embedding, embeddingModel } : {}),
-            })
-            .returning(),
-      );
+      const rows = await scopedDb.transaction(async (tx) => await tx.insert(schema.knowledgeMemories).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        status: "active",
+        kind,
+        scope: "workspace",
+        text: sanitizedText,
+        textHash,
+        sourceRefs,
+        confidence: confidenceToStorage(input.confidence ?? 0.5),
+        pinned: input.pinned ?? false,
+        metadata: saveMemoryMetadata(input),
+        createdBySessionId: input.sessionId ?? null,
+        supersedesId: replacesFullId,
+        ...(embedding ? { embedding, embeddingModel } : {}),
+      }).returning());
       inserted = rows[0];
     } catch (error) {
       if (!isVisibleTextHashUniqueViolation(error)) {
@@ -4145,21 +3187,15 @@ export async function saveWorkspaceMemory(
 
     let superseded: KnowledgeMemory | null = null;
     if (replacesFullId) {
-      const [old] = await scopedDb
-        .update(schema.knowledgeMemories)
-        .set({
-          status: "superseded",
-          supersededById: inserted.id,
-          validUntil: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
-          ),
-        )
-        .returning();
+      const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+        status: "superseded",
+        supersededById: inserted.id,
+        validUntil: new Date(),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
       superseded = old ? mapKnowledgeMemory(old) : null;
     }
 
@@ -4189,34 +3225,23 @@ export async function correctWorkspaceMemory(
       if (!fullId) {
         return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
       }
-      return await scopedDb
-        .select()
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, fullId),
-          ),
-        )
+      return await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
         .limit(1);
     });
     if (!old) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
-    const result = await saveWorkspaceMemory(
-      db,
-      {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        text: replacementText,
-        kind: old.kind as KnowledgeMemoryKind,
-        pinned: old.pinned,
-        replacesId: old.id,
-        sessionId: input.sessionId ?? null,
-        origin: "agent",
-      },
-      embedder,
-    );
+    const result = await saveWorkspaceMemory(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      text: replacementText,
+      kind: old.kind as KnowledgeMemoryKind,
+      pinned: old.pinned,
+      replacesId: old.id,
+      sessionId: input.sessionId ?? null,
+      origin: "agent",
+    }, embedder);
     if (result.superseded) {
       return {
         action: "superseded",
@@ -4237,37 +3262,22 @@ export async function correctWorkspaceMemory(
     if (!fullId) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
-    const [existing] = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.id, fullId),
-        ),
-      )
+    const [existing] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
       .limit(1);
     if (!existing) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
     const correctionReason = cleanDbString(input.reason);
-    const [archived] = await scopedDb
-      .update(schema.knowledgeMemories)
-      .set({
-        status: "archived",
-        validUntil: new Date(),
-        updatedAt: new Date(),
-        ...(correctionReason
-          ? { metadata: { ...(existing.metadata ?? {}), correctionReason } }
-          : {}),
-      })
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.id, fullId),
-        ),
-      )
-      .returning();
+    const [archived] = await scopedDb.update(schema.knowledgeMemories).set({
+      status: "archived",
+      validUntil: new Date(),
+      updatedAt: new Date(),
+      ...(correctionReason ? { metadata: { ...(existing.metadata ?? {}), correctionReason } } : {}),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+      eq(schema.knowledgeMemories.id, fullId),
+    )).returning();
     if (!archived) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
@@ -4283,10 +3293,7 @@ export async function searchWorkspaceMemories(
 ): Promise<WorkspaceMemorySearchResult[]> {
   const query = requireDbString(input.query, "memory search query");
   const mode: WorkspaceMemorySearchMode = input.mode ?? "hybrid";
-  const limit = Math.min(
-    Math.max(input.limit ?? MEMORY_SEARCH_DEFAULT_LIMIT, 1),
-    MEMORY_SEARCH_MAX_LIMIT,
-  );
+  const limit = Math.min(Math.max(input.limit ?? MEMORY_SEARCH_DEFAULT_LIMIT, 1), MEMORY_SEARCH_MAX_LIMIT);
   const candidateLimit = mode === "hybrid" ? Math.min(limit * 4, 100) : limit;
 
   const baseConditions: SQL[] = [
@@ -4310,86 +3317,65 @@ export async function searchWorkspaceMemories(
           throw new Error("embedder returned no query vector");
         }
         const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(vector)}::vector`;
-        const rows = await scopedDb
-          .select({ id: schema.knowledgeMemories.id, distance })
-          .from(schema.knowledgeMemories)
-          .where(
-            and(
-              ...baseConditions,
-              eq(schema.knowledgeMemories.embeddingModel, embedder.model),
-              sql`${schema.knowledgeMemories.embedding} is not null`,
-            ),
-          )
+        const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, distance }).from(schema.knowledgeMemories)
+          .where(and(
+            ...baseConditions,
+            eq(schema.knowledgeMemories.embeddingModel, embedder.model),
+            sql`${schema.knowledgeMemories.embedding} is not null`,
+          ))
           .orderBy(distance)
           .limit(candidateLimit);
         for (const row of rows) {
           const vectorScore = 1 / (1 + Number(row.distance));
-          scored.set(row.id, {
-            vectorScore,
-            keywordScore: scored.get(row.id)?.keywordScore ?? null,
-          });
+          scored.set(row.id, { vectorScore, keywordScore: scored.get(row.id)?.keywordScore ?? null });
         }
       } catch (error) {
         if (mode === "vector") {
           throw error;
         }
-        console.warn(
-          "workspace memory hybrid search vector component failed; falling back to keyword",
-          {
-            workspaceId,
-            error: error instanceof Error ? error.message : String(error),
-          },
-        );
+        console.warn("workspace memory hybrid search vector component failed; falling back to keyword", {
+          workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
     if (mode === "keyword" || mode === "hybrid") {
       const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.knowledgeMemories.text}), plainto_tsquery('simple', ${query}))`;
-      const rows = await scopedDb
-        .select({ id: schema.knowledgeMemories.id, rank })
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            ...baseConditions,
-            sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
-          ),
-        )
+      const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, rank }).from(schema.knowledgeMemories)
+        .where(and(
+          ...baseConditions,
+          sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
+        ))
         .orderBy(desc(rank))
         .limit(candidateLimit);
       for (const row of rows) {
         const rankValue = Number(row.rank);
-        const keywordScore =
-          Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
+        const keywordScore = Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
         const prev = scored.get(row.id);
         scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
       }
     }
 
-    const ranked = [...scored.entries()]
-      .map(([id, { vectorScore, keywordScore }]) => {
-        const matchType: WorkspaceMemorySearchMode =
-          vectorScore !== null && keywordScore !== null
-            ? "hybrid"
-            : vectorScore !== null
-              ? "vector"
-              : "keyword";
-        const vector = vectorScore ?? 0;
-        const keyword = keywordScore ?? 0;
-        const score =
-          mode === "vector"
-            ? vector
-            : mode === "keyword"
-              ? keyword
-              : Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0));
-        return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
-      })
-      .sort(
-        (left, right) =>
-          right.score - left.score ||
-          (right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
-          (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
-      )
-      .slice(0, limit);
+    const ranked = [...scored.entries()].map(([id, { vectorScore, keywordScore }]) => {
+      const matchType: WorkspaceMemorySearchMode = vectorScore !== null && keywordScore !== null
+        ? "hybrid"
+        : vectorScore !== null
+          ? "vector"
+          : "keyword";
+      const vector = vectorScore ?? 0;
+      const keyword = keywordScore ?? 0;
+      const score = mode === "vector"
+        ? vector
+        : mode === "keyword"
+          ? keyword
+          : Math.min(1, (0.65 * vector) + (0.35 * keyword) + (matchType === "hybrid" ? 0.1 : 0));
+      return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
+    }).sort((left, right) =>
+      right.score - left.score
+      || (right.vectorScore ?? 0) - (left.vectorScore ?? 0)
+      || (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
+    ).slice(0, limit);
 
     if (ranked.length === 0) {
       return [];
@@ -4398,19 +3384,13 @@ export async function searchWorkspaceMemories(
     // Bump usage_count/last_used_at for the returned rows (NOT updated_at — search
     // must not reshuffle the working set's recency order). Returns the fresh rows.
     const ids = ranked.map((entry) => entry.id);
-    const bumped = await scopedDb
-      .update(schema.knowledgeMemories)
-      .set({
-        usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
-        lastUsedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, workspaceId),
-          inArray(schema.knowledgeMemories.id, ids),
-        ),
-      )
-      .returning();
+    const bumped = await scopedDb.update(schema.knowledgeMemories).set({
+      usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
+      lastUsedAt: new Date(),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      inArray(schema.knowledgeMemories.id, ids),
+    )).returning();
     const byId = new Map(bumped.map((row) => [row.id, row] as const));
 
     const results: WorkspaceMemorySearchResult[] = [];
@@ -4435,39 +3415,28 @@ export async function searchWorkspaceMemories(
 // workspace's memory setting is off (injection no-ops); the empty-state block
 // when memory is on but there are zero visible records; otherwise the populated
 // block. Pure rendering lives in memory-domain.ts.
-export async function resolveWorkspaceMemoryBlock(
-  db: Database,
-  workspaceId: string,
-): Promise<string | null> {
-  const [workspace] = await db
-    .select({ settings: schema.workspaces.settings })
+export async function resolveWorkspaceMemoryBlock(db: Database, workspaceId: string): Promise<string | null> {
+  const [workspace] = await db.select({ settings: schema.workspaces.settings })
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
   if (!workspace || !resolveWorkspaceMemoryEnabled(workspace.settings)) {
     return null;
   }
-  const records = await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb
-        .select({
-          id: schema.knowledgeMemories.id,
-          kind: schema.knowledgeMemories.kind,
-          text: schema.knowledgeMemories.text,
-          pinned: schema.knowledgeMemories.pinned,
-        })
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, workspaceId),
-            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-            ne(schema.knowledgeMemories.kind, "episodic"),
-          ),
-        )
-        .orderBy(desc(schema.knowledgeMemories.pinned), desc(schema.knowledgeMemories.updatedAt))
-        .limit(MEMORY_BLOCK_RECORD_LIMIT),
+  const records = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      kind: schema.knowledgeMemories.kind,
+      text: schema.knowledgeMemories.text,
+      pinned: schema.knowledgeMemories.pinned,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+        ne(schema.knowledgeMemories.kind, "episodic"),
+      ))
+      .orderBy(desc(schema.knowledgeMemories.pinned), desc(schema.knowledgeMemories.updatedAt))
+      .limit(MEMORY_BLOCK_RECORD_LIMIT),
   );
   if (records.length === 0) {
     return WORKSPACE_MEMORY_BLOCK_EMPTY;
@@ -4481,47 +3450,31 @@ export async function resolveWorkspaceMemoryBlock(
   return renderWorkspaceMemoryBlock(blockRecords) ?? WORKSPACE_MEMORY_BLOCK_EMPTY;
 }
 
-export async function createSocialConnection(
-  db: Database,
-  input: CreateSocialConnectionInput,
-): Promise<SocialConnection> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.socialConnections)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          provider: input.provider,
-          accountHandle: input.accountHandle,
-          accountName: input.accountName ?? null,
-          externalAccountId: input.externalAccountId ?? null,
-          status: input.status,
-          scopes: input.scopes ?? [],
-          credentialRef: input.credentialRef ?? null,
-          tokenMetadata: input.tokenMetadata ?? {},
-          metadata: input.metadata ?? {},
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create social connection");
-      }
-      return mapSocialConnection(row);
-    },
-  );
+export async function createSocialConnection(db: Database, input: CreateSocialConnectionInput): Promise<SocialConnection> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.socialConnections).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      provider: input.provider,
+      accountHandle: input.accountHandle,
+      accountName: input.accountName ?? null,
+      externalAccountId: input.externalAccountId ?? null,
+      status: input.status,
+      scopes: input.scopes ?? [],
+      credentialRef: input.credentialRef ?? null,
+      tokenMetadata: input.tokenMetadata ?? {},
+      metadata: input.metadata ?? {},
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create social connection");
+    }
+    return mapSocialConnection(row);
+  });
 }
 
-export async function listSocialConnections(
-  db: Database,
-  workspaceId: string,
-  limit = 100,
-): Promise<SocialConnection[]> {
+export async function listSocialConnections(db: Database, workspaceId: string, limit = 100): Promise<SocialConnection[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.socialConnections)
+    const rows = await scopedDb.select().from(schema.socialConnections)
       .where(eq(schema.socialConnections.workspaceId, workspaceId))
       .orderBy(desc(schema.socialConnections.createdAt))
       .limit(limit);
@@ -4529,31 +3482,16 @@ export async function listSocialConnections(
   });
 }
 
-export async function getSocialConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-): Promise<SocialConnection | null> {
+export async function getSocialConnection(db: Database, workspaceId: string, connectionId: string): Promise<SocialConnection | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.socialConnections)
-      .where(
-        and(
-          eq(schema.socialConnections.workspaceId, workspaceId),
-          eq(schema.socialConnections.id, connectionId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.socialConnections)
+      .where(and(eq(schema.socialConnections.workspaceId, workspaceId), eq(schema.socialConnections.id, connectionId)))
       .limit(1);
     return row ? mapSocialConnection(row) : null;
   });
 }
 
-export async function requireSocialConnection(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-): Promise<SocialConnection> {
+export async function requireSocialConnection(db: Database, workspaceId: string, connectionId: string): Promise<SocialConnection> {
   const connection = await getSocialConnection(db, workspaceId, connectionId);
   if (!connection) {
     throw new Error(`Social connection not found: ${connectionId}`);
@@ -4561,52 +3499,35 @@ export async function requireSocialConnection(
   return connection;
 }
 
-export async function createSocialPost(
-  db: Database,
-  input: CreateSocialPostInput,
-): Promise<SocialPost> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const connection = await requireSocialConnection(
-        scopedDb,
-        input.workspaceId,
-        input.connectionId,
-      );
-      const [row] = await scopedDb
-        .insert(schema.socialPosts)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          connectionId: input.connectionId,
-          provider: connection.provider,
-          externalPostId: input.externalPostId ?? null,
-          url: input.url ?? null,
-          authorHandle: input.authorHandle ?? connection.accountHandle,
-          text: input.text,
-          publishedAt: input.publishedAt,
-          metrics: input.metrics ?? {},
-          raw: input.raw ?? {},
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create social post");
-      }
-      return mapSocialPost(row);
-    },
-  );
+export async function createSocialPost(db: Database, input: CreateSocialPostInput): Promise<SocialPost> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const connection = await requireSocialConnection(scopedDb, input.workspaceId, input.connectionId);
+    const [row] = await scopedDb.insert(schema.socialPosts).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      connectionId: input.connectionId,
+      provider: connection.provider,
+      externalPostId: input.externalPostId ?? null,
+      url: input.url ?? null,
+      authorHandle: input.authorHandle ?? connection.accountHandle,
+      text: input.text,
+      publishedAt: input.publishedAt,
+      metrics: input.metrics ?? {},
+      raw: input.raw ?? {},
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create social post");
+    }
+    return mapSocialPost(row);
+  });
 }
 
-export async function listSocialPosts(
-  db: Database,
-  options: {
-    workspaceId: string;
-    connectionIds?: string[];
-    since?: Date;
-    limit?: number;
-  },
-): Promise<SocialPost[]> {
+export async function listSocialPosts(db: Database, options: {
+  workspaceId: string;
+  connectionIds?: string[];
+  since?: Date;
+  limit?: number;
+}): Promise<SocialPost[]> {
   const conditions: SQL[] = [eq(schema.socialPosts.workspaceId, options.workspaceId)];
   if (options.connectionIds?.length) {
     conditions.push(inArray(schema.socialPosts.connectionId, options.connectionIds));
@@ -4616,9 +3537,7 @@ export async function listSocialPosts(
   }
   const limit = options.limit ?? 100;
   return await withWorkspaceRls(db, options.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.socialPosts)
+    const rows = await scopedDb.select().from(schema.socialPosts)
       .where(and(...conditions))
       .orderBy(desc(schema.socialPosts.publishedAt))
       .limit(limit);
@@ -4626,53 +3545,31 @@ export async function listSocialPosts(
   });
 }
 
-export async function createScheduledTask(
-  db: Database,
-  input: CreateScheduledTaskInput,
-): Promise<ScheduledTask> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb.insert(schema.scheduledTasks).values(input).returning();
-      if (!row) {
-        throw new Error("Failed to create scheduled task");
-      }
-      return mapScheduledTask(row);
-    },
-  );
+export async function createScheduledTask(db: Database, input: CreateScheduledTaskInput): Promise<ScheduledTask> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.scheduledTasks).values(input).returning();
+    if (!row) {
+      throw new Error("Failed to create scheduled task");
+    }
+    return mapScheduledTask(row);
+  });
 }
 
-export async function updateScheduledTask(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-  input: UpdateScheduledTaskInput,
-): Promise<ScheduledTask> {
+export async function updateScheduledTask(db: Database, workspaceId: string, taskId: string, input: UpdateScheduledTaskInput): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.scheduledTasks)
-      .set({
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
-        ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
-        ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
-        ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-        ...(input.reusableSessionId !== undefined
-          ? { reusableSessionId: input.reusableSessionId }
-          : {}),
-        ...(input.environmentId !== undefined ? { environmentId: input.environmentId } : {}),
-        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.scheduledTasks).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
+      ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
+      ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
+      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+      ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
+      ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
+      ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).returning();
     if (!row) {
       throw new Error(`Scheduled task not found: ${taskId}`);
     }
@@ -4680,31 +3577,14 @@ export async function updateScheduledTask(
   });
 }
 
-export async function getScheduledTask(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-): Promise<ScheduledTask | null> {
+export async function getScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      )
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.scheduledTasks).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).limit(1);
     return row ? mapScheduledTask(row) : null;
   });
 }
 
-export async function requireScheduledTask(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-): Promise<ScheduledTask> {
+export async function requireScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask> {
   const task = await getScheduledTask(db, workspaceId, taskId);
   if (!task) {
     throw new Error(`Scheduled task not found: ${taskId}`);
@@ -4712,15 +3592,9 @@ export async function requireScheduledTask(
   return task;
 }
 
-export async function listScheduledTasks(
-  db: Database,
-  workspaceId: string,
-  limit = 100,
-): Promise<ScheduledTask[]> {
+export async function listScheduledTasks(db: Database, workspaceId: string, limit = 100): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.scheduledTasks)
+    const rows = await scopedDb.select().from(schema.scheduledTasks)
       .where(eq(schema.scheduledTasks.workspaceId, workspaceId))
       .orderBy(desc(schema.scheduledTasks.createdAt))
       .limit(limit);
@@ -4728,59 +3602,35 @@ export async function listScheduledTasks(
   });
 }
 
-export async function deleteScheduledTask(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-): Promise<void> {
+export async function deleteScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .delete(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      );
+    await scopedDb.delete(schema.scheduledTasks).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId)));
   });
 }
 
-export async function createScheduledTaskRun(
-  db: Database,
-  input: {
-    workspaceId: string;
-    taskId: string;
-    triggerType: ScheduledTaskTriggerType;
-    scheduledAt?: Date | null;
-    firedAt?: Date;
-  },
-): Promise<ScheduledTaskRun> {
+export async function createScheduledTaskRun(db: Database, input: {
+  workspaceId: string;
+  taskId: string;
+  triggerType: ScheduledTaskTriggerType;
+  scheduledAt?: Date | null;
+  firedAt?: Date;
+}): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [taskRow] = await scopedDb
-      .select()
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
-          eq(schema.scheduledTasks.id, input.taskId),
-        ),
-      )
+    const [taskRow] = await scopedDb.select().from(schema.scheduledTasks)
+      .where(and(eq(schema.scheduledTasks.workspaceId, input.workspaceId), eq(schema.scheduledTasks.id, input.taskId)))
       .limit(1);
     if (!taskRow) {
       throw new Error(`Scheduled task not found: ${input.taskId}`);
     }
-    const [row] = await scopedDb
-      .insert(schema.scheduledTaskRuns)
-      .values({
-        accountId: taskRow.accountId,
-        workspaceId: taskRow.workspaceId,
-        taskId: input.taskId,
-        triggerType: input.triggerType,
-        scheduledAt: input.scheduledAt ?? null,
-        firedAt: input.firedAt ?? new Date(),
-        status: "queued",
-      })
-      .returning();
+    const [row] = await scopedDb.insert(schema.scheduledTaskRuns).values({
+      accountId: taskRow.accountId,
+      workspaceId: taskRow.workspaceId,
+      taskId: input.taskId,
+      triggerType: input.triggerType,
+      scheduledAt: input.scheduledAt ?? null,
+      firedAt: input.firedAt ?? new Date(),
+      status: "queued",
+    }).returning();
     if (!row) {
       throw new Error("Failed to create scheduled task run");
     }
@@ -4788,34 +3638,20 @@ export async function createScheduledTaskRun(
   });
 }
 
-export async function updateScheduledTaskRun(
-  db: Database,
-  workspaceId: string,
-  runId: string,
-  input: Partial<{
-    status: ScheduledTaskRunStatus;
-    sessionId: string | null;
-    triggerEventId: string | null;
-    error: string | null;
-  }>,
-): Promise<ScheduledTaskRun> {
+export async function updateScheduledTaskRun(db: Database, workspaceId: string, runId: string, input: Partial<{
+  status: ScheduledTaskRunStatus;
+  sessionId: string | null;
+  triggerEventId: string | null;
+  error: string | null;
+}>): Promise<ScheduledTaskRun> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.scheduledTaskRuns)
-      .set({
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
-        ...(input.triggerEventId !== undefined ? { triggerEventId: input.triggerEventId } : {}),
-        ...(input.error !== undefined ? { error: input.error } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
-          eq(schema.scheduledTaskRuns.id, runId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.scheduledTaskRuns).set({
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+      ...(input.triggerEventId !== undefined ? { triggerEventId: input.triggerEventId } : {}),
+      ...(input.error !== undefined ? { error: input.error } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.scheduledTaskRuns.workspaceId, workspaceId), eq(schema.scheduledTaskRuns.id, runId))).returning();
     if (!row) {
       throw new Error(`Scheduled task run not found: ${runId}`);
     }
@@ -4823,427 +3659,1009 @@ export async function updateScheduledTaskRun(
   });
 }
 
-export async function listScheduledTaskRuns(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-  limit = 100,
-): Promise<ScheduledTaskRun[]> {
+export async function listScheduledTaskRuns(db: Database, workspaceId: string, taskId: string, limit = 100): Promise<ScheduledTaskRun[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.scheduledTaskRuns)
-      .where(
-        and(
-          eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
-          eq(schema.scheduledTaskRuns.taskId, taskId),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.scheduledTaskRuns)
+      .where(and(eq(schema.scheduledTaskRuns.workspaceId, workspaceId), eq(schema.scheduledTaskRuns.taskId, taskId)))
       .orderBy(desc(schema.scheduledTaskRuns.createdAt))
       .limit(limit);
     return rows.map(mapScheduledTaskRun);
   });
 }
 
-export async function createWorkspaceEnvironment(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    name: string;
-    description?: string | null;
-    variables?: Array<{ name: string; valueEncrypted: string }>;
-  },
-): Promise<WorkspaceEnvironment> {
-  // withRlsContext wraps the callback in one transaction, so the environment
+export async function createVariableSet(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description?: string | null;
+  variables?: Array<{ name: string; valueEncrypted: string }>;
+}): Promise<VariableSet> {
+  // withRlsContext wraps the callback in one transaction, so the variableSet
   // row and all initial variables commit or roll back together.
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.workspaceEnvironments)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          name: input.name,
-          description: input.description ?? null,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create workspace environment");
-      }
-      const variables = input.variables ?? [];
-      if (variables.length === 0) {
-        return mapWorkspaceEnvironment(row, []);
-      }
-      const inserted = await scopedDb
-        .insert(schema.workspaceEnvironmentVariables)
-        .values(
-          variables.map((variable) => ({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            environmentId: row.id,
-            name: variable.name,
-            valueEncrypted: variable.valueEncrypted,
-          })),
-        )
-        .returning({
-          name: schema.workspaceEnvironmentVariables.name,
-          version: schema.workspaceEnvironmentVariables.version,
-          createdAt: schema.workspaceEnvironmentVariables.createdAt,
-          updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-        });
-      return mapWorkspaceEnvironment(
-        row,
-        inserted
-          .map(mapWorkspaceEnvironmentVariableMetadata)
-          .sort((a, b) => a.name.localeCompare(b.name)),
-      );
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.workspaceVariableSets).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      name: input.name,
+      description: input.description ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create variable set");
+    }
+    const variables = input.variables ?? [];
+    if (variables.length === 0) {
+      return mapVariableSet(row, []);
+    }
+    const inserted = await scopedDb.insert(schema.workspaceVariableSetVariables).values(variables.map((variable) => ({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      variableSetId: row.id,
+      name: variable.name,
+      valueEncrypted: variable.valueEncrypted,
+    }))).returning({
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+    });
+    return mapVariableSet(row, inserted
+      .map(mapVariableSetVariableMetadata)
+      .sort((a, b) => a.name.localeCompare(b.name)));
+  });
 }
 
-export async function listWorkspaceEnvironments(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceEnvironment[]> {
+export async function listVariableSets(db: Database, workspaceId: string): Promise<VariableSet[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspaceEnvironments)
-      .where(eq(schema.workspaceEnvironments.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceEnvironments.createdAt));
-    const variableRows = await scopedDb
-      .select({
-        environmentId: schema.workspaceEnvironmentVariables.environmentId,
-        name: schema.workspaceEnvironmentVariables.name,
-        version: schema.workspaceEnvironmentVariables.version,
-        createdAt: schema.workspaceEnvironmentVariables.createdAt,
-        updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-      })
-      .from(schema.workspaceEnvironmentVariables)
-      .where(eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceEnvironmentVariables.name));
-    const grouped = new Map<string, WorkspaceEnvironmentVariableMetadata[]>();
+    const rows = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(eq(schema.workspaceVariableSets.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceVariableSets.createdAt));
+    const variableRows = await scopedDb.select({
+      variableSetId: schema.workspaceVariableSetVariables.variableSetId,
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+    }).from(schema.workspaceVariableSetVariables)
+      .where(eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceVariableSetVariables.name));
+    const grouped = new Map<string, VariableSetVariableMetadata[]>();
     for (const variable of variableRows) {
-      const list = grouped.get(variable.environmentId) ?? [];
-      list.push(mapWorkspaceEnvironmentVariableMetadata(variable));
-      grouped.set(variable.environmentId, list);
+      const list = grouped.get(variable.variableSetId) ?? [];
+      list.push(mapVariableSetVariableMetadata(variable));
+      grouped.set(variable.variableSetId, list);
     }
-    return rows.map((row) => mapWorkspaceEnvironment(row, grouped.get(row.id) ?? []));
+    return rows.map((row) => mapVariableSet(row, grouped.get(row.id) ?? []));
   });
 }
 
-export async function getWorkspaceEnvironment(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<WorkspaceEnvironment | null> {
+export async function getVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSet | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspaceEnvironments)
-      .where(
-        and(
-          eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironments.id, environmentId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return mapWorkspaceEnvironment(
-      row,
-      await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId),
-    );
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId));
   });
 }
 
-export async function getWorkspaceEnvironmentByName(
-  db: Database,
-  workspaceId: string,
-  name: string,
-): Promise<WorkspaceEnvironment | null> {
+export async function getVariableSetByName(db: Database, workspaceId: string, name: string): Promise<VariableSet | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspaceEnvironments)
-      .where(
-        and(
-          eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironments.name, name),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.name, name)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return mapWorkspaceEnvironment(
-      row,
-      await listEnvironmentVariableMetadata(scopedDb, workspaceId, row.id),
-    );
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, row.id));
   });
 }
 
-export async function updateWorkspaceEnvironment(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-  input: {
-    name?: string;
-    description?: string | null;
-  },
-): Promise<WorkspaceEnvironment> {
+export async function updateVariableSet(db: Database, workspaceId: string, variableSetId: string, input: {
+  name?: string;
+  description?: string | null;
+}): Promise<VariableSet> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.workspaceEnvironments)
-      .set({
-        ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.description !== undefined ? { description: input.description } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironments.id, environmentId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.workspaceVariableSets).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId))).returning();
     if (!row) {
-      throw new Error(`Workspace environment not found: ${environmentId}`);
+      throw new Error(`Variable set not found: ${variableSetId}`);
     }
-    return mapWorkspaceEnvironment(
-      row,
-      await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId),
-    );
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId));
   });
 }
 
-export async function deleteWorkspaceEnvironment(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<boolean> {
+export async function deleteVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspaceEnvironments)
-      .where(
-        and(
-          eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironments.id, environmentId),
-        ),
-      )
-      .returning({ id: schema.workspaceEnvironments.id });
+    const rows = await scopedDb.delete(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
+      .returning({ id: schema.workspaceVariableSets.id });
     return rows.length > 0;
   });
 }
 
-export async function countWorkspaceEnvironments(
-  db: Database,
-  workspaceId: string,
-): Promise<number> {
+export async function countVariableSets(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.workspaceEnvironments)
-      .where(eq(schema.workspaceEnvironments.workspaceId, workspaceId));
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.workspaceVariableSets).where(eq(schema.workspaceVariableSets.workspaceId, workspaceId));
     return Number(count);
   });
 }
 
-export async function countScheduledTasksUsingEnvironment(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<number> {
+export async function countScheduledTasksUsingVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.environmentId, environmentId),
-        ),
-      );
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.scheduledTasks)
+      .where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.variableSetId, variableSetId)));
     return Number(count);
   });
 }
 
-export async function countActiveSessionsUsingEnvironment(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<number> {
+export async function countActiveSessionsUsingVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.environmentId, environmentId),
-          inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
-        ),
-      );
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.variableSetId, variableSetId),
+        inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
+      ));
     return Number(count);
   });
 }
 
-export async function setWorkspaceEnvironmentVariable(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    environmentId: string;
-    name: string;
-    valueEncrypted: string;
-  },
-): Promise<WorkspaceEnvironmentVariableMetadata> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.workspaceEnvironmentVariables)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          environmentId: input.environmentId,
-          name: input.name,
-          valueEncrypted: input.valueEncrypted,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.workspaceEnvironmentVariables.workspaceId,
-            schema.workspaceEnvironmentVariables.environmentId,
-            schema.workspaceEnvironmentVariables.name,
-          ],
-          set: {
-            valueEncrypted: input.valueEncrypted,
-            version: sql`${schema.workspaceEnvironmentVariables.version} + 1`,
-            updatedAt: now,
-          },
-        })
-        .returning({
-          name: schema.workspaceEnvironmentVariables.name,
-          version: schema.workspaceEnvironmentVariables.version,
-          createdAt: schema.workspaceEnvironmentVariables.createdAt,
-          updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-        });
-      if (!row) {
-        throw new Error("Failed to set workspace environment variable");
-      }
-      await scopedDb
-        .update(schema.workspaceEnvironments)
-        .set({ updatedAt: now })
-        .where(
-          and(
-            eq(schema.workspaceEnvironments.workspaceId, input.workspaceId),
-            eq(schema.workspaceEnvironments.id, input.environmentId),
-          ),
-        );
-      return mapWorkspaceEnvironmentVariableMetadata(row);
-    },
-  );
+export async function setVariableSetVariable(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  variableSetId: string;
+  name: string;
+  valueEncrypted: string;
+}): Promise<VariableSetVariableMetadata> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const [row] = await scopedDb.insert(schema.workspaceVariableSetVariables).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      variableSetId: input.variableSetId,
+      name: input.name,
+      valueEncrypted: input.valueEncrypted,
+    }).onConflictDoUpdate({
+      target: [
+        schema.workspaceVariableSetVariables.workspaceId,
+        schema.workspaceVariableSetVariables.variableSetId,
+        schema.workspaceVariableSetVariables.name,
+      ],
+      set: {
+        valueEncrypted: input.valueEncrypted,
+        version: sql`${schema.workspaceVariableSetVariables.version} + 1`,
+        updatedAt: now,
+      },
+    }).returning({
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+    });
+    if (!row) {
+      throw new Error("Failed to set variable set variable");
+    }
+    await scopedDb.update(schema.workspaceVariableSets).set({ updatedAt: now })
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, input.workspaceId), eq(schema.workspaceVariableSets.id, input.variableSetId)));
+    return mapVariableSetVariableMetadata(row);
+  });
 }
 
-export async function deleteWorkspaceEnvironmentVariable(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-  name: string,
-): Promise<boolean> {
+export async function deleteVariableSetVariable(db: Database, workspaceId: string, variableSetId: string, name: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspaceEnvironmentVariables)
-      .where(
-        and(
-          eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
-          eq(schema.workspaceEnvironmentVariables.name, name),
-        ),
-      )
-      .returning({ id: schema.workspaceEnvironmentVariables.id });
+    const rows = await scopedDb.delete(schema.workspaceVariableSetVariables)
+      .where(and(
+        eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+        eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
+        eq(schema.workspaceVariableSetVariables.name, name),
+      ))
+      .returning({ id: schema.workspaceVariableSetVariables.id });
     if (rows.length > 0) {
-      await scopedDb
-        .update(schema.workspaceEnvironments)
-        .set({ updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-            eq(schema.workspaceEnvironments.id, environmentId),
-          ),
-        );
+      await scopedDb.update(schema.workspaceVariableSets).set({ updatedAt: new Date() })
+        .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)));
     }
     return rows.length > 0;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Rigs (migration 0047). Workspace-scoped, versioned sandbox machine definitions.
+// Versions are append-only + content-immutable: NO function below ever UPDATEs a
+// content column of rig_versions — only activateRigVersion flips the `active`
+// boolean. Every function runs through withWorkspaceRls / withRlsContext.
+// ---------------------------------------------------------------------------
+
+// Thrown when a rig_change status transition is illegal (merged/rejected are
+// terminal). The domain/route layer maps this to a 409.
+export class RigChangeTransitionError extends Error {
+  constructor(
+    public readonly changeId: string,
+    public readonly fromStatus: string,
+    public readonly toStatus: string,
+  ) {
+    super(`Rig change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`);
+    this.name = "RigChangeTransitionError";
+  }
+}
+
+export class RigActiveVersionChangedError extends Error {
+  constructor(
+    public readonly rigId: string,
+    public readonly expectedVersionId: string,
+    public readonly actualVersionId: string | null,
+  ) {
+    super(`Rig ${rigId} moved since verification: expected active ${expectedVersionId}, current active ${actualVersionId ?? "none"}`);
+    this.name = "RigActiveVersionChangedError";
+  }
+}
+
+export class RigChangeAlreadyVerifyingError extends Error {
+  constructor(public readonly changeId: string) {
+    super(`Rig change ${changeId} is already verifying`);
+    this.name = "RigChangeAlreadyVerifyingError";
+  }
+}
+
+export type RigVersionContentInput = {
+  image?: string | null;
+  setupScript?: string | null;
+  checks?: RigCheck[];
+  credentialHooks?: string[];
+  defaultVariableSetIds?: string[];
+  changelog?: string | null;
+  createdBy?: string | null;
+};
+
+function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion {
+  return {
+    id: row.id,
+    rigId: row.rigId,
+    version: row.version,
+    image: row.image,
+    setupScript: row.setupScript,
+    checks: row.checks,
+    credentialHooks: row.credentialHooks,
+    defaultVariableSetIds: row.defaultVariableSetIds,
+    changelog: row.changelog,
+    createdBy: row.createdBy,
+    active: row.active,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHealth | null {
+  return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
+}
+
+function mapRig(row: typeof schema.rigs.$inferSelect, activeVersion: RigVersion | null, versionCount: number, activeVersionHealth: RigVerificationHealth | null = unknownRigHealth(activeVersion)): Rig {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    description: row.description,
+    createdBy: row.createdBy,
+    activeVersion,
+    activeVersionHealth,
+    versionCount,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapRigChange(row: typeof schema.rigChanges.$inferSelect): RigChange {
+  return {
+    id: row.id,
+    rigId: row.rigId,
+    baseVersionId: row.baseVersionId,
+    kind: row.kind as RigChangeKind,
+    payload: row.payload,
+    status: row.status as RigChangeStatus,
+    proposedBy: row.proposedBy,
+    verification: (row.verification ?? null) as RigChange["verification"],
+    resultVersionId: row.resultVersionId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// Load a rig's active version + total version count within an existing RLS scope.
+async function loadRigActiveAndCount(scopedDb: Database, workspaceId: string, rigId: string): Promise<{ activeVersion: RigVersion | null; versionCount: number }> {
+  const [activeRow] = await scopedDb.select().from(schema.rigVersions)
+    .where(and(
+      eq(schema.rigVersions.workspaceId, workspaceId),
+      eq(schema.rigVersions.rigId, rigId),
+      eq(schema.rigVersions.active, true),
+    ))
+    .limit(1);
+  const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+    .from(schema.rigVersions)
+    .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+  return { activeVersion: activeRow ? mapRigVersion(activeRow) : null, versionCount: Number(count) };
+}
+
+type RigHealthCandidate = {
+  versionId: string;
+  checkHealth: "passing" | "failing";
+  verifiedAt: string;
+};
+
+function latestRigHealth(candidates: RigHealthCandidate[]): RigVerificationHealth {
+  let latest: RigHealthCandidate | null = null;
+  for (const candidate of candidates) {
+    if (!latest || Date.parse(candidate.verifiedAt) >= Date.parse(latest.verifiedAt)) {
+      latest = candidate;
+    }
+  }
+  return latest
+    ? { checkHealth: latest.checkHealth, lastVerifiedAt: latest.verifiedAt }
+    : { checkHealth: "unknown", lastVerifiedAt: null };
+}
+
+function verificationTimestamp(verification: Record<string, unknown> | null | undefined, fallback: Date): string {
+  return typeof verification?.finishedAt === "string" ? verification.finishedAt : fallback.toISOString();
+}
+
+async function loadRigHealthByActiveVersion(scopedDb: Database, workspaceId: string, activeVersions: RigVersion[]): Promise<Map<string, RigVerificationHealth>> {
+  const versionIds = activeVersions.map((version) => version.id);
+  const healthByVersion: Map<string, RigVerificationHealth> = new Map(
+    versionIds.map((versionId) => [versionId, { checkHealth: "unknown", lastVerifiedAt: null }]),
+  );
+  if (versionIds.length === 0) {
+    return healthByVersion;
+  }
+  const candidatesByVersion = new Map<string, RigHealthCandidate[]>();
+  const pushCandidate = (candidate: RigHealthCandidate) => {
+    candidatesByVersion.set(candidate.versionId, [...(candidatesByVersion.get(candidate.versionId) ?? []), candidate]);
+  };
+
+  const changes = await scopedDb.select({
+    resultVersionId: schema.rigChanges.resultVersionId,
+    verification: schema.rigChanges.verification,
+    updatedAt: schema.rigChanges.updatedAt,
+  }).from(schema.rigChanges)
+    .where(and(
+      eq(schema.rigChanges.workspaceId, workspaceId),
+      inArray(schema.rigChanges.resultVersionId, versionIds),
+    ));
+  for (const change of changes) {
+    if (!change.resultVersionId) {
+      continue;
+    }
+    const verification = (change.verification ?? null) as Record<string, unknown> | null;
+    if (verification?.passed === true) {
+      pushCandidate({
+        versionId: change.resultVersionId,
+        checkHealth: "passing",
+        verifiedAt: verificationTimestamp(verification, change.updatedAt),
+      });
+    } else if (verification?.passed === false) {
+      pushCandidate({
+        versionId: change.resultVersionId,
+        checkHealth: "failing",
+        verifiedAt: verificationTimestamp(verification, change.updatedAt),
+      });
+    }
+  }
+
+  const auditRows = await scopedDb.select({
+    action: schema.auditEvents.action,
+    metadata: schema.auditEvents.metadata,
+    occurredAt: schema.auditEvents.occurredAt,
+  }).from(schema.auditEvents)
+    .where(and(
+      eq(schema.auditEvents.workspaceId, workspaceId),
+      eq(schema.auditEvents.targetType, "rig"),
+      inArray(schema.auditEvents.action, ["rig.verification.passed", "rig.verification.failed"]),
+      inArray(sql<string>`${schema.auditEvents.metadata}->>'versionId'`, versionIds),
+    ));
+  for (const row of auditRows) {
+    const metadata = row.metadata ?? {};
+    const versionId = typeof metadata.versionId === "string" ? metadata.versionId : null;
+    if (!versionId || !healthByVersion.has(versionId)) {
+      continue;
+    }
+    const passed = typeof metadata.passed === "boolean" ? metadata.passed : row.action === "rig.verification.passed";
+    pushCandidate({
+      versionId,
+      checkHealth: passed ? "passing" : "failing",
+      verifiedAt: typeof metadata.finishedAt === "string" ? metadata.finishedAt : row.occurredAt.toISOString(),
+    });
+  }
+
+  for (const versionId of versionIds) {
+    healthByVersion.set(versionId, latestRigHealth(candidatesByVersion.get(versionId) ?? []));
+  }
+  return healthByVersion;
+}
+
+// Creates the rig row AND its version 1 (active) in one transaction: a failure
+// leaves nothing behind. version-1 content comes from `initialVersion`.
+export async function createRig(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description?: string | null;
+  createdBy?: string | null;
+  initialVersion?: RigVersionContentInput;
+}): Promise<Rig> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [rigRow] = await scopedDb.insert(schema.rigs).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      name: input.name,
+      description: input.description ?? null,
+      createdBy: input.createdBy ?? null,
+    }).returning();
+    if (!rigRow) {
+      throw new Error("Failed to create rig");
+    }
+    const content = input.initialVersion ?? {};
+    const [versionRow] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      rigId: rigRow.id,
+      version: 1,
+      image: content.image ?? null,
+      setupScript: content.setupScript ?? null,
+      checks: content.checks ?? [],
+      credentialHooks: content.credentialHooks ?? [],
+      defaultVariableSetIds: content.defaultVariableSetIds ?? [],
+      changelog: content.changelog ?? null,
+      createdBy: content.createdBy ?? input.createdBy ?? null,
+      active: true,
+    }).returning();
+    if (!versionRow) {
+      throw new Error("Failed to create initial rig version");
+    }
+    return mapRig(rigRow, mapRigVersion(versionRow), 1);
+  });
+}
+
+export async function listRigs(db: Database, workspaceId: string): Promise<Rig[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigs)
+      .where(eq(schema.rigs.workspaceId, workspaceId))
+      .orderBy(asc(schema.rigs.createdAt));
+    if (rows.length === 0) {
+      return [];
+    }
+    const activeRows = await scopedDb.select().from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.active, true)));
+    const activeByRig = new Map(activeRows.map((row) => [row.rigId, mapRigVersion(row)]));
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, [...activeByRig.values()]);
+    const countRows = await scopedDb.select({
+      rigId: schema.rigVersions.rigId,
+      count: sql<number>`count(*)::int`,
+    }).from(schema.rigVersions)
+      .where(eq(schema.rigVersions.workspaceId, workspaceId))
+      .groupBy(schema.rigVersions.rigId);
+    const countByRig = new Map(countRows.map((row) => [row.rigId, Number(row.count)]));
+    return rows.map((row) => {
+      const activeVersion = activeByRig.get(row.id) ?? null;
+      return mapRig(row, activeVersion, countByRig.get(row.id) ?? 0, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
+    });
+  });
+}
+
+export async function getRig(db: Database, workspaceId: string, rigId: string): Promise<Rig | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
+  });
+}
+
+export async function getRigByName(db: Database, workspaceId: string, name: string): Promise<Rig | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.name, name)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, row.id);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
+  });
+}
+
+// name/description only — never touches versions (content immutability).
+export async function updateRig(db: Database, workspaceId: string, rigId: string, input: {
+  name?: string;
+  description?: string | null;
+}): Promise<Rig> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.rigs).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId))).returning();
+    if (!row) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const { activeVersion, versionCount } = await loadRigActiveAndCount(scopedDb, workspaceId, rigId);
+    const healthByVersion = await loadRigHealthByActiveVersion(scopedDb, workspaceId, activeVersion ? [activeVersion] : []);
+    return mapRig(row, activeVersion, versionCount, activeVersion ? healthByVersion.get(activeVersion.id) ?? unknownRigHealth(activeVersion) : null);
+  });
+}
+
+export async function deleteRig(db: Database, workspaceId: string, rigId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .returning({ id: schema.rigs.id });
+    return rows.length > 0;
+  });
+}
+
+export async function deleteRigIfNoActiveSessions(db: Database, workspaceId: string, rigId: string): Promise<{ deleted: boolean; activeSessionCount: number }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      return { deleted: false, activeSessionCount: 0 };
+    }
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.rigId, rigId),
+        sql`${schema.sessions.status} not in ('failed', 'cancelled')`,
+      ));
+    const activeSessionCount = Number(count);
+    if (activeSessionCount > 0) {
+      return { deleted: false, activeSessionCount };
+    }
+    const rows = await scopedDb.delete(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .returning({ id: schema.rigs.id });
+    return { deleted: rows.length > 0, activeSessionCount };
+  });
+}
+
+export async function countRigs(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.rigs).where(eq(schema.rigs.workspaceId, workspaceId));
+    return Number(count);
+  });
+}
+
+export async function countSessionsUsingRig(db: Database, workspaceId: string, rigId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.rigId, rigId)));
+    return Number(count);
+  });
+}
+
+// Mints the next version for a rig (promote/rollback-mint paths, M4). Row-locks
+// the rig so concurrent mints get strictly-monotonic version numbers. When
+// `activate` is set, atomically deactivates the current active version first.
+export async function createRigVersion(db: Database, workspaceId: string, rigId: string, input: RigVersionContentInput, options: { activate?: boolean } = {}): Promise<RigVersion> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [{ max } = { max: 0 }] = await scopedDb.select({
+      max: sql<number>`coalesce(max(${schema.rigVersions.version}), 0)::int`,
+    }).from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+    const nextVersion = Number(max) + 1;
+    if (options.activate) {
+      await scopedDb.update(schema.rigVersions).set({ active: false })
+        .where(and(
+          eq(schema.rigVersions.workspaceId, workspaceId),
+          eq(schema.rigVersions.rigId, rigId),
+          eq(schema.rigVersions.active, true),
+        ));
+    }
+    const [row] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: rig.accountId,
+      workspaceId,
+      rigId,
+      version: nextVersion,
+      image: input.image ?? null,
+      setupScript: input.setupScript ?? null,
+      checks: input.checks ?? [],
+      credentialHooks: input.credentialHooks ?? [],
+      defaultVariableSetIds: input.defaultVariableSetIds ?? [],
+      changelog: input.changelog ?? null,
+      createdBy: input.createdBy ?? null,
+      active: options.activate ?? false,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create rig version");
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return mapRigVersion(row);
+  });
+}
+
+export async function createRigVersionForChangePromotion(db: Database, workspaceId: string, rigId: string, changeId: string, input: RigVersionContentInput & {
+  expectedActiveVersionId: string;
+}): Promise<{ version: RigVersion; change: RigChange }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [currentChange] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(
+        eq(schema.rigChanges.workspaceId, workspaceId),
+        eq(schema.rigChanges.rigId, rigId),
+        eq(schema.rigChanges.id, changeId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!currentChange) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    if (currentChange.status === "merged" || currentChange.status === "rejected") {
+      throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+    }
+    if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
+      throw new RigActiveVersionChangedError(rigId, input.expectedActiveVersionId, currentChange.baseVersionId);
+    }
+    const [active] = await scopedDb.select({ id: schema.rigVersions.id })
+      .from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ))
+      .limit(1);
+    if (active?.id !== input.expectedActiveVersionId) {
+      throw new RigActiveVersionChangedError(rigId, input.expectedActiveVersionId, active?.id ?? null);
+    }
+    const [{ max } = { max: 0 }] = await scopedDb.select({
+      max: sql<number>`coalesce(max(${schema.rigVersions.version}), 0)::int`,
+    }).from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+    const nextVersion = Number(max) + 1;
+    await scopedDb.update(schema.rigVersions).set({ active: false })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ));
+    const [versionRow] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: rig.accountId,
+      workspaceId,
+      rigId,
+      version: nextVersion,
+      image: input.image ?? null,
+      setupScript: input.setupScript ?? null,
+      checks: input.checks ?? [],
+      credentialHooks: input.credentialHooks ?? [],
+      defaultVariableSetIds: input.defaultVariableSetIds ?? [],
+      changelog: input.changelog ?? null,
+      createdBy: input.createdBy ?? null,
+      active: true,
+    }).returning();
+    if (!versionRow) {
+      throw new Error("Failed to create rig version");
+    }
+    const [changeRow] = await scopedDb.update(schema.rigChanges).set({
+      status: "merged",
+      resultVersionId: versionRow.id,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!changeRow) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return { version: mapRigVersion(versionRow), change: mapRigChange(changeRow) };
+  });
+}
+
+export async function listRigVersions(db: Database, workspaceId: string, rigId: string): Promise<RigVersion[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)))
+      .orderBy(desc(schema.rigVersions.version));
+    return rows.map(mapRigVersion);
+  });
+}
+
+export async function getRigVersion(db: Database, workspaceId: string, rigId: string, versionId: string): Promise<RigVersion | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    return row ? mapRigVersion(row) : null;
+  });
+}
+
+export async function getRigVersionById(db: Database, workspaceId: string, versionId: string): Promise<RigVersion | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    return row ? mapRigVersion(row) : null;
+  });
+}
+
+// M3 runtime: the rig's display name only (for the turn's doctrine block + setup
+// events/errors), without the extra active-version + count reads getRig does.
+export async function getRigName(db: Database, workspaceId: string, rigId: string): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({ name: schema.rigs.name }).from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .limit(1);
+    return row?.name ?? null;
+  });
+}
+
+// Flips which version is active (rollback / promote-activate). Row-locks the rig
+// to serialize concurrent activations, deactivates the current active, activates
+// the target. Only touches the `active` flag — never content.
+export async function activateRigVersion(db: Database, workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id }).from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [target] = await scopedDb.select({ id: schema.rigVersions.id }).from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    if (!target) {
+      throw new Error(`Rig version not found: ${versionId}`);
+    }
+    await scopedDb.update(schema.rigVersions).set({ active: false })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ));
+    const [row] = await scopedDb.update(schema.rigVersions).set({ active: true })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.id, versionId),
+      )).returning();
+    if (!row) {
+      throw new Error(`Rig version not found: ${versionId}`);
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return mapRigVersion(row);
+  });
+}
+
+export async function createRigChange(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  rigId: string;
+  baseVersionId?: string | null;
+  kind: RigChangeKind;
+  payload: Record<string, unknown>;
+  proposedBy?: string | null;
+}): Promise<RigChange> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.rigChanges).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      rigId: input.rigId,
+      baseVersionId: input.baseVersionId ?? null,
+      kind: input.kind,
+      payload: input.payload,
+      status: "proposed",
+      proposedBy: input.proposedBy ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create rig change");
+    }
+    return mapRigChange(row);
+  });
+}
+
+export async function listRigChanges(db: Database, workspaceId: string, rigId: string, limit = 100): Promise<RigChange[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)))
+      .orderBy(desc(schema.rigChanges.createdAt))
+      .limit(limit);
+    return rows.map(mapRigChange);
+  });
+}
+
+export async function getRigChange(db: Database, workspaceId: string, changeId: string): Promise<RigChange | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .limit(1);
+    return row ? mapRigChange(row) : null;
+  });
+}
+
+// Advances a change's lifecycle. merged/rejected are terminal (any attempted
+// transition throws RigChangeTransitionError). A supplied verification payload is
+// shallow-merged onto the existing one so a status bump can enrich it (M4).
+export async function updateRigChangeStatus(db: Database, workspaceId: string, changeId: string, input: {
+  status: RigChangeStatus;
+  verification?: Record<string, unknown> | null;
+  resultVersionId?: string | null;
+}): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    const terminal = current.status === "merged" || current.status === "rejected";
+    if (terminal) {
+      throw new RigChangeTransitionError(changeId, current.status, input.status);
+    }
+    const mergedVerification = input.verification
+      ? { ...((current.verification as Record<string, unknown> | null) ?? {}), ...input.verification }
+      : undefined;
+    const [row] = await scopedDb.update(schema.rigChanges).set({
+      status: input.status,
+      ...(mergedVerification !== undefined ? { verification: mergedVerification } : {}),
+      ...(input.resultVersionId !== undefined ? { resultVersionId: input.resultVersionId } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
+  });
+}
+
+export async function beginRigChangeVerificationAttempt(db: Database, workspaceId: string, changeId: string, input: {
+  startedAt: string;
+  allowAlreadyVerifying?: boolean;
+}): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    if (current.status === "verifying") {
+      if (input.allowAlreadyVerifying) {
+        return mapRigChange(current);
+      }
+      throw new RigChangeAlreadyVerifyingError(changeId);
+    }
+    if (current.status === "merged") {
+      throw new RigChangeTransitionError(changeId, current.status, "verifying");
+    }
+    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const previousAttempt = typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
+    const [row] = await scopedDb.update(schema.rigChanges).set({
+      status: "verifying",
+      verification: {
+        ...previousVerification,
+        attempt: previousAttempt + 1,
+        startedAt: input.startedAt,
+        checkResults: [],
+        finishedAt: null,
+        passed: null,
+        error: null,
+      },
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
   });
 }
 
 /**
  * The ONLY helper that selects value_encrypted. Used exclusively by the worker
  * activity that materializes a sandbox for a run whose session carries an
- * environment attachment. Do not call from API routes: values are write-only.
+ * variableSet attachment. Do not call from API routes: values are write-only.
  */
-export async function getWorkspaceEnvironmentValuesForRun(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<{
-  environment: { id: string; name: string; description: string | null };
+export async function getVariableSetValuesForRun(db: Database, workspaceId: string, variableSetId: string): Promise<{
+  variableSet: { id: string; name: string; description: string | null };
   values: Record<string, string>;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [environment] = await scopedDb
-      .select({
-        id: schema.workspaceEnvironments.id,
-        name: schema.workspaceEnvironments.name,
-        description: schema.workspaceEnvironments.description,
-      })
-      .from(schema.workspaceEnvironments)
-      .where(
-        and(
-          eq(schema.workspaceEnvironments.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironments.id, environmentId),
-        ),
-      )
+    const [variableSet] = await scopedDb.select({
+      id: schema.workspaceVariableSets.id,
+      name: schema.workspaceVariableSets.name,
+      description: schema.workspaceVariableSets.description,
+    }).from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
       .limit(1);
-    if (!environment) {
+    if (!variableSet) {
       return null;
     }
-    const rows = await scopedDb
-      .select({
-        name: schema.workspaceEnvironmentVariables.name,
-        valueEncrypted: schema.workspaceEnvironmentVariables.valueEncrypted,
-      })
-      .from(schema.workspaceEnvironmentVariables)
-      .where(
-        and(
-          eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-          eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
-        ),
-      );
+    const rows = await scopedDb.select({
+      name: schema.workspaceVariableSetVariables.name,
+      valueEncrypted: schema.workspaceVariableSetVariables.valueEncrypted,
+    }).from(schema.workspaceVariableSetVariables)
+      .where(and(
+        eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+        eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
+      ));
     return {
-      environment: {
-        id: environment.id,
-        name: environment.name,
-        description: environment.description,
-      },
+      variableSet: { id: variableSet.id, name: variableSet.name, description: variableSet.description },
       values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
     };
   });
 }
 
-export type WorkspaceEnvironmentForRun = {
+/** @deprecated use createVariableSet */
+export const createWorkspaceEnvironment = createVariableSet;
+/** @deprecated use listVariableSets */
+export const listWorkspaceEnvironments = listVariableSets;
+/** @deprecated use getVariableSet */
+export const getWorkspaceEnvironment = getVariableSet;
+/** @deprecated use getVariableSetByName */
+export const getWorkspaceEnvironmentByName = getVariableSetByName;
+/** @deprecated use updateVariableSet */
+export const updateWorkspaceEnvironment = updateVariableSet;
+/** @deprecated use deleteVariableSet */
+export const deleteWorkspaceEnvironment = deleteVariableSet;
+/** @deprecated use countVariableSets */
+export const countWorkspaceEnvironments = countVariableSets;
+/** @deprecated use countScheduledTasksUsingVariableSet */
+export const countScheduledTasksUsingEnvironment = countScheduledTasksUsingVariableSet;
+/** @deprecated use countActiveSessionsUsingVariableSet */
+export const countActiveSessionsUsingEnvironment = countActiveSessionsUsingVariableSet;
+/** @deprecated use setVariableSetVariable */
+export const setWorkspaceEnvironmentVariable = setVariableSetVariable;
+/** @deprecated use deleteVariableSetVariable */
+export const deleteWorkspaceEnvironmentVariable = deleteVariableSetVariable;
+/** @deprecated use getVariableSetValuesForRun */
+export const getWorkspaceEnvironmentValuesForRun = getVariableSetValuesForRun;
+
+export type VariableSetForRun = {
   id: string;
   name: string;
   description: string | null;
@@ -5251,37 +4669,35 @@ export type WorkspaceEnvironmentForRun = {
 };
 
 /**
- * Load and decrypt the workspace environment attached to a run's session. SHARED
+ * Load and decrypt the variable set attached to a run's session. SHARED
  * by the worker TURN path (apps/worker agent-turn) AND the API-direct ATTACH paths
  * (viewer / Channel-A / desktop / terminal) so a box first warmed by an attach is
- * created with the SAME decrypted workspace-environment values the turn declares —
+ * created with the SAME decrypted workspace-variableSet values the turn declares —
  * the box-manifest env must match the agent-manifest env or the SDK's
- * `validateNoEnvironmentDelta` throws when the agent injects its manifest into the
+ * `validateNoVariableSetDelta` throws when the agent injects its manifest into the
  * resumed non-owned box.
  *
- * `environmentId === null` is the unattached path: zero DB work and behavior
+ * `variableSetId === null` is the unattached path: zero DB work and behavior
  * byte-identical to deployments without this feature. Attached runs fail closed: a
- * missing key or a deleted environment throws (names/ids only in messages) instead
+ * missing key or a deleted variableSet throws (names/ids only in messages) instead
  * of silently running without the secrets the run expects.
  */
-export async function loadWorkspaceEnvironmentForRun(
+export async function loadVariableSetForRun(
   db: Database,
   settings: Settings,
   workspaceId: string,
-  environmentId: string | null,
-): Promise<WorkspaceEnvironmentForRun | null> {
-  if (!environmentId) {
+  variableSetId: string | null,
+): Promise<VariableSetForRun | null> {
+  if (!variableSetId) {
     return null;
   }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new Error(
-      "workspace environment attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-    );
+    throw new Error("variable set attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
   }
-  const stored = await getWorkspaceEnvironmentValuesForRun(db, workspaceId, environmentId);
+  const stored = await getVariableSetValuesForRun(db, workspaceId, variableSetId);
   if (!stored) {
-    throw new Error(`workspace environment not found: ${environmentId}`);
+    throw new Error(`variable set not found: ${variableSetId}`);
   }
   const values: Record<string, string> = {};
   for (const [name, encrypted] of Object.entries(stored.values)) {
@@ -5289,18 +4705,21 @@ export async function loadWorkspaceEnvironmentForRun(
       values[name] = decryptEnvironmentValue(key, encrypted);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`, {
-        cause: error,
-      });
+      throw new Error(`failed to decrypt variable set variable ${name}: ${reason}`);
     }
   }
   return {
-    id: stored.environment.id,
-    name: stored.environment.name,
-    description: stored.environment.description,
+    id: stored.variableSet.id,
+    name: stored.variableSet.name,
+    description: stored.variableSet.description,
     values,
   };
 }
+
+/** @deprecated use loadVariableSetForRun */
+export const loadWorkspaceEnvironmentForRun = loadVariableSetForRun;
+/** @deprecated use VariableSetForRun */
+export type WorkspaceEnvironmentForRun = VariableSetForRun;
 
 // ---------------------------------------------------------------------------
 // Codex (ChatGPT) subscription credentials
@@ -5316,10 +4735,10 @@ export async function loadWorkspaceEnvironmentForRun(
 export type CodexCredentialTokens = { accessToken: string; refreshToken: string; idToken: string };
 
 export type CodexCredentialForRun = {
-  id: string; // row id — for compare-and-set writes (P1-c)
-  version: number; // optimistic-concurrency version loaded with this snapshot
+  id: string;                             // row id — for compare-and-set writes (P1-c)
+  version: number;                        // optimistic-concurrency version loaded with this snapshot
   workspaceId: string;
-  tokens: CodexCredentialTokens; // decrypted — never logged, never returned by a route
+  tokens: CodexCredentialTokens;          // decrypted — never logged, never returned by a route
   chatgptAccountId: string | null;
   scopes: string | null;
   planType: string | null;
@@ -5339,92 +4758,78 @@ export type CodexCredentialForRun = {
  * accessor — auto-activates a brand-new first account and ensures the
  * rotation-settings row exists.
  */
-export async function upsertCodexSubscriptionCredential(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    credentialEncrypted: string; // v1 envelope of JSON {access_token, refresh_token, id_token}
-    chatgptAccountId: string | null;
-    scopes: string | null;
-    planType: string | null;
-    isFedramp: boolean;
-    expiresAt: Date | null;
-    lastRefreshAt: Date | null;
-    accountEmail?: string | null;
-    label?: string | null;
-  },
-): Promise<{ id: string; isNew: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.codexSubscriptionCredentials)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          credentialEncrypted: input.credentialEncrypted,
-          chatgptAccountId: input.chatgptAccountId,
-          scopes: input.scopes,
-          planType: input.planType,
-          isFedramp: input.isFedramp,
-          expiresAt: input.expiresAt,
-          lastRefreshAt: input.lastRefreshAt,
-          accountEmail: input.accountEmail ?? null,
-          label: input.label ?? null,
-          status: "active",
-          lastError: null,
-        })
-        .onConflictDoUpdate({
-          // The unique index is PARTIAL (WHERE chatgpt_account_id IS NOT NULL), so the
-          // conflict target MUST repeat that predicate via targetWhere, else postgres
-          // raises "no unique or exclusion constraint matching the ON CONFLICT".
-          target: [
-            schema.codexSubscriptionCredentials.workspaceId,
-            schema.codexSubscriptionCredentials.chatgptAccountId,
-          ],
-          targetWhere: sql`chatgpt_account_id is not null`,
-          set: {
-            // account_id MUST be re-asserted on conflict. Omitting it leaves a stale
-            // account_id on a row whose owning account changed (e.g. a reconnect
-            // under a different grant), which makes the row RLS-INVISIBLE to every
-            // subsequent scoped read — a permanent phantom "no active subscription".
-            accountId: input.accountId,
-            credentialEncrypted: input.credentialEncrypted,
-            scopes: input.scopes,
-            planType: input.planType,
-            isFedramp: input.isFedramp,
-            expiresAt: input.expiresAt,
-            lastRefreshAt: input.lastRefreshAt,
-            // Refresh the derived email; keep an existing user-chosen label (only seed
-            // it when still null) so a re-connect never clobbers a rename.
-            accountEmail: input.accountEmail ?? null,
-            label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-            status: "active",
-            lastError: null,
-            version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
-            updatedAt: now,
-          },
-        })
-        .returning({
-          id: schema.codexSubscriptionCredentials.id,
-          createdAt: schema.codexSubscriptionCredentials.createdAt,
-          updatedAt: schema.codexSubscriptionCredentials.updatedAt,
-        });
-      // The upsert always returns exactly one row (insert or update).
-      if (!row) {
-        throw new Error("upsertCodexSubscriptionCredential returned no row");
-      }
-      // A fresh INSERT leaves created_at === updated_at (both the same per-txn db
-      // now()). A conflict UPDATE stamps updated_at to our JS `now` while created_at
-      // keeps the original (older) value, so the two diverge. This distinguishes
-      // insert from update without a second read.
-      const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
-      return { id: row.id, isNew };
-    },
-  );
+export async function upsertCodexSubscriptionCredential(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  credentialEncrypted: string;            // v1 envelope of JSON {access_token, refresh_token, id_token}
+  chatgptAccountId: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  accountEmail?: string | null;
+  label?: string | null;
+}): Promise<{ id: string; isNew: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const [row] = await scopedDb.insert(schema.codexSubscriptionCredentials).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      credentialEncrypted: input.credentialEncrypted,
+      chatgptAccountId: input.chatgptAccountId,
+      scopes: input.scopes,
+      planType: input.planType,
+      isFedramp: input.isFedramp,
+      expiresAt: input.expiresAt,
+      lastRefreshAt: input.lastRefreshAt,
+      accountEmail: input.accountEmail ?? null,
+      label: input.label ?? null,
+      status: "active",
+      lastError: null,
+    }).onConflictDoUpdate({
+      // The unique index is PARTIAL (WHERE chatgpt_account_id IS NOT NULL), so the
+      // conflict target MUST repeat that predicate via targetWhere, else postgres
+      // raises "no unique or exclusion constraint matching the ON CONFLICT".
+      target: [schema.codexSubscriptionCredentials.workspaceId, schema.codexSubscriptionCredentials.chatgptAccountId],
+      targetWhere: sql`chatgpt_account_id is not null`,
+      set: {
+        // account_id MUST be re-asserted on conflict. Omitting it leaves a stale
+        // account_id on a row whose owning account changed (e.g. a reconnect
+        // under a different grant), which makes the row RLS-INVISIBLE to every
+        // subsequent scoped read — a permanent phantom "no active subscription".
+        accountId: input.accountId,
+        credentialEncrypted: input.credentialEncrypted,
+        scopes: input.scopes,
+        planType: input.planType,
+        isFedramp: input.isFedramp,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        // Refresh the derived email; keep an existing user-chosen label (only seed
+        // it when still null) so a re-connect never clobbers a rename.
+        accountEmail: input.accountEmail ?? null,
+        label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
+        status: "active",
+        lastError: null,
+        version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
+        updatedAt: now,
+      },
+    }).returning({
+      id: schema.codexSubscriptionCredentials.id,
+      createdAt: schema.codexSubscriptionCredentials.createdAt,
+      updatedAt: schema.codexSubscriptionCredentials.updatedAt,
+    });
+    // The upsert always returns exactly one row (insert or update).
+    if (!row) {
+      throw new Error("upsertCodexSubscriptionCredential returned no row");
+    }
+    // A fresh INSERT leaves created_at === updated_at (both the same per-txn db
+    // now()). A conflict UPDATE stamps updated_at to our JS `now` while created_at
+    // keeps the original (older) value, so the two diverge. This distinguishes
+    // insert from update without a second read.
+    const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
+    return { id: row.id, isNew };
+  });
 }
 
 /**
@@ -5445,21 +4850,14 @@ export async function loadCodexCredentialForRun(
 ): Promise<CodexCredentialForRun | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new Error(
-      "codex credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured",
-    );
+    throw new Error("codex credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
   }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.codexSubscriptionCredentials)
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      )).limit(1);
     if (!row) {
       return null;
     }
@@ -5472,17 +4870,10 @@ export async function loadCodexCredentialForRun(
         refresh_token: string;
         id_token: string;
       };
-      tokens = {
-        accessToken: parsed.access_token,
-        refreshToken: parsed.refresh_token,
-        idToken: parsed.id_token,
-      };
+      tokens = { accessToken: parsed.access_token, refreshToken: parsed.refresh_token, idToken: parsed.id_token };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`,
-        { cause: error },
-      );
+      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`);
     }
     return {
       id: row.id,
@@ -5511,36 +4902,27 @@ export async function loadCodexCredentialForRun(
  * iff the guarded row was updated; false means "credential changed under me —
  * the rotation is moot, drop it."
  */
-export async function recordCodexTokenRefresh(
-  db: Database,
-  input: {
-    id: string;
-    version: number;
-    workspaceId: string;
-    credentialEncrypted: string;
-    expiresAt: Date | null;
-    lastRefreshAt: Date;
-  },
-): Promise<boolean> {
+export async function recordCodexTokenRefresh(db: Database, input: {
+  id: string;
+  version: number;
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  lastRefreshAt: Date;
+}): Promise<boolean> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({
-        credentialEncrypted: input.credentialEncrypted,
-        expiresAt: input.expiresAt,
-        lastRefreshAt: input.lastRefreshAt,
-        status: "active",
-        lastError: null,
-        version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, input.id),
-          eq(schema.codexSubscriptionCredentials.version, input.version),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials).set({
+      credentialEncrypted: input.credentialEncrypted,
+      expiresAt: input.expiresAt,
+      lastRefreshAt: input.lastRefreshAt,
+      status: "active",
+      lastError: null,
+      version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(schema.codexSubscriptionCredentials.id, input.id),
+      eq(schema.codexSubscriptionCredentials.version, input.version),
+    )).returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
 }
@@ -5563,15 +4945,12 @@ export async function setCodexCredentialStatus(
   target: { id: string; version: number },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ status, lastError, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, target.id),
-          eq(schema.codexSubscriptionCredentials.version, target.version),
-        ),
-      )
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, target.id),
+        eq(schema.codexSubscriptionCredentials.version, target.version),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
@@ -5587,10 +4966,7 @@ export async function setCodexCredentialStatus(
  * lazily repairs the pointer so the next read is deterministic. The returned
  * `credentialId` is the active row's id (null when no credential exists at all).
  */
-export async function getCodexCredentialStatus(
-  db: Database,
-  workspaceId: string,
-): Promise<{
+export async function getCodexCredentialStatus(db: Database, workspaceId: string): Promise<{
   connected: boolean;
   credentialId: string | null;
   chatgptAccountId: string | null;
@@ -5612,48 +4988,26 @@ export async function getCodexCredentialStatus(
       lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
       lastError: schema.codexSubscriptionCredentials.lastError,
     } as const;
-    const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
       .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
 
-    let row:
-      | {
-          id: string;
-          chatgptAccountId: string | null;
-          scopes: string | null;
-          planType: string | null;
-          status: string;
-          expiresAt: Date | null;
-          lastRefreshAt: Date | null;
-          lastError: string | null;
-        }
-      | undefined;
+    let row: { id: string; chatgptAccountId: string | null; scopes: string | null; planType: string | null; status: string; expiresAt: Date | null; lastRefreshAt: Date | null; lastError: string | null } | undefined;
     if (settingsRow?.activeCredentialId) {
-      [row] = await scopedDb
-        .select(cols)
-        .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, settingsRow.activeCredentialId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          ),
-        )
-        .limit(1);
+      [row] = await scopedDb.select(cols).from(schema.codexSubscriptionCredentials)
+        .where(and(
+          eq(schema.codexSubscriptionCredentials.id, settingsRow.activeCredentialId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        )).limit(1);
     }
     if (!row) {
       // No active pointer (or it dangles): fall back to the most-recently-connected
       // credential and lazily repair the pointer so the active account is stable.
-      [row] = await scopedDb
-        .select(cols)
-        .from(schema.codexSubscriptionCredentials)
+      [row] = await scopedDb.select(cols).from(schema.codexSubscriptionCredentials)
         .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
-        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
-        .limit(1);
+        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt)).limit(1);
       if (row && settingsRow && settingsRow.activeCredentialId !== row.id) {
-        await scopedDb
-          .update(schema.codexRotationSettings)
+        await scopedDb.update(schema.codexRotationSettings)
           .set({ activeCredentialId: row.id, updatedAt: new Date() })
           .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
       }
@@ -5699,9 +5053,7 @@ export async function workspaceCodexSubscriptionActive(
     } catch (error) {
       lastError = error;
       if (attempt < CODEX_ACTIVE_READ_ATTEMPTS - 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, CODEX_ACTIVE_READ_RETRY_MS * (attempt + 1)),
-        );
+        await new Promise((resolve) => setTimeout(resolve, CODEX_ACTIVE_READ_RETRY_MS * (attempt + 1)));
       }
     }
   }
@@ -5767,7 +5119,7 @@ export type CodexAccountStatus = {
   label: string | null;
   accountEmail: string | null;
   planType: string | null;
-  status: string; // active | needs_relogin | error
+  status: string;        // active | needs_relogin | error
   isActive: boolean;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
@@ -5794,40 +5146,33 @@ export type CodexAccountStatus = {
  * accounts UI + the worker's selection resolver. NEVER decrypts. `isActive` marks
  * the workspace active pointer. Ordered by created_at ASC (stable list order).
  */
-export async function listCodexAccountStatuses(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexAccountStatus[]> {
+export async function listCodexAccountStatuses(db: Database, workspaceId: string): Promise<CodexAccountStatus[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
       .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
     const activeId = settingsRow?.activeCredentialId ?? null;
-    const rows = await scopedDb
-      .select({
-        id: schema.codexSubscriptionCredentials.id,
-        chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
-        label: schema.codexSubscriptionCredentials.label,
-        accountEmail: schema.codexSubscriptionCredentials.accountEmail,
-        planType: schema.codexSubscriptionCredentials.planType,
-        status: schema.codexSubscriptionCredentials.status,
-        expiresAt: schema.codexSubscriptionCredentials.expiresAt,
-        lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
-        lastError: schema.codexSubscriptionCredentials.lastError,
-        // P2 cached usage columns — metadata-only, ride along on this read.
-        primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
-        primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
-        secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
-        secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
-        usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
-        exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
-        // P4 connector-set cache — metadata-only, rides along on this read.
-        connectorNamespaces: schema.codexSubscriptionCredentials.connectorNamespaces,
-        connectorsCheckedAt: schema.codexSubscriptionCredentials.connectorsCheckedAt,
-      })
-      .from(schema.codexSubscriptionCredentials)
+    const rows = await scopedDb.select({
+      id: schema.codexSubscriptionCredentials.id,
+      chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+      label: schema.codexSubscriptionCredentials.label,
+      accountEmail: schema.codexSubscriptionCredentials.accountEmail,
+      planType: schema.codexSubscriptionCredentials.planType,
+      status: schema.codexSubscriptionCredentials.status,
+      expiresAt: schema.codexSubscriptionCredentials.expiresAt,
+      lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
+      lastError: schema.codexSubscriptionCredentials.lastError,
+      // P2 cached usage columns — metadata-only, ride along on this read.
+      primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
+      primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
+      secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
+      secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+      usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
+      exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+      // P4 connector-set cache — metadata-only, rides along on this read.
+      connectorNamespaces: schema.codexSubscriptionCredentials.connectorNamespaces,
+      connectorsCheckedAt: schema.codexSubscriptionCredentials.connectorsCheckedAt,
+    }).from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.createdAt));
     return rows.map((row) => ({ ...row, isActive: row.id === activeId }));
@@ -5858,8 +5203,7 @@ export async function recordCodexAccountUsage(
   snapshot: CodexAccountUsageSnapshot,
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({
         primaryUsedPercent: snapshot.primaryUsedPercent,
         primaryResetAt: snapshot.primaryResetAt,
@@ -5870,12 +5214,10 @@ export async function recordCodexAccountUsage(
         // metadata and must NOT race the (id, version) refresh CAS in
         // recordCodexTokenRefresh / setCodexCredentialStatus.
       })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
@@ -5883,38 +5225,27 @@ export async function recordCodexAccountUsage(
 
 export type CodexRotationSettings = {
   activeCredentialId: string | null;
-  rotationEnabled: boolean; // P1: always false
-  rotationStrategy: string; // P1: 'most_remaining' (unused)
+  rotationEnabled: boolean;     // P1: always false
+  rotationStrategy: string;     // P1: 'most_remaining' (unused)
 };
 
 /** The per-workspace rotation/active-pointer row (null when none exists yet). */
-export async function getCodexRotationSettings(
-  db: Database,
-  workspaceId: string,
-): Promise<CodexRotationSettings | null> {
+export async function getCodexRotationSettings(db: Database, workspaceId: string): Promise<CodexRotationSettings | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
-        rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-        rotationStrategy: schema.codexRotationSettings.rotationStrategy,
-      })
-      .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+    const [row] = await scopedDb.select({
+      activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      rotationEnabled: schema.codexRotationSettings.rotationEnabled,
+      rotationStrategy: schema.codexRotationSettings.rotationStrategy,
+    }).from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
     return row ?? null;
   });
 }
 
 /** Idempotently ensure the per-workspace rotation-settings row exists. */
-export async function ensureCodexRotationSettings(
-  db: Database,
-  accountId: string,
-  workspaceId: string,
-): Promise<void> {
+export async function ensureCodexRotationSettings(db: Database, accountId: string, workspaceId: string): Promise<void> {
   await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
-    await scopedDb
-      .insert(schema.codexRotationSettings)
+    await scopedDb.insert(schema.codexRotationSettings)
       .values({ accountId, workspaceId })
       .onConflictDoNothing({ target: [schema.codexRotationSettings.workspaceId] });
   });
@@ -5925,27 +5256,18 @@ export async function ensureCodexRotationSettings(
  * belongs to the workspace, then one-cell UPDATEs active_credential_id. Returns
  * false if the id is unknown (so the route can 404).
  */
-export async function setActiveCodexCredential(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-): Promise<boolean> {
+export async function setActiveCodexCredential(db: Database, workspaceId: string, credentialId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [cred] = await scopedDb
-      .select({ id: schema.codexSubscriptionCredentials.id })
+    const [cred] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
       .from(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .limit(1);
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      )).limit(1);
     if (!cred) {
       return false;
     }
-    const updated = await scopedDb
-      .update(schema.codexRotationSettings)
+    const updated = await scopedDb.update(schema.codexRotationSettings)
       .set({ activeCredentialId: credentialId, updatedAt: new Date() })
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .returning({ id: schema.codexRotationSettings.id });
@@ -5968,15 +5290,12 @@ export async function setCodexCredentialExhausted(
   until: Date | null,
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ exhaustedUntil: until })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
@@ -6001,16 +5320,13 @@ export async function countConsecutiveReactiveRotations(
   sessionId: string,
 ): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [lastOk] = await scopedDb
-      .select({ sequence: schema.sessionEvents.sequence })
+    const [lastOk] = await scopedDb.select({ sequence: schema.sessionEvents.sequence })
       .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, workspaceId),
-          eq(schema.sessionEvents.sessionId, sessionId),
-          eq(schema.sessionEvents.type, "turn.completed"),
-        ),
-      )
+      .where(and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        eq(schema.sessionEvents.type, "turn.completed"),
+      ))
       .orderBy(desc(schema.sessionEvents.sequence))
       .limit(1);
     const conditions = [
@@ -6022,12 +5338,9 @@ export async function countConsecutiveReactiveRotations(
     if (lastOk) {
       conditions.push(sql`${schema.sessionEvents.sequence} > ${lastOk.sequence}`);
     }
-    const [{ rotated } = { rotated: 0 }] = await scopedDb
-      .select({
-        rotated: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessionEvents)
-      .where(and(...conditions));
+    const [{ rotated } = { rotated: 0 }] = await scopedDb.select({
+      rotated: sql<number>`count(*)::int`,
+    }).from(schema.sessionEvents).where(and(...conditions));
     return Number(rotated);
   });
 }
@@ -6052,8 +5365,7 @@ export async function recordCodexAccountConnectors(
   namespaces: string[],
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({
         connectorNamespaces: namespaces,
         connectorsCheckedAt: new Date(),
@@ -6061,23 +5373,17 @@ export async function recordCodexAccountConnectors(
         // metadata and must NOT race the (id, version) refresh CAS (same discipline as
         // recordCodexAccountUsage / setCodexCredentialExhausted).
       })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
 }
 
 /** The supported rotation strategies (P3). */
-export const CODEX_ROTATION_STRATEGIES = [
-  "most_remaining",
-  "round_robin",
-  "drain_then_next",
-] as const;
+export const CODEX_ROTATION_STRATEGIES = ["most_remaining", "round_robin", "drain_then_next"] as const;
 export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
 
 /**
@@ -6091,10 +5397,7 @@ export async function updateCodexRotationSettings(
   workspaceId: string,
   patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy },
 ): Promise<CodexRotationSettings | null> {
-  if (
-    patch.rotationStrategy !== undefined &&
-    !CODEX_ROTATION_STRATEGIES.includes(patch.rotationStrategy)
-  ) {
+  if (patch.rotationStrategy !== undefined && !CODEX_ROTATION_STRATEGIES.includes(patch.rotationStrategy)) {
     throw new Error(`invalid codex rotation strategy: ${patch.rotationStrategy}`);
   }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -6105,8 +5408,7 @@ export async function updateCodexRotationSettings(
     if (patch.rotationStrategy !== undefined) {
       set.rotationStrategy = patch.rotationStrategy;
     }
-    const [row] = await scopedDb
-      .update(schema.codexRotationSettings)
+    const [row] = await scopedDb.update(schema.codexRotationSettings)
       .set(set)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .returning({
@@ -6119,22 +5421,14 @@ export async function updateCodexRotationSettings(
 }
 
 /** P1 rename (label only); P3 widens to rotation fields. */
-export async function renameCodexAccount(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
-  label: string | null,
-): Promise<boolean> {
+export async function renameCodexAccount(db: Database, workspaceId: string, credentialId: string, label: string | null): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ label, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
@@ -6146,20 +5440,13 @@ export type SessionCodexState = {
 };
 
 /** The session's pin + last-ran-on Codex account (drives the worker resolver + indicator). */
-export async function getSessionCodexState(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionCodexState | null> {
+export async function getSessionCodexState(db: Database, workspaceId: string, sessionId: string): Promise<SessionCodexState | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        pinnedCredentialId: schema.sessions.codexPinnedCredentialId,
-        lastCredentialId: schema.sessions.codexLastCredentialId,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
+    const [row] = await scopedDb.select({
+      pinnedCredentialId: schema.sessions.codexPinnedCredentialId,
+      lastCredentialId: schema.sessions.codexLastCredentialId,
+    }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).limit(1);
     return row ?? null;
   });
 }
@@ -6170,29 +5457,21 @@ export async function getSessionCodexState(
  * non-null. Returns false if the session is unknown or the id is invalid.
  */
 export async function setSessionCodexPin(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pinnedCredentialId: string | null,
+  db: Database, workspaceId: string, sessionId: string, pinnedCredentialId: string | null,
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     if (pinnedCredentialId !== null) {
-      const [cred] = await scopedDb
-        .select({ id: schema.codexSubscriptionCredentials.id })
+      const [cred] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
         .from(schema.codexSubscriptionCredentials)
-        .where(
-          and(
-            eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId),
-            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-          ),
-        )
-        .limit(1);
+        .where(and(
+          eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        )).limit(1);
       if (!cred) {
         return false;
       }
     }
-    const updated = await scopedDb
-      .update(schema.sessions)
+    const updated = await scopedDb.update(schema.sessions)
       .set({ codexPinnedCredentialId: pinnedCredentialId, updatedAt: new Date() })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .returning({ id: schema.sessions.id });
@@ -6202,14 +5481,10 @@ export async function setSessionCodexPin(
 
 /** Written by the worker at the turn boundary; drives the in-session indicator. */
 export async function recordSessionActiveCodexCredential(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  credentialId: string,
+  db: Database, workspaceId: string, sessionId: string, credentialId: string,
 ): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
+    await scopedDb.update(schema.sessions)
       .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
   });
@@ -6222,41 +5497,31 @@ export async function recordSessionActiveCodexCredential(
  * the same RLS txn. Returns whether a row was removed + the new active id.
  */
 export async function disconnectCodexAccount(
-  db: Database,
-  workspaceId: string,
-  credentialId: string,
+  db: Database, workspaceId: string, credentialId: string,
 ): Promise<{ removed: boolean; newActiveCredentialId: string | null }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const removedRows = await scopedDb
-      .delete(schema.codexSubscriptionCredentials)
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
+    const removedRows = await scopedDb.delete(schema.codexSubscriptionCredentials)
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     // The FK SET NULL already cleared the pointer if we deleted the active row.
-    const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
       .from(schema.codexRotationSettings)
-      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-      .limit(1);
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
     if (removedRows.length === 0) {
       return { removed: false, newActiveCredentialId: settingsRow?.activeCredentialId ?? null };
     }
     let newActive = settingsRow?.activeCredentialId ?? null;
     if (newActive === null) {
-      const [next] = await scopedDb
-        .select({ id: schema.codexSubscriptionCredentials.id })
+      const [next] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
         .from(schema.codexSubscriptionCredentials)
         .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
-        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
-        .limit(1);
+        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt)).limit(1);
       newActive = next?.id ?? null;
       if (settingsRow) {
-        await scopedDb
-          .update(schema.codexRotationSettings)
+        await scopedDb.update(schema.codexRotationSettings)
           .set({ activeCredentialId: newActive, updatedAt: new Date() })
           .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
       }
@@ -6266,77 +5531,55 @@ export async function disconnectCodexAccount(
 }
 
 /** Legacy "disconnect all" (old workspace-wide behavior). Returns rows removed. */
-export async function disconnectAllCodexAccounts(
-  db: Database,
-  workspaceId: string,
-): Promise<number> {
+export async function disconnectAllCodexAccounts(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.codexSubscriptionCredentials)
+    const rows = await scopedDb.delete(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return rows.length;
   });
 }
 
-export async function recordAuditEvent(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    subjectId?: string | null;
-    action: string;
-    targetType?: string | null;
-    targetId?: string | null;
-    metadata?: Record<string, unknown>;
-  },
-): Promise<void> {
+export async function recordAuditEvent(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  subjectId?: string | null;
+  action: string;
+  targetType?: string | null;
+  targetId?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
   // audit_events has a FORCED RLS policy keyed on the account/workspace GUCs,
   // so the insert must run inside an RLS context.
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
-    async (scopedDb) => {
-      await scopedDb.insert(schema.auditEvents).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId ?? null,
-        subjectId: input.subjectId ?? null,
-        action: input.action,
-        targetType: input.targetType ?? null,
-        targetId: input.targetId ?? null,
-        metadata: input.metadata ?? {},
-      });
-    },
-  );
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.insert(schema.auditEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      subjectId: input.subjectId ?? null,
+      action: input.action,
+      targetType: input.targetType ?? null,
+      targetId: input.targetId ?? null,
+      metadata: input.metadata ?? {},
+    });
+  });
 }
 
-async function listEnvironmentVariableMetadata(
-  db: Database,
-  workspaceId: string,
-  environmentId: string,
-): Promise<WorkspaceEnvironmentVariableMetadata[]> {
-  const rows = await db
-    .select({
-      name: schema.workspaceEnvironmentVariables.name,
-      version: schema.workspaceEnvironmentVariables.version,
-      createdAt: schema.workspaceEnvironmentVariables.createdAt,
-      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-    })
-    .from(schema.workspaceEnvironmentVariables)
-    .where(
-      and(
-        eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-        eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
-      ),
-    )
-    .orderBy(asc(schema.workspaceEnvironmentVariables.name));
-  return rows.map(mapWorkspaceEnvironmentVariableMetadata);
+async function listVariableSetVariableMetadata(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSetVariableMetadata[]> {
+  const rows = await db.select({
+    name: schema.workspaceVariableSetVariables.name,
+    version: schema.workspaceVariableSetVariables.version,
+    createdAt: schema.workspaceVariableSetVariables.createdAt,
+    updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+  }).from(schema.workspaceVariableSetVariables)
+    .where(and(
+      eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+      eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
+    ))
+    .orderBy(asc(schema.workspaceVariableSetVariables.name));
+  return rows.map(mapVariableSetVariableMetadata);
 }
 
-function mapWorkspaceEnvironment(
-  row: typeof schema.workspaceEnvironments.$inferSelect,
-  variables: WorkspaceEnvironmentVariableMetadata[],
-): WorkspaceEnvironment {
+function mapVariableSet(row: typeof schema.workspaceVariableSets.$inferSelect, variables: VariableSetVariableMetadata[]): VariableSet {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -6349,12 +5592,12 @@ function mapWorkspaceEnvironment(
   };
 }
 
-function mapWorkspaceEnvironmentVariableMetadata(row: {
+function mapVariableSetVariableMetadata(row: {
   name: string;
   version: number;
   createdAt: Date;
   updatedAt: Date;
-}): WorkspaceEnvironmentVariableMetadata {
+}): VariableSetVariableMetadata {
   return {
     name: row.name,
     version: row.version,
@@ -6363,9 +5606,7 @@ function mapWorkspaceEnvironmentVariableMetadata(row: {
   };
 }
 
-function mapSessionMcpServerMetadata(
-  row: typeof schema.sessionMcpServers.$inferSelect,
-): SessionMcpServerMetadata {
+function mapSessionMcpServerMetadata(row: typeof schema.sessionMcpServers.$inferSelect): SessionMcpServerMetadata {
   return {
     id: row.serverId,
     name: row.name ?? null,
@@ -6384,15 +5625,11 @@ async function sessionMcpServerMetadataForSessions(
   if (sessionIds.length === 0) {
     return grouped;
   }
-  const rows = await db
-    .select()
-    .from(schema.sessionMcpServers)
-    .where(
-      and(
-        eq(schema.sessionMcpServers.workspaceId, workspaceId),
-        inArray(schema.sessionMcpServers.sessionId, sessionIds),
-      ),
-    )
+  const rows = await db.select().from(schema.sessionMcpServers)
+    .where(and(
+      eq(schema.sessionMcpServers.workspaceId, workspaceId),
+      inArray(schema.sessionMcpServers.sessionId, sessionIds),
+    ))
     .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
   for (const row of rows) {
     const list = grouped.get(row.sessionId) ?? [];
@@ -6402,82 +5639,57 @@ async function sessionMcpServerMetadataForSessions(
   return grouped;
 }
 
-async function insertSessionMcpServers(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    servers: CreateSessionMcpServerInput[];
-  },
-): Promise<SessionMcpServerMetadata[]> {
+async function insertSessionMcpServers(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  servers: CreateSessionMcpServerInput[];
+}): Promise<SessionMcpServerMetadata[]> {
   if (input.servers.length === 0) {
     return [];
   }
-  const rows = await db
-    .insert(schema.sessionMcpServers)
-    .values(
-      input.servers.map((server) => ({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        serverId: server.id,
-        name: server.name ?? null,
-        url: server.url,
-        allowedTools: server.allowedTools ?? null,
-        timeoutMs: server.timeoutMs ?? null,
-        cacheToolsList: server.cacheToolsList ?? false,
-        requireApproval: server.requireApproval ?? null,
-        headersEncrypted: server.headersEncrypted ?? {},
-      })),
-    )
-    .returning();
+  const rows = await db.insert(schema.sessionMcpServers).values(input.servers.map((server) => ({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    serverId: server.id,
+    name: server.name ?? null,
+    url: server.url,
+    allowedTools: server.allowedTools ?? null,
+    timeoutMs: server.timeoutMs ?? null,
+    cacheToolsList: server.cacheToolsList ?? false,
+    requireApproval: server.requireApproval ?? null,
+    headersEncrypted: server.headersEncrypted ?? {},
+  }))).returning();
   return rows.map(mapSessionMcpServerMetadata);
 }
 
-export async function createSessionMcpServers(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    servers: CreateSessionMcpServerInput[];
-  },
-): Promise<SessionMcpServerMetadata[]> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => await insertSessionMcpServers(scopedDb, input),
+export async function createSessionMcpServers(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  servers: CreateSessionMcpServerInput[];
+}): Promise<SessionMcpServerMetadata[]> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) =>
+    await insertSessionMcpServers(scopedDb, input)
   );
 }
 
-export async function listSessionMcpServerMetadata(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionMcpServerMetadata[]> {
+export async function listSessionMcpServerMetadata(db: Database, workspaceId: string, sessionId: string): Promise<SessionMcpServerMetadata[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [sessionId]);
     return grouped.get(sessionId) ?? [];
   });
 }
 
-export async function updateSessionMcpServerCredentials(
-  db: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    updates: UpdateSessionMcpServerCredentialsInput[];
-  },
-): Promise<UpdateSessionMcpServerCredentialsResult> {
-  return await withWorkspaceRls(
-    db,
-    input.workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(
-        async (tx) => await updateSessionMcpServerCredentialsInTransaction(tx, input),
-      ),
-  );
+export async function updateSessionMcpServerCredentials(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  updates: UpdateSessionMcpServerCredentialsInput[];
+}): Promise<UpdateSessionMcpServerCredentialsResult> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) =>
+    await updateSessionMcpServerCredentialsInTransaction(tx, input)
+  ));
 }
 
 async function updateSessionMcpServerCredentialsInTransaction(
@@ -6491,20 +5703,17 @@ async function updateSessionMcpServerCredentialsInTransaction(
   const servers: SessionMcpServerMetadata[] = [];
   const missingIds: string[] = [];
   for (const update of input.updates) {
-    const [row] = await tx
-      .update(schema.sessionMcpServers)
+    const [row] = await tx.update(schema.sessionMcpServers)
       .set({
         headersEncrypted: update.headersEncrypted,
         credentialVersion: sql`${schema.sessionMcpServers.credentialVersion} + 1`,
         updatedAt: new Date(),
       })
-      .where(
-        and(
-          eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
-          eq(schema.sessionMcpServers.sessionId, input.sessionId),
-          eq(schema.sessionMcpServers.serverId, update.id),
-        ),
-      )
+      .where(and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.sessionId),
+        eq(schema.sessionMcpServers.serverId, update.id),
+      ))
       .returning();
     if (!row) {
       missingIds.push(update.id);
@@ -6522,25 +5731,17 @@ export async function listSessionMcpServersForRun(
   encryptionKey: Uint8Array,
 ): Promise<SessionMcpServerForRun[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessionMcpServers)
-      .where(
-        and(
-          eq(schema.sessionMcpServers.workspaceId, workspaceId),
-          eq(schema.sessionMcpServers.sessionId, sessionId),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.sessionMcpServers)
+      .where(and(
+        eq(schema.sessionMcpServers.workspaceId, workspaceId),
+        eq(schema.sessionMcpServers.sessionId, sessionId),
+      ))
       .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
     return rows.map((row) => {
       let headers: Record<string, string>;
       try {
-        headers = Object.fromEntries(
-          Object.entries(row.headersEncrypted ?? {}).map(([name, stored]) => [
-            name,
-            decryptEnvironmentValue(encryptionKey, stored),
-          ]),
-        );
+        headers = Object.fromEntries(Object.entries(row.headersEncrypted ?? {})
+          .map(([name, stored]) => [name, decryptEnvironmentValue(encryptionKey, stored)]));
       } catch {
         throw new Error("session MCP server credential decryption failed");
       }
@@ -6556,73 +5757,69 @@ export async function listSessionMcpServersForRun(
   });
 }
 
-export async function createSession(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    initialMessage: string;
-    resources: ResourceRef[];
-    tools?: ToolRef[];
-    metadata: Record<string, unknown>;
-    model: string;
-    sandboxBackend: SandboxBackend;
-    environmentId?: string | null;
-    firstPartyMcpPermissions?: Permission[] | null;
-    // Per-session agent persona/system instructions (org-visible, not a secret).
-    // Null/omitted ⇒ the session carries none (composed instructions unchanged).
-    instructions?: string | null;
-    parentSessionId?: string | null;
-    createIdempotencyKey?: string | null;
-    // The shared-sandbox group to join. Omit (or null) for a singleton group:
-    // the new row's own id is used (group === session), today's 1:1 behavior. A
-    // shared spawn passes the parent's sandboxGroupId so both run in ONE box.
-    sandboxGroupId?: string | null;
-    sandboxOs?: SandboxOs;
-    mcpServers?: CreateSessionMcpServerInput[];
-  },
-): Promise<Session> {
+export async function createSession(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  initialMessage: string;
+  resources: ResourceRef[];
+  tools?: ToolRef[];
+  metadata: Record<string, unknown>;
+  model: string;
+  sandboxBackend: SandboxBackend;
+  variableSetId?: string | null;
+  // The rig + frozen active rig version resolved at create (M3). Both omitted/null
+  // ⇒ a rig-less session (byte-for-byte today's behavior).
+  rigId?: string | null;
+  rigVersionId?: string | null;
+  firstPartyMcpPermissions?: Permission[] | null;
+  // Per-session agent persona/system instructions (org-visible, not a secret).
+  // Null/omitted ⇒ the session carries none (composed instructions unchanged).
+  instructions?: string | null;
+  parentSessionId?: string | null;
+  createIdempotencyKey?: string | null;
+  // The shared-sandbox group to join. Omit (or null) for a singleton group:
+  // the new row's own id is used (group === session), today's 1:1 behavior. A
+  // shared spawn passes the parent's sandboxGroupId so both run in ONE box.
+  sandboxGroupId?: string | null;
+  sandboxOs?: SandboxOs;
+  mcpServers?: CreateSessionMcpServerInput[];
+}): Promise<Session> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = crypto.randomUUID();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessions)
-        .values({
-          id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          initialMessage: input.initialMessage,
-          resources: input.resources,
-          tools: input.tools ?? [],
-          metadata: input.metadata,
-          model: input.model,
-          sandboxBackend: input.sandboxBackend,
-          sandboxOs: input.sandboxOs ?? "linux",
-          sandboxGroupId: input.sandboxGroupId ?? id,
-          environmentId: input.environmentId ?? null,
-          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-          instructions: input.instructions ?? null,
-          parentSessionId: input.parentSessionId ?? null,
-          createIdempotencyKey: input.createIdempotencyKey ?? null,
-          status: "queued",
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create session");
-      }
-      const mcpServers = await insertSessionMcpServers(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: row.id,
-        servers: input.mcpServers ?? [],
-      });
-      return mapSession(row, mcpServers);
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessions).values({
+      id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      resources: input.resources,
+      tools: input.tools ?? [],
+      metadata: input.metadata,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      sandboxOs: input.sandboxOs ?? "linux",
+      sandboxGroupId: input.sandboxGroupId ?? id,
+      variableSetId: input.variableSetId ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey: input.createIdempotencyKey ?? null,
+      status: "queued",
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create session");
+    }
+    const mcpServers = await insertSessionMcpServers(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: row.id,
+      servers: input.mcpServers ?? [],
+    });
+    return mapSession(row, mcpServers);
+  });
 }
 
 /**
@@ -6635,129 +5832,98 @@ export async function createSession(
  * inserted and must run the rest of the start flow) from the loser/dup (false:
  * the row already existed and must be returned as-is).
  */
-export async function createSessionWithIdempotencyKey(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    initialMessage: string;
-    resources: ResourceRef[];
-    tools?: ToolRef[];
-    metadata: Record<string, unknown>;
-    model: string;
-    sandboxBackend: SandboxBackend;
-    environmentId?: string | null;
-    firstPartyMcpPermissions?: Permission[] | null;
-    // Per-session agent persona/system instructions (org-visible, not a secret).
-    instructions?: string | null;
-    parentSessionId?: string | null;
-    createIdempotencyKey: string;
-    // The shared-sandbox group to join. Omit (or null) for a singleton group
-    // (group === the new row's own id); a shared spawn passes the parent's group.
-    sandboxGroupId?: string | null;
-    sandboxOs?: SandboxOs;
-    mcpServers?: CreateSessionMcpServerInput[];
-  },
-): Promise<{ session: Session; created: boolean }> {
+export async function createSessionWithIdempotencyKey(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  initialMessage: string;
+  resources: ResourceRef[];
+  tools?: ToolRef[];
+  metadata: Record<string, unknown>;
+  model: string;
+  sandboxBackend: SandboxBackend;
+  variableSetId?: string | null;
+  // The rig + frozen active rig version resolved at create (M3). Both omitted/null
+  // ⇒ a rig-less session (byte-for-byte today's behavior).
+  rigId?: string | null;
+  rigVersionId?: string | null;
+  firstPartyMcpPermissions?: Permission[] | null;
+  // Per-session agent persona/system instructions (org-visible, not a secret).
+  instructions?: string | null;
+  parentSessionId?: string | null;
+  createIdempotencyKey: string;
+  // The shared-sandbox group to join. Omit (or null) for a singleton group
+  // (group === the new row's own id); a shared spawn passes the parent's group.
+  sandboxGroupId?: string | null;
+  sandboxOs?: SandboxOs;
+  mcpServers?: CreateSessionMcpServerInput[];
+}): Promise<{ session: Session; created: boolean }> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = crypto.randomUUID();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [inserted] = await scopedDb
-        .insert(schema.sessions)
-        .values({
-          id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          initialMessage: input.initialMessage,
-          resources: input.resources,
-          tools: input.tools ?? [],
-          metadata: input.metadata,
-          model: input.model,
-          sandboxBackend: input.sandboxBackend,
-          sandboxOs: input.sandboxOs ?? "linux",
-          sandboxGroupId: input.sandboxGroupId ?? id,
-          environmentId: input.environmentId ?? null,
-          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-          instructions: input.instructions ?? null,
-          parentSessionId: input.parentSessionId ?? null,
-          createIdempotencyKey: input.createIdempotencyKey,
-          status: "queued",
-        })
-        .onConflictDoNothing({
-          target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
-          where: sql`${schema.sessions.createIdempotencyKey} is not null`,
-        })
-        .returning();
-      if (inserted) {
-        const mcpServers = await insertSessionMcpServers(scopedDb, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: inserted.id,
-          servers: input.mcpServers ?? [],
-        });
-        return { session: mapSession(inserted, mcpServers), created: true };
-      }
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
-          ),
-        )
-        .limit(1);
-      if (!existing) {
-        // No row inserted and none found: the conflict target did not actually
-        // collide (should never happen for a present key) — surface it rather
-        // than silently returning a phantom.
-        throw new Error("Failed to create session under idempotency key");
-      }
-      const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [
-        existing.id,
-      ]);
-      return { session: mapSession(existing, grouped.get(existing.id) ?? []), created: false };
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [inserted] = await scopedDb.insert(schema.sessions).values({
+      id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      resources: input.resources,
+      tools: input.tools ?? [],
+      metadata: input.metadata,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      sandboxOs: input.sandboxOs ?? "linux",
+      sandboxGroupId: input.sandboxGroupId ?? id,
+      variableSetId: input.variableSetId ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey: input.createIdempotencyKey,
+      status: "queued",
+    }).onConflictDoNothing({
+      target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
+      where: sql`${schema.sessions.createIdempotencyKey} is not null`,
+    }).returning();
+    if (inserted) {
+      const mcpServers = await insertSessionMcpServers(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: inserted.id,
+        servers: input.mcpServers ?? [],
+      });
+      return { session: mapSession(inserted, mcpServers), created: true };
+    }
+    const [existing] = await scopedDb.select().from(schema.sessions).where(and(
+      eq(schema.sessions.workspaceId, input.workspaceId),
+      eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
+    )).limit(1);
+    if (!existing) {
+      // No row inserted and none found: the conflict target did not actually
+      // collide (should never happen for a present key) — surface it rather
+      // than silently returning a phantom.
+      throw new Error("Failed to create session under idempotency key");
+    }
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [existing.id]);
+    return { session: mapSession(existing, grouped.get(existing.id) ?? []), created: false };
+  });
 }
 
-export async function getSessionByCreateIdempotencyKey(
-  db: Database,
-  workspaceId: string,
-  createIdempotencyKey: string,
-): Promise<Session | null> {
+export async function getSessionByCreateIdempotencyKey(db: Database, workspaceId: string, createIdempotencyKey: string): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
-        ),
-      )
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.sessions).where(and(
+      eq(schema.sessions.workspaceId, workspaceId),
+      eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
+    )).limit(1);
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return mapSession(row, grouped.get(row.id) ?? []);
   });
 }
 
-export async function getSession(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Session | null> {
+export async function getSession(db: Database, workspaceId: string, sessionId: string): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).limit(1);
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return mapSession(row, grouped.get(row.id) ?? []);
@@ -6776,50 +5942,54 @@ export async function getSession(
  * session (any one suffices to read the shared box's backend/os); null when the
  * group has no session in this workspace.
  */
-export async function getAnySessionInGroup(
-  db: Database,
-  workspaceId: string,
-  sandboxGroupId: string,
-): Promise<Session | null> {
+export async function getAnySessionInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.sandboxGroupId, sandboxGroupId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
       .limit(1);
     return row ? mapSession(row) : null;
   });
 }
 
 /**
- * The DISTINCT environmentIds across a group's member sessions (workspace-
- * scoped; null = no environment attached). The env-aware create check compares
+ * The DISTINCT variableSetIds across a group's member sessions (workspace-
+ * scoped; null = no variableSet attached). The env-aware create check compares
  * a joiner against EVERY member — an arbitrary single member (getAnySessionInGroup)
  * makes the compatibility verdict nondeterministic for legacy env-blind groups
- * whose members carry mixed environmentIds.
+ * whose members carry mixed variableSetIds.
  */
-export async function listDistinctEnvironmentIdsInGroup(
-  db: Database,
-  workspaceId: string,
-  sandboxGroupId: string,
-): Promise<Array<string | null>> {
+export async function listDistinctVariableSetIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .selectDistinct({ environmentId: schema.sessions.environmentId })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.sandboxGroupId, sandboxGroupId),
-        ),
-      );
-    return rows.map((r) => r.environmentId ?? null);
+    const rows = await scopedDb.selectDistinct({ variableSetId: schema.sessions.variableSetId }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return rows.map((r) => r.variableSetId ?? null);
   });
+}
+
+// M3 rig sharing gate: the distinct frozen rig_version_ids across a group's
+// sessions. Mirrors listDistinctVariableSetIdsInGroup — the box's rig-baked
+// setup is fixed at cold-create, so a session joining a group must carry the
+// SAME rig_version_id (or the join is a genuine shared-state conflict). A null
+// entry means a rig-less member (compatible only with another rig-less join).
+export async function listDistinctRigVersionIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.selectDistinct({ rigVersionId: schema.sessions.rigVersionId }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return rows.map((r) => r.rigVersionId ?? null);
+  });
+}
+
+// M3 default-rig fallback: the workspace's default rig id (workspaces.default_rig_id),
+// read WITHOUT surfacing it through the Workspace contract (a workspace-settings
+// UI concern deferred to M5). A create with no explicit rigId falls back to this.
+// Not RLS-scoped for the same reason getWorkspace is not: the workspace row is
+// addressed by its primary key and the caller already holds the workspace grant.
+export async function getWorkspaceDefaultRigId(db: Database, workspaceId: string): Promise<string | null> {
+  const [row] = await db.select({ defaultRigId: schema.workspaces.defaultRigId })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return row?.defaultRigId ?? null;
 }
 
 export type ListSessionsOptions = {
@@ -6827,21 +5997,9 @@ export type ListSessionsOptions = {
   parentSessionId?: string | null;
 };
 
-export async function listSessions(
-  db: Database,
-  workspaceId: string,
-  limit?: number,
-): Promise<Session[]>;
-export async function listSessions(
-  db: Database,
-  workspaceId: string,
-  options?: ListSessionsOptions,
-): Promise<Session[]>;
-export async function listSessions(
-  db: Database,
-  workspaceId: string,
-  limitOrOptions: number | ListSessionsOptions = 50,
-): Promise<Session[]> {
+export async function listSessions(db: Database, workspaceId: string, limit?: number): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, options?: ListSessionsOptions): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, limitOrOptions: number | ListSessionsOptions = 50): Promise<Session[]> {
   const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
   const limit = options.limit ?? 50;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -6854,17 +6012,11 @@ export async function listSessions(
         filters.push(eq(schema.sessions.parentSessionId, parentSessionId));
       }
     }
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessions)
+    const rows = await scopedDb.select().from(schema.sessions)
       .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
-    const grouped = await sessionMcpServerMetadataForSessions(
-      scopedDb,
-      workspaceId,
-      rows.map((row) => row.id),
-    );
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
     return rows.map((row) => mapSession(row, grouped.get(row.id) ?? []));
   });
 }
@@ -6888,11 +6040,7 @@ type LineageIdRow = {
  * before RLS is considered. Ancestors are capped at 10 and returned root-first.
  * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
  */
-export async function getSessionLineage(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionLineage | null> {
+export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
   const descendantLimit = 200;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
@@ -6908,7 +6056,7 @@ export async function getSessionLineage(
       return null;
     }
 
-    const ancestorRows = (await scopedDb.execute(sql<LineageIdRow>`
+    const ancestorRows = await scopedDb.execute(sql<LineageIdRow>`
       with recursive ancestors(id, parent_session_id, depth, path) as (
         select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}]
         from ${schema.sessions}
@@ -6926,9 +6074,9 @@ export async function getSessionLineage(
       from ancestors
       where depth > 0
       order by depth desc
-    `)) as LineageIdRow[];
+    `) as LineageIdRow[];
 
-    const childRows = (await scopedDb.execute(sql<LineageIdRow>`
+    const childRows = await scopedDb.execute(sql<LineageIdRow>`
       with recursive descendants(id, parent_session_id, depth, path) as (
         select child.id, child.parent_session_id, 1, array[${sessionId}, child.id]
         from ${schema.sessions} child
@@ -6946,7 +6094,7 @@ export async function getSessionLineage(
       from descendants
       order by path
       limit ${descendantLimit + 1}
-    `)) as LineageIdRow[];
+    `) as LineageIdRow[];
     const truncated = childRows.length > descendantLimit;
     const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
@@ -6955,18 +6103,10 @@ export async function getSessionLineage(
     if (ids.length === 0) {
       return { ancestors: [], children: [], truncated: false };
     }
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessions)
+    const rows = await scopedDb.select().from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
-    const grouped = await sessionMcpServerMetadataForSessions(
-      scopedDb,
-      workspaceId,
-      rows.map((row) => row.id),
-    );
-    const sessionsById = new Map(
-      rows.map((row) => [row.id, mapSession(row, grouped.get(row.id) ?? [])]),
-    );
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
+    const sessionsById = new Map(rows.map((row) => [row.id, mapSession(row, grouped.get(row.id) ?? [])]));
 
     const ancestors = ancestorRows
       .map((row) => sessionsById.get(row.id))
@@ -7000,31 +6140,20 @@ export async function getSessionLineage(
  * delete path uses this to refuse (409) while a session could still be running
  * in Temporal, since there is no clean session-terminate to call first.
  */
-export async function countActiveSessionsForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<number> {
+export async function countActiveSessionsForWorkspace(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [{ count } = { count: 0 }] = await scopedDb
-      .select({
-        count: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
-        ),
-      );
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
+      ));
     return Number(count);
   });
 }
 
-export async function requireSession(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Session> {
+export async function requireSession(db: Database, workspaceId: string, sessionId: string): Promise<Session> {
   const session = await getSession(db, workspaceId, sessionId);
   if (!session) {
     throw new Error(`Session not found: ${sessionId}`);
@@ -7040,24 +6169,9 @@ export type ListSessionEventsOptions = {
 
 const POSTGRES_INT_MAX = 2_147_483_647;
 
-export async function listSessionEvents(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionEvent[]>;
-export async function listSessionEvents(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  after: number,
-  limit?: number,
-): Promise<SessionEvent[]>;
-export async function listSessionEvents(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  options: ListSessionEventsOptions,
-): Promise<SessionEvent[]>;
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string): Promise<SessionEvent[]>;
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, after: number, limit?: number): Promise<SessionEvent[]>;
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, options: ListSessionEventsOptions): Promise<SessionEvent[]>;
 export async function listSessionEvents(
   db: Database,
   workspaceId: string,
@@ -7065,10 +6179,9 @@ export async function listSessionEvents(
   afterOrOptions: number | ListSessionEventsOptions = 0,
   legacyLimit = 500,
 ): Promise<SessionEvent[]> {
-  const options =
-    typeof afterOrOptions === "number"
-      ? { after: afterOrOptions, limit: legacyLimit }
-      : afterOrOptions;
+  const options = typeof afterOrOptions === "number"
+    ? { after: afterOrOptions, limit: legacyLimit }
+    : afterOrOptions;
   const after = normalizeEventSequence(options.after, 0);
   const limit = normalizeEventLimit(options.limit, 500);
   const hasBefore = options.before !== undefined && Number.isFinite(options.before);
@@ -7083,9 +6196,7 @@ export async function listSessionEvents(
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessionEvents)
+    const rows = await scopedDb.select().from(schema.sessionEvents)
       .where(and(...filters))
       .orderBy(hasBefore ? desc(schema.sessionEvents.sequence) : asc(schema.sessionEvents.sequence))
       .limit(limit);
@@ -7093,7 +6204,9 @@ export async function listSessionEvents(
   });
 }
 
-export type ToolspaceCallReservation = { reserved: true; count: number } | { reserved: false };
+export type ToolspaceCallReservation =
+  | { reserved: true; count: number }
+  | { reserved: false };
 
 /**
  * Atomically reserve one toolspace call against a turn's per-turn budget.
@@ -7113,17 +6226,14 @@ export async function reserveToolspaceCallForTurn(
   limit: number,
 ): Promise<ToolspaceCallReservation> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionTurns)
+    const [row] = await scopedDb.update(schema.sessionTurns)
       .set({ toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1` })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.id, turnId),
-          sql`${schema.sessionTurns.toolspaceCallCount} < ${limit}`,
-        ),
-      )
+      .where(and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        eq(schema.sessionTurns.id, turnId),
+        sql`${schema.sessionTurns.toolspaceCallCount} < ${limit}`,
+      ))
       .returning({ count: schema.sessionTurns.toolspaceCallCount });
     return row ? { reserved: true, count: Number(row.count) } : { reserved: false };
   });
@@ -7143,31 +6253,14 @@ function normalizeEventLimit(value: number | undefined, fallback: number): numbe
   return Math.max(0, Math.floor(value));
 }
 
-export async function getSessionEvent(
-  db: Database,
-  workspaceId: string,
-  eventId: string,
-): Promise<SessionEvent | null> {
+export async function getSessionEvent(db: Database, workspaceId: string, eventId: string): Promise<SessionEvent | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, workspaceId),
-          eq(schema.sessionEvents.id, eventId),
-        ),
-      )
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.sessionEvents).where(and(eq(schema.sessionEvents.workspaceId, workspaceId), eq(schema.sessionEvents.id, eventId))).limit(1);
     return row ? mapEvent(row) : null;
   });
 }
 
-export async function getLatestRunState(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{
+export async function getLatestRunState(db: Database, workspaceId: string, sessionId: string): Promise<{
   id: string;
   serializedRunState: string;
   pendingApprovals: unknown[];
@@ -7178,25 +6271,16 @@ export async function getLatestRunState(
   frozenCodexCredentialId: string | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.agentRunStates)
-      .where(
-        and(
-          eq(schema.agentRunStates.workspaceId, workspaceId),
-          eq(schema.agentRunStates.sessionId, sessionId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.agentRunStates)
+      .where(and(eq(schema.agentRunStates.workspaceId, workspaceId), eq(schema.agentRunStates.sessionId, sessionId)))
       .orderBy(desc(schema.agentRunStates.createdAt))
       .limit(1);
-    return row
-      ? {
-          id: row.id,
-          serializedRunState: row.serializedRunState,
-          pendingApprovals: row.pendingApprovals,
-          frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
-        }
-      : null;
+    return row ? {
+      id: row.id,
+      serializedRunState: row.serializedRunState,
+      pendingApprovals: row.pendingApprovals,
+      frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
+    } : null;
   });
 }
 
@@ -7206,69 +6290,42 @@ export async function getLatestRunState(
  * repeated writers (streaming writes + turn-end reconciliation) converge
  * instead of duplicating.
  */
-export async function appendSessionHistoryItems(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId?: string | null;
-    // The codex account that produced these items (the turn's resolved credential
-    // id), or null/undefined on the non-codex path. Stored verbatim so the read
-    // path can strip cross-account reasoning.encrypted_content blobs per turn.
-    producerCodexCredentialId?: string | null;
-    items: Array<{ position: number; item: Record<string, unknown> }>;
-  },
-): Promise<void> {
+export async function appendSessionHistoryItems(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  // The codex account that produced these items (the turn's resolved credential
+  // id), or null/undefined on the non-codex path. Stored verbatim so the read
+  // path can strip cross-account reasoning.encrypted_content blobs per turn.
+  producerCodexCredentialId?: string | null;
+  items: Array<{ position: number; item: Record<string, unknown> }>;
+}): Promise<void> {
   if (input.items.length === 0) {
     return;
   }
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb
-        .insert(schema.sessionHistoryItems)
-        .values(
-          input.items.map((entry) => ({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId ?? null,
-            producerCodexCredentialId: input.producerCodexCredentialId ?? null,
-            position: entry.position,
-            item: sanitizeEventPayload(entry.item),
-          })),
-        )
-        .onConflictDoNothing({
-          target: [
-            schema.sessionHistoryItems.workspaceId,
-            schema.sessionHistoryItems.sessionId,
-            schema.sessionHistoryItems.position,
-          ],
-        });
-    },
-  );
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.sessionHistoryItems).values(input.items.map((entry) => ({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      producerCodexCredentialId: input.producerCodexCredentialId ?? null,
+      position: entry.position,
+      item: sanitizeEventPayload(entry.item),
+    }))).onConflictDoNothing({
+      target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+    });
+  });
 }
 
-export async function getSessionHistoryItems(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Array<{ position: number; item: Record<string, unknown> }>> {
+export async function getSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown> }>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({
-        position: schema.sessionHistoryItems.position,
-        item: schema.sessionHistoryItems.item,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, sessionId),
-        ),
-      )
+    const rows = await scopedDb.select({
+      position: schema.sessionHistoryItems.position,
+      item: schema.sessionHistoryItems.item,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)))
       .orderBy(schema.sessionHistoryItems.position);
     return rows;
   });
@@ -7282,32 +6339,18 @@ export async function getSessionHistoryItems(
  * (summarized-away) prefix rows are excluded while the full transcript stays in
  * the table as an audit trail.
  */
-export async function getActiveSessionHistoryItems(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<
-  Array<{
-    position: number;
-    item: Record<string, unknown>;
-    producerCodexCredentialId: string | null;
-  }>
-> {
+export async function getActiveSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown>; producerCodexCredentialId: string | null }>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({
-        position: schema.sessionHistoryItems.position,
-        item: schema.sessionHistoryItems.item,
-        producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, sessionId),
-          eq(schema.sessionHistoryItems.active, true),
-        ),
-      )
+    const rows = await scopedDb.select({
+      position: schema.sessionHistoryItems.position,
+      item: schema.sessionHistoryItems.item,
+      producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
+    }).from(schema.sessionHistoryItems)
+      .where(and(
+        eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, sessionId),
+        eq(schema.sessionHistoryItems.active, true),
+      ))
       .orderBy(schema.sessionHistoryItems.position);
     return rows;
   });
@@ -7319,24 +6362,16 @@ export async function getActiveSessionHistoryItems(
  * index — which after a compaction is far smaller than the total persisted-row
  * count (countSessionHistoryItems still includes the superseded prefix).
  */
-export async function countActiveSessionHistoryItems(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
+export async function countActiveSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        count: sql<number>`count(*)`,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, sessionId),
-          eq(schema.sessionHistoryItems.active, true),
-        ),
-      );
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(
+        eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, sessionId),
+        eq(schema.sessionHistoryItems.active, true),
+      ));
     return Number(row?.count ?? 0);
   });
 }
@@ -7462,99 +6497,73 @@ export function orphanedResultRowIndicesForRepair(
  * before the tail. Because positions are whole numbers and summaries are
  * half-steps, the summary's fractional position can never equal a real row.
  */
-export async function applyContextCompaction(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId?: string | null;
-    /** Active prefix rows with position < boundaryPosition get superseded. */
-    boundaryPosition: number;
-    /** Position for the new summary row. Old boundary mode uses a fractional half-step before the kept tail. */
-    summaryPosition: number;
-    /**
-     * Optional replacement rows inserted after superseding the old active set.
-     * Used by Codex-parity client compaction to rebuild active history as retained
-     * user messages plus one summary. These rows are synthetic replay rows, so
-     * they intentionally do not inherit the current compaction turn id.
-     */
-    replacementItems?: Array<{ position: number; item: Record<string, unknown> }>;
-    summaryItem: Record<string, unknown>;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.transaction(async (tx) => {
-        await tx
-          .update(schema.sessionHistoryItems)
-          .set({ active: false })
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              lt(schema.sessionHistoryItems.position, input.boundaryPosition),
-            ),
-          );
-        if (input.replacementItems && input.replacementItems.length > 0) {
-          await tx
-            .insert(schema.sessionHistoryItems)
-            .values(
-              input.replacementItems.map((entry) => ({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: null,
-                position: entry.position,
-                item: sanitizeEventPayload(entry.item),
-                active: true,
-              })),
-            )
-            .onConflictDoUpdate({
-              target: [
-                schema.sessionHistoryItems.workspaceId,
-                schema.sessionHistoryItems.sessionId,
-                schema.sessionHistoryItems.position,
-              ],
-              set: { active: true },
-            });
-        }
-        // Insert the summary at its FRACTIONAL position. The supersede step above
-        // also sets active=false for any rows with position < boundaryPosition —
-        // which on a RETRY includes the summary itself (it sits below the
-        // boundary). The conflict target here is that fractional position, which
-        // can ONLY ever collide with a prior summary row (real rows are whole
-        // numbers), so onConflictDoUpdate set:{active:true} is safe: it merely
-        // re-activates the existing summary, keeping the retry idempotent WITHOUT
-        // mutating its item/turnId and — crucially — WITHOUT ever touching the
-        // real row at boundaryPosition - 1 (the old integer placement overwrote
-        // it). The summary carries the current turnId so per-turn counts stay
-        // correct.
-        await tx
-          .insert(schema.sessionHistoryItems)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId ?? null,
-            position: input.summaryPosition,
-            item: sanitizeEventPayload(input.summaryItem),
-            active: true,
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.sessionHistoryItems.workspaceId,
-              schema.sessionHistoryItems.sessionId,
-              schema.sessionHistoryItems.position,
-            ],
-            set: { active: true },
-          });
+export async function applyContextCompaction(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  /** Active prefix rows with position < boundaryPosition get superseded. */
+  boundaryPosition: number;
+  /** Position for the new summary row. Old boundary mode uses a fractional half-step before the kept tail. */
+  summaryPosition: number;
+  /**
+   * Optional replacement rows inserted after superseding the old active set.
+   * Used by Codex-parity client compaction to rebuild active history as retained
+   * user messages plus one summary. These rows are synthetic replay rows, so
+   * they intentionally do not inherit the current compaction turn id.
+   */
+  replacementItems?: Array<{ position: number; item: Record<string, unknown> }>;
+  summaryItem: Record<string, unknown>;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.transaction(async (tx) => {
+      await tx.update(schema.sessionHistoryItems)
+        .set({ active: false })
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          eq(schema.sessionHistoryItems.active, true),
+          lt(schema.sessionHistoryItems.position, input.boundaryPosition),
+        ));
+      if (input.replacementItems && input.replacementItems.length > 0) {
+        await tx.insert(schema.sessionHistoryItems).values(input.replacementItems.map((entry) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: null,
+          position: entry.position,
+          item: sanitizeEventPayload(entry.item),
+          active: true,
+        }))).onConflictDoUpdate({
+          target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+          set: { active: true },
+        });
+      }
+      // Insert the summary at its FRACTIONAL position. The supersede step above
+      // also sets active=false for any rows with position < boundaryPosition —
+      // which on a RETRY includes the summary itself (it sits below the
+      // boundary). The conflict target here is that fractional position, which
+      // can ONLY ever collide with a prior summary row (real rows are whole
+      // numbers), so onConflictDoUpdate set:{active:true} is safe: it merely
+      // re-activates the existing summary, keeping the retry idempotent WITHOUT
+      // mutating its item/turnId and — crucially — WITHOUT ever touching the
+      // real row at boundaryPosition - 1 (the old integer placement overwrote
+      // it). The summary carries the current turnId so per-turn counts stay
+      // correct.
+      await tx.insert(schema.sessionHistoryItems).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId ?? null,
+        position: input.summaryPosition,
+        item: sanitizeEventPayload(input.summaryItem),
+        active: true,
+      }).onConflictDoUpdate({
+        target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+        set: { active: true },
       });
-    },
-  );
+    });
+  });
 }
 
 /**
@@ -7565,23 +6574,12 @@ export async function applyContextCompaction(
  * from the in-memory history length (which, after a compaction, is far shorter
  * than the total persisted-row count and so cannot serve as the next position).
  */
-export async function nextSessionHistoryPosition(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
+export async function nextSessionHistoryPosition(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        maxPosition: sql<number | null>`max(${schema.sessionHistoryItems.position})`,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, sessionId),
-        ),
-      );
+    const [row] = await scopedDb.select({
+      maxPosition: sql<number | null>`max(${schema.sessionHistoryItems.position})`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)));
     const max = row?.maxPosition;
     return max === null || max === undefined ? 0 : Math.floor(Number(max)) + 1;
   });
@@ -7591,15 +6589,9 @@ export async function nextSessionHistoryPosition(
  * Record the actual input-token count of the most recent turn's final model
  * call, for the next turn's pre-read compaction trigger.
  */
-export async function setSessionLastInputTokens(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  lastInputTokens: number,
-): Promise<void> {
+export async function setSessionLastInputTokens(db: Database, workspaceId: string, sessionId: string, lastInputTokens: number): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
+    await scopedDb.update(schema.sessions)
       .set({ lastInputTokens, updatedAt: new Date() })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
   });
@@ -7667,117 +6659,75 @@ export type ClearSessionContextResult = {
  * inserts another marker at the next position, and another cleared run-state.
  * The post-conditions (one active marker row, latest run-state cleared) hold.
  */
-export async function clearSessionContext(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-  },
-): Promise<ClearSessionContextResult> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      return await scopedDb.transaction(async (tx) => {
-        const supersededRows = await tx
-          .update(schema.sessionHistoryItems)
-          .set({ active: false })
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-            ),
-          )
-          .returning({ id: schema.sessionHistoryItems.id });
+export async function clearSessionContext(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+}): Promise<ClearSessionContextResult> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const supersededRows = await tx.update(schema.sessionHistoryItems)
+        .set({ active: false })
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          eq(schema.sessionHistoryItems.active, true),
+        ))
+        .returning({ id: schema.sessionHistoryItems.id });
 
-        const [{ maxPosition } = { maxPosition: -1 }] = await tx
-          .select({
-            maxPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1)`,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-            ),
-          );
-        const markerPosition = Number(maxPosition) + 1;
-        await tx
-          .insert(schema.sessionHistoryItems)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: null,
-            position: markerPosition,
-            item: sanitizeEventPayload(clearedContextMarkerItem()),
-            active: true,
-          })
-          .onConflictDoNothing({
-            target: [
-              schema.sessionHistoryItems.workspaceId,
-              schema.sessionHistoryItems.sessionId,
-              schema.sessionHistoryItems.position,
-            ],
-          });
-
-        const [{ maxVersion } = { maxVersion: 0 }] = await tx
-          .select({
-            maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
-          })
-          .from(schema.agentRunStates)
-          .where(
-            and(
-              eq(schema.agentRunStates.workspaceId, input.workspaceId),
-              eq(schema.agentRunStates.sessionId, input.sessionId),
-            ),
-          );
-        const runStateVersion = Number(maxVersion) + 1;
-        await tx.insert(schema.agentRunStates).values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: null,
-          stateVersion: runStateVersion,
-          serializedRunState: CLEARED_RUN_STATE,
-          pendingApprovals: [],
-        });
-
-        await tx
-          .update(schema.sessions)
-          .set({ lastInputTokens: 0, updatedAt: new Date() })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          );
-
-        return { supersededItems: supersededRows.length, markerPosition, runStateVersion };
+      const [{ maxPosition } = { maxPosition: -1 }] = await tx.select({
+        maxPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1)`,
+      }).from(schema.sessionHistoryItems)
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+        ));
+      const markerPosition = Number(maxPosition) + 1;
+      await tx.insert(schema.sessionHistoryItems).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: null,
+        position: markerPosition,
+        item: sanitizeEventPayload(clearedContextMarkerItem()),
+        active: true,
+      }).onConflictDoNothing({
+        target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
       });
-    },
-  );
+
+      const [{ maxVersion } = { maxVersion: 0 }] = await tx.select({
+        maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+      }).from(schema.agentRunStates)
+        .where(and(
+          eq(schema.agentRunStates.workspaceId, input.workspaceId),
+          eq(schema.agentRunStates.sessionId, input.sessionId),
+        ));
+      const runStateVersion = Number(maxVersion) + 1;
+      await tx.insert(schema.agentRunStates).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: null,
+        stateVersion: runStateVersion,
+        serializedRunState: CLEARED_RUN_STATE,
+        pendingApprovals: [],
+      });
+
+      await tx.update(schema.sessions)
+        .set({ lastInputTokens: 0, updatedAt: new Date() })
+        .where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.sessionId)));
+
+      return { supersededItems: supersededRows.length, markerPosition, runStateVersion };
+    });
+  });
 }
 
-export async function countSessionHistoryItems(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
+export async function countSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        count: sql<number>`count(*)`,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, sessionId),
-        ),
-      );
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)));
     return Number(row?.count ?? 0);
   });
 }
@@ -7787,14 +6737,9 @@ export async function countSessionHistoryItems(
  * turn (forced client-side compaction) and clears it. Idempotent: repeated
  * requests collapse to one pending compaction.
  */
-export async function requestSessionCompaction(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<void> {
+export async function requestSessionCompaction(db: Database, workspaceId: string, sessionId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
+    await scopedDb.update(schema.sessions)
       .set({ compactRequested: true, updatedAt: new Date() })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
   });
@@ -7805,22 +6750,15 @@ export async function requestSessionCompaction(
  * was set. The worker calls this pre-turn; only the call that observed `true`
  * runs the forced compaction, so concurrent turns can't double-compact.
  */
-export async function consumeSessionCompactionRequest(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<boolean> {
+export async function consumeSessionCompactionRequest(db: Database, workspaceId: string, sessionId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const cleared = await scopedDb
-      .update(schema.sessions)
+    const cleared = await scopedDb.update(schema.sessions)
       .set({ compactRequested: false, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.id, sessionId),
-          eq(schema.sessions.compactRequested, true),
-        ),
-      )
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.id, sessionId),
+        eq(schema.sessions.compactRequested, true),
+      ))
       .returning({ id: schema.sessions.id });
     return cleared.length > 0;
   });
@@ -7833,23 +6771,12 @@ export async function consumeSessionCompactionRequest(
  * part of conversation truth, so replaying the original trigger would hand
  * the model duplicate input) or can replay its original trigger cleanly.
  */
-export async function countTurnSessionHistoryItems(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-): Promise<number> {
+export async function countTurnSessionHistoryItems(db: Database, workspaceId: string, turnId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        count: sql<number>`count(*)`,
-      })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-          eq(schema.sessionHistoryItems.turnId, turnId),
-        ),
-      );
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.turnId, turnId)));
     return Number(row?.count ?? 0);
   });
 }
@@ -7859,53 +6786,30 @@ export async function countTurnSessionHistoryItems(
  * envelope used to reattach / snapshot-restore / rebuild the sandbox),
  * decoupled from the RunState blob.
  */
-export async function upsertSandboxSessionEnvelope(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    envelope: Record<string, unknown>;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb
-        .insert(schema.sandboxSessionEnvelopes)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          envelope: input.envelope,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sandboxSessionEnvelopes.workspaceId,
-            schema.sandboxSessionEnvelopes.sessionId,
-          ],
-          set: { envelope: input.envelope, updatedAt: new Date() },
-        });
-    },
-  );
+export async function upsertSandboxSessionEnvelope(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  envelope: Record<string, unknown>;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.sandboxSessionEnvelopes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      envelope: input.envelope,
+    }).onConflictDoUpdate({
+      target: [schema.sandboxSessionEnvelopes.workspaceId, schema.sandboxSessionEnvelopes.sessionId],
+      set: { envelope: input.envelope, updatedAt: new Date() },
+    });
+  });
 }
 
-export async function getSandboxSessionEnvelope(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Record<string, unknown> | null> {
+export async function getSandboxSessionEnvelope(db: Database, workspaceId: string, sessionId: string): Promise<Record<string, unknown> | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({ envelope: schema.sandboxSessionEnvelopes.envelope })
+    const [row] = await scopedDb.select({ envelope: schema.sandboxSessionEnvelopes.envelope })
       .from(schema.sandboxSessionEnvelopes)
-      .where(
-        and(
-          eq(schema.sandboxSessionEnvelopes.workspaceId, workspaceId),
-          eq(schema.sandboxSessionEnvelopes.sessionId, sessionId),
-        ),
-      )
+      .where(and(eq(schema.sandboxSessionEnvelopes.workspaceId, workspaceId), eq(schema.sandboxSessionEnvelopes.sessionId, sessionId)))
       .limit(1);
     return row?.envelope ?? null;
   });
@@ -7951,10 +6855,7 @@ function mapRecording(row: typeof schema.sessionRecordings.$inferSelect): Sessio
     codec: row.codec,
     storageKey: row.storageKey,
     sizeBytes: row.sizeBytes === null || row.sizeBytes === undefined ? null : Number(row.sizeBytes),
-    durationSeconds:
-      row.durationSeconds === null || row.durationSeconds === undefined
-        ? null
-        : Number(row.durationSeconds),
+    durationSeconds: row.durationSeconds === null || row.durationSeconds === undefined ? null : Number(row.durationSeconds),
     width: row.width,
     height: row.height,
     reason: row.reason,
@@ -7963,85 +6864,65 @@ function mapRecording(row: typeof schema.sessionRecordings.$inferSelect): Sessio
   };
 }
 
-export async function insertRecording(
-  db: Database,
-  input: {
-    id: string;
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId?: string | null;
-    mode: SessionRecordingMode;
-    codec: SessionRecordingCodec;
-    width: number;
-    height: number;
-    reason?: string | null;
-  },
-): Promise<SessionRecordingRow> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionRecordings)
-        .values({
-          id: input.id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId ?? null,
-          state: "recording",
-          mode: input.mode,
-          codec: input.codec,
-          width: input.width,
-          height: input.height,
-          reason: input.reason ?? null,
-        })
-        .returning();
-      return mapRecording(row!);
-    },
-  );
+export async function insertRecording(db: Database, input: {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  mode: SessionRecordingMode;
+  codec: SessionRecordingCodec;
+  width: number;
+  height: number;
+  reason?: string | null;
+}): Promise<SessionRecordingRow> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessionRecordings).values({
+      id: input.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      state: "recording",
+      mode: input.mode,
+      codec: input.codec,
+      width: input.width,
+      height: input.height,
+      reason: input.reason ?? null,
+    }).returning();
+    return mapRecording(row!);
+  });
 }
 
-export async function updateRecording(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    recordingId: string;
-    state: SessionRecordingState;
-    storageKey?: string | null;
-    sizeBytes?: number | null;
-    durationSeconds?: number | null;
-    reason?: string | null;
-    finalized?: boolean;
-  },
-): Promise<SessionRecordingRow | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const set: Partial<typeof schema.sessionRecordings.$inferInsert> = { state: input.state };
-      if (input.storageKey !== undefined) set.storageKey = input.storageKey;
-      if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
-      if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
-      if (input.reason !== undefined) set.reason = input.reason;
-      if (input.finalized || input.state === "available" || input.state === "failed") {
-        set.finalizedAt = new Date();
-      }
-      const [row] = await scopedDb
-        .update(schema.sessionRecordings)
-        .set(set)
-        .where(
-          and(
-            eq(schema.sessionRecordings.workspaceId, input.workspaceId),
-            eq(schema.sessionRecordings.id, input.recordingId),
-          ),
-        )
-        .returning();
-      return row ? mapRecording(row) : null;
-    },
-  );
+export async function updateRecording(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  state: SessionRecordingState;
+  storageKey?: string | null;
+  sizeBytes?: number | null;
+  durationSeconds?: number | null;
+  reason?: string | null;
+  finalized?: boolean;
+}): Promise<SessionRecordingRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const set: Partial<typeof schema.sessionRecordings.$inferInsert> = { state: input.state };
+    if (input.storageKey !== undefined) set.storageKey = input.storageKey;
+    if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
+    if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
+    if (input.reason !== undefined) set.reason = input.reason;
+    if (input.finalized || input.state === "available" || input.state === "failed") {
+      set.finalizedAt = new Date();
+    }
+    const [row] = await scopedDb.update(schema.sessionRecordings)
+      .set(set)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+        eq(schema.sessionRecordings.id, input.recordingId),
+      ))
+      .returning();
+    return row ? mapRecording(row) : null;
+  });
 }
 
 /**
@@ -8051,65 +6932,39 @@ export async function updateRecording(
  * is removed entirely rather than surfaced as a phantom recording or a failure. No
  * other table FK-references session_recordings, so the delete is self-contained.
  */
-export async function deleteRecording(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    recordingId: string;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb
-        .delete(schema.sessionRecordings)
-        .where(
-          and(
-            eq(schema.sessionRecordings.workspaceId, input.workspaceId),
-            eq(schema.sessionRecordings.id, input.recordingId),
-          ),
-        );
-    },
-  );
+export async function deleteRecording(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.delete(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+        eq(schema.sessionRecordings.id, input.recordingId),
+      ));
+  });
 }
 
-export async function getRecording(
-  db: Database,
-  workspaceId: string,
-  recordingId: string,
-): Promise<SessionRecordingRow | null> {
+export async function getRecording(db: Database, workspaceId: string, recordingId: string): Promise<SessionRecordingRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessionRecordings)
-      .where(
-        and(
-          eq(schema.sessionRecordings.workspaceId, workspaceId),
-          eq(schema.sessionRecordings.id, recordingId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, workspaceId),
+        eq(schema.sessionRecordings.id, recordingId),
+      ))
       .limit(1);
     return row ? mapRecording(row) : null;
   });
 }
 
-export async function listRecordings(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionRecordingRow[]> {
+export async function listRecordings(db: Database, workspaceId: string, sessionId: string): Promise<SessionRecordingRow[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessionRecordings)
-      .where(
-        and(
-          eq(schema.sessionRecordings.workspaceId, workspaceId),
-          eq(schema.sessionRecordings.sessionId, sessionId),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, workspaceId),
+        eq(schema.sessionRecordings.sessionId, sessionId),
+      ))
       .orderBy(desc(schema.sessionRecordings.createdAt));
     return rows.map(mapRecording);
   });
@@ -8158,65 +7013,47 @@ function mapPtySession(row: typeof schema.sandboxPtySessions.$inferSelect): Sand
   };
 }
 
-export async function insertPtySession(
-  db: Database,
-  input: {
-    id: string;
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    execSessionId?: number | null;
-    leaseEpoch: number;
-    cols: number;
-    rows: number;
-    shell: string;
-    cwd: string;
-    openedBy: string;
-  },
-): Promise<SandboxPtySessionRow> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sandboxPtySessions)
-        .values({
-          id: input.id,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          execSessionId: input.execSessionId ?? null,
-          leaseEpoch: input.leaseEpoch,
-          cols: input.cols,
-          rows: input.rows,
-          shell: input.shell,
-          cwd: input.cwd,
-          status: "open",
-          openedBy: input.openedBy,
-        })
-        .returning();
-      return mapPtySession(row!);
-    },
-  );
+export async function insertPtySession(db: Database, input: {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  execSessionId?: number | null;
+  leaseEpoch: number;
+  cols: number;
+  rows: number;
+  shell: string;
+  cwd: string;
+  openedBy: string;
+}): Promise<SandboxPtySessionRow> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sandboxPtySessions).values({
+      id: input.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      execSessionId: input.execSessionId ?? null,
+      leaseEpoch: input.leaseEpoch,
+      cols: input.cols,
+      rows: input.rows,
+      shell: input.shell,
+      cwd: input.cwd,
+      status: "open",
+      openedBy: input.openedBy,
+    }).returning();
+    return mapPtySession(row!);
+  });
 }
 
 /** Read an OPEN PTY row by ptyId. Returns null when absent or already closed. */
-export async function getOpenPtySession(
-  db: Database,
-  workspaceId: string,
-  ptyId: string,
-): Promise<SandboxPtySessionRow | null> {
+export async function getOpenPtySession(db: Database, workspaceId: string, ptyId: string): Promise<SandboxPtySessionRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sandboxPtySessions)
-      .where(
-        and(
-          eq(schema.sandboxPtySessions.workspaceId, workspaceId),
-          eq(schema.sandboxPtySessions.id, ptyId),
-          eq(schema.sandboxPtySessions.status, "open"),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.sandboxPtySessions)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, workspaceId),
+        eq(schema.sandboxPtySessions.id, ptyId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
       .limit(1);
     return row ? mapPtySession(row) : null;
   });
@@ -8224,88 +7061,58 @@ export async function getOpenPtySession(
 
 /** Stamp the SDK exec-session id (known only after the open exec yields a still-
  *  running process) + refresh the input-activity TTL. */
-export async function updatePtySessionActivity(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    ptyId: string;
-    execSessionId?: number | null;
-    cols?: number;
-    rows?: number;
-  },
-): Promise<SandboxPtySessionRow | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const set: Partial<typeof schema.sandboxPtySessions.$inferInsert> = {
-        lastInputAt: new Date(),
-      };
-      if (input.execSessionId !== undefined) set.execSessionId = input.execSessionId;
-      if (input.cols !== undefined) set.cols = input.cols;
-      if (input.rows !== undefined) set.rows = input.rows;
-      const [row] = await scopedDb
-        .update(schema.sandboxPtySessions)
-        .set(set)
-        .where(
-          and(
-            eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
-            eq(schema.sandboxPtySessions.id, input.ptyId),
-            eq(schema.sandboxPtySessions.status, "open"),
-          ),
-        )
-        .returning();
-      return row ? mapPtySession(row) : null;
-    },
-  );
+export async function updatePtySessionActivity(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  ptyId: string;
+  execSessionId?: number | null;
+  cols?: number;
+  rows?: number;
+}): Promise<SandboxPtySessionRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const set: Partial<typeof schema.sandboxPtySessions.$inferInsert> = { lastInputAt: new Date() };
+    if (input.execSessionId !== undefined) set.execSessionId = input.execSessionId;
+    if (input.cols !== undefined) set.cols = input.cols;
+    if (input.rows !== undefined) set.rows = input.rows;
+    const [row] = await scopedDb.update(schema.sandboxPtySessions)
+      .set(set)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+        eq(schema.sandboxPtySessions.id, input.ptyId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
+      .returning();
+    return row ? mapPtySession(row) : null;
+  });
 }
 
 /** Mark a PTY closed (idempotent — a double close on a closed row is a no-op). */
-export async function closePtySession(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    ptyId: string;
-  },
-): Promise<SandboxPtySessionRow | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .update(schema.sandboxPtySessions)
-        .set({ status: "closed", closedAt: new Date() })
-        .where(
-          and(
-            eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
-            eq(schema.sandboxPtySessions.id, input.ptyId),
-          ),
-        )
-        .returning();
-      return row ? mapPtySession(row) : null;
-    },
-  );
+export async function closePtySession(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  ptyId: string;
+}): Promise<SandboxPtySessionRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sandboxPtySessions)
+      .set({ status: "closed", closedAt: new Date() })
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+        eq(schema.sandboxPtySessions.id, input.ptyId),
+      ))
+      .returning();
+    return row ? mapPtySession(row) : null;
+  });
 }
 
 /** List a session's OPEN PTYs (reattach + reap). */
-export async function listOpenPtySessions(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SandboxPtySessionRow[]> {
+export async function listOpenPtySessions(db: Database, workspaceId: string, sessionId: string): Promise<SandboxPtySessionRow[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sandboxPtySessions)
-      .where(
-        and(
-          eq(schema.sandboxPtySessions.workspaceId, workspaceId),
-          eq(schema.sandboxPtySessions.sessionId, sessionId),
-          eq(schema.sandboxPtySessions.status, "open"),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.sandboxPtySessions)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, workspaceId),
+        eq(schema.sandboxPtySessions.sessionId, sessionId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
       .orderBy(desc(schema.sandboxPtySessions.createdAt));
     return rows.map(mapPtySession);
   });
@@ -8344,6 +7151,7 @@ type LeaseRow = {
   backend: string;
   os: string;
   image: string | null;
+  rig_version_id: string | null;
   data_plane_url: string | null;
   terminal_data_plane_url: string | null;
   lease_epoch: number | string;
@@ -8368,6 +7176,11 @@ export interface LeaseSnapshot {
   // for a legacy/cold row (image unknown). Shared state: all the box's sessions run
   // this image; a resume resolving a different image conflicts (B3).
   image: string | null;
+  // The frozen rig version the group box was created under (M3). Like `image`,
+  // shared state: a resume resolving a DIFFERENT rig_version_id conflicts (solo
+  // recreates, N-holders throw SandboxRigConflictError). Null = rig unknown
+  // (legacy/cold row or a rig-less session), which never conflicts.
+  rigVersionId: string | null;
   dataPlaneUrl: string | null;
   // The cached ttyd pty-ws tunnel URL (7681), separate from dataPlaneUrl (the
   // 6080 desktop tunnel). Null until mintTerminalStream resolves + records it.
@@ -8393,17 +7206,23 @@ export interface AcquireLeaseInput {
   // singleton group). The lease is per-group, not per-session.
   sandboxGroupId: string;
   kind: LeaseHolderKind;
-  holderId: string; // session_turns.id (turn) | viewer connection id (viewer)
-  subjectId?: string | null; // the attributing session within the group
-  backend: string; // sessions.sandbox_backend
-  os?: string; // default 'linux'
+  holderId: string;            // session_turns.id (turn) | viewer connection id (viewer)
+  subjectId?: string | null;   // the attributing session within the group
+  backend: string;             // sessions.sandbox_backend
+  os?: string;                 // default 'linux'
   // The container image this run resolves (Modal image ref / docker image). Stamped on
   // the cold-create + folded onto a warming/CAS; a warm/draining/warming box already
   // running a DIFFERENT image is a shared-state conflict (B3): a SOLO holder forces the
   // box to recreate on this image, N-holders throw SandboxImageConflictError. Omitted
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
-  leaseTtlMs: number; // refresh window for expires_at (turn-heartbeat cadence)
+  // The frozen rig version this run rides (M3). Stamped on the cold-create + CAS
+  // and conflicted exactly like `image`: a live multi-holder box under a DIFFERENT
+  // rig version throws SandboxRigConflictError; a solo holder recreates the box cold
+  // on the new rig. Omitted (null/undefined) -> rig is not enforced (rig-less
+  // sessions never stamp or conflict; legacy/cold rows read null = compatible).
+  rigVersionId?: string | null;
+  leaseTtlMs: number;          // refresh window for expires_at (turn-heartbeat cadence)
   // Expiry stamped only while a cold->warming spawner is allowed to create the
   // provider box before any instance_id exists. Warm/draining/attached refreshes
   // must continue using leaseTtlMs.
@@ -8429,10 +7248,7 @@ export type AcquireLeaseResult =
 
 // Thrown by callers that treat a fenced/superseded epoch as an error path.
 export class SandboxLeaseSupersededError extends Error {
-  constructor(
-    public readonly sandboxGroupId: string,
-    public readonly leaseEpoch: number,
-  ) {
+  constructor(public readonly sandboxGroupId: string, public readonly leaseEpoch: number) {
     super(`Sandbox lease superseded for group ${sandboxGroupId} (epoch ${leaseEpoch})`);
     this.name = "SandboxLeaseSupersededError";
   }
@@ -8451,10 +7267,30 @@ export class SandboxImageConflictError extends Error {
     public readonly requestedImage: string,
   ) {
     super(
-      `Sandbox group ${sandboxGroupId} runs image ${currentImage}; this run resolves image ${requestedImage}. ` +
-        `A shared box requires one image — spawn with sandbox:'new' for an isolated box or align the pack image.`,
+      `Sandbox group ${sandboxGroupId} runs image ${currentImage}; this run resolves image ${requestedImage}. `
+      + `A shared box requires one image — spawn with sandbox:'new' for an isolated box or align the pack image.`,
     );
     this.name = "SandboxImageConflictError";
+  }
+}
+
+// RIG IS SHARED STATE (M3): thrown when a resume resolves a rig version DIFFERENT from
+// the one the live shared box was set up under AND other holders are still on the box.
+// A rig bakes setup/tooling into the ONE shared filesystem; recreating it on a different
+// rig would yank that filesystem out from under the other sessions, so we refuse. The
+// turn activity surfaces this as an actionable error. A SOLO holder never hits this —
+// acquireLease recreates the box cold on the new rig instead. Mirrors SandboxImageConflictError.
+export class SandboxRigConflictError extends Error {
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly currentRigVersionId: string,
+    public readonly requestedRigVersionId: string,
+  ) {
+    super(
+      `Sandbox group ${sandboxGroupId} was set up for rig version ${currentRigVersionId}; this run resolves rig version ${requestedRigVersionId}. `
+      + `A shared box requires one rig — spawn with sandbox:'new' for an isolated box or bind the group's rig.`,
+    );
+    this.name = "SandboxRigConflictError";
   }
 }
 
@@ -8470,6 +7306,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     backend: row.backend,
     os: row.os,
     image: row.image ?? null,
+    rigVersionId: row.rig_version_id ?? null,
     dataPlaneUrl: row.data_plane_url,
     terminalDataPlaneUrl: row.terminal_data_plane_url ?? null,
     // Defensive coercion: integer returns a number, but coerce regardless so the
@@ -8513,13 +7350,8 @@ async function recomputeAndStampLease(
 // Idempotent acquire: the unique (lease, kind, holder) index makes a retried or
 // duplicate acquire a no-op heartbeat refresh, never a double-count.
 async function upsertLeaseHolder(
-  tx: Database,
-  leaseId: string,
-  accountId: string,
-  workspaceId: string,
-  kind: LeaseHolderKind,
-  holderId: string,
-  subjectId: string | null,
+  tx: Database, leaseId: string, accountId: string, workspaceId: string,
+  kind: LeaseHolderKind, holderId: string, subjectId: string | null,
 ): Promise<void> {
   await tx.execute(sql`
     insert into sandbox_lease_holders
@@ -8533,161 +7365,160 @@ async function upsertLeaseHolder(
 // §4.1 — the get-or-create critical section. ONE transaction:
 // insert-or-nothing -> SELECT … FOR UPDATE (block, not skip) -> branch -> bump.
 // The single most load-bearing function: the sole double-spawn guard.
-export async function acquireLease(
-  db: Database,
-  input: AcquireLeaseInput,
-): Promise<AcquireLeaseResult> {
+export async function acquireLease(db: Database, input: AcquireLeaseInput): Promise<AcquireLeaseResult> {
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
   const warmingLeaseTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
-  return await withRlsContext(
-    db,
-    { accountId, workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const image = input.image ?? null;
-        // (1) Materialize the singleton row if absent. ON CONFLICT DO NOTHING + the
-        // unique index = idempotent under a race; concurrent inserts collapse to
-        // one row. expires_at seeded so a never-warmed cold row has a valid TTL. The
-        // image (B3) is stamped on the cold-create so a fresh box records the image it
-        // will be built on; a conflict on an EXISTING live box is handled below.
-        await tx.execute(sql`
+  return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) =>
+    await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const image = input.image ?? null;
+      const rigVersionId = input.rigVersionId ?? null;
+      // (1) Materialize the singleton row if absent. ON CONFLICT DO NOTHING + the
+      // unique index = idempotent under a race; concurrent inserts collapse to
+      // one row. expires_at seeded so a never-warmed cold row has a valid TTL. The
+      // image (B3) + rig version (M3) are stamped on the cold-create so a fresh box
+      // records what it will be built on; a conflict on an EXISTING live box is
+      // handled below.
+      await tx.execute(sql`
         insert into sandbox_leases
-          (account_id, workspace_id, sandbox_group_id, liveness, backend, os, image, expires_at)
+          (account_id, workspace_id, sandbox_group_id, liveness, backend, os, image, rig_version_id, expires_at)
         values
-          (${accountId}, ${workspaceId}, ${sandboxGroupId}, 'cold', ${backend}, ${os}, ${image},
+          (${accountId}, ${workspaceId}, ${sandboxGroupId}, 'cold', ${backend}, ${os}, ${image}, ${rigVersionId},
            now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval)
         on conflict (workspace_id, sandbox_group_id) do nothing
       `);
 
-        // (2) Serialize ALL concurrent arrivals on this group's row. Plain FOR
-        // UPDATE (block, do NOT skip) — unlike claimNextQueuedTurn's SKIP LOCKED,
-        // because we WANT the loser to block then attach, not skip and lose.
-        const rows = await tx.execute<LeaseRow>(sql`
+      // (2) Serialize ALL concurrent arrivals on this group's row. Plain FOR
+      // UPDATE (block, do NOT skip) — unlike claimNextQueuedTurn's SKIP LOCKED,
+      // because we WANT the loser to block then attach, not skip and lose.
+      const rows = await tx.execute<LeaseRow>(sql`
         select * from sandbox_leases
         where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
         for update
       `);
-        const row = rows[0];
-        if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
+      const row = rows[0];
+      if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
-        let liveness = row.liveness;
+      let liveness = row.liveness;
 
-        // -- IMAGE IS SHARED STATE (B3): a LIVE box (warm/draining/warming) already runs
-        // a specific image. If this run resolves a DIFFERENT image (both sides known),
-        // the shared filesystem cannot serve both. Under the held row lock we count the
-        // OTHER holders (holders that are not this exact (kind, holderId) — an idempotent
-        // retry of our own holder does not count as a rival):
-        //   - SOLO (no other holders): RECREATE. Reset the box to cold and re-stamp the
-        //     NEW image, then fall through to the cold branch below, which CASes us in as
-        //     the spawner. The spawner cold-creates a fresh box on the new image (the
-        //     archive replay in establishSandboxSessionFromEnvelope hydrates /workspace).
-        //   - OTHER holders present: REFUSE. Throw SandboxImageConflictError — recreating
-        //     would yank the running filesystem out from under the other sessions.
-        // Only enforced when BOTH images are known; a cold row / a legacy null-image box /
-        // an unset input image never conflicts (the selfhosted path passes no image).
-        if (liveness !== "cold" && image !== null && row.image !== null && row.image !== image) {
-          const others = await tx.execute<{ n: number }>(sql`
+      // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
+      // was created under a specific image AND rig version. If this run resolves a
+      // DIFFERENT image OR a DIFFERENT rig version (each checked only when both sides are
+      // known), the one shared filesystem cannot serve both. Under the held row lock we
+      // count the OTHER holders (not this exact (kind, holderId) — an idempotent retry of
+      // our own holder is not a rival):
+      //   - SOLO (no other holders): RECREATE. Reset the box to cold and re-stamp the NEW
+      //     image + rig version, then fall through to the cold branch below, which CASes us
+      //     in as the spawner. The spawner cold-creates a fresh box (the archive replay in
+      //     establishSandboxSessionFromEnvelope hydrates /workspace) — for the RIG case the
+      //     new box then re-runs the new rig's setup hook (fresh marker).
+      //   - OTHER holders present: REFUSE. Throw — recreating would yank the running
+      //     filesystem out from under the other sessions. Image conflict is reported first
+      //     so its (pre-rig) error is unchanged for the image-only case.
+      // Each axis is enforced only when BOTH sides are known; a cold row / a legacy null /
+      // an unset input never conflicts (the selfhosted path passes neither; a rig-less run
+      // passes no rigVersionId, so it never stamps or conflicts on rig).
+      const imageConflict = image !== null && row.image !== null && row.image !== image;
+      const rigConflict = rigVersionId !== null && row.rig_version_id !== null && row.rig_version_id !== rigVersionId;
+      if (liveness !== "cold" && (imageConflict || rigConflict)) {
+        const others = await tx.execute<{ n: number }>(sql`
           select count(*)::int as n from sandbox_lease_holders
           where lease_id = ${row.id} and not (kind = ${kind} and holder_id = ${holderId})
         `);
-          const otherHolders = Number(others[0]?.n ?? 0);
-          if (otherHolders > 0) {
-            throw new SandboxImageConflictError(sandboxGroupId, row.image, image);
+        const otherHolders = Number(others[0]?.n ?? 0);
+        if (otherHolders > 0) {
+          if (imageConflict) {
+            throw new SandboxImageConflictError(sandboxGroupId, row.image as string, image as string);
           }
-          // SOLO recreate: reset to cold + re-stamp the new image. Clear the live-box
-          // fields so no stale instance/tunnel survives the image roll (symmetric with
-          // failWarmingToCold). resume_state is nulled — a solo image change is an
-          // intentional fresh box (a divergent image cannot replay the old box's live
-          // state); the session envelope/archive still drives /workspace hydration on the
-          // cold re-create. Fall through to the cold branch, which CASes us in as spawner.
-          await tx.execute(sql`
+          throw new SandboxRigConflictError(sandboxGroupId, row.rig_version_id as string, rigVersionId as string);
+        }
+        // SOLO recreate: reset to cold + re-stamp whichever axis this run carries (each
+        // conditional so a rig-only change does not null out a still-valid image and vice
+        // versa). Clear the live-box fields so no stale instance/tunnel survives the roll
+        // (symmetric with failWarmingToCold). resume_state is nulled — a solo image/rig
+        // change is an intentional fresh box (a divergent image/rig cannot replay the old
+        // box's live state); the session envelope/archive still drives /workspace
+        // hydration on the cold re-create. Fall through to the cold branch (CAS spawner).
+        await tx.execute(sql`
           update sandbox_leases set
-            liveness = 'cold', image = ${image}, instance_id = null,
+            liveness = 'cold',
+            ${image !== null ? sql`image = ${image},` : sql``}
+            ${rigVersionId !== null ? sql`rig_version_id = ${rigVersionId},` : sql``}
+            instance_id = null,
             data_plane_url = null, terminal_data_plane_url = null,
             resume_backend_id = null, resume_state = null, updated_at = now()
           where id = ${row.id}
         `);
-          liveness = "cold";
-        }
+        liveness = "cold";
+      }
 
-        // -- draining: late arrival re-arms (D1). Box still alive (grace open).
-        if (liveness === "draining") {
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-          const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
-          return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
-        }
+      // -- draining: late arrival re-arms (D1). Box still alive (grace open).
+      if (liveness === "draining") {
+        await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+        const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
+        return { role: "rearmed" as const, lease: mapLeaseRow(updated) };
+      }
 
-        // -- cold: WIN the cold->warming CAS (C1). Exactly one winner under the
-        // held row lock; concurrent arrivals serialize behind us and see warming.
-        // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
-        // records the image it runs — for a fresh cold row or a solo-recreate above.
-        if (liveness === "cold") {
-          const casRows = await tx.execute<{ id: string }>(sql`
+      // -- cold: WIN the cold->warming CAS (C1). Exactly one winner under the
+      // held row lock; concurrent arrivals serialize behind us and see warming.
+      // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
+      // records the image it runs — for a fresh cold row or a solo-recreate above.
+      if (liveness === "cold") {
+        const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
             ${image !== null ? sql`image = ${image},` : sql``}
+            ${rigVersionId !== null ? sql`rig_version_id = ${rigVersionId},` : sql``}
             updated_at = now()
           where id = ${row.id} and liveness = 'cold'
           returning id
         `);
-          await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-          const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
-          // casRows.length === 0 cannot happen under the held row lock (defensive):
-          // a lost CAS means a sibling flipped it first, so we attach.
-          const role = casRows.length === 0 ? ("attached" as const) : ("spawner" as const);
-          return { role, lease: mapLeaseRow(updated) };
-        }
-
-        // -- warm: epoch fence for re-establishing turn holders (split-brain). A
-        // turn arriving with expectedEpoch must match the live row epoch; a stale
-        // re-dispatched turn is fenced out -> back off, NEVER create(). Number()-
-        // coerced so an int8 drift cannot make the compare always-true.
-        if (
-          liveness === "warm" &&
-          kind === "turn" &&
-          input.expectedEpoch !== undefined &&
-          Number(row.lease_epoch) !== input.expectedEpoch
-        ) {
-          return { role: "fenced" as const, lease: mapLeaseRow(row) };
-        }
-
-        // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
-        // liveness. The spawner exclusively owns warming->warm.
-        // TTL: a WARMING attach must keep the warming budget — re-stamping the
-        // plain (90s) TTL while a spawner's create() is still in flight would
-        // collapse expires_at and let the warming-death reaper reset/drain the
-        // lease before instance_id is recorded (F1). A WARM attach uses the plain
-        // TTL as before.
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-        const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
-        const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
-        return { role: "attached" as const, lease: mapLeaseRow(updated) };
-      }),
+        const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
+        // casRows.length === 0 cannot happen under the held row lock (defensive):
+        // a lost CAS means a sibling flipped it first, so we attach.
+        const role = casRows.length === 0 ? "attached" as const : "spawner" as const;
+        return { role, lease: mapLeaseRow(updated) };
+      }
+
+      // -- warm: epoch fence for re-establishing turn holders (split-brain). A
+      // turn arriving with expectedEpoch must match the live row epoch; a stale
+      // re-dispatched turn is fenced out -> back off, NEVER create(). Number()-
+      // coerced so an int8 drift cannot make the compare always-true.
+      if (liveness === "warm" && kind === "turn" && input.expectedEpoch !== undefined
+          && Number(row.lease_epoch) !== input.expectedEpoch) {
+        return { role: "fenced" as const, lease: mapLeaseRow(row) };
+      }
+
+      // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
+      // liveness. The spawner exclusively owns warming->warm.
+      // TTL: a WARMING attach must keep the warming budget — re-stamping the
+      // plain (90s) TTL while a spawner's create() is still in flight would
+      // collapse expires_at and let the warming-death reaper reset/drain the
+      // lease before instance_id is recorded (F1). A WARM attach uses the plain
+      // TTL as before.
+      await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
+      const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
+      const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
+      return { role: "attached" as const, lease: mapLeaseRow(updated) };
+    }),
   );
 }
 
 // §4.2 — the ONLY lease_epoch++ site. CAS on (warming AND lease_epoch=expected).
 // Folds the group box-envelope (resume_backend_id/resume_state) onto the lease.
-export async function commitWarmingToWarm(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number; // the epoch the spawner observed at cold->warming
-    instanceId: string;
-    dataPlaneUrl?: string | null; // event-driven resolveExposedPort result, any worker
-    resumeBackendId?: string | null;
-    resumeState?: Record<string, unknown> | null;
-    leaseTtlMs: number;
-  },
-): Promise<{ committed: boolean; lease: LeaseSnapshot | null }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function commitWarmingToWarm(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;          // the epoch the spawner observed at cold->warming
+  instanceId: string;
+  dataPlaneUrl?: string | null;   // event-driven resolveExposedPort result, any worker
+  resumeBackendId?: string | null;
+  resumeState?: Record<string, unknown> | null;
+  leaseTtlMs: number;
+}): Promise<{ committed: boolean; lease: LeaseSnapshot | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       // resume_state is jsonb: the raw postgres driver does NOT auto-stringify a
       // plain object bound for a jsonb column, so serialize to a JSON string and
@@ -8718,8 +7549,7 @@ export async function commitWarmingToWarm(
       // warm, NEVER provider-delete the box (it rides the provider idle-timeout).
       if (rows.length === 0) return { committed: false, lease: null };
       return { committed: true, lease: mapLeaseRow(rows[0]!) };
-    },
-  );
+    });
 }
 
 // §4.2a — leak-proof create attribution. The spawner calls this immediately
@@ -8727,28 +7557,23 @@ export async function commitWarmingToWarm(
 // intentionally does NOT bump lease_epoch or mark the lease warm; it only makes
 // the just-created provider id durable while the row is still warming so a
 // failure/reaper/provider-side sweep can identify and stop it.
-export async function recordWarmingSandboxCreated(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    instanceId: string;
-    resumeBackendId?: string | null;
-    resumeState?: Record<string, unknown> | null;
-    leaseTtlMs: number;
-    /** The still-WARMING lease must keep the warming budget after create() returns:
-     *  the spawner has yet to run display-stack setup, port expose, and
-     *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
-     *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
-     *  for legacy callers/tests. */
-    warmingLeaseTtlMs?: number;
-  },
-): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function recordWarmingSandboxCreated(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+  resumeBackendId?: string | null;
+  resumeState?: Record<string, unknown> | null;
+  leaseTtlMs: number;
+  /** The still-WARMING lease must keep the warming budget after create() returns:
+   *  the spawner has yet to run display-stack setup, port expose, and
+   *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
+   *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
+   *  for legacy callers/tests. */
+  warmingLeaseTtlMs?: number;
+}): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
       const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
@@ -8765,8 +7590,7 @@ export async function recordWarmingSandboxCreated(
       `);
       if (rows.length === 0) return { recorded: false, lease: null };
       return { recorded: true, lease: mapLeaseRow(rows[0]!) };
-    },
-  );
+    });
 }
 
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
@@ -8784,18 +7608,10 @@ export async function recordWarmingSandboxCreated(
 // envelope across this failure rollback (same shape confirmDrainCold keeps) and
 // retain resume_backend_id. No archive on the warming row (a never-persisted cold
 // start) -> resume_state is nulled as before.
-export async function failWarmingToCold(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function failWarmingToCold(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       await scopedDb.execute(sql`
         update sandbox_leases set
@@ -8824,106 +7640,81 @@ export async function failWarmingToCold(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
       `);
-    },
-  );
+    });
 }
 
 // §4.4 — idempotent delete-my-row (+ opportunistic warm->draining guarded
 // refcount=0 AND turn_holders=0, so a paying turn is never drained).
-export async function releaseLeaseHolder(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    kind: LeaseHolderKind;
-    holderId: string;
-    idleGraceMs: number;
-  },
-): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const rows = await tx.execute<LeaseRow>(sql`
+export async function releaseLeaseHolder(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  kind: LeaseHolderKind; holderId: string; idleGraceMs: number;
+}): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const rows = await tx.execute<LeaseRow>(sql`
         select * from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        const row = rows[0];
-        if (!row) return null; // already cold-and-reaped; release is an idempotent no-op
+      const row = rows[0];
+      if (!row) return null;  // already cold-and-reaped; release is an idempotent no-op
 
-        // Idempotent: deleting an already-gone holder affects 0 rows, fine.
-        await tx.execute(sql`
+      // Idempotent: deleting an already-gone holder affects 0 rows, fine.
+      await tx.execute(sql`
         delete from sandbox_lease_holders
         where lease_id = ${row.id} and kind = ${input.kind} and holder_id = ${input.holderId}
       `);
 
-        const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
+      const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
         select count(*)::int as total,
                count(*) filter (where kind = 'turn')::int   as turns,
                count(*) filter (where kind = 'viewer')::int as viewers
         from sandbox_lease_holders where lease_id = ${row.id}
       `);
-        const c = counts[0]!;
+      const c = counts[0]!;
 
-        // warm + dropped to 0 (AND no turn holders) -> draining, stamp grace deadline.
-        // Release during warming decrements only, NEVER touches liveness (the
-        // spawner owns warming->warm and re-checks refcount after committing).
-        const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
-        const updated = await tx.execute<LeaseRow>(sql`
+      // warm + dropped to 0 (AND no turn holders) -> draining, stamp grace deadline.
+      // Release during warming decrements only, NEVER touches liveness (the
+      // spawner owns warming->warm and re-checks refcount after committing).
+      const enterDraining = row.liveness === "warm" && c.total === 0 && c.turns === 0;
+      const updated = await tx.execute<LeaseRow>(sql`
         update sandbox_leases set
           refcount = ${c.total}, turn_holders = ${c.turns}, viewer_holders = ${c.viewers},
-          ${
-            enterDraining
-              ? sql`liveness = 'draining', expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,`
-              : sql``
-          }
+          ${enterDraining
+            ? sql`liveness = 'draining', expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,`
+            : sql``}
           updated_at = now()
         where id = ${row.id}
         returning *
       `);
-        return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
-      }),
-  );
+      return { liveness: updated[0]!.liveness, refcount: Number(c.total) };
+    }));
 }
 
 // §4.5 — heartbeat. EPOCH-FENCED (the C1b fix — the real split-brain bug, on the
 // HEARTBEAT path): a stale (superseded) owner's lease refresh is rejected so it
 // self-evicts. Also liveness-guarded to warm/warming (C2) so a heartbeat can't
 // wedge a draining lease forever by pushing its grace deadline.
-export async function heartbeatLeaseHolder(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    kind: LeaseHolderKind;
-    holderId: string;
-    leaseTtlMs: number;
-    expectedEpoch: number;
-  },
-): Promise<boolean> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const updated = await tx.execute<{ id: string }>(sql`
+export async function heartbeatLeaseHolder(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  kind: LeaseHolderKind; holderId: string; leaseTtlMs: number; expectedEpoch: number;
+}): Promise<boolean> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const updated = await tx.execute<{ id: string }>(sql`
         update sandbox_lease_holders set last_heartbeat_at = now()
         where lease_id = (select id from sandbox_leases
                           where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
           and kind = ${input.kind} and holder_id = ${input.holderId}
         returning id
       `);
-        if (updated.length === 0) return false; // holder was reaped — caller re-acquires
-        // Epoch-fenced, liveness-guarded lease TTL refresh: only a live-epoch
-        // warm/warming lease is refreshed. A stale-epoch (split-brain) or draining
-        // lease returns 0 rows -> false -> the stale holder drops its handle.
-        const leaseRows = await tx.execute<{ id: string }>(sql`
+      if (updated.length === 0) return false;   // holder was reaped — caller re-acquires
+      // Epoch-fenced, liveness-guarded lease TTL refresh: only a live-epoch
+      // warm/warming lease is refreshed. A stale-epoch (split-brain) or draining
+      // lease returns 0 rows -> false -> the stale holder drops its handle.
+      const leaseRows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
@@ -8932,9 +7723,8 @@ export async function heartbeatLeaseHolder(
           and liveness in ('warm','warming')
         returning id
       `);
-        return leaseRows.length > 0;
-      }),
-  );
+      return leaseRows.length > 0;
+    }));
 }
 
 /**
@@ -8946,19 +7736,11 @@ export async function heartbeatLeaseHolder(
  * epoch fence — supersession is handled by the fenced acquire/establish paths;
  * a reaped/released row returns false (row gone).
  */
-export async function touchLeaseHolder(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    kind: LeaseHolderKind;
-    holderId: string;
-  },
-): Promise<boolean> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function touchLeaseHolder(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  kind: LeaseHolderKind; holderId: string;
+}): Promise<boolean> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const updated = await scopedDb.execute<{ id: string }>(sql`
         update sandbox_lease_holders set last_heartbeat_at = now()
@@ -8968,8 +7750,7 @@ export async function touchLeaseHolder(
         returning id
       `);
       return updated.length > 0;
-    },
-  );
+    });
 }
 
 // §4.6 — the reaper. DB-SIDE ONLY (no provider call — the provider stop() is
@@ -8989,62 +7770,50 @@ export interface ReapDrainable {
 
 let loggedLegacyReapFunctionFallback = false;
 
-export async function reapStaleLeaseHolders(
-  db: Database,
-  input: {
-    workspaceId: string;
-    viewerHolderTtlMs: number; // delete viewer rows older than this
-    /** Delete TURN rows whose heartbeat is older than this (the lease TTL: >> the
-     *  10s turn heartbeat, so only a DEAD worker's holder ever crosses it). 0/absent
-     *  = legacy never-reap. */
-    turnHolderTtlMs?: number;
-    idleGraceMs: number; // drain-grace horizon (matches releaseLeaseHolder)
-  },
-): Promise<{
-  reapedViewers: number;
-  reapedTurns: number;
-  warmingReset: number;
-  drained: ReapDrainable[];
-}> {
-  return await withWorkspaceRls(
-    db,
-    input.workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        // (a) Reap stale VIEWER holders.
-        const reaped = await tx.execute<{ lease_id: string }>(sql`
+export async function reapStaleLeaseHolders(db: Database, input: {
+  workspaceId: string;
+  viewerHolderTtlMs: number;   // delete viewer rows older than this
+  /** Delete TURN rows whose heartbeat is older than this (the lease TTL: >> the
+   *  10s turn heartbeat, so only a DEAD worker's holder ever crosses it). 0/absent
+   *  = legacy never-reap. */
+  turnHolderTtlMs?: number;
+  idleGraceMs: number;         // drain-grace horizon (matches releaseLeaseHolder)
+}): Promise<{ reapedViewers: number; reapedTurns: number; warmingReset: number; drained: ReapDrainable[] }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      // (a) Reap stale VIEWER holders.
+      const reaped = await tx.execute<{ lease_id: string }>(sql`
         delete from sandbox_lease_holders
         where workspace_id = ${input.workspaceId} and kind = 'viewer'
           and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
         returning lease_id
       `);
-        // (a2) Reap DEAD-WORKER turn holders. A live holder is touched every 10s
-        // from registration (the resumeBoxForTurn holder-liveness loop covers the
-        // warmup; the turn heartbeat covers the run — legit multi-day turns
-        // included), so the caller's horizon is generous defense-in-depth, never
-        // a bound a live path can reach. A holder staler than it belongs to a
-        // worker that died without cleanup (SIGKILL/OOM/deploy churn); left in
-        // place it pins refcount >= 1 FOREVER, so the lease never drains, the
-        // reaper never persists /workspace, and the box rides the provider
-        // hard-timeout to an UNPERSISTED death (the 2026-07-06 staging deploy
-        // churn left holders frozen for hours). The redispatched turn re-acquires
-        // under a NEW holder id, so deleting the corpse never touches a live
-        // execution.
-        const reapedTurnRows =
-          input.turnHolderTtlMs && input.turnHolderTtlMs > 0
-            ? await tx.execute<{ lease_id: string }>(sql`
+      // (a2) Reap DEAD-WORKER turn holders. A live holder is touched every 10s
+      // from registration (the resumeBoxForTurn holder-liveness loop covers the
+      // warmup; the turn heartbeat covers the run — legit multi-day turns
+      // included), so the caller's horizon is generous defense-in-depth, never
+      // a bound a live path can reach. A holder staler than it belongs to a
+      // worker that died without cleanup (SIGKILL/OOM/deploy churn); left in
+      // place it pins refcount >= 1 FOREVER, so the lease never drains, the
+      // reaper never persists /workspace, and the box rides the provider
+      // hard-timeout to an UNPERSISTED death (the 2026-07-06 staging deploy
+      // churn left holders frozen for hours). The redispatched turn re-acquires
+      // under a NEW holder id, so deleting the corpse never touches a live
+      // execution.
+      const reapedTurnRows = input.turnHolderTtlMs && input.turnHolderTtlMs > 0
+        ? await tx.execute<{ lease_id: string }>(sql`
           delete from sandbox_lease_holders
           where workspace_id = ${input.workspaceId} and kind = 'turn'
             and last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
           returning lease_id
         `)
-            : [];
+        : [];
 
-        // (b) Recompute refcounts for every lease in the workspace; warm leases
-        // that hit 0 (AND turn_holders=0) enter draining with a fresh grace
-        // deadline (idleGraceMs — the SAME horizon releaseLeaseHolder stamps).
-        await tx.execute(sql`
+      // (b) Recompute refcounts for every lease in the workspace; warm leases
+      // that hit 0 (AND turn_holders=0) enter draining with a fresh grace
+      // deadline (idleGraceMs — the SAME horizon releaseLeaseHolder stamps).
+      await tx.execute(sql`
         update sandbox_leases L set
           refcount       = c.total,
           turn_holders   = c.turns,
@@ -9065,10 +7834,10 @@ export async function reapStaleLeaseHolders(
         where L.id = c.id and L.workspace_id = ${input.workspaceId}
       `);
 
-        // (c1) WARMING-death before provider create returned: no instance_id was
-        // ever persisted, so there is no provider box to stop. Reset to cold so a
-        // queued turn can re-acquire and re-spawn.
-        const warmingReset = await tx.execute<{ id: string }>(sql`
+      // (c1) WARMING-death before provider create returned: no instance_id was
+      // ever persisted, so there is no provider box to stop. Reset to cold so a
+      // queued turn can re-acquire and re-spawn.
+      const warmingReset = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
@@ -9078,10 +7847,10 @@ export async function reapStaleLeaseHolders(
         returning id
       `);
 
-        // (c2) WARMING-death after provider create returned: instance_id is known,
-        // so do NOT drop it. Convert to immediately-drainable so the caller's
-        // provider terminate path stops the box before the lease goes cold.
-        const warmingDrain = await tx.execute<{ id: string }>(sql`
+      // (c2) WARMING-death after provider create returned: instance_id is known,
+      // so do NOT drop it. Convert to immediately-drainable so the caller's
+      // provider terminate path stops the box before the lease goes cold.
+      const warmingDrain = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'draining',
           refcount = 0,
@@ -9096,35 +7865,27 @@ export async function reapStaleLeaseHolders(
         returning id
       `);
 
-        // (d) DRAINING-grace elapsed: surface leases whose grace is up AND still
-        // idle, with instance_id + epoch, so the caller can issue the provider
-        // stop() then confirmDrainCold. DB-only: no provider call here.
-        const drainable = await rawRows<{
-          sandbox_group_id: string;
-          instance_id: string | null;
-          lease_epoch: number | string;
-        }>(
-          tx,
-          sql`
+      // (d) DRAINING-grace elapsed: surface leases whose grace is up AND still
+      // idle, with instance_id + epoch, so the caller can issue the provider
+      // stop() then confirmDrainCold. DB-only: no provider call here.
+      const drainable = await rawRows<{ sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(tx, sql`
         select sandbox_group_id, instance_id, lease_epoch from sandbox_leases
         where workspace_id = ${input.workspaceId}
           and liveness = 'draining' and expires_at < now() and refcount = 0
-      `,
-        );
+      `);
 
-        return {
-          reapedViewers: reaped.length,
-          reapedTurns: reapedTurnRows.length,
-          warmingReset: warmingReset.length + warmingDrain.length,
-          drained: drainable.map((r) => ({
-            workspaceId: input.workspaceId,
-            sandboxGroupId: r.sandbox_group_id,
-            instanceId: r.instance_id,
-            leaseEpoch: Number(r.lease_epoch),
-          })),
-        };
-      }),
-  );
+      return {
+        reapedViewers: reaped.length,
+        reapedTurns: reapedTurnRows.length,
+        warmingReset: warmingReset.length + warmingDrain.length,
+        drained: drainable.map((r) => ({
+          workspaceId: input.workspaceId,
+          sandboxGroupId: r.sandbox_group_id,
+          instanceId: r.instance_id,
+          leaseEpoch: Number(r.lease_epoch),
+        })),
+      };
+    }));
 }
 
 // §4.6 (global) — the cross-workspace reaper sweep (OD-3). Calls the
@@ -9133,35 +7894,19 @@ export async function reapStaleLeaseHolders(
 // pass, bypassing per-workspace FORCE RLS. DB-only — returns the drainable rows;
 // the provider stop() is the caller's concern. No RLS GUC is set (the DEFINER fn
 // is the sanctioned cross-workspace read).
-export async function reapStaleLeaseHoldersGlobal(
-  db: Database,
-  input: {
-    viewerHolderTtlMs: number;
-    /** Reap DEAD-WORKER turn holders staler than this (the lease TTL; see
-     *  reapStaleLeaseHolders). 0/absent = never (legacy). */
-    turnHolderTtlMs?: number;
-    idleGraceMs: number;
-  },
-): Promise<ReapDrainable[]> {
-  let rows: Array<{
-    workspace_id: string;
-    sandbox_group_id: string;
-    instance_id: string | null;
-    lease_epoch: number | string;
-  }>;
+export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
+  viewerHolderTtlMs: number;
+  /** Reap DEAD-WORKER turn holders staler than this (the lease TTL; see
+   *  reapStaleLeaseHolders). 0/absent = never (legacy). */
+  turnHolderTtlMs?: number;
+  idleGraceMs: number;
+}): Promise<ReapDrainable[]> {
+  let rows: Array<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>;
   try {
-    rows = await rawRows<{
-      workspace_id: string;
-      sandbox_group_id: string;
-      instance_id: string | null;
-      lease_epoch: number | string;
-    }>(
-      db,
-      sql`
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
       select workspace_id, sandbox_group_id, instance_id, lease_epoch
       from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
-    `,
-    );
+    `);
   } catch (error) {
     // Deploy normally runs migrations before rollout, but a newly-started worker
     // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
@@ -9172,22 +7917,12 @@ export async function reapStaleLeaseHoldersGlobal(
     }
     if (!loggedLegacyReapFunctionFallback) {
       loggedLegacyReapFunctionFallback = true;
-      console.warn(
-        "sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep",
-      );
+      console.warn("sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep");
     }
-    rows = await rawRows<{
-      workspace_id: string;
-      sandbox_group_id: string;
-      instance_id: string | null;
-      lease_epoch: number | string;
-    }>(
-      db,
-      sql`
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
       select workspace_id, sandbox_group_id, instance_id, lease_epoch
       from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
-    `,
-    );
+    `);
   }
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
@@ -9211,19 +7946,10 @@ export interface MeterableWarmLease {
 }
 
 export async function listMeterableWarmLeases(db: Database): Promise<MeterableWarmLease[]> {
-  const rows = await rawRows<{
-    account_id: string;
-    workspace_id: string;
-    sandbox_group_id: string;
-    lease_epoch: number | string;
-    backend: string;
-  }>(
-    db,
-    sql`
+  const rows = await rawRows<{ account_id: string; workspace_id: string; sandbox_group_id: string; lease_epoch: number | string; backend: string }>(db, sql`
     select account_id, workspace_id, sandbox_group_id, lease_epoch, backend
     from opengeni_private.list_meterable_warm_leases()
-  `,
-  );
+  `);
   return rows.map((r) => ({
     accountId: r.account_id,
     workspaceId: r.workspace_id,
@@ -9234,31 +7960,23 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
 }
 
 export async function countQueuedTurns(db: Database): Promise<number> {
-  const rows = await rawRows<{ count: number | string }>(
-    db,
-    sql`
+  const rows = await rawRows<{ count: number | string }>(db, sql`
     select opengeni_private.count_queued_turns() as count
-  `,
-  );
+  `);
   return Number(rows[0]?.count ?? 0);
 }
 
-export async function countSandboxLeasesByLiveness(
-  db: Database,
-): Promise<Record<SandboxLeaseLiveness, number>> {
+export async function countSandboxLeasesByLiveness(db: Database): Promise<Record<SandboxLeaseLiveness, number>> {
   const counts: Record<SandboxLeaseLiveness, number> = {
     cold: 0,
     warming: 0,
     warm: 0,
     draining: 0,
   };
-  const rows = await rawRows<{ liveness: SandboxLeaseLiveness; count: number | string }>(
-    db,
-    sql`
+  const rows = await rawRows<{ liveness: SandboxLeaseLiveness; count: number | string }>(db, sql`
     select liveness, count
     from opengeni_private.count_sandbox_leases_by_liveness()
-  `,
-  );
+  `);
   for (const row of rows) {
     if (row.liveness in counts) {
       counts[row.liveness] = Number(row.count);
@@ -9273,13 +7991,10 @@ export type CreditBalanceByAccount = {
 };
 
 export async function listCreditBalancesByAccount(db: Database): Promise<CreditBalanceByAccount[]> {
-  const rows = await rawRows<{ account_id: string; balance_micros: number | string }>(
-    db,
-    sql`
+  const rows = await rawRows<{ account_id: string; balance_micros: number | string }>(db, sql`
     select account_id, balance_micros
     from opengeni_private.credit_balance_by_account()
-  `,
-  );
+  `);
   return rows.map((row) => ({
     accountId: row.account_id,
     balanceMicros: Number(row.balance_micros),
@@ -9288,22 +8003,17 @@ export async function listCreditBalancesByAccount(db: Database): Promise<CreditB
 
 // Cross-workspace live Modal lease read for the provider-side orphan sweep. The
 // SECURITY DEFINER function is the sanctioned RLS bypass; see migration 0036.
-export async function listLiveModalSandboxLeaseAttributions(
-  db: Database,
-): Promise<LiveModalSandboxLeaseAttribution[]> {
+export async function listLiveModalSandboxLeaseAttributions(db: Database): Promise<LiveModalSandboxLeaseAttribution[]> {
   const rows = await rawRows<{
     lease_id: string;
     workspace_id: string;
     sandbox_group_id: string;
     instance_id: string | null;
     liveness: SandboxLeaseLiveness;
-  }>(
-    db,
-    sql`
+  }>(db, sql`
     select lease_id, workspace_id, sandbox_group_id, instance_id, liveness
     from opengeni_private.list_live_modal_sandbox_leases()
-  `,
-  );
+  `);
   return rows.map((r) => ({
     leaseId: r.lease_id,
     workspaceId: r.workspace_id,
@@ -9316,18 +8026,10 @@ export async function listLiveModalSandboxLeaseAttributions(
 // §4.7 — explicit re-arm seam (D1). acquireLease already re-arms a draining
 // lease inline; this is the standalone version for callers that learn a holder
 // is wanted during the grace window without going through acquireLease first.
-export async function reArmDrainingLease(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    leaseTtlMs: number;
-  },
-): Promise<{ rearmed: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function reArmDrainingLease(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string; leaseTtlMs: number;
+}): Promise<{ rearmed: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<{ id: string }>(sql`
         update sandbox_leases set
@@ -9339,8 +8041,7 @@ export async function reArmDrainingLease(
         returning id
       `);
       return { rearmed: rows.length > 0 };
-    },
-  );
+    });
 }
 
 // §4.8 — the reaper's final teardown commit (D3). Called AFTER the caller issued
@@ -9348,18 +8049,10 @@ export async function reArmDrainingLease(
 // lease_epoch=expected) so a late re-arm (D1) or a newer epoch that snuck in
 // during teardown wins — wentCold:false means the box is still wanted and must
 // NOT have been stopped (the caller checks this CAS before stop(), or re-reads).
-export async function confirmDrainCold(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-  },
-): Promise<{ wentCold: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function confirmDrainCold(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
+}): Promise<{ wentCold: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       // draining->cold: the box is terminated, so EVERY live-box field is cleared
       // (instance_id / data-plane URLs). resume_state, however, is NOT blindly
@@ -9404,8 +8097,7 @@ export async function confirmDrainCold(
         returning id
       `);
       return { wentCold: rows.length > 0 };
-    },
-  );
+    });
 }
 
 // §4.8b — persist the /workspace snapshot archive onto the lease BEFORE the
@@ -9434,33 +8126,23 @@ export async function confirmDrainCold(
 //                     persist for this box or when workspaceArchive is null.
 // The fence is the split-brain guard: a stale-epoch reaper writes ZERO rows and
 // is told not to terminate.
-export async function persistDrainSnapshot(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
-     *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
-    workspaceArchive: string | null;
-  },
-): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
+export async function persistDrainSnapshot(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
+   *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
+  workspaceArchive: string | null;
+}): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
   // the RLS-scoped connection wedges the postgres-js client ("Failed query").
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       // (1) Lock + read the PRIOR archive under the CAS guard (draining AND
       // refcount=0 AND lease_epoch=expected). A miss (re-armed / newer epoch /
       // vanished) returns no row → wrote:false, the caller must NOT terminate.
-      const guard = await scopedDb.execute<{
-        prior_archive: string | null;
-        prior_archive_prev: string | null;
-      }>(sql`
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev
@@ -9488,8 +8170,7 @@ export async function persistDrainSnapshot(
         clearPreviousArchive: true,
       });
       return { wrote: true, priorArchive, priorArchivePrev };
-    },
-  );
+    });
 }
 
 /**
@@ -9508,30 +8189,22 @@ export async function persistDrainSnapshot(
  * bound as a jsonb string scalar (to_jsonb(text)). Re-asserting the caller's
  * CAS guard keeps the write atomic with its FOR UPDATE lock.
  */
-async function foldWorkspaceArchiveOntoLease(
-  scopedDb: Database,
-  input: {
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    workspaceArchive: string;
-    livenessGuard: "draining" | "warm";
-    priorCurrentArchive?: string | null;
-    clearPreviousArchive?: boolean;
-    /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
-     *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
-     *  land time — a late, older capture is superseded (persistWarmSnapshot's
-     *  monotonic guard). Absent (drain) → now(). */
-    archiveAtIso?: string;
-  },
-): Promise<void> {
-  const livenessGuard =
-    input.livenessGuard === "draining"
-      ? sql`liveness = 'draining' and refcount = 0`
-      : sql`liveness = 'warm'`;
-  const archiveAt = input.archiveAtIso
-    ? sql`to_jsonb(${input.archiveAtIso}::text)`
-    : sql`to_jsonb(now()::timestamptz::text)`;
+async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
+  workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
+  workspaceArchive: string;
+  livenessGuard: "draining" | "warm";
+  priorCurrentArchive?: string | null;
+  clearPreviousArchive?: boolean;
+  /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
+   *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
+   *  land time — a late, older capture is superseded (persistWarmSnapshot's
+   *  monotonic guard). Absent (drain) → now(). */
+  archiveAtIso?: string;
+}): Promise<void> {
+  const livenessGuard = input.livenessGuard === "draining"
+    ? sql`liveness = 'draining' and refcount = 0`
+    : sql`liveness = 'warm'`;
+  const archiveAt = input.archiveAtIso ? sql`to_jsonb(${input.archiveAtIso}::text)` : sql`to_jsonb(now()::timestamptz::text)`;
   await scopedDb.execute(sql`
     update sandbox_leases set
       resume_state = jsonb_set(
@@ -9572,40 +8245,24 @@ async function foldWorkspaceArchiveOntoLease(
  * throttle re-check here is ATOMIC with the write — two concurrent holders
  * cannot double-snapshot inside one interval.
  */
-export async function persistWarmSnapshot(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
-    workspaceArchive: string;
-    /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
-    minIntervalMs: number;
-    /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
-     *  NOT land time: a capture that started at or before the archive already on
-     *  the lease is SUPERSEDED (a stale heartbeat capture that timed out its wait
-     *  and landed late must never overwrite a fresher turn-end snapshot or refresh
-     *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
-    capturedAtMs?: number;
-  },
-): Promise<{
-  wrote: boolean;
-  throttled: boolean;
-  superseded: boolean;
-  priorArchiveForGc: string | null;
-}> {
+export async function persistWarmSnapshot(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
+  workspaceArchive: string;
+  /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
+  minIntervalMs: number;
+  /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
+   *  NOT land time: a capture that started at or before the archive already on
+   *  the lease is SUPERSEDED (a stale heartbeat capture that timed out its wait
+   *  and landed late must never overwrite a fresher turn-end snapshot or refresh
+   *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
+  capturedAtMs?: number;
+}): Promise<{ wrote: boolean; throttled: boolean; superseded: boolean; priorArchiveForGc: string | null }> {
   const capturedAtMs = input.capturedAtMs ?? Date.now();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const guard = await scopedDb.execute<{
-        prior_archive: string | null;
-        prior_archive_prev: string | null;
-        prior_archive_at: string | null;
-      }>(sql`
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null; prior_archive_at: string | null }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
@@ -9620,9 +8277,7 @@ export async function persistWarmSnapshot(
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
-      const priorAtMs = guard[0]!.prior_archive_at
-        ? Date.parse(guard[0]!.prior_archive_at)
-        : Number.NaN;
+      const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
       // MONOTONIC guard: a capture whose start is at/before the stored archive's
       // capture is stale (a slower-but-earlier heartbeat capture landing after a
       // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
@@ -9631,9 +8286,9 @@ export async function persistWarmSnapshot(
         return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
       }
       if (
-        input.minIntervalMs > 0 &&
-        Number.isFinite(priorAtMs) &&
-        capturedAtMs - priorAtMs < input.minIntervalMs
+        input.minIntervalMs > 0
+        && Number.isFinite(priorAtMs)
+        && capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
         return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
       }
@@ -9646,29 +8301,16 @@ export async function persistWarmSnapshot(
         priorCurrentArchive: priorArchive,
         archiveAtIso: new Date(capturedAtMs).toISOString(),
       });
-      return {
-        wrote: true,
-        throttled: false,
-        superseded: false,
-        priorArchiveForGc: priorArchivePrev,
-      };
-    },
-  );
+      return { wrote: true, throttled: false, superseded: false, priorArchiveForGc: priorArchivePrev };
+  });
 }
 
-export async function getMaterializedSandboxFileResources(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    instanceId: string;
-  },
-): Promise<Set<string>> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function getMaterializedSandboxFileResources(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+}): Promise<Set<string>> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<{ file_ids: unknown }>(sql`
         select coalesce(
@@ -9688,28 +8330,20 @@ export async function getMaterializedSandboxFileResources(
       const raw = rows[0]?.file_ids;
       const values = Array.isArray(raw) ? raw : [];
       return new Set(values.filter((value): value is string => typeof value === "string"));
-    },
-  );
+    });
 }
 
-export async function markSandboxFileResourcesMaterialized(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    instanceId: string;
-    fileIds: string[];
-  },
-): Promise<{ wrote: boolean }> {
+export async function markSandboxFileResourcesMaterialized(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+  fileIds: string[];
+}): Promise<{ wrote: boolean }> {
   const fileIds = [...new Set(input.fileIds.filter((fileId) => fileId.length > 0))];
   if (fileIds.length === 0) {
     return { wrote: false };
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<{ id: string }>(sql`
         update sandbox_leases set
@@ -9752,8 +8386,7 @@ export async function markSandboxFileResourcesMaterialized(
         returning id
       `);
       return { wrote: rows.length > 0 };
-    },
-  );
+    });
 }
 
 // ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
@@ -9785,18 +8418,10 @@ const WORKSPACE_CAPTURE_COLUMNS = sql`
 `;
 
 function mapWorkspaceCaptureRow(row: {
-  id: string;
-  session_id: string;
-  turn_id: string | null;
-  revision: number | string;
-  lease_epoch: number | string;
-  state: string;
-  manifest_key: string | null;
-  tree_index_key: string | null;
-  blob_keys: unknown;
-  size_bytes: number | string | null;
-  stats: unknown;
-  captured_at: string;
+  id: string; session_id: string; turn_id: string | null; revision: number | string;
+  lease_epoch: number | string; state: string; manifest_key: string | null;
+  tree_index_key: string | null; blob_keys: unknown; size_bytes: number | string | null;
+  stats: unknown; captured_at: string;
 }): WorkspaceCaptureRow {
   return {
     id: row.id,
@@ -9807,7 +8432,7 @@ function mapWorkspaceCaptureRow(row: {
     state: row.state,
     manifestKey: row.manifest_key,
     treeIndexKey: row.tree_index_key,
-    blobKeys: Array.isArray(row.blob_keys) ? (row.blob_keys as string[]) : [],
+    blobKeys: Array.isArray(row.blob_keys) ? row.blob_keys as string[] : [],
     sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
     stats: (row.stats && typeof row.stats === "object" ? row.stats : {}) as Record<string, unknown>,
     capturedAt: row.captured_at,
@@ -9824,26 +8449,21 @@ function mapWorkspaceCaptureRow(row: {
  * released lease). Captures for one session are serialized (one turn at a time),
  * so the explicit revision never races the unique (session_id, revision) index.
  */
-export async function insertWorkspaceCapture(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string | null;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    revision: number;
-    manifestKey: string;
-    treeIndexKey: string;
-    blobKeys: string[];
-    sizeBytes: number;
-    stats: Record<string, unknown>;
-  },
-): Promise<{ revision: number } | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function insertWorkspaceCapture(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  revision: number;
+  manifestKey: string;
+  treeIndexKey: string;
+  blobKeys: string[];
+  sizeBytes: number;
+  stats: Record<string, unknown>;
+}): Promise<{ revision: number } | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<{ revision: number | string }>(sql`
         insert into workspace_captures
@@ -9864,16 +8484,11 @@ export async function insertWorkspaceCapture(
       `);
       if (rows.length === 0) return null;
       return { revision: Number(rows[0]!.revision) };
-    },
-  );
+    });
 }
 
 /** The newest capture for a session (highest revision), or null if none. */
-export async function latestWorkspaceCapture(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<WorkspaceCaptureRow | null> {
+export async function latestWorkspaceCapture(db: Database, workspaceId: string, sessionId: string): Promise<WorkspaceCaptureRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
       select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
@@ -9887,12 +8502,7 @@ export async function latestWorkspaceCapture(
 
 /** A specific capture revision for a session (the M2 file route with an explicit
  *  `?revision=`), or null if that revision was never captured / already GC'd. */
-export async function workspaceCaptureAtRevision(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  revision: number,
-): Promise<WorkspaceCaptureRow | null> {
+export async function workspaceCaptureAtRevision(db: Database, workspaceId: string, sessionId: string, revision: number): Promise<WorkspaceCaptureRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.execute<Parameters<typeof mapWorkspaceCaptureRow>[0]>(sql`
       select ${WORKSPACE_CAPTURE_COLUMNS} from workspace_captures
@@ -9931,10 +8541,7 @@ export type WorkspaceCaptureGcPlan = {
  * is deleted ONLY when NO surviving revision also references it (shared blobs are
  * never deleted); per-revision manifest/tree keys are unshared → always deleted.
  */
-export function computeWorkspaceCaptureGcPlan(
-  rows: WorkspaceCaptureGcRow[],
-  keepN: number,
-): WorkspaceCaptureGcPlan {
+export function computeWorkspaceCaptureGcPlan(rows: WorkspaceCaptureGcRow[], keepN: number): WorkspaceCaptureGcPlan {
   const survivors = rows.slice(0, Math.max(0, keepN));
   const evicted = rows.slice(Math.max(0, keepN));
   const survivingBlobKeys = new Set<string>();
@@ -9951,55 +8558,33 @@ export function computeWorkspaceCaptureGcPlan(
   return { evictedRowIds, deleteBlobKeys: [...deleteBlobKeys], deletePerRevisionKeys };
 }
 
-export async function planWorkspaceCaptureGc(
-  db: Database,
-  input: { workspaceId: string; sessionId: string; keepN: number },
-): Promise<WorkspaceCaptureGcPlan> {
+export async function planWorkspaceCaptureGc(db: Database, input: { workspaceId: string; sessionId: string; keepN: number }): Promise<WorkspaceCaptureGcPlan> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.execute<{
-      id: string;
-      revision: number | string;
-      manifest_key: string | null;
-      tree_index_key: string | null;
-      blob_keys: unknown;
-    }>(sql`
+    const rows = await scopedDb.execute<{ id: string; revision: number | string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }>(sql`
       select id, revision, manifest_key, tree_index_key, blob_keys
       from workspace_captures
       where session_id = ${input.sessionId}
       order by revision desc
     `);
     return computeWorkspaceCaptureGcPlan(
-      rows.map(
-        (r: {
-          id: string;
-          manifest_key: string | null;
-          tree_index_key: string | null;
-          blob_keys: unknown;
-        }) => ({
-          id: r.id,
-          manifestKey: r.manifest_key,
-          treeIndexKey: r.tree_index_key,
-          blobKeys: Array.isArray(r.blob_keys) ? (r.blob_keys as string[]) : [],
-        }),
-      ),
+      rows.map((r: { id: string; manifest_key: string | null; tree_index_key: string | null; blob_keys: unknown }) => ({
+        id: r.id,
+        manifestKey: r.manifest_key,
+        treeIndexKey: r.tree_index_key,
+        blobKeys: Array.isArray(r.blob_keys) ? r.blob_keys as string[] : [],
+      })),
       input.keepN,
     );
   });
 }
 
 /** Delete evicted capture rows by id (call AFTER their storage blobs are gone). */
-export async function deleteWorkspaceCaptureRows(
-  db: Database,
-  input: { workspaceId: string; rowIds: string[] },
-): Promise<number> {
+export async function deleteWorkspaceCaptureRows(db: Database, input: { workspaceId: string; rowIds: string[] }): Promise<number> {
   if (input.rowIds.length === 0) return 0;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const result = await scopedDb.execute<{ id: string }>(sql`
       delete from workspace_captures
-      where id in (${sql.join(
-        input.rowIds.map((id) => sql`${id}`),
-        sql`, `,
-      )})
+      where id in (${sql.join(input.rowIds.map((id) => sql`${id}`), sql`, `)})
       returning id
     `);
     return result.length;
@@ -10007,11 +8592,7 @@ export async function deleteWorkspaceCaptureRows(
 }
 
 // §4.9 — non-locking snapshot for the API handshake & health.
-export async function readLease(
-  db: Database,
-  workspaceId: string,
-  sandboxGroupId: string,
-): Promise<LeaseSnapshot | null> {
+export async function readLease(db: Database, workspaceId: string, sandboxGroupId: string): Promise<LeaseSnapshot | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.execute<LeaseRow>(sql`
       select * from sandbox_leases
@@ -10030,19 +8611,14 @@ export async function readLease(
 // split-brain guard: a stale-epoch writer (a box re-established under a newer
 // epoch) updates ZERO rows and the caller backs off. Returns the updated
 // snapshot, or null on a fence miss (epoch advanced / lease vanished).
-export async function recordLeaseDataPlaneUrl(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    dataPlaneUrl: string | null;
-  },
-): Promise<LeaseSnapshot | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function recordLeaseDataPlaneUrl(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  dataPlaneUrl: string | null;
+}): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
@@ -10054,8 +8630,7 @@ export async function recordLeaseDataPlaneUrl(
         returning *
       `);
       return rows[0] ? mapLeaseRow(rows[0]) : null;
-    },
-  );
+    });
 }
 
 // P5.t — record the (re-)resolved ttyd terminal data-plane URL (7681) on an
@@ -10066,19 +8641,14 @@ export async function recordLeaseDataPlaneUrl(
 // token against the cached URL. The fence is the split-brain guard (a stale-epoch
 // writer updates ZERO rows). Returns the updated snapshot, or null on a fence
 // miss (epoch advanced / lease vanished).
-export async function recordLeaseTerminalDataPlaneUrl(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    expectedEpoch: number;
-    terminalDataPlaneUrl: string | null;
-  },
-): Promise<LeaseSnapshot | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function recordLeaseTerminalDataPlaneUrl(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  terminalDataPlaneUrl: string | null;
+}): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
@@ -10090,8 +8660,7 @@ export async function recordLeaseTerminalDataPlaneUrl(
         returning *
       `);
       return rows[0] ? mapLeaseRow(rows[0]) : null;
-    },
-  );
+    });
 }
 
 // ============================================================================
@@ -10177,74 +8746,52 @@ function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
 // the machine was previously revoked, re-activates it (status->active, revoked_at
 // cleared) — never a duplicate machine row. The agent's ed25519 pubkey is the
 // machine identity; the unique (workspace, pubkey) index is the conflict target.
-export async function createEnrollment(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    pubkey: string;
-    exposure?: EnrollmentExposure;
-    hasDisplay?: boolean;
-    allowScreenControl?: boolean;
-    os?: EnrollmentOs;
-    arch?: string;
-  },
-): Promise<EnrollmentRecord> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.enrollments)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          pubkey: input.pubkey,
-          exposure: input.exposure ?? "whole-machine",
-          hasDisplay: input.hasDisplay ?? false,
-          allowScreenControl: input.allowScreenControl ?? false,
-          os: input.os ?? "linux",
-          arch: input.arch ?? "x86_64",
-          status: "active",
-        })
-        .onConflictDoUpdate({
-          target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
-          set: {
-            exposure: input.exposure ?? "whole-machine",
-            hasDisplay: input.hasDisplay ?? false,
-            allowScreenControl: input.allowScreenControl ?? false,
-            os: input.os ?? "linux",
-            arch: input.arch ?? "x86_64",
-            // A re-enroll re-activates a previously revoked machine.
-            status: "active",
-            revokedAt: null,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create enrollment");
-      }
-      return mapEnrollment(row);
-    },
-  );
+export async function createEnrollment(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  exposure?: EnrollmentExposure;
+  hasDisplay?: boolean;
+  allowScreenControl?: boolean;
+  os?: EnrollmentOs;
+  arch?: string;
+}): Promise<EnrollmentRecord> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.enrollments).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: input.pubkey,
+      exposure: input.exposure ?? "whole-machine",
+      hasDisplay: input.hasDisplay ?? false,
+      allowScreenControl: input.allowScreenControl ?? false,
+      os: input.os ?? "linux",
+      arch: input.arch ?? "x86_64",
+      status: "active",
+    }).onConflictDoUpdate({
+      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+      set: {
+        exposure: input.exposure ?? "whole-machine",
+        hasDisplay: input.hasDisplay ?? false,
+        allowScreenControl: input.allowScreenControl ?? false,
+        os: input.os ?? "linux",
+        arch: input.arch ?? "x86_64",
+        // A re-enroll re-activates a previously revoked machine.
+        status: "active",
+        revokedAt: null,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create enrollment");
+    }
+    return mapEnrollment(row);
+  });
 }
 
-export async function getEnrollment(
-  db: Database,
-  workspaceId: string,
-  enrollmentId: string,
-): Promise<EnrollmentRecord | null> {
+export async function getEnrollment(db: Database, workspaceId: string, enrollmentId: string): Promise<EnrollmentRecord | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.enrollments)
-      .where(
-        and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.id, enrollmentId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.enrollments)
+      .where(and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.id, enrollmentId)))
       .limit(1);
     return row ? mapEnrollment(row) : null;
   });
@@ -10252,21 +8799,12 @@ export async function getEnrollment(
 
 // List a workspace's enrollments, newest first. `status` filters the lifecycle
 // (omit for all; 'active' for the Machines dashboard's live list).
-export async function listEnrollments(
-  db: Database,
-  workspaceId: string,
-  options: { status?: EnrollmentStatus } = {},
-): Promise<EnrollmentRecord[]> {
+export async function listEnrollments(db: Database, workspaceId: string, options: { status?: EnrollmentStatus } = {}): Promise<EnrollmentRecord[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const where = options.status
-      ? and(
-          eq(schema.enrollments.workspaceId, workspaceId),
-          eq(schema.enrollments.status, options.status),
-        )
+      ? and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.status, options.status))
       : eq(schema.enrollments.workspaceId, workspaceId);
-    const rows = await scopedDb
-      .select()
-      .from(schema.enrollments)
+    const rows = await scopedDb.select().from(schema.enrollments)
       .where(where)
       .orderBy(desc(schema.enrollments.createdAt));
     return rows.map(mapEnrollment);
@@ -10275,59 +8813,35 @@ export async function listEnrollments(
 
 // Revoke a machine (uninstall --purge / dashboard revoke). Idempotent: an already
 // -revoked row is a no-op (revoked:false). status->revoked, revoked_at stamped.
-export async function revokeEnrollment(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-  },
-): Promise<{ revoked: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.enrollments)
-        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.enrollments.workspaceId, input.workspaceId),
-            eq(schema.enrollments.id, input.enrollmentId),
-            eq(schema.enrollments.status, "active"),
-          ),
-        )
-        .returning({ id: schema.enrollments.id });
-      return { revoked: rows.length > 0 };
-    },
-  );
+export async function revokeEnrollment(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string;
+}): Promise<{ revoked: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.enrollments)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        eq(schema.enrollments.status, "active"),
+      ))
+      .returning({ id: schema.enrollments.id });
+    return { revoked: rows.length > 0 };
+  });
 }
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
 // by the online/reconnecting/offline derivation in the Machines surface.
-export async function touchEnrollmentLastSeen(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb
-        .update(schema.enrollments)
-        .set({ lastSeenAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.enrollments.workspaceId, input.workspaceId),
-            eq(schema.enrollments.id, input.enrollmentId),
-          ),
-        );
-    },
-  );
+export async function touchEnrollmentLastSeen(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.update(schema.enrollments)
+      .set({ lastSeenAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+      ));
+  });
 }
 
 // Live display cursor: the agent's connect Hello reports whether a display is
@@ -10348,44 +8862,31 @@ export async function touchEnrollmentLastSeen(
 // `IS DISTINCT FROM`), so a steady-state Hello updates zero rows and never churns.
 // Returns whether a row was actually changed. Best-effort — the caller swallows
 // failures so a display refresh never breaks the agent's connect.
-export async function setEnrollmentDisplayState(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-    hasDisplay: boolean;
-    desktopUnavailableReason: string | null;
-  },
-): Promise<{ updated: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.enrollments)
-        .set({
-          hasDisplay: input.hasDisplay,
-          desktopUnavailableReason: input.desktopUnavailableReason,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.enrollments.workspaceId, input.workspaceId),
-            eq(schema.enrollments.id, input.enrollmentId),
-            // Only write on a CHANGE to EITHER field — an unchanged display state must
-            // not churn a write on every reconnect Hello. `IS DISTINCT FROM` is the
-            // null-safe inequality (a plain `ne` skips NULL rows).
-            or(
-              ne(schema.enrollments.hasDisplay, input.hasDisplay),
-              sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
-            ),
-          ),
-        )
-        .returning({ id: schema.enrollments.id });
-      return { updated: rows.length > 0 };
-    },
-  );
+export async function setEnrollmentDisplayState(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string;
+  hasDisplay: boolean; desktopUnavailableReason: string | null;
+}): Promise<{ updated: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.enrollments)
+      .set({
+        hasDisplay: input.hasDisplay,
+        desktopUnavailableReason: input.desktopUnavailableReason,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        // Only write on a CHANGE to EITHER field — an unchanged display state must
+        // not churn a write on every reconnect Hello. `IS DISTINCT FROM` is the
+        // null-safe inequality (a plain `ne` skips NULL rows).
+        or(
+          ne(schema.enrollments.hasDisplay, input.hasDisplay),
+          sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
+        ),
+      ))
+      .returning({ id: schema.enrollments.id });
+    return { updated: rows.length > 0 };
+  });
 }
 
 // ---- device-flow enrollment requests (M5, migration 0025) -----------------
@@ -10423,9 +8924,7 @@ export type DeviceEnrollmentRequestRecord = {
   updatedAt: string;
 };
 
-function mapDeviceEnrollmentRequest(
-  row: typeof schema.deviceEnrollmentRequests.$inferSelect,
-): DeviceEnrollmentRequestRecord {
+function mapDeviceEnrollmentRequest(row: typeof schema.deviceEnrollmentRequests.$inferSelect): DeviceEnrollmentRequestRecord {
   return {
     id: row.id,
     deviceCode: row.deviceCode,
@@ -10455,51 +8954,41 @@ function mapDeviceEnrollmentRequest(
 // Persist a fresh PENDING device-auth request (the agent's POST /start). The
 // caller supplies the unguessable device_code + user_code (minted with a CSPRNG)
 // and the short TTL. RLS-scoped to the workspace the flow binds to.
-export async function createDeviceEnrollmentRequest(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    deviceCode: string;
-    userCode: string;
-    pubkey: string;
-    os?: EnrollmentOs;
-    arch?: string;
-    machineName?: string | null;
-    requestedExposure?: EnrollmentExposure;
-    canOfferDisplay?: boolean;
-    requestsScreenControl?: boolean;
-    expiresAt: Date;
-  },
-): Promise<DeviceEnrollmentRequestRecord> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.deviceEnrollmentRequests)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          deviceCode: input.deviceCode,
-          userCode: input.userCode,
-          pubkey: input.pubkey,
-          os: input.os ?? "linux",
-          arch: input.arch ?? "x86_64",
-          machineName: input.machineName ?? null,
-          requestedExposure: input.requestedExposure ?? "whole-machine",
-          canOfferDisplay: input.canOfferDisplay ?? false,
-          requestsScreenControl: input.requestsScreenControl ?? false,
-          status: "pending",
-          expiresAt: input.expiresAt,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create device enrollment request");
-      }
-      return mapDeviceEnrollmentRequest(row);
-    },
-  );
+export async function createDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  deviceCode: string;
+  userCode: string;
+  pubkey: string;
+  os?: EnrollmentOs;
+  arch?: string;
+  machineName?: string | null;
+  requestedExposure?: EnrollmentExposure;
+  canOfferDisplay?: boolean;
+  requestsScreenControl?: boolean;
+  expiresAt: Date;
+}): Promise<DeviceEnrollmentRequestRecord> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.deviceEnrollmentRequests).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      deviceCode: input.deviceCode,
+      userCode: input.userCode,
+      pubkey: input.pubkey,
+      os: input.os ?? "linux",
+      arch: input.arch ?? "x86_64",
+      machineName: input.machineName ?? null,
+      requestedExposure: input.requestedExposure ?? "whole-machine",
+      canOfferDisplay: input.canOfferDisplay ?? false,
+      requestsScreenControl: input.requestsScreenControl ?? false,
+      status: "pending",
+      expiresAt: input.expiresAt,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create device enrollment request");
+    }
+    return mapDeviceEnrollmentRequest(row);
+  });
 }
 
 // Look up a request by its opaque device_code (the agent's poll key). The
@@ -10507,10 +8996,7 @@ export async function createDeviceEnrollmentRequest(
 // workspace context yet, so resolve (account_id, workspace_id) via the SECURITY
 // DEFINER resolver (mirrors the global reaper's cross-workspace read), then re-read
 // the FULL row under that workspace's RLS scope. Returns null when unknown.
-export async function getDeviceEnrollmentRequestByDeviceCode(
-  db: Database,
-  deviceCode: string,
-): Promise<DeviceEnrollmentRequestRecord | null> {
+export async function getDeviceEnrollmentRequestByDeviceCode(db: Database, deviceCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
   const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_device_enrollment_request(${deviceCode})
   `);
@@ -10518,39 +9004,25 @@ export async function getDeviceEnrollmentRequestByDeviceCode(
   if (!ctx) {
     return null;
   }
-  return await withRlsContext(
-    db,
-    { accountId: ctx.account_id, workspaceId: ctx.workspace_id },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .select()
-        .from(schema.deviceEnrollmentRequests)
-        .where(eq(schema.deviceEnrollmentRequests.deviceCode, deviceCode))
-        .limit(1);
-      return row ? mapDeviceEnrollmentRequest(row) : null;
-    },
-  );
+  return await withRlsContext(db, { accountId: ctx.account_id, workspaceId: ctx.workspace_id }, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(eq(schema.deviceEnrollmentRequests.deviceCode, deviceCode))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
 }
 
 // Look up the PENDING request for a user_code within a workspace (the approve
 // lookup). Workspace-scoped: a user can only approve a request bound to a
 // workspace they hold a grant in. Returns null when no LIVE pending row matches.
-export async function getPendingDeviceEnrollmentRequestByUserCode(
-  db: Database,
-  workspaceId: string,
-  userCode: string,
-): Promise<DeviceEnrollmentRequestRecord | null> {
+export async function getPendingDeviceEnrollmentRequestByUserCode(db: Database, workspaceId: string, userCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.deviceEnrollmentRequests)
-      .where(
-        and(
-          eq(schema.deviceEnrollmentRequests.workspaceId, workspaceId),
-          eq(schema.deviceEnrollmentRequests.userCode, userCode),
-          eq(schema.deviceEnrollmentRequests.status, "pending"),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, workspaceId),
+        eq(schema.deviceEnrollmentRequests.userCode, userCode),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
       .limit(1);
     return row ? mapDeviceEnrollmentRequest(row) : null;
   });
@@ -10564,10 +9036,7 @@ export async function getPendingDeviceEnrollmentRequestByUserCode(
 // workspace's RLS scope. The ROUTE then re-checks the caller holds a grant in the
 // resolved workspace before returning anything. Returns null when no live pending
 // row matches (an unknown / terminal / expired code).
-export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
-  db: Database,
-  userCode: string,
-): Promise<DeviceEnrollmentRequestRecord | null> {
+export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(db: Database, userCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
   const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_pending_device_enrollment_by_user_code(${userCode})
   `);
@@ -10575,23 +9044,15 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
   if (!ctx) {
     return null;
   }
-  return await withRlsContext(
-    db,
-    { accountId: ctx.account_id, workspaceId: ctx.workspace_id },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .select()
-        .from(schema.deviceEnrollmentRequests)
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.userCode, userCode),
-            eq(schema.deviceEnrollmentRequests.status, "pending"),
-          ),
-        )
-        .limit(1);
-      return row ? mapDeviceEnrollmentRequest(row) : null;
-    },
-  );
+  return await withRlsContext(db, { accountId: ctx.account_id, workspaceId: ctx.workspace_id }, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.userCode, userCode),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
 }
 
 // The SHARED finalize core (design 11 §A2.3 "reuse, don't fork"): "upsert the
@@ -10605,51 +9066,44 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 //     for a stateless token).
 // Idempotent: a re-run for the same (workspace, pubkey) re-activates the existing
 // enrollment (M2 upsert) and REUSES its selfhosted sandbox — never a duplicate.
-async function finalizeEnrollmentInScope(
-  scopedDb: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    pubkey: string;
-    hasDisplay: boolean;
-    allowScreenControl: boolean;
-    os: EnrollmentOs;
-    arch: string;
-    sandboxName: string;
-    now: Date;
-  },
-): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
+async function finalizeEnrollmentInScope(scopedDb: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  os: EnrollmentOs;
+  arch: string;
+  sandboxName: string;
+  now: Date;
+}): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
   // createEnrollment (idempotent upsert) — whole-machine is mandatory; display +
   // screen-control come from the agent's offer + the consenting decision. We inline
   // the insert here (rather than calling createEnrollment, which opens its OWN
   // scope) so it shares the caller's transaction.
-  const [enrollmentRow] = await scopedDb
-    .insert(schema.enrollments)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      pubkey: input.pubkey,
+  const [enrollmentRow] = await scopedDb.insert(schema.enrollments).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    pubkey: input.pubkey,
+    exposure: "whole-machine",
+    hasDisplay: input.hasDisplay,
+    allowScreenControl: input.allowScreenControl,
+    os: input.os,
+    arch: input.arch,
+    status: "active",
+  }).onConflictDoUpdate({
+    target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+    set: {
       exposure: "whole-machine",
       hasDisplay: input.hasDisplay,
       allowScreenControl: input.allowScreenControl,
       os: input.os,
       arch: input.arch,
       status: "active",
-    })
-    .onConflictDoUpdate({
-      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
-      set: {
-        exposure: "whole-machine",
-        hasDisplay: input.hasDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: input.os,
-        arch: input.arch,
-        status: "active",
-        revokedAt: null,
-        updatedAt: input.now,
-      },
-    })
-    .returning();
+      revokedAt: null,
+      updatedAt: input.now,
+    },
+  }).returning();
   if (!enrollmentRow) {
     throw new Error("Failed to create enrollment during finalize");
   }
@@ -10657,30 +9111,23 @@ async function finalizeEnrollmentInScope(
 
   // Ensure a selfhosted sandbox for this enrollment. A re-finalize of the SAME
   // machine reuses the existing sandbox rather than creating a duplicate.
-  const [existingSandbox] = await scopedDb
-    .select()
-    .from(schema.sandboxes)
-    .where(
-      and(
-        eq(schema.sandboxes.workspaceId, input.workspaceId),
-        eq(schema.sandboxes.enrollmentId, enrollment.id),
-      ),
-    )
+  const [existingSandbox] = await scopedDb.select().from(schema.sandboxes)
+    .where(and(
+      eq(schema.sandboxes.workspaceId, input.workspaceId),
+      eq(schema.sandboxes.enrollmentId, enrollment.id),
+    ))
     .limit(1);
   let sandbox: SandboxRecord;
   if (existingSandbox) {
     sandbox = mapSandbox(existingSandbox);
   } else {
-    const [sandboxRow] = await scopedDb
-      .insert(schema.sandboxes)
-      .values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        kind: "selfhosted",
-        name: input.sandboxName,
-        enrollmentId: enrollment.id,
-      })
-      .returning();
+    const [sandboxRow] = await scopedDb.insert(schema.sandboxes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      kind: "selfhosted",
+      name: input.sandboxName,
+      enrollmentId: enrollment.id,
+    }).returning();
     if (!sandboxRow) {
       throw new Error("Failed to create sandbox during finalize");
     }
@@ -10693,38 +9140,31 @@ async function finalizeEnrollmentInScope(
 // end state as approveDeviceEnrollmentRequest — an enrollments row + a selfhosted
 // sandbox row — but WITHOUT a pending device-flow request (a stateless `oget_`
 // token carries the grant). Idempotent via the shared finalize core's upsert.
-export async function finalizeEnrollmentByToken(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    pubkey: string;
-    hasDisplay: boolean;
-    allowScreenControl: boolean;
-    os: EnrollmentOs;
-    arch: string;
-    sandboxName: string;
-    now?: Date;
-  },
-): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
+export async function finalizeEnrollmentByToken(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  os: EnrollmentOs;
+  arch: string;
+  sandboxName: string;
+  now?: Date;
+}): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
   const now = input.now ?? new Date();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      return await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        pubkey: input.pubkey,
-        hasDisplay: input.hasDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: input.os,
-        arch: input.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    return await finalizeEnrollmentInScope(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: input.pubkey,
+      hasDisplay: input.hasDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: input.os,
+      arch: input.arch,
+      sandboxName: input.sandboxName,
+      now,
+    });
+  });
 }
 
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
@@ -10741,120 +9181,92 @@ export async function finalizeEnrollmentByToken(
 // re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
 // enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
 // no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
-export async function approveDeviceEnrollmentRequest(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    requestId: string;
-    allowScreenControl: boolean;
-    approvedBySubjectId: string;
-    approvedBySubjectLabel?: string | null;
-    // A name for the generated sandbox (machine name or a fallback).
-    sandboxName: string;
-    now?: Date;
-  },
-): Promise<{
-  approved: boolean;
-  enrollment: EnrollmentRecord | null;
-  sandbox: SandboxRecord | null;
-}> {
+export async function approveDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  requestId: string;
+  allowScreenControl: boolean;
+  approvedBySubjectId: string;
+  approvedBySubjectLabel?: string | null;
+  // A name for the generated sandbox (machine name or a fallback).
+  sandboxName: string;
+  now?: Date;
+}): Promise<{ approved: boolean; enrollment: EnrollmentRecord | null; sandbox: SandboxRecord | null }> {
   const now = input.now ?? new Date();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
-      const [pending] = await scopedDb
-        .select()
-        .from(schema.deviceEnrollmentRequests)
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
-            eq(schema.deviceEnrollmentRequests.id, input.requestId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!pending) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      // Already terminally approved → idempotent return of the existing rows (re-run
-      // the consent fields in case allow_screen_control changed on re-approve).
-      const expired = pending.expiresAt.getTime() <= now.getTime();
-      if (pending.status === "denied" || pending.status === "consumed") {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      if (pending.status === "pending" && expired) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
+    const [pending] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!pending) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    // Already terminally approved → idempotent return of the existing rows (re-run
+    // the consent fields in case allow_screen_control changed on re-approve).
+    const expired = pending.expiresAt.getTime() <= now.getTime();
+    if (pending.status === "denied" || pending.status === "consumed") {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    if (pending.status === "pending" && expired) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
 
-      // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
-      // selfhosted sandbox. RLS is already set on scopedDb's session and this call
-      // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
-      // enrollment/sandbox writes all commit atomically (semantics unchanged from the
-      // pre-refactor inline block — acceptance #2 stays one machine). The headless
-      // token exchange (finalizeEnrollmentByToken) calls the SAME core.
-      const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        pubkey: pending.pubkey,
-        hasDisplay: pending.canOfferDisplay,
+    // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
+    // selfhosted sandbox. RLS is already set on scopedDb's session and this call
+    // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
+    // enrollment/sandbox writes all commit atomically (semantics unchanged from the
+    // pre-refactor inline block — acceptance #2 stays one machine). The headless
+    // token exchange (finalizeEnrollmentByToken) calls the SAME core.
+    const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: pending.pubkey,
+      hasDisplay: pending.canOfferDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: pending.os as EnrollmentOs,
+      arch: pending.arch,
+      sandboxName: input.sandboxName,
+      now,
+    });
+
+    // Stamp the request approved + the LOUD CONSENT record (who/when/what).
+    await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({
+        status: "approved",
         allowScreenControl: input.allowScreenControl,
-        os: pending.os as EnrollmentOs,
-        arch: pending.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
+        approvedBySubjectId: input.approvedBySubjectId,
+        approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
+        approvedAt: now,
+        enrollmentId: enrollment.id,
+        sandboxId: sandbox.id,
+        updatedAt: now,
+      })
+      .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
 
-      // Stamp the request approved + the LOUD CONSENT record (who/when/what).
-      await scopedDb
-        .update(schema.deviceEnrollmentRequests)
-        .set({
-          status: "approved",
-          allowScreenControl: input.allowScreenControl,
-          approvedBySubjectId: input.approvedBySubjectId,
-          approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
-          approvedAt: now,
-          enrollmentId: enrollment.id,
-          sandboxId: sandbox.id,
-          updatedAt: now,
-        })
-        .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
-
-      return { approved: true, enrollment, sandbox };
-    },
-  );
+    return { approved: true, enrollment, sandbox };
+  });
 }
 
 // Mark a pending request DENIED (an explicit user "no" at the approve page).
 // Idempotent: a non-pending row is a no-op (denied:false).
-export async function denyDeviceEnrollmentRequest(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    requestId: string;
-  },
-): Promise<{ denied: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.deviceEnrollmentRequests)
-        .set({ status: "denied", updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
-            eq(schema.deviceEnrollmentRequests.id, input.requestId),
-            eq(schema.deviceEnrollmentRequests.status, "pending"),
-          ),
-        )
-        .returning({ id: schema.deviceEnrollmentRequests.id });
-      return { denied: rows.length > 0 };
-    },
-  );
+export async function denyDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ denied: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "denied", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { denied: rows.length > 0 };
+  });
 }
 
 // Flip an APPROVED request to CONSUMED once the agent has polled its credentials
@@ -10862,32 +9274,20 @@ export async function denyDeviceEnrollmentRequest(
 // a second poll then re-reads the consumed row and still returns credentials (the
 // agent may legitimately retry the same poll) — the route decides. Returns whether
 // THIS call performed the consume transition.
-export async function consumeDeviceEnrollmentRequest(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    requestId: string;
-  },
-): Promise<{ consumed: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb
-        .update(schema.deviceEnrollmentRequests)
-        .set({ status: "consumed", updatedAt: new Date() })
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
-            eq(schema.deviceEnrollmentRequests.id, input.requestId),
-            eq(schema.deviceEnrollmentRequests.status, "approved"),
-          ),
-        )
-        .returning({ id: schema.deviceEnrollmentRequests.id });
-      return { consumed: rows.length > 0 };
-    },
-  );
+export async function consumeDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ consumed: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "consumed", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "approved"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { consumed: rows.length > 0 };
+  });
 }
 
 // ---- sandboxes ------------------------------------------------------------
@@ -10896,16 +9296,13 @@ export async function consumeDeviceEnrollmentRequest(
 // DB CHECK pins selfhosted<->enrollment_id: a selfhosted sandbox MUST carry an
 // enrollment; a modal sandbox MUST NOT. We surface that as a typed pre-check so
 // the caller gets a clear error rather than a raw constraint violation.
-export async function createSandbox(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    kind: SandboxKind;
-    name: string;
-    enrollmentId?: string | null;
-  },
-): Promise<SandboxRecord> {
+export async function createSandbox(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  kind: SandboxKind;
+  name: string;
+  enrollmentId?: string | null;
+}): Promise<SandboxRecord> {
   const enrollmentId = input.enrollmentId ?? null;
   if (input.kind === "selfhosted" && !enrollmentId) {
     throw new Error("A selfhosted sandbox requires an enrollmentId.");
@@ -10913,37 +9310,24 @@ export async function createSandbox(
   if (input.kind !== "selfhosted" && enrollmentId) {
     throw new Error(`A ${input.kind} sandbox must not carry an enrollmentId.`);
   }
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sandboxes)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          kind: input.kind,
-          name: input.name,
-          enrollmentId,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create sandbox");
-      }
-      return mapSandbox(row);
-    },
-  );
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sandboxes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      name: input.name,
+      enrollmentId,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create sandbox");
+    }
+    return mapSandbox(row);
+  });
 }
 
-export async function getSandbox(
-  db: Database,
-  workspaceId: string,
-  sandboxId: string,
-): Promise<SandboxRecord | null> {
+export async function getSandbox(db: Database, workspaceId: string, sandboxId: string): Promise<SandboxRecord | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sandboxes)
+    const [row] = await scopedDb.select().from(schema.sandboxes)
       .where(and(eq(schema.sandboxes.workspaceId, workspaceId), eq(schema.sandboxes.id, sandboxId)))
       .limit(1);
     return row ? mapSandbox(row) : null;
@@ -10953,9 +9337,7 @@ export async function getSandbox(
 // List a workspace's sandboxes, newest first (the sandboxes_list tool surface).
 export async function listSandboxes(db: Database, workspaceId: string): Promise<SandboxRecord[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sandboxes)
+    const rows = await scopedDb.select().from(schema.sandboxes)
       .where(eq(schema.sandboxes.workspaceId, workspaceId))
       .orderBy(desc(schema.sandboxes.createdAt));
     return rows.map(mapSandbox);
@@ -10974,29 +9356,19 @@ export type ActiveSandboxPointer = {
 
 // Read the session's current pointer (the routing proxy re-reads this PER TOOL
 // CALL). NULL active_sandbox_id == "use the session's own group sandbox".
-export async function readActiveSandbox(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<ActiveSandboxPointer | null> {
+export async function readActiveSandbox(db: Database, workspaceId: string, sessionId: string): Promise<ActiveSandboxPointer | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        activeSandboxId: schema.sessions.activeSandboxId,
-        activeEpoch: schema.sessions.activeEpoch,
-        workingDir: schema.sessions.workingDir,
-      })
-      .from(schema.sessions)
+    const [row] = await scopedDb.select({
+      activeSandboxId: schema.sessions.activeSandboxId,
+      activeEpoch: schema.sessions.activeEpoch,
+      workingDir: schema.sessions.workingDir,
+    }).from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return {
-      activeSandboxId: row.activeSandboxId ?? null,
-      activeEpoch: Number(row.activeEpoch),
-      workingDir: row.workingDir ?? null,
-    };
+    return { activeSandboxId: row.activeSandboxId ?? null, activeEpoch: Number(row.activeEpoch), workingDir: row.workingDir ?? null };
   });
 }
 
@@ -11007,30 +9379,20 @@ export async function readActiveSandbox(
 // swapped:false and re-reads. The bumped epoch fences any in-flight op cached
 // against the old pointer, which then retries against the new active sandbox.
 // integer epoch returns a JS number; Number()-coerced defensively (lease lesson).
-export async function setActiveSandbox(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    targetSandboxId: string | null;
-    expectedEpoch: number;
-    // The session's working directory to write alongside the pointer. OMITTED
-    // (undefined) ⇒ the column is left UNCHANGED (a plain swap/attach never touches
-    // it); a string sets it; null clears it back to the default. Per-session
-    // working dir is seeded create-time through this CAS, not the row INSERT.
-    workingDir?: string | null;
-  },
-): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{
-        active_sandbox_id: string | null;
-        active_epoch: number | string;
-        working_dir: string | null;
-      }>(sql`
+export async function setActiveSandbox(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  targetSandboxId: string | null;
+  expectedEpoch: number;
+  // The session's working directory to write alongside the pointer. OMITTED
+  // (undefined) ⇒ the column is left UNCHANGED (a plain swap/attach never touches
+  // it); a string sets it; null clears it back to the default. Per-session
+  // working dir is seeded create-time through this CAS, not the row INSERT.
+  workingDir?: string | null;
+}): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ active_sandbox_id: string | null; active_epoch: number | string; working_dir: string | null }>(sql`
       update sessions set
         active_sandbox_id = ${input.targetSandboxId},
         active_epoch      = active_epoch + 1,
@@ -11040,20 +9402,15 @@ export async function setActiveSandbox(
         and active_epoch = ${input.expectedEpoch}
       returning active_sandbox_id, active_epoch, working_dir
     `);
-      const row = rows[0];
-      if (!row) {
-        return { swapped: false, pointer: null };
-      }
-      return {
-        swapped: true,
-        pointer: {
-          activeSandboxId: row.active_sandbox_id ?? null,
-          activeEpoch: Number(row.active_epoch),
-          workingDir: row.working_dir ?? null,
-        },
-      };
-    },
-  );
+    const row = rows[0];
+    if (!row) {
+      return { swapped: false, pointer: null };
+    }
+    return {
+      swapped: true,
+      pointer: { activeSandboxId: row.active_sandbox_id ?? null, activeEpoch: Number(row.active_epoch), workingDir: row.working_dir ?? null },
+    };
+  });
 }
 
 // ---- per-machine metrics (§10.7) ------------------------------------------
@@ -11096,59 +9453,36 @@ function metricColumns(sample: MachineMetricsSample) {
 
 // Last-sample UPSERT: one row per enrollment, overwritten every sample (PK on
 // enrollment_id is the conflict target). The Machines dashboard's "now" read.
-export async function upsertMachineMetricsLatest(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-    sample: MachineMetricsSample;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const cols = metricColumns(input.sample);
-      await scopedDb
-        .insert(schema.machineMetricsLatest)
-        .values({
-          enrollmentId: input.enrollmentId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...cols,
-        })
-        .onConflictDoUpdate({
-          target: schema.machineMetricsLatest.enrollmentId,
-          set: { ...cols, updatedAt: new Date() },
-        });
-    },
-  );
+export async function upsertMachineMetricsLatest(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const cols = metricColumns(input.sample);
+    await scopedDb.insert(schema.machineMetricsLatest).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...cols,
+    }).onConflictDoUpdate({
+      target: schema.machineMetricsLatest.enrollmentId,
+      set: { ...cols, updatedAt: new Date() },
+    });
+  });
 }
 
 // Append a downsampled (~1/min) series row (the history the dashboard time-range
 // reads + the later retention sweep prune).
-export async function insertMachineMetricsSeries(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-    sample: MachineMetricsSample;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await scopedDb.insert(schema.machineMetricsSeries).values({
-        enrollmentId: input.enrollmentId,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        ...metricColumns(input.sample),
-      });
-    },
-  );
+export async function insertMachineMetricsSeries(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.machineMetricsSeries).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...metricColumns(input.sample),
+    });
+  });
 }
 
 // The target spacing between series rows: the agent heartbeats ~every 5s, but we
@@ -11167,60 +9501,46 @@ export const MACHINE_METRICS_SERIES_INTERVAL_MS = 60_000;
  * spacing. A null/absent `sampledAt` on the prior row treats it as "no prior" →
  * append.
  */
-export async function ingestMachineMetricsSample(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    enrollmentId: string;
-    sample: MachineMetricsSample;
-    /** Override the downsample interval (tests). Defaults to ~1/min. */
-    seriesIntervalMs?: number;
-  },
-): Promise<{ latestUpserted: true; seriesAppended: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const cols = metricColumns(input.sample);
-      // 1. Latest upsert — always.
-      await scopedDb
-        .insert(schema.machineMetricsLatest)
-        .values({
-          enrollmentId: input.enrollmentId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...cols,
-        })
-        .onConflictDoUpdate({
-          target: schema.machineMetricsLatest.enrollmentId,
-          set: { ...cols, updatedAt: new Date() },
-        });
+export async function ingestMachineMetricsSample(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+  /** Override the downsample interval (tests). Defaults to ~1/min. */
+  seriesIntervalMs?: number;
+}): Promise<{ latestUpserted: true; seriesAppended: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const cols = metricColumns(input.sample);
+    // 1. Latest upsert — always.
+    await scopedDb.insert(schema.machineMetricsLatest).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...cols,
+    }).onConflictDoUpdate({
+      target: schema.machineMetricsLatest.enrollmentId,
+      set: { ...cols, updatedAt: new Date() },
+    });
 
-      // 2. Series append — downsampled. Read the most recent series sampled_at and
-      // only append when the new sample is >= the interval newer (or there is no
-      // prior row). Done in-context so RLS scopes the read to this workspace.
-      const intervalMs = input.seriesIntervalMs ?? MACHINE_METRICS_SERIES_INTERVAL_MS;
-      const [prior] = await scopedDb
-        .select({ sampledAt: schema.machineMetricsSeries.sampledAt })
-        .from(schema.machineMetricsSeries)
-        .where(eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId))
-        .orderBy(desc(schema.machineMetricsSeries.sampledAt))
-        .limit(1);
-      const priorMs = prior?.sampledAt ? prior.sampledAt.getTime() : null;
-      const sampleMs = input.sample.sampledAt.getTime();
-      const seriesAppended = priorMs === null || sampleMs - priorMs >= intervalMs;
-      if (seriesAppended) {
-        await scopedDb.insert(schema.machineMetricsSeries).values({
-          enrollmentId: input.enrollmentId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...cols,
-        });
-      }
-      return { latestUpserted: true, seriesAppended };
-    },
-  );
+    // 2. Series append — downsampled. Read the most recent series sampled_at and
+    // only append when the new sample is >= the interval newer (or there is no
+    // prior row). Done in-context so RLS scopes the read to this workspace.
+    const intervalMs = input.seriesIntervalMs ?? MACHINE_METRICS_SERIES_INTERVAL_MS;
+    const [prior] = await scopedDb.select({ sampledAt: schema.machineMetricsSeries.sampledAt })
+      .from(schema.machineMetricsSeries)
+      .where(eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId))
+      .orderBy(desc(schema.machineMetricsSeries.sampledAt))
+      .limit(1);
+    const priorMs = prior?.sampledAt ? prior.sampledAt.getTime() : null;
+    const sampleMs = input.sample.sampledAt.getTime();
+    const seriesAppended = priorMs === null || sampleMs - priorMs >= intervalMs;
+    if (seriesAppended) {
+      await scopedDb.insert(schema.machineMetricsSeries).values({
+        enrollmentId: input.enrollmentId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...cols,
+      });
+    }
+    return { latestUpserted: true, seriesAppended };
+  });
 }
 
 // The mapped read shape of a stored metrics sample (latest or a series point).
@@ -11285,21 +9605,13 @@ function mapMetricsRow(row: {
 
 // Read the latest sample for ONE enrollment (the dashboard "now" read), or null
 // when none has landed (never seen / offline before a first heartbeat).
-export async function readMachineMetricsLatest(
-  db: Database,
-  workspaceId: string,
-  enrollmentId: string,
-): Promise<MachineMetricsRow | null> {
+export async function readMachineMetricsLatest(db: Database, workspaceId: string, enrollmentId: string): Promise<MachineMetricsRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.machineMetricsLatest)
-      .where(
-        and(
-          eq(schema.machineMetricsLatest.workspaceId, workspaceId),
-          eq(schema.machineMetricsLatest.enrollmentId, enrollmentId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.machineMetricsLatest)
+      .where(and(
+        eq(schema.machineMetricsLatest.workspaceId, workspaceId),
+        eq(schema.machineMetricsLatest.enrollmentId, enrollmentId),
+      ))
       .limit(1);
     return row ? mapMetricsRow(row) : null;
   });
@@ -11308,14 +9620,9 @@ export async function readMachineMetricsLatest(
 // Read the latest sample for EVERY enrollment in a workspace, keyed by
 // enrollmentId — the Machines list joins this onto the fleet entries with ONE
 // query rather than N per-machine reads.
-export async function readMachineMetricsLatestForWorkspace(
-  db: Database,
-  workspaceId: string,
-): Promise<Map<string, MachineMetricsRow>> {
+export async function readMachineMetricsLatestForWorkspace(db: Database, workspaceId: string): Promise<Map<string, MachineMetricsRow>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.machineMetricsLatest)
+    const rows = await scopedDb.select().from(schema.machineMetricsLatest)
       .where(eq(schema.machineMetricsLatest.workspaceId, workspaceId));
     const byEnrollment = new Map<string, MachineMetricsRow>();
     for (const row of rows) {
@@ -11329,26 +9636,16 @@ export async function readMachineMetricsLatestForWorkspace(
 // dashboard time-range read). `sinceMs` bounds the window (e.g. now - 1h);
 // ordered oldest-first for a left-to-right chart. `limit` caps the row count
 // (defensive against an unbounded window).
-export async function readMachineMetricsSeries(
-  db: Database,
-  input: {
-    workspaceId: string;
-    enrollmentId: string;
-    since: Date;
-    limit?: number;
-  },
-): Promise<MachineMetricsRow[]> {
+export async function readMachineMetricsSeries(db: Database, input: {
+  workspaceId: string; enrollmentId: string; since: Date; limit?: number;
+}): Promise<MachineMetricsRow[]> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.machineMetricsSeries)
-      .where(
-        and(
-          eq(schema.machineMetricsSeries.workspaceId, input.workspaceId),
-          eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId),
-          gte(schema.machineMetricsSeries.sampledAt, input.since),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.machineMetricsSeries)
+      .where(and(
+        eq(schema.machineMetricsSeries.workspaceId, input.workspaceId),
+        eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId),
+        gte(schema.machineMetricsSeries.sampledAt, input.since),
+      ))
       .orderBy(asc(schema.machineMetricsSeries.sampledAt))
       .limit(input.limit ?? 5_000);
     return rows.map(mapMetricsRow);
@@ -11378,25 +9675,17 @@ export interface StreamAcknowledgment {
 // pixel plane (and, when shared, the shared-exposure disclosure). Keyed on
 // (workspace, group, subject); a re-ack (e.g. a solo→shared upgrade adding the
 // shared consent) is ON CONFLICT DO UPDATE, never a duplicate row.
-export async function recordStreamAcknowledgment(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    subjectId: string;
-    acknowledgeUnredacted: boolean;
-    acknowledgeShared: boolean;
-  },
-): Promise<StreamAcknowledgment> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+export async function recordStreamAcknowledgment(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  subjectId: string;
+  acknowledgeUnredacted: boolean;
+  acknowledgeShared: boolean;
+}): Promise<StreamAcknowledgment> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const rows = await scopedDb.execute<{
-        acknowledged_unredacted: boolean;
-        acknowledged_shared: boolean;
-      }>(sql`
+      const rows = await scopedDb.execute<{ acknowledged_unredacted: boolean; acknowledged_shared: boolean }>(sql`
         insert into session_stream_acknowledgments
           (account_id, workspace_id, sandbox_group_id, subject_id,
            acknowledged_unredacted, acknowledged_shared, acknowledged_at, updated_at)
@@ -11413,30 +9702,20 @@ export async function recordStreamAcknowledgment(
         returning acknowledged_unredacted, acknowledged_shared
       `);
       const row = rows[0]!;
-      return {
-        acknowledgedUnredacted: row.acknowledged_unredacted,
-        acknowledgedShared: row.acknowledged_shared,
-      };
-    },
-  );
+      return { acknowledgedUnredacted: row.acknowledged_unredacted, acknowledgedShared: row.acknowledged_shared };
+    });
 }
 
 // Read a principal's recorded acknowledgment for a group, or null if they have
 // never acknowledged the un-redacted pixel plane. The negotiation read + the
 // desktop-stream gate both consult this.
-export async function getStreamAcknowledgment(
-  db: Database,
-  input: {
-    workspaceId: string;
-    sandboxGroupId: string;
-    subjectId: string;
-  },
-): Promise<StreamAcknowledgment | null> {
+export async function getStreamAcknowledgment(db: Database, input: {
+  workspaceId: string;
+  sandboxGroupId: string;
+  subjectId: string;
+}): Promise<StreamAcknowledgment | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.execute<{
-      acknowledged_unredacted: boolean;
-      acknowledged_shared: boolean;
-    }>(sql`
+    const rows = await scopedDb.execute<{ acknowledged_unredacted: boolean; acknowledged_shared: boolean }>(sql`
       select acknowledged_unredacted, acknowledged_shared
       from session_stream_acknowledgments
       where workspace_id = ${input.workspaceId}
@@ -11445,10 +9724,7 @@ export async function getStreamAcknowledgment(
       limit 1
     `);
     if (!rows[0]) return null;
-    return {
-      acknowledgedUnredacted: rows[0].acknowledged_unredacted,
-      acknowledgedShared: rows[0].acknowledged_shared,
-    };
+    return { acknowledgedUnredacted: rows[0].acknowledged_unredacted, acknowledgedShared: rows[0].acknowledged_shared };
   });
 }
 
@@ -11456,20 +9732,13 @@ export async function getStreamAcknowledgment(
 // disclosure surfaces the OTHER sessions' ids ONLY — never their goal/metadata/
 // conversation. The query selects ONLY the id column (id is the disclosure
 // boundary; stress g). RLS-scoped: a foreign-workspace group returns no rows.
-export async function listSessionIdsInGroup(
-  db: Database,
-  workspaceId: string,
-  sandboxGroupId: string,
-): Promise<string[]> {
+export async function listSessionIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<string[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await rawRows<{ id: string }>(
-      scopedDb,
-      sql`
+    const rows = await rawRows<{ id: string }>(scopedDb, sql`
       select id from sessions
       where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
       order by created_at asc
-    `,
-    );
+    `);
     return rows.map((r) => r.id);
   });
 }
@@ -11486,16 +9755,13 @@ export async function listSessionIdsInGroup(
 // independently holds a holder on a SIBLING session may still watch via that
 // session (correct — authorized there); this drops ONLY the named viewerId's
 // holder.
-export async function revokeViewer(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    viewerId: string;
-    idleGraceMs: number;
-  },
-): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
+export async function revokeViewer(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  viewerId: string;
+  idleGraceMs: number;
+}): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
   // The drop is exactly releaseLeaseHolder's idempotent delete-my-row +
   // recompute (refcount recomputes; warm→draining is guarded refcount=0 AND
   // turn_holders=0, so a turn-held box never drains on a viewer revoke). The
@@ -11560,35 +9826,29 @@ export interface AccrueWarmSecondsResult {
  * REQUESTED cost; the ledger is the ACTUAL debit (they legitimately differ when
  * balance is low — M2). Set debitCredits:false to meter without debiting.
  */
-export async function accrueWarmSeconds(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sandboxGroupId: string;
-    /** The epoch the tick observed; the fence — a stale writer no-ops. */
-    expectedEpoch: number;
-    /** usd_micros per warm-second for this box's backend (0 = meter only, no cost). */
-    warmRateMicrosPerSecond: number;
-    /** Optional attribution: the founding/observing session (visibility only — the
-     *  group meter key makes the workspace charge correct regardless). */
-    subjectId?: string | null;
-    /** Debit credits for warm-cost (default true). The force-drain at 0 balance
-     *  depends on this decrementing the balance. */
-    debitCredits?: boolean;
-  },
-): Promise<AccrueWarmSecondsResult> {
+export async function accrueWarmSeconds(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  /** The epoch the tick observed; the fence — a stale writer no-ops. */
+  expectedEpoch: number;
+  /** usd_micros per warm-second for this box's backend (0 = meter only, no cost). */
+  warmRateMicrosPerSecond: number;
+  /** Optional attribution: the founding/observing session (visibility only — the
+   *  group meter key makes the workspace charge correct regardless). */
+  subjectId?: string | null;
+  /** Debit credits for warm-cost (default true). The force-drain at 0 balance
+   *  depends on this decrementing the balance. */
+  debitCredits?: boolean;
+}): Promise<AccrueWarmSecondsResult> {
   const none: AccrueWarmSecondsResult = { accrued: false, seconds: 0, tick: 0, costMicros: 0 };
-  const result = await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        // Lock the group's lease row so the cursor advance + the usage insert are
-        // one atomic step (no other tick can interleave between the diff and the
-        // cursor write).
-        const rows = await tx.execute<LeaseRow & { meter_elapsed_s: number | null }>(sql`
+  const result = await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      // Lock the group's lease row so the cursor advance + the usage insert are
+      // one atomic step (no other tick can interleave between the diff and the
+      // cursor write).
+      const rows = await tx.execute<LeaseRow & { meter_elapsed_s: number | null }>(sql`
         select *,
           case when last_meter_at is null then null
                else floor(extract(epoch from (now() - last_meter_at)))::int end as meter_elapsed_s
@@ -11596,38 +9856,38 @@ export async function accrueWarmSeconds(
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
       `);
-        const row = rows[0];
-        if (!row) return none;
+      const row = rows[0];
+      if (!row) return none;
 
-        // Epoch fence + liveness guard: only a live-epoch warm box meters. A stale
-        // (superseded) tick or a draining/cold/warming lease is a no-op.
-        if (Number(row.lease_epoch) !== input.expectedEpoch || row.liveness !== "warm") {
-          return none;
-        }
+      // Epoch fence + liveness guard: only a live-epoch warm box meters. A stale
+      // (superseded) tick or a draining/cold/warming lease is a no-op.
+      if (Number(row.lease_epoch) !== input.expectedEpoch || row.liveness !== "warm") {
+        return none;
+      }
 
-        // First tick on a never-metered lease: SEED the cursor, accrue nothing.
-        if (row.last_meter_at == null) {
-          await tx.execute(sql`
+      // First tick on a never-metered lease: SEED the cursor, accrue nothing.
+      if (row.last_meter_at == null) {
+        await tx.execute(sql`
           update sandbox_leases set last_meter_at = now(), updated_at = now()
           where id = ${row.id}
         `);
-          return none;
-        }
+        return none;
+      }
 
-        const elapsedS = Number(row.meter_elapsed_s ?? 0);
-        if (elapsedS <= 0) {
-          // No whole second elapsed yet — leave the cursor untouched so the
-          // remainder accrues on the next tick (no silent seconds loss).
-          return none;
-        }
+      const elapsedS = Number(row.meter_elapsed_s ?? 0);
+      if (elapsedS <= 0) {
+        // No whole second elapsed yet — leave the cursor untouched so the
+        // remainder accrues on the next tick (no silent seconds loss).
+        return none;
+      }
 
-        const tick = Number(row.last_meter_tick) + 1;
-        const costMicros = Math.round(elapsedS * Math.max(0, input.warmRateMicrosPerSecond));
+      const tick = Number(row.last_meter_tick) + 1;
+      const costMicros = Math.round(elapsedS * Math.max(0, input.warmRateMicrosPerSecond));
 
-        // (1) The warm-seconds meter — GROUP+epoch+tick keyed, ON CONFLICT DO
-        // NOTHING (the idempotency that makes a shared box one stream + a re-fire a
-        // no-op). sourceResourceId is keyed on (group, epoch).
-        await tx.execute(sql`
+      // (1) The warm-seconds meter — GROUP+epoch+tick keyed, ON CONFLICT DO
+      // NOTHING (the idempotency that makes a shared box one stream + a re-fire a
+      // no-op). sourceResourceId is keyed on (group, epoch).
+      await tx.execute(sql`
         insert into usage_events
           (account_id, workspace_id, subject_id, event_type, quantity, unit,
            source_resource_type, source_resource_id, idempotency_key, occurred_at)
@@ -11640,9 +9900,9 @@ export async function accrueWarmSeconds(
         on conflict (idempotency_key) do nothing
       `);
 
-        // (2) The warm-cost meter (only when a rate is configured). Same keying.
-        if (costMicros > 0) {
-          await tx.execute(sql`
+      // (2) The warm-cost meter (only when a rate is configured). Same keying.
+      if (costMicros > 0) {
+        await tx.execute(sql`
           insert into usage_events
             (account_id, workspace_id, subject_id, event_type, quantity, unit,
              source_resource_type, source_resource_id, idempotency_key, occurred_at)
@@ -11654,19 +9914,18 @@ export async function accrueWarmSeconds(
              now())
           on conflict (idempotency_key) do nothing
         `);
-        }
+      }
 
-        // (3) Advance the cursor IN THE SAME TXN — the atomicity that makes the tick
-        // index and the metered seconds inseparable.
-        await tx.execute(sql`
+      // (3) Advance the cursor IN THE SAME TXN — the atomicity that makes the tick
+      // index and the metered seconds inseparable.
+      await tx.execute(sql`
         update sandbox_leases set
           last_meter_at = now(), last_meter_tick = ${tick}, updated_at = now()
         where id = ${row.id}
       `);
 
-        return { accrued: true, seconds: elapsedS, tick, costMicros };
-      }),
-  );
+      return { accrued: true, seconds: elapsedS, tick, costMicros };
+    }));
 
   // Debit credits for the warm-cost OUTSIDE the lease-row txn (applyCreditDebit
   // takes its own per-account advisory lock — never nest it under the lease row
@@ -11716,22 +9975,19 @@ function startOfUtcMonthDefault(date = new Date()): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 0, 0, 0, 0));
 }
 
-export async function forceDrainOverLimitViewerOnlyBoxes(
-  db: Database,
-  input: {
-    workspaceId: string;
-    /** account balance gate: when <= 0 (and a billing/managed mode is on) drain. */
-    balanceMicros: number;
-    enforceBalance: boolean;
-    /** warm-second cap (cumulative this UTC month). 0 = unbounded (no cap gate). */
-    maxWarmSecondsPerWorkspace: number;
-    /** start of the cap window (caller passes startOfUtcMonth() so the fn stays
-     *  time-source-agnostic for tests). */
-    capWindowStart?: Date;
-    /** drain-grace horizon stamped on the newly-draining rows (matches the reaper). */
-    idleGraceMs: number;
-  },
-): Promise<ForceDrainResult> {
+export async function forceDrainOverLimitViewerOnlyBoxes(db: Database, input: {
+  workspaceId: string;
+  /** account balance gate: when <= 0 (and a billing/managed mode is on) drain. */
+  balanceMicros: number;
+  enforceBalance: boolean;
+  /** warm-second cap (cumulative this UTC month). 0 = unbounded (no cap gate). */
+  maxWarmSecondsPerWorkspace: number;
+  /** start of the cap window (caller passes startOfUtcMonth() so the fn stays
+   *  time-source-agnostic for tests). */
+  capWindowStart?: Date;
+  /** drain-grace horizon stamped on the newly-draining rows (matches the reaper). */
+  idleGraceMs: number;
+}): Promise<ForceDrainResult> {
   return await withWorkspaceUsageLock(db, input.workspaceId, async (scopedDb) => {
     // Determine over-limit under the lock (so the cap read + the drain are one
     // serialized critical section per workspace).
@@ -11740,18 +9996,13 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       reason = "balance";
     } else if (input.maxWarmSecondsPerWorkspace > 0) {
       const since = input.capWindowStart ?? startOfUtcMonthDefault();
-      const [{ total } = { total: 0 }] = await scopedDb
-        .select({
-          total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
-        })
-        .from(schema.usageEvents)
-        .where(
-          and(
-            eq(schema.usageEvents.workspaceId, input.workspaceId),
-            eq(schema.usageEvents.eventType, "sandbox.warm_seconds"),
-            gt(schema.usageEvents.occurredAt, since),
-          ),
-        );
+      const [{ total } = { total: 0 }] = await scopedDb.select({
+        total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+      }).from(schema.usageEvents).where(and(
+        eq(schema.usageEvents.workspaceId, input.workspaceId),
+        eq(schema.usageEvents.eventType, "sandbox.warm_seconds"),
+        gt(schema.usageEvents.occurredAt, since),
+      ));
       if (Number(total) >= input.maxWarmSecondsPerWorkspace) {
         reason = "warm_cap";
       }
@@ -11782,9 +10033,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     // CAS the now-holderless leases warm→draining at refcount 0 with the grace
     // deadline stamped — so the SAME reaper sweep's refcount=0 drain predicate
     // then terminates the box.
-    const drained = await rawRows<{ sandbox_group_id: string }>(
-      scopedDb,
-      sql`
+    const drained = await rawRows<{ sandbox_group_id: string }>(scopedDb, sql`
       update sandbox_leases set
         liveness = 'draining',
         refcount = 0, turn_holders = 0, viewer_holders = 0,
@@ -11793,63 +10042,44 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       where workspace_id = ${input.workspaceId}
         and liveness = 'warm' and turn_holders = 0
       returning sandbox_group_id
-    `,
-    );
+    `);
 
     return {
       overLimit: true,
       reason,
-      drained: drained.map((r) => ({
-        workspaceId: input.workspaceId,
-        sandboxGroupId: r.sandbox_group_id,
-      })),
+      drained: drained.map((r) => ({ workspaceId: input.workspaceId, sandboxGroupId: r.sandbox_group_id })),
     };
   });
 }
 
-export async function saveRunState(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId?: string | null;
-    serializedRunState: string;
-    pendingApprovals: unknown[];
-    // The codex account freezing this state (the turn's resolved credential id),
-    // or null on a non-codex turn. Stamped so a resume on a DIFFERENT codex
-    // account can strip the blob's account-bound reasoning. Defaults null so
-    // every legacy caller (and the non-codex path) is byte-identical.
-    frozenCodexCredentialId?: string | null;
-  },
-): Promise<void> {
-  await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [{ maxVersion } = { maxVersion: 0 }] = await scopedDb
-        .select({
-          maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
-        })
-        .from(schema.agentRunStates)
-        .where(
-          and(
-            eq(schema.agentRunStates.workspaceId, input.workspaceId),
-            eq(schema.agentRunStates.sessionId, input.sessionId),
-          ),
-        );
-      await scopedDb.insert(schema.agentRunStates).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId ?? null,
-        stateVersion: Number(maxVersion) + 1,
-        serializedRunState: input.serializedRunState,
-        pendingApprovals: input.pendingApprovals,
-        frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
-      });
-    },
-  );
+export async function saveRunState(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  serializedRunState: string;
+  pendingApprovals: unknown[];
+  // The codex account freezing this state (the turn's resolved credential id),
+  // or null on a non-codex turn. Stamped so a resume on a DIFFERENT codex
+  // account can strip the blob's account-bound reasoning. Defaults null so
+  // every legacy caller (and the non-codex path) is byte-identical.
+  frozenCodexCredentialId?: string | null;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [{ maxVersion } = { maxVersion: 0 }] = await scopedDb.select({
+      maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+    }).from(schema.agentRunStates).where(and(eq(schema.agentRunStates.workspaceId, input.workspaceId), eq(schema.agentRunStates.sessionId, input.sessionId)));
+    await scopedDb.insert(schema.agentRunStates).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      stateVersion: Number(maxVersion) + 1,
+      serializedRunState: input.serializedRunState,
+      pendingApprovals: input.pendingApprovals,
+      frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
+    });
+  });
 }
 
 export type CreateSessionGoalInput = {
@@ -11862,118 +10092,70 @@ export type CreateSessionGoalInput = {
   createdBy: SessionGoalCreatedBy;
 };
 
-export async function createSessionGoal(
-  db: Database,
-  input: CreateSessionGoalInput,
-): Promise<SessionGoal> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionGoals)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          text: input.text,
-          successCriteria: input.successCriteria ?? null,
-          maxAutoContinuations: input.maxAutoContinuations ?? null,
-          createdBy: input.createdBy,
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to create session goal");
-      }
-      return mapSessionGoal(row);
-    },
-  );
+export async function createSessionGoal(db: Database, input: CreateSessionGoalInput): Promise<SessionGoal> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessionGoals).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      text: input.text,
+      successCriteria: input.successCriteria ?? null,
+      maxAutoContinuations: input.maxAutoContinuations ?? null,
+      createdBy: input.createdBy,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create session goal");
+    }
+    return mapSessionGoal(row);
+  });
 }
 
-export async function getSessionGoal(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<SessionGoal | null> {
+export async function getSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<SessionGoal | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessionGoals)
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          eq(schema.sessionGoals.sessionId, sessionId),
-        ),
-      )
+    const [row] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
       .limit(1);
     return row ? mapSessionGoal(row) : null;
   });
 }
 
-export async function clearSessionGoal(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [existing] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, workspaceId),
-              eq(schema.sessionGoals.sessionId, sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!existing) {
-          return { cleared: false, goal: null, event: null };
-        }
-        await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!session) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        const sequence = session.lastSequence + 1;
-        const [event] = await tx
-          .insert(schema.sessionEvents)
-          .values({
-            accountId: session.accountId,
-            workspaceId: session.workspaceId,
-            sessionId,
-            sequence,
-            type: "goal.cleared",
-            payload: sanitizeEventPayload({
-              goalId: existing.id,
-              text: existing.text,
-              version: existing.version,
-            }),
-          })
-          .returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: new Date() })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        if (!event) {
-          throw new Error("Failed to append goal.cleared event");
-        }
-        return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+export async function clearSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [existing] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      return { cleared: false, goal: null, event: null };
+    }
+    await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
+    const [session] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const sequence = session.lastSequence + 1;
+    const [event] = await tx.insert(schema.sessionEvents).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId,
+      sequence,
+      type: "goal.cleared",
+      payload: sanitizeEventPayload({
+        goalId: existing.id,
+        text: existing.text,
+        version: existing.version,
       }),
-  );
+    }).returning();
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    if (!event) {
+      throw new Error("Failed to append goal.cleared event");
+    }
+    return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+  }));
 }
 
 /**
@@ -11982,101 +10164,66 @@ export async function clearSessionGoal(
  * and resets the continuation counters — re-stating the objective re-arms the
  * auto-continuation budget.
  */
-export async function upsertSessionGoal(
-  db: Database,
-  input: CreateSessionGoalInput,
-): Promise<{ goal: SessionGoal; replaced: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.sessionGoals)
-        .where(
-          and(
-            eq(schema.sessionGoals.workspaceId, input.workspaceId),
-            eq(schema.sessionGoals.sessionId, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!existing) {
-        const [row] = await scopedDb
-          .insert(schema.sessionGoals)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            text: input.text,
-            successCriteria: input.successCriteria ?? null,
-            maxAutoContinuations: input.maxAutoContinuations ?? null,
-            createdBy: input.createdBy,
-          })
-          .returning();
-        if (!row) {
-          throw new Error("Failed to upsert session goal");
-        }
-        return { goal: mapSessionGoal(row), replaced: false };
-      }
-      const [row] = await scopedDb
-        .update(schema.sessionGoals)
-        .set({
-          status: "active",
-          text: input.text,
-          successCriteria: input.successCriteria ?? null,
-          maxAutoContinuations: input.maxAutoContinuations ?? null,
-          evidence: null,
-          rationale: null,
-          pausedReason: null,
-          createdBy: input.createdBy,
-          version: existing.version + 1,
-          autoContinuations: 0,
-          noProgressStreak: 0,
-          lastContinuationTurnId: null,
-          versionAtLastContinuation: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.sessionGoals.id, existing.id))
-        .returning();
+export async function upsertSessionGoal(db: Database, input: CreateSessionGoalInput): Promise<{ goal: SessionGoal; replaced: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [existing] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, input.workspaceId), eq(schema.sessionGoals.sessionId, input.sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      const [row] = await scopedDb.insert(schema.sessionGoals).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        text: input.text,
+        successCriteria: input.successCriteria ?? null,
+        maxAutoContinuations: input.maxAutoContinuations ?? null,
+        createdBy: input.createdBy,
+      }).returning();
       if (!row) {
         throw new Error("Failed to upsert session goal");
       }
-      return { goal: mapSessionGoal(row), replaced: true };
-    },
-  );
+      return { goal: mapSessionGoal(row), replaced: false };
+    }
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      status: "active",
+      text: input.text,
+      successCriteria: input.successCriteria ?? null,
+      maxAutoContinuations: input.maxAutoContinuations ?? null,
+      evidence: null,
+      rationale: null,
+      pausedReason: null,
+      createdBy: input.createdBy,
+      version: existing.version + 1,
+      autoContinuations: 0,
+      noProgressStreak: 0,
+      lastContinuationTurnId: null,
+      versionAtLastContinuation: null,
+      updatedAt: new Date(),
+    }).where(eq(schema.sessionGoals.id, existing.id)).returning();
+    if (!row) {
+      throw new Error("Failed to upsert session goal");
+    }
+    return { goal: mapSessionGoal(row), replaced: true };
+  });
 }
 
 /**
  * goal_update semantics: revise text/criteria without changing status. The
  * version bump counts as progress for the no-progress detector.
  */
-export async function updateSessionGoal(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  input: {
-    text?: string;
-    successCriteria?: string | null;
-  },
-): Promise<SessionGoal> {
+export async function updateSessionGoal(db: Database, workspaceId: string, sessionId: string, input: {
+  text?: string;
+  successCriteria?: string | null;
+}): Promise<SessionGoal> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionGoals)
-      .set({
-        ...(input.text !== undefined ? { text: input.text } : {}),
-        ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
-        version: sql`${schema.sessionGoals.version} + 1`,
-        noProgressStreak: 0,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          eq(schema.sessionGoals.sessionId, sessionId),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
+      version: sql`${schema.sessionGoals.version} + 1`,
+      noProgressStreak: 0,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId))).returning();
     if (!row) {
       throw new Error(`Session goal not found: ${sessionId}`);
     }
@@ -12093,33 +10240,22 @@ export async function updateSessionGoal(
  * skipped because a user title already pinned the session, true otherwise;
  * `title` is the resulting title (null when skipped).
  */
-export async function updateSessionTitle(
-  db: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    title: string;
-    source: "user" | "agent";
-  },
-): Promise<{ updated: boolean; title: string | null }> {
+export async function updateSessionTitle(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  source: "user" | "agent";
+}): Promise<{ updated: boolean; title: string | null }> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessions)
-      .set({
-        title: input.title,
-        titleSource: input.source,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-          ...(input.source === "agent"
-            ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
-            : []),
-        ),
-      )
-      .returning({ title: schema.sessions.title });
+    const [row] = await scopedDb.update(schema.sessions).set({
+      title: input.title,
+      titleSource: input.source,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(schema.sessions.workspaceId, input.workspaceId),
+      eq(schema.sessions.id, input.sessionId),
+      ...(input.source === "agent" ? [sql`${schema.sessions.titleSource} is distinct from 'user'`] : []),
+    )).returning({ title: schema.sessions.title });
     return { updated: Boolean(row), title: row?.title ?? null };
   });
 }
@@ -12131,27 +10267,15 @@ export async function updateSessionTitle(
  * completed goal. Resuming to `active` clears the pause fields and resets the
  * continuation counters.
  */
-export async function setSessionGoalStatus(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  input: {
-    status: SessionGoalStatus;
-    evidence?: string;
-    rationale?: string;
-    pausedReason?: string;
-  },
-): Promise<{ goal: SessionGoal; changed: boolean }> {
+export async function setSessionGoalStatus(db: Database, workspaceId: string, sessionId: string, input: {
+  status: SessionGoalStatus;
+  evidence?: string;
+  rationale?: string;
+  pausedReason?: string;
+}): Promise<{ goal: SessionGoal; changed: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [existing] = await scopedDb
-      .select()
-      .from(schema.sessionGoals)
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          eq(schema.sessionGoals.sessionId, sessionId),
-        ),
-      )
+    const [existing] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
       .for("update")
       .limit(1);
     if (!existing) {
@@ -12163,39 +10287,29 @@ export async function setSessionGoalStatus(
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
     }
-    const [row] = await scopedDb
-      .update(schema.sessionGoals)
-      .set({
-        status: input.status,
-        version: existing.version + 1,
-        updatedAt: new Date(),
-        ...(input.status === "completed"
-          ? {
-              evidence: input.evidence ?? null,
-              pausedReason: null,
-            }
-          : {}),
-        ...(input.status === "paused"
-          ? {
-              rationale: input.rationale ?? null,
-              pausedReason: input.pausedReason ?? null,
-            }
-          : {}),
-        ...(input.status === "active"
-          ? {
-              rationale: null,
-              pausedReason: null,
-              autoContinuations: 0,
-              noProgressStreak: 0,
-              // A re-armed goal starts a fresh continuation epoch; stale pointers to
-              // a pre-pause continuation turn must not feed the progress detector.
-              lastContinuationTurnId: null,
-              versionAtLastContinuation: null,
-            }
-          : {}),
-      })
-      .where(eq(schema.sessionGoals.id, existing.id))
-      .returning();
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      status: input.status,
+      version: existing.version + 1,
+      updatedAt: new Date(),
+      ...(input.status === "completed" ? {
+        evidence: input.evidence ?? null,
+        pausedReason: null,
+      } : {}),
+      ...(input.status === "paused" ? {
+        rationale: input.rationale ?? null,
+        pausedReason: input.pausedReason ?? null,
+      } : {}),
+      ...(input.status === "active" ? {
+        rationale: null,
+        pausedReason: null,
+        autoContinuations: 0,
+        noProgressStreak: 0,
+        // A re-armed goal starts a fresh continuation epoch; stale pointers to
+        // a pre-pause continuation turn must not feed the progress detector.
+        lastContinuationTurnId: null,
+        versionAtLastContinuation: null,
+      } : {}),
+    }).where(eq(schema.sessionGoals.id, existing.id)).returning();
     if (!row) {
       throw new Error(`Session goal not found: ${sessionId}`);
     }
@@ -12203,36 +10317,19 @@ export async function setSessionGoalStatus(
   });
 }
 
-export async function setSessionGoalLastContinuationTurn(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<void> {
+export async function setSessionGoalLastContinuationTurn(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessionGoals)
-      .set({
-        lastContinuationTurnId: turnId,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessionGoals.workspaceId, workspaceId),
-          eq(schema.sessionGoals.sessionId, sessionId),
-        ),
-      );
+    await scopedDb.update(schema.sessionGoals).set({
+      lastContinuationTurnId: turnId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)));
   });
 }
 
 export type GoalContinuationDecision =
   | { decision: "none" }
   | { decision: "queue" }
-  | {
-      decision: "paused";
-      reason: "no_progress" | "max_auto_continuations" | "limits";
-      goal: SessionGoal;
-    }
+  | { decision: "paused"; reason: "no_progress" | "max_auto_continuations" | "limits"; goal: SessionGoal }
   | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number | null };
 
 /**
@@ -12243,223 +10340,157 @@ export type GoalContinuationDecision =
  * replaying workflow re-reads recorded activity results and never recomputes
  * them.
  */
-export async function evaluateGoalContinuation(
-  db: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    // Optional: when absent (the default posture) goals are uncapped and length
-    // is governed by the no-progress and budget guards only.
-    defaultMaxAutoContinuations?: number | null;
-    noProgressLimit: number;
-    // Caller-computed billing/limits block reason. Applied inside the locked
-    // decision (before the counter bump) so a budget pause never consumes
-    // continuation budget.
-    budgetBlocked?: string | null;
-  },
-): Promise<GoalContinuationDecision> {
-  return await withWorkspaceRls(
-    db,
-    input.workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [row] = await tx
-          .select()
-          .from(schema.sessionGoals)
-          .where(
-            and(
-              eq(schema.sessionGoals.workspaceId, input.workspaceId),
-              eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!row || row.status !== "active") {
-          return { decision: "none" } as const;
-        }
-        const [pendingTurn] = await tx
-          .select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
-            ),
-          )
-          .limit(1);
-        if (pendingTurn) {
-          // "queue" tells the workflow to claim immediately; running/requires_action
-          // turns (e.g. a pending approval on a restarted workflow) must not be
-          // bypassed by a continuation, so they decline instead.
-          return pendingTurn.status === "queued"
-            ? ({ decision: "queue" } as const)
-            : ({ decision: "none" } as const);
-        }
-        let autoContinuations = row.autoContinuations;
-        let noProgressStreak = row.noProgressStreak;
-        // P3: a 429-failover continuation (the last continuation turn carried the `rotated`
-        // marker) is a multi-account rotate, not goal progress OR a goal stall — it must not
-        // burn the auto-continuation budget while walking accounts. Freezes the increment below,
-        // mirroring the budget-pause precedent that a limits pause never consumes budget.
-        let rotatedFailover = false;
-        if (row.lastContinuationTurnId) {
-          const [lastFinished] = await tx
-            .select({ id: schema.sessionTurns.id })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                sql`${schema.sessionTurns.finishedAt} is not null`,
-              ),
-            )
-            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
-            .limit(1);
-          if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
-            // A user/scheduled turn ran since the last continuation: human
-            // re-engagement re-arms the auto-continuation budget.
-            autoContinuations = 0;
-            noProgressStreak = 0;
-          } else if (lastFinished) {
-            const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx
-              .select({
-                rotatedFailures: sql<number>`count(*)::int`,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                  eq(schema.sessionEvents.type, "turn.failed"),
-                  sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
-                ),
-              );
-            rotatedFailover = Number(rotatedFailures) > 0;
-            const [{ toolCalls } = { toolCalls: 0 }] = await tx
-              .select({
-                toolCalls: sql<number>`count(*)::int`,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                  eq(schema.sessionEvents.type, "agent.toolCall.created"),
-                ),
-              );
-            const goalRevised =
-              row.versionAtLastContinuation !== null && row.version > row.versionAtLastContinuation;
-            if (Number(toolCalls) > 0 || goalRevised) {
-              noProgressStreak = 0;
-            } else {
-              // A turn that died on retryable provider backpressure says nothing
-              // about whether the goal can progress; freezing the streak keeps a
-              // sustained rate-limit window from masquerading as a stuck goal.
-              // The auto-continuation cap remains the backstop for a real outage.
-              const [{ backpressureFailures } = { backpressureFailures: 0 }] = await tx
-                .select({
-                  backpressureFailures: sql<number>`count(*)::int`,
-                })
-                .from(schema.sessionEvents)
-                .where(
-                  and(
-                    eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                    eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
-                    eq(schema.sessionEvents.type, "turn.failed"),
-                    sql`${schema.sessionEvents.payload} ->> 'recovery' = 'goal_continuation'`,
-                  ),
-                );
-              if (Number(backpressureFailures) === 0) {
-                noProgressStreak = noProgressStreak + 1;
-              }
-            }
+export async function evaluateGoalContinuation(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  // Optional: when absent (the default posture) goals are uncapped and length
+  // is governed by the no-progress and budget guards only.
+  defaultMaxAutoContinuations?: number | null;
+  noProgressLimit: number;
+  // Caller-computed billing/limits block reason. Applied inside the locked
+  // decision (before the counter bump) so a budget pause never consumes
+  // continuation budget.
+  budgetBlocked?: string | null;
+}): Promise<GoalContinuationDecision> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, input.workspaceId), eq(schema.sessionGoals.sessionId, input.sessionId)))
+      .for("update")
+      .limit(1);
+    if (!row || row.status !== "active") {
+      return { decision: "none" } as const;
+    }
+    const [pendingTurn] = await tx.select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
+      .from(schema.sessionTurns)
+      .where(and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+      ))
+      .limit(1);
+    if (pendingTurn) {
+      // "queue" tells the workflow to claim immediately; running/requires_action
+      // turns (e.g. a pending approval on a restarted workflow) must not be
+      // bypassed by a continuation, so they decline instead.
+      return pendingTurn.status === "queued" ? { decision: "queue" } as const : { decision: "none" } as const;
+    }
+    let autoContinuations = row.autoContinuations;
+    let noProgressStreak = row.noProgressStreak;
+    // P3: a 429-failover continuation (the last continuation turn carried the `rotated`
+    // marker) is a multi-account rotate, not goal progress OR a goal stall — it must not
+    // burn the auto-continuation budget while walking accounts. Freezes the increment below,
+    // mirroring the budget-pause precedent that a limits pause never consumes budget.
+    let rotatedFailover = false;
+    if (row.lastContinuationTurnId) {
+      const [lastFinished] = await tx.select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          sql`${schema.sessionTurns.finishedAt} is not null`,
+        ))
+        .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+        .limit(1);
+      if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
+        // A user/scheduled turn ran since the last continuation: human
+        // re-engagement re-arms the auto-continuation budget.
+        autoContinuations = 0;
+        noProgressStreak = 0;
+      } else if (lastFinished) {
+        const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx.select({
+          rotatedFailures: sql<number>`count(*)::int`,
+        }).from(schema.sessionEvents)
+          .where(and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+            eq(schema.sessionEvents.type, "turn.failed"),
+            sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
+          ));
+        rotatedFailover = Number(rotatedFailures) > 0;
+        const [{ toolCalls } = { toolCalls: 0 }] = await tx.select({
+          toolCalls: sql<number>`count(*)::int`,
+        }).from(schema.sessionEvents)
+          .where(and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+            eq(schema.sessionEvents.type, "agent.toolCall.created"),
+          ));
+        const goalRevised = row.versionAtLastContinuation !== null && row.version > row.versionAtLastContinuation;
+        if (Number(toolCalls) > 0 || goalRevised) {
+          noProgressStreak = 0;
+        } else {
+          // A turn that died on retryable provider backpressure says nothing
+          // about whether the goal can progress; freezing the streak keeps a
+          // sustained rate-limit window from masquerading as a stuck goal.
+          // The auto-continuation cap remains the backstop for a real outage.
+          const [{ backpressureFailures } = { backpressureFailures: 0 }] = await tx.select({
+            backpressureFailures: sql<number>`count(*)::int`,
+          }).from(schema.sessionEvents)
+            .where(and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+              eq(schema.sessionEvents.type, "turn.failed"),
+              sql`${schema.sessionEvents.payload} ->> 'recovery' = 'goal_continuation'`,
+            ));
+          if (Number(backpressureFailures) === 0) {
+            noProgressStreak = noProgressStreak + 1;
           }
         }
-        if (noProgressStreak >= input.noProgressLimit) {
-          const [paused] = await tx
-            .update(schema.sessionGoals)
-            .set({
-              status: "paused",
-              pausedReason: "no_progress",
-              autoContinuations,
-              noProgressStreak,
-              version: row.version + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.sessionGoals.id, row.id))
-            .returning();
-          return {
-            decision: "paused",
-            reason: "no_progress",
-            goal: mapSessionGoal(paused!),
-          } as const;
-        }
-        // No configured default means uncapped: goal length is bounded by the
-        // no-progress and budget guards above, never by count. When a default is
-        // configured it is a hard ceiling; per-goal overrides can only lower it.
-        const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations].filter(
-          (value): value is number => typeof value === "number",
-        );
-        const cap = capCandidates.length > 0 ? Math.min(...capCandidates) : null;
-        if (cap !== null && autoContinuations >= cap) {
-          const [paused] = await tx
-            .update(schema.sessionGoals)
-            .set({
-              status: "paused",
-              pausedReason: "max_auto_continuations",
-              autoContinuations,
-              noProgressStreak,
-              version: row.version + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.sessionGoals.id, row.id))
-            .returning();
-          return {
-            decision: "paused",
-            reason: "max_auto_continuations",
-            goal: mapSessionGoal(paused!),
-          } as const;
-        }
-        if (input.budgetBlocked) {
-          // Budget exhaustion pauses the goal visibly without bumping the
-          // continuation counter — no turn is synthesized for this pass.
-          const [paused] = await tx
-            .update(schema.sessionGoals)
-            .set({
-              status: "paused",
-              pausedReason: "limits",
-              rationale: input.budgetBlocked,
-              autoContinuations,
-              noProgressStreak,
-              version: row.version + 1,
-              updatedAt: new Date(),
-            })
-            .where(eq(schema.sessionGoals.id, row.id))
-            .returning();
-          return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
-        }
-        // Freeze the counter on a rotation failover (invariant: a rotation walk never
-        // consumes continuation budget); a normal continuation increments as before.
-        const nextAutoContinuations = autoContinuations + (rotatedFailover ? 0 : 1);
-        const [updated] = await tx
-          .update(schema.sessionGoals)
-          .set({
-            autoContinuations: nextAutoContinuations,
-            noProgressStreak,
-            versionAtLastContinuation: row.version,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.sessionGoals.id, row.id))
-          .returning();
-        return {
-          decision: "continue",
-          goal: mapSessionGoal(updated!),
-          autoContinuation: nextAutoContinuations,
-          cap,
-        } as const;
-      }),
-  );
+      }
+    }
+    if (noProgressStreak >= input.noProgressLimit) {
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "no_progress",
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "no_progress", goal: mapSessionGoal(paused!) } as const;
+    }
+    // No configured default means uncapped: goal length is bounded by the
+    // no-progress and budget guards above, never by count. When a default is
+    // configured it is a hard ceiling; per-goal overrides can only lower it.
+    const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations]
+      .filter((value): value is number => typeof value === "number");
+    const cap = capCandidates.length > 0 ? Math.min(...capCandidates) : null;
+    if (cap !== null && autoContinuations >= cap) {
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "max_auto_continuations",
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "max_auto_continuations", goal: mapSessionGoal(paused!) } as const;
+    }
+    if (input.budgetBlocked) {
+      // Budget exhaustion pauses the goal visibly without bumping the
+      // continuation counter — no turn is synthesized for this pass.
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "limits",
+        rationale: input.budgetBlocked,
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
+    }
+    // Freeze the counter on a rotation failover (invariant: a rotation walk never
+    // consumes continuation budget); a normal continuation increments as before.
+    const nextAutoContinuations = autoContinuations + (rotatedFailover ? 0 : 1);
+    const [updated] = await tx.update(schema.sessionGoals).set({
+      autoContinuations: nextAutoContinuations,
+      noProgressStreak,
+      versionAtLastContinuation: row.version,
+      updatedAt: new Date(),
+    }).where(eq(schema.sessionGoals.id, row.id)).returning();
+    return { decision: "continue", goal: mapSessionGoal(updated!), autoContinuation: nextAutoContinuations, cap } as const;
+  }));
 }
 
 function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGoal {
@@ -12485,170 +10516,111 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
   };
 }
 
-export async function createTurn(
-  db: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    triggerEventId: string;
-    temporalWorkflowId: string;
-  },
-): Promise<string> {
+export async function createTurn(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  triggerEventId: string;
+  temporalWorkflowId: string;
+}): Promise<string> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const session = await requireSession(scopedDb, input.workspaceId, input.sessionId);
     const trigger = await getSessionEvent(scopedDb, input.workspaceId, input.triggerEventId);
     const position = await nextTurnPosition(scopedDb, input.workspaceId, input.sessionId);
-    const [row] = await scopedDb
-      .insert(schema.sessionTurns)
-      .values({
-        accountId: session.accountId,
-        workspaceId: session.workspaceId,
-        sessionId: input.sessionId,
-        triggerEventId: input.triggerEventId,
-        temporalWorkflowId: input.temporalWorkflowId,
-        status: "running",
-        source: "user",
-        position,
-        prompt: promptFromTrigger(trigger?.payload) ?? session.initialMessage,
-        resources: resourcesFromTrigger(trigger?.payload) ?? session.resources,
-        tools: toolsFromTrigger(trigger?.payload) ?? session.tools,
-        model: session.model,
-        reasoningEffort: reasoningEffortFromSession(session),
-        sandboxBackend: session.sandboxBackend,
-        metadata: {},
-        startedAt: new Date(),
-      })
-      .returning({ id: schema.sessionTurns.id });
+    const [row] = await scopedDb.insert(schema.sessionTurns).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: input.sessionId,
+      triggerEventId: input.triggerEventId,
+      temporalWorkflowId: input.temporalWorkflowId,
+      status: "running",
+      source: "user",
+      position,
+      prompt: promptFromTrigger(trigger?.payload) ?? session.initialMessage,
+      resources: resourcesFromTrigger(trigger?.payload) ?? session.resources,
+      tools: toolsFromTrigger(trigger?.payload) ?? session.tools,
+      model: session.model,
+      reasoningEffort: reasoningEffortFromSession(session),
+      sandboxBackend: session.sandboxBackend,
+      metadata: {},
+      startedAt: new Date(),
+    }).returning({ id: schema.sessionTurns.id });
     if (!row) {
       throw new Error("Failed to create turn");
     }
-    await scopedDb
-      .update(schema.sessions)
-      .set({
-        activeTurnId: row.id,
-        status: "running",
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      );
+    await scopedDb.update(schema.sessions).set({
+      activeTurnId: row.id,
+      status: "running",
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.sessionId)));
     return row.id;
   });
 }
 
-export async function enqueueSessionTurn(
-  db: Database,
-  input: EnqueueSessionTurnInput,
-): Promise<SessionTurn> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const position = await nextTurnPosition(
-          tx as unknown as Database,
-          input.workspaceId,
-          input.sessionId,
-        );
-        const [row] = await tx
-          .insert(schema.sessionTurns)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            triggerEventId: input.triggerEventId,
-            temporalWorkflowId: input.temporalWorkflowId,
-            status: "queued",
-            source: input.source,
-            position,
-            prompt: input.prompt,
-            resources: input.resources,
-            tools: input.tools,
-            model: input.model,
-            reasoningEffort: input.reasoningEffort,
-            sandboxBackend: input.sandboxBackend,
-            metadata: input.metadata,
-          })
-          .returning();
-        if (!row) {
-          throw new Error("Failed to enqueue session turn");
-        }
-        return mapSessionTurn(row);
-      }),
-  );
+export async function enqueueSessionTurn(db: Database, input: EnqueueSessionTurnInput): Promise<SessionTurn> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const position = await nextTurnPosition(tx as unknown as Database, input.workspaceId, input.sessionId);
+    const [row] = await tx.insert(schema.sessionTurns).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      triggerEventId: input.triggerEventId,
+      temporalWorkflowId: input.temporalWorkflowId,
+      status: "queued",
+      source: input.source,
+      position,
+      prompt: input.prompt,
+      resources: input.resources,
+      tools: input.tools,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+      sandboxBackend: input.sandboxBackend,
+      metadata: input.metadata,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to enqueue session turn");
+    }
+    return mapSessionTurn(row);
+  }));
 }
 
-export async function claimNextQueuedTurn(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  workflowId: string,
-): Promise<SessionTurn | null> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const rows = await tx.execute(sql<{ id: string }>`
+export async function claimNextQueuedTurn(db: Database, workspaceId: string, sessionId: string, workflowId: string): Promise<SessionTurn | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.execute(sql<{ id: string }>`
       select id from session_turns
       where workspace_id = ${workspaceId} and session_id = ${sessionId} and status = 'queued'
       order by position asc, created_at asc, id asc
       for update skip locked
       limit 1
     `);
-        const id = rows[0]?.id as string | undefined;
-        if (!id) {
-          return null;
-        }
-        const [row] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            status: "running",
-            temporalWorkflowId: workflowId,
-            startedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, id)),
-          )
-          .returning();
-        if (!row) {
-          throw new Error(`Session turn not found: ${id}`);
-        }
-        await tx
-          .update(schema.sessions)
-          .set({
-            status: "running",
-            activeTurnId: row.id,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return mapSessionTurn(row);
-      }),
-  );
+    const id = rows[0]?.id as string | undefined;
+    if (!id) {
+      return null;
+    }
+    const [row] = await tx.update(schema.sessionTurns).set({
+      status: "running",
+      temporalWorkflowId: workflowId,
+      startedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, id))).returning();
+    if (!row) {
+      throw new Error(`Session turn not found: ${id}`);
+    }
+    await tx.update(schema.sessions).set({
+      status: "running",
+      activeTurnId: row.id,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return mapSessionTurn(row);
+  }));
 }
 
-export async function setSessionStatus(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  status: SessionStatus,
-  activeTurnId?: string | null,
-): Promise<void> {
+export async function setSessionStatus(db: Database, workspaceId: string, sessionId: string, status: SessionStatus, activeTurnId?: string | null): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
-      .set({
-        status,
-        activeTurnId: activeTurnId === undefined ? undefined : activeTurnId,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    await scopedDb.update(schema.sessions).set({
+      status,
+      activeTurnId: activeTurnId === undefined ? undefined : activeTurnId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
   });
 }
 
@@ -12667,13 +10639,7 @@ export type WakeParentForChildCompletionInput = {
 
 export type WakeParentForChildCompletionResult =
   | { delivered: false; reason: "already_delivered" | "parent_cancelled" }
-  | {
-      delivered: true;
-      turn: SessionTurn;
-      triggerEvent: SessionEvent;
-      events: SessionEvent[];
-      temporalWorkflowId: string;
-    };
+  | { delivered: true; turn: SessionTurn; triggerEvent: SessionEvent; events: SessionEvent[]; temporalWorkflowId: string };
 
 /**
  * Deliver a one-shot completion wake from a spawned worker into its parent
@@ -12694,198 +10660,123 @@ export async function wakeParentSessionForChildCompletion(
   db: Database,
   input: WakeParentForChildCompletionInput,
 ): Promise<WakeParentForChildCompletionResult> {
-  return await withWorkspaceRls(
-    db,
-    input.workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [parent] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.parentSessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!parent) {
-          throw new Error(`Parent session not found: ${input.parentSessionId}`);
-        }
-        if (parent.status === "cancelled") {
-          // Cancelled is the one terminal state that refuses new input; a manager a
-          // human explicitly stopped is not revived by a worker finishing.
-          return { delivered: false, reason: "parent_cancelled" as const };
-        }
-        // Idempotency gate: a wake for this terminal episode was already delivered.
-        const [existing] = await tx
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.parentSessionId),
-              eq(schema.sessionEvents.clientEventId, input.clientEventId),
-            ),
-          )
-          .limit(1);
-        if (existing) {
-          return { delivered: false, reason: "already_delivered" as const };
-        }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [parent] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.parentSessionId)))
+      .for("update")
+      .limit(1);
+    if (!parent) {
+      throw new Error(`Parent session not found: ${input.parentSessionId}`);
+    }
+    if (parent.status === "cancelled") {
+      // Cancelled is the one terminal state that refuses new input; a manager a
+      // human explicitly stopped is not revived by a worker finishing.
+      return { delivered: false, reason: "parent_cancelled" as const };
+    }
+    // Idempotency gate: a wake for this terminal episode was already delivered.
+    const [existing] = await tx.select({ id: schema.sessionEvents.id }).from(schema.sessionEvents)
+      .where(and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.parentSessionId),
+        eq(schema.sessionEvents.clientEventId, input.clientEventId),
+      ))
+      .limit(1);
+    if (existing) {
+      return { delivered: false, reason: "already_delivered" as const };
+    }
 
-        const shouldQueue = parent.status === "idle" || parent.status === "failed";
-        const workflowId = parent.temporalWorkflowId ?? `session-${parent.id}`;
-        let sequence = parent.lastSequence;
-        const now = new Date();
-        const eventRows = [
-          {
-            type: "user.message",
-            payload: { text: input.text, childCompletion: input.childCompletion },
-            clientEventId: input.clientEventId,
-          },
-          ...(shouldQueue
-            ? [
-                {
-                  type: "session.status.changed",
-                  payload: { status: "queued" },
-                  clientEventId: null as string | null,
-                },
-              ]
-            : []),
-        ].map((event) => ({
-          accountId: parent.accountId,
-          workspaceId: parent.workspaceId,
-          sessionId: parent.id,
-          sequence: ++sequence,
-          type: event.type,
-          payload: sanitizeEventPayload(event.payload),
-          clientEventId: event.clientEventId ?? null,
-          turnId: null,
-          producerId: null,
-          producerSeq: null,
-          occurredAt: now,
-        }));
-        const inserted = (await tx.insert(schema.sessionEvents).values(eventRows).returning()).map(
-          mapEvent,
-        );
-        const triggerEvent = inserted[0]!;
+    const shouldQueue = parent.status === "idle" || parent.status === "failed";
+    const workflowId = parent.temporalWorkflowId ?? `session-${parent.id}`;
+    let sequence = parent.lastSequence;
+    const now = new Date();
+    const eventRows = [
+      {
+        type: "user.message",
+        payload: { text: input.text, childCompletion: input.childCompletion },
+        clientEventId: input.clientEventId,
+      },
+      ...(shouldQueue ? [{ type: "session.status.changed", payload: { status: "queued" }, clientEventId: null as string | null }] : []),
+    ].map((event) => ({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      sequence: ++sequence,
+      type: event.type,
+      payload: sanitizeEventPayload(event.payload),
+      clientEventId: event.clientEventId ?? null,
+      turnId: null,
+      producerId: null,
+      producerSeq: null,
+      occurredAt: now,
+    }));
+    const inserted = (await tx.insert(schema.sessionEvents).values(eventRows).returning()).map(mapEvent);
+    const triggerEvent = inserted[0]!;
 
-        const position = await nextTurnPosition(
-          tx as unknown as Database,
-          input.workspaceId,
-          parent.id,
-        );
-        const [turnRow] = await tx
-          .insert(schema.sessionTurns)
-          .values({
-            accountId: parent.accountId,
-            workspaceId: parent.workspaceId,
-            sessionId: parent.id,
-            triggerEventId: triggerEvent.id,
-            temporalWorkflowId: workflowId,
-            status: "queued",
-            source: "user",
-            position,
-            prompt: input.text,
-            resources: [],
-            tools: parent.tools as ToolRef[],
-            model: parent.model,
-            reasoningEffort: reasoningEffortForMetadata(
-              parent.metadata,
-              input.reasoningEffortFallback,
-            ),
-            sandboxBackend: parent.sandboxBackend as SandboxBackend,
-            metadata: { childCompletion: input.childCompletion },
-          })
-          .returning();
-        if (!turnRow) {
-          throw new Error("Failed to enqueue parent wake turn");
-        }
-        const turn = mapSessionTurn(turnRow);
+    const position = await nextTurnPosition(tx as unknown as Database, input.workspaceId, parent.id);
+    const [turnRow] = await tx.insert(schema.sessionTurns).values({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      triggerEventId: triggerEvent.id,
+      temporalWorkflowId: workflowId,
+      status: "queued",
+      source: "user",
+      position,
+      prompt: input.text,
+      resources: [],
+      tools: parent.tools as ToolRef[],
+      model: parent.model,
+      reasoningEffort: reasoningEffortForMetadata(parent.metadata, input.reasoningEffortFallback),
+      sandboxBackend: parent.sandboxBackend as SandboxBackend,
+      metadata: { childCompletion: input.childCompletion },
+    }).returning();
+    if (!turnRow) {
+      throw new Error("Failed to enqueue parent wake turn");
+    }
+    const turn = mapSessionTurn(turnRow);
 
-        sequence += 1;
-        const [queuedEventRow] = await tx
-          .insert(schema.sessionEvents)
-          .values({
-            accountId: parent.accountId,
-            workspaceId: parent.workspaceId,
-            sessionId: parent.id,
-            sequence,
-            type: "turn.queued",
-            payload: sanitizeEventPayload({
-              turnId: turn.id,
-              triggerEventId: triggerEvent.id,
-              source: turn.source,
-            }),
-            clientEventId: null,
-            turnId: turn.id,
-            producerId: null,
-            producerSeq: null,
-            occurredAt: now,
-          })
-          .returning();
-        const events = [...inserted, ...(queuedEventRow ? [mapEvent(queuedEventRow)] : [])];
+    sequence += 1;
+    const [queuedEventRow] = await tx.insert(schema.sessionEvents).values({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      sequence,
+      type: "turn.queued",
+      payload: sanitizeEventPayload({ turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source }),
+      clientEventId: null,
+      turnId: turn.id,
+      producerId: null,
+      producerSeq: null,
+      occurredAt: now,
+    }).returning();
+    const events = [...inserted, ...(queuedEventRow ? [mapEvent(queuedEventRow)] : [])];
 
-        await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sequence,
-            ...(shouldQueue ? { status: "queued" as const, activeTurnId: null } : {}),
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, parent.id),
-            ),
-          );
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(shouldQueue ? { status: "queued" as const, activeTurnId: null } : {}),
+      updatedAt: now,
+    }).where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, parent.id)));
 
-        return {
-          delivered: true as const,
-          turn,
-          triggerEvent,
-          events,
-          temporalWorkflowId: workflowId,
-        };
-      }),
-  );
+    return { delivered: true as const, turn, triggerEvent, events, temporalWorkflowId: workflowId };
+  }));
 }
 
-export async function setTemporalWorkflowId(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  workflowId: string,
-): Promise<void> {
+export async function setTemporalWorkflowId(db: Database, workspaceId: string, sessionId: string, workflowId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessions)
-      .set({
-        temporalWorkflowId: workflowId,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    await scopedDb.update(schema.sessions).set({
+      temporalWorkflowId: workflowId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
   });
 }
 
-export async function finishTurn(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-  status: SessionStatus | SessionTurnStatus,
-): Promise<void> {
+export async function finishTurn(db: Database, workspaceId: string, turnId: string, status: SessionStatus | SessionTurnStatus): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
-      .update(schema.sessionTurns)
-      .set({
-        status: turnStatusForFinish(status),
-        finishedAt: status === "requires_action" ? undefined : new Date(),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
-      );
+    await scopedDb.update(schema.sessionTurns).set({
+      status: turnStatusForFinish(status),
+      finishedAt: status === "requires_action" ? undefined : new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)));
   });
 }
 
@@ -12912,23 +10803,13 @@ export async function requeuePreemptedTurn(
   fromStatuses: string[] = ["running", "requires_action"],
 ): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionTurns)
-      .set({
-        status: "queued",
-        triggerEventId,
-        startedAt: null,
-        finishedAt: null,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.id, turnId),
-          inArray(schema.sessionTurns.status, fromStatuses),
-        ),
-      )
-      .returning({ id: schema.sessionTurns.id });
+    const [row] = await scopedDb.update(schema.sessionTurns).set({
+      status: "queued",
+      triggerEventId,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, fromStatuses))).returning({ id: schema.sessionTurns.id });
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
@@ -12942,11 +10823,7 @@ export async function requeuePreemptedTurn(
  * restarts, and even a session-workflow re-run, and the increment is a single
  * atomic statement.
  */
-export async function incrementTurnWorkerDeathRedispatches(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-): Promise<number> {
+export async function incrementTurnWorkerDeathRedispatches(db: Database, workspaceId: string, turnId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.execute(sql<{ count: number }>`
       update session_turns
@@ -12999,72 +10876,35 @@ export async function cancelTurnFromDyingDispatch(
   });
 }
 
-export async function getSessionTurn(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-): Promise<SessionTurn | null> {
+export async function getSessionTurn(db: Database, workspaceId: string, turnId: string): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessionTurns)
-      .where(
-        and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)),
-      )
-      .limit(1);
+    const [row] = await scopedDb.select().from(schema.sessionTurns).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId))).limit(1);
     return row ? mapSessionTurn(row) : null;
   });
 }
 
-export async function listSessionTurns(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  limit = 100,
-): Promise<SessionTurn[]> {
+export async function listSessionTurns(db: Database, workspaceId: string, sessionId: string, limit = 100): Promise<SessionTurn[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-        ),
-      )
+    const rows = await scopedDb.select().from(schema.sessionTurns)
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId)))
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
       .limit(limit);
     return rows.map(mapSessionTurn);
   });
 }
 
-export async function updateQueuedSessionTurn(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-  input: UpdateQueuedSessionTurnInput,
-): Promise<SessionTurn> {
+export async function updateQueuedSessionTurn(db: Database, workspaceId: string, turnId: string, input: UpdateQueuedSessionTurnInput): Promise<SessionTurn> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionTurns)
-      .set({
-        ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
-        ...(input.resources !== undefined ? { resources: input.resources } : {}),
-        ...(input.tools !== undefined ? { tools: input.tools } : {}),
-        ...(input.model !== undefined ? { model: input.model } : {}),
-        ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
-        ...(input.sandboxBackend !== undefined ? { sandboxBackend: input.sandboxBackend } : {}),
-        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.id, turnId),
-          eq(schema.sessionTurns.status, "queued"),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.sessionTurns).set({
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+      ...(input.resources !== undefined ? { resources: input.resources } : {}),
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
+      ...(input.sandboxBackend !== undefined ? { sandboxBackend: input.sandboxBackend } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
     if (!row) {
       throw new Error(`Queued session turn not found: ${turnId}`);
     }
@@ -13072,27 +10912,13 @@ export async function updateQueuedSessionTurn(
   });
 }
 
-export async function cancelQueuedSessionTurn(
-  db: Database,
-  workspaceId: string,
-  turnId: string,
-): Promise<SessionTurn> {
+export async function cancelQueuedSessionTurn(db: Database, workspaceId: string, turnId: string): Promise<SessionTurn> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionTurns)
-      .set({
-        status: "cancelled",
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.id, turnId),
-          eq(schema.sessionTurns.status, "queued"),
-        ),
-      )
-      .returning();
+    const [row] = await scopedDb.update(schema.sessionTurns).set({
+      status: "cancelled",
+      finishedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
     if (!row) {
       throw new Error(`Queued session turn not found: ${turnId}`);
     }
@@ -13100,112 +10926,58 @@ export async function cancelQueuedSessionTurn(
   });
 }
 
-export async function reorderQueuedSessionTurns(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnIds: string[],
-): Promise<SessionTurn[]> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const rows = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-              inArray(schema.sessionTurns.id, turnIds),
-            ),
-          );
-        if (rows.length !== turnIds.length) {
-          throw new Error("All reordered turns must be queued turns in the session");
-        }
-        let index = 0;
-        for (const turnId of turnIds) {
-          index += 1;
-          await tx
-            .update(schema.sessionTurns)
-            .set({
-              position: index,
-              updatedAt: new Date(),
-            })
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, workspaceId),
-                eq(schema.sessionTurns.id, turnId),
-              ),
-            );
-        }
-        const updated = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-            ),
-          )
-          .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
-        return updated.map(mapSessionTurn);
-      }),
-  );
+export async function reorderQueuedSessionTurns(db: Database, workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.select().from(schema.sessionTurns)
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued"), inArray(schema.sessionTurns.id, turnIds)));
+    if (rows.length !== turnIds.length) {
+      throw new Error("All reordered turns must be queued turns in the session");
+    }
+    let index = 0;
+    for (const turnId of turnIds) {
+      index += 1;
+      await tx.update(schema.sessionTurns).set({
+        position: index,
+        updatedAt: new Date(),
+      }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)));
+    }
+    const updated = await tx.select().from(schema.sessionTurns)
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued")))
+      .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
+    return updated.map(mapSessionTurn);
+  }));
 }
 
-export async function appendSessionEvents(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  inputs: AppendEventInput[],
-): Promise<SessionEvent[]> {
+export async function appendSessionEvents(db: Database, workspaceId: string, sessionId: string, inputs: AppendEventInput[]): Promise<SessionEvent[]> {
   if (inputs.length === 0) {
     return [];
   }
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!row) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        let sequence = row.lastSequence;
-        const values = inputs.map((input) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? new Date(),
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: new Date() })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!row) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    let sequence = row.lastSequence;
+    const values = inputs.map((input) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId,
+      sequence: ++sequence,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt: input.occurredAt ?? new Date(),
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return inserted.map(mapEvent);
+  }));
 }
 
 export async function appendSessionEventToSandboxGroup(
@@ -13214,130 +10986,88 @@ export async function appendSessionEventToSandboxGroup(
   sandboxGroupId: string,
   input: AppendEventInput,
 ): Promise<SessionEvent[]> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const rows = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, workspaceId),
-              eq(schema.sessions.sandboxGroupId, sandboxGroupId),
-            ),
-          )
-          .orderBy(asc(schema.sessions.createdAt))
-          .for("update");
-        if (rows.length === 0) {
-          return [];
-        }
-        const occurredAt = input.occurredAt ?? new Date();
-        const values = rows.map((row) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId: row.id,
-          sequence: row.lastSequence + 1,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt,
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sql`${schema.sessions.lastSequence} + 1`,
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, workspaceId),
-              eq(schema.sessions.sandboxGroupId, sandboxGroupId),
-            ),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
+      .orderBy(asc(schema.sessions.createdAt))
+      .for("update");
+    if (rows.length === 0) {
+      return [];
+    }
+    const occurredAt = input.occurredAt ?? new Date();
+    const values = rows.map((row) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.id,
+      sequence: row.lastSequence + 1,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sql`${schema.sessions.lastSequence} + 1`,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return inserted.map(mapEvent);
+  }));
 }
 
-export async function appendSessionEventsAndUpdateSession(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  inputs: AppendEventInput[],
-  update: {
-    resources?: ResourceRef[];
-    tools?: ToolRef[];
-    model?: string;
-    metadata?: Record<string, unknown>;
-    status?: SessionStatus;
-    activeTurnId?: string | null;
-  },
-): Promise<SessionEvent[]> {
+export async function appendSessionEventsAndUpdateSession(db: Database, workspaceId: string, sessionId: string, inputs: AppendEventInput[], update: {
+  resources?: ResourceRef[];
+  tools?: ToolRef[];
+  model?: string;
+  metadata?: Record<string, unknown>;
+  status?: SessionStatus;
+  activeTurnId?: string | null;
+}): Promise<SessionEvent[]> {
   if (inputs.length === 0) {
     return [];
   }
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!row) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        let sequence = row.lastSequence;
-        const now = new Date();
-        const values = inputs.map((input) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? now,
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sequence,
-            ...(update.resources !== undefined ? { resources: update.resources } : {}),
-            ...(update.tools !== undefined ? { tools: update.tools } : {}),
-            ...(update.model !== undefined ? { model: update.model } : {}),
-            ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
-            ...(update.status !== undefined ? { status: update.status } : {}),
-            ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
-          })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!row) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    let sequence = row.lastSequence;
+    const now = new Date();
+    const values = inputs.map((input) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId,
+      sequence: ++sequence,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt: input.occurredAt ?? now,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(update.resources !== undefined ? { resources: update.resources } : {}),
+      ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.model !== undefined ? { model: update.model } : {}),
+      ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
+      ...(update.status !== undefined ? { status: update.status } : {}),
+      ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
+      updatedAt: now,
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return inserted.map(mapEvent);
+  }));
 }
 
 type LockedSessionUpdateContext = {
-  updateSessionMcpServerCredentials: (
-    updates: UpdateSessionMcpServerCredentialsInput[],
-  ) => Promise<UpdateSessionMcpServerCredentialsResult>;
+  updateSessionMcpServerCredentials: (updates: UpdateSessionMcpServerCredentialsInput[]) => Promise<UpdateSessionMcpServerCredentialsResult>;
 };
 
 type LockedSessionUpdateResult = {
@@ -13356,83 +11086,55 @@ export async function appendSessionEventsWithLockedSessionUpdate(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  build: (
-    session: Session,
-    context: LockedSessionUpdateContext,
-  ) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
+  build: (session: Session, context: LockedSessionUpdateContext) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
 ): Promise<SessionEvent[]> {
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [sessionRow] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!sessionRow) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        const built = await build(mapSession(sessionRow), {
-          updateSessionMcpServerCredentials: async (updates) =>
-            await updateSessionMcpServerCredentialsInTransaction(tx, {
-              workspaceId,
-              sessionId,
-              updates,
-            }),
-        });
-        if (built.events.length === 0) {
-          return [];
-        }
-        let sequence = sessionRow.lastSequence;
-        const now = new Date();
-        const values = built.events.map((input) => ({
-          accountId: sessionRow.accountId,
-          workspaceId: sessionRow.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? now,
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        const update = built.update ?? {};
-        await tx
-          .update(schema.sessions)
-          .set({
-            lastSequence: sequence,
-            ...(update.resources !== undefined ? { resources: update.resources } : {}),
-            ...(update.tools !== undefined ? { tools: update.tools } : {}),
-            ...(update.model !== undefined ? { model: update.model } : {}),
-            ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
-            ...(update.status !== undefined ? { status: update.status } : {}),
-            ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
-          })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [sessionRow] = await tx.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).for("update").limit(1);
+    if (!sessionRow) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const built = await build(mapSession(sessionRow), {
+      updateSessionMcpServerCredentials: async (updates) => await updateSessionMcpServerCredentialsInTransaction(tx, { workspaceId, sessionId, updates }),
+    });
+    if (built.events.length === 0) {
+      return [];
+    }
+    let sequence = sessionRow.lastSequence;
+    const now = new Date();
+    const values = built.events.map((input) => ({
+      accountId: sessionRow.accountId,
+      workspaceId: sessionRow.workspaceId,
+      sessionId,
+      sequence: ++sequence,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt: input.occurredAt ?? now,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    const update = built.update ?? {};
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(update.resources !== undefined ? { resources: update.resources } : {}),
+      ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.model !== undefined ? { model: update.model } : {}),
+      ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
+      ...(update.status !== undefined ? { status: update.status } : {}),
+      ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
+      updatedAt: now,
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return inserted.map(mapEvent);
+  }));
 }
 
 export function sessionSubject(workspaceId: string, sessionId: string): string {
   return `workspaces.${workspaceId}.sessions.${sessionId}.events`;
 }
 
-function mapSession(
-  row: typeof schema.sessions.$inferSelect,
-  mcpServers: SessionMcpServerMetadata[] = [],
-): Session {
+function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: SessionMcpServerMetadata[] = []): Session {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -13454,7 +11156,12 @@ function mapSession(
     // the fence exact even if the column type ever drifts (the lease-epoch lesson).
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
-    environmentId: row.environmentId,
+    variableSetId: row.variableSetId,
+    environmentId: row.variableSetId,
+    // The rig + frozen rig version the session rides (M3). Both null for a
+    // rig-less session; frozen at create so a later promote never moves them.
+    rigId: row.rigId ?? null,
+    rigVersionId: row.rigVersionId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -13509,22 +11216,10 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
   };
 }
 
-async function nextTurnPosition(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
-  const [{ maxPosition } = { maxPosition: 0 }] = await db
-    .select({
-      maxPosition: sql<number>`coalesce(max(${schema.sessionTurns.position}), 0)`,
-    })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, workspaceId),
-        eq(schema.sessionTurns.sessionId, sessionId),
-      ),
-    );
+async function nextTurnPosition(db: Database, workspaceId: string, sessionId: string): Promise<number> {
+  const [{ maxPosition } = { maxPosition: 0 }] = await db.select({
+    maxPosition: sql<number>`coalesce(max(${schema.sessionTurns.position}), 0)`,
+  }).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId)));
   return Number(maxPosition) + 1;
 }
 
@@ -13542,36 +11237,21 @@ function turnStatusForFinish(status: SessionStatus | SessionTurnStatus): Session
 }
 
 function promptFromTrigger(payload: unknown): string | null {
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "text" in payload &&
-    typeof payload.text === "string"
-  ) {
+  if (payload && typeof payload === "object" && "text" in payload && typeof payload.text === "string") {
     return payload.text;
   }
   return null;
 }
 
 function resourcesFromTrigger(payload: unknown): ResourceRef[] | null {
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "resources" in payload &&
-    Array.isArray(payload.resources)
-  ) {
+  if (payload && typeof payload === "object" && "resources" in payload && Array.isArray(payload.resources)) {
     return payload.resources as ResourceRef[];
   }
   return null;
 }
 
 function toolsFromTrigger(payload: unknown): ToolRef[] | null {
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "tools" in payload &&
-    Array.isArray(payload.tools)
-  ) {
+  if (payload && typeof payload === "object" && "tools" in payload && Array.isArray(payload.tools)) {
     return payload.tools as ToolRef[];
   }
   return null;
@@ -13579,12 +11259,7 @@ function toolsFromTrigger(payload: unknown): ToolRef[] | null {
 
 function reasoningEffortFromSession(session: Session): ReasoningEffort {
   const value = session.metadata.reasoningEffort;
-  return value === "none" ||
-    value === "minimal" ||
-    value === "low" ||
-    value === "medium" ||
-    value === "high" ||
-    value === "xhigh"
+  return value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
     ? value
     : "medium";
 }
@@ -13619,7 +11294,9 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
     reusableSessionId: row.reusableSessionId,
-    environmentId: row.environmentId,
+    variableSetId: row.variableSetId,
+    environmentId: row.variableSetId,
+    rigId: row.rigId ?? null,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -13698,26 +11375,22 @@ function mapImportBatch(row: typeof schema.importBatches.$inferSelect): ImportBa
   };
 }
 
-function mapCapabilityCatalogItem(
-  row: typeof schema.capabilityCatalogItems.$inferSelect,
-): CapabilityCatalogItem {
-  const runtime =
-    row.kind === "mcp" && row.endpointUrl
-      ? {
-          available: true,
-          mcpServerId: mcpServerIdForCapability(row.id, row.metadata),
-          transport: row.transport ?? "streamable-http",
-          notes: row.authModel
-            ? "Requires credential headers supplied in the enable request."
-            : null,
-        }
-      : {
-          available: false,
-          notes:
-            row.kind === "mcp"
-              ? "Remote streamable HTTP endpoint is required for runtime use."
-              : null,
-        };
+function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inferSelect): CapabilityCatalogItem {
+  const runtime = row.kind === "mcp" && row.endpointUrl
+    ? {
+      available: true,
+      mcpServerId: mcpServerIdForCapability(row.id, row.metadata),
+      transport: row.transport ?? "streamable-http",
+      notes: row.authModel
+        ? "Requires credential headers supplied in the enable request."
+        : null,
+    }
+    : {
+      available: false,
+      notes: row.kind === "mcp"
+        ? "Remote streamable HTTP endpoint is required for runtime use."
+        : null,
+    };
   return {
     id: row.id,
     ...(row.accountId ? { accountId: row.accountId } : {}),
@@ -13767,6 +11440,7 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     externalId: row.externalId,
     agentInstructions: row.agentInstructions ?? null,
     settings: (row.settings ?? {}) as Record<string, unknown>,
+    defaultRigId: row.defaultRigId ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -13782,9 +11456,7 @@ function mapWorkspaceMember(row: typeof schema.workspaceMemberships.$inferSelect
   };
 }
 
-function mapCapabilityInstallation(
-  row: typeof schema.capabilityInstallations.$inferSelect,
-): CapabilityInstallation {
+function mapCapabilityInstallation(row: typeof schema.capabilityInstallations.$inferSelect): CapabilityInstallation {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -13864,7 +11536,7 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     kind: row.kind as KnowledgeMemoryKind,
     scope: row.scope,
     text: row.text,
-    sourceRefs: Array.isArray(row.sourceRefs) ? (row.sourceRefs as KnowledgeSourceRef[]) : [],
+    sourceRefs: Array.isArray(row.sourceRefs) ? row.sourceRefs as KnowledgeSourceRef[] : [],
     confidence: confidenceFromStorage(row.confidence),
     metadata: row.metadata,
     createdBySessionId: row.createdBySessionId,
@@ -13917,9 +11589,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
   };
 }
 
-function mapGitHubInstallation(
-  row: typeof schema.githubInstallations.$inferSelect,
-): GitHubInstallation {
+function mapGitHubInstallation(row: typeof schema.githubInstallations.$inferSelect): GitHubInstallation {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -13973,9 +11643,7 @@ function stringArrayConfig(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
-  const values = value.filter(
-    (item): item is string => typeof item === "string" && item.trim().length > 0,
-  );
+  const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
   return values.length > 0 ? [...new Set(values.map((item) => item.trim()))] : undefined;
 }
 
@@ -14021,20 +11689,14 @@ function encryptedHeadersConfig(value: unknown): Record<string, string> | undefi
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
-  const entries = Object.entries(value as Record<string, unknown>).filter(
-    (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
-  );
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function mcpConnectivityOk(metadata: Record<string, unknown>): boolean {
   const value = metadata.mcpConnectivity;
-  return (
-    !!value &&
-    typeof value === "object" &&
-    "status" in value &&
-    (value.status === "ok" || value.status === "auth_deferred")
-  );
+  return !!value && typeof value === "object" && "status" in value && (value.status === "ok" || value.status === "auth_deferred");
 }
 
 function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined {
@@ -14049,16 +11711,11 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   if (typeof record.connectionId === "string" && record.connectionId.length > 0) {
     ref.connectionId = record.connectionId;
   }
-  if (
-    typeof record.kind === "string" &&
-    ["oauth2", "api_key", "app_install", "delegated"].includes(record.kind)
-  ) {
+  if (typeof record.kind === "string" && ["oauth2", "api_key", "app_install", "delegated"].includes(record.kind)) {
     ref.kind = record.kind as ConnectionKind;
   }
   if (Array.isArray(record.scopes)) {
-    const scopes = record.scopes.filter(
-      (scope): scope is string => typeof scope === "string" && scope.length > 0,
-    );
+    const scopes = record.scopes.filter((scope): scope is string => typeof scope === "string" && scope.length > 0);
     if (scopes.length > 0) {
       ref.scopes = scopes;
     }

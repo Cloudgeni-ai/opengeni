@@ -26,6 +26,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `docs/embedding.md`, `@opengeni/react` docs should link. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |
+| Rigs (versioned sandbox machine definitions) | `docs/rigs.md` | `docs/architecture.md`, `docs/packs.md`, `docs/variable-sets.md`, `docs/capabilities.md` should link instead of restating verification/promotion rules. |
 | MCP surface selection | `docs/mcp-surfaces.md` | `docs/architecture.md`, `docs/capabilities.md`, `docs/session-mcp-servers.md` should link. |
 | Toolspace programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/toolspace.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |

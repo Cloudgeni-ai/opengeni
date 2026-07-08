@@ -1,7 +1,7 @@
 // Packs are the heaviest, workspace-runtime-altering capability (a sandbox
 // image + skills + tools + connectors + knowledge + schedule templates that
 // enable as one unit), so they keep a first-class surface with
-// register/enable-with-environment/disable/unregister. Restyled flat for the
+// register/enable-with-variable-set/disable/unregister. Restyled flat for the
 // I3 redesign: one card border per pack, dividers and whitespace instead of
 // nested bordered boxes.
 import type { usePacks } from "@opengeni/react";
@@ -30,10 +30,10 @@ import type { CapabilityPack, PackInstallation } from "@/types";
 
 export function PacksSection(props: {
   packs: ReturnType<typeof usePacks>;
-  environments: Array<{ id: string; name: string }>;
+  variableSets: Array<{ id: string; name: string }>;
   busyPackId: string | null;
   onRegister: (manifestDraft: string) => Promise<boolean>;
-  onEnable: (pack: CapabilityPack, environmentId: string | undefined) => void;
+  onEnable: (pack: CapabilityPack, variableSetId: string | undefined) => void;
   onDisable: (pack: CapabilityPack) => void;
   onUnregister: (pack: CapabilityPack) => Promise<boolean>;
 }) {
@@ -43,11 +43,7 @@ export function PacksSection(props: {
   // Registration runs through a direct client call (not the packs hook), so this
   // local flag owns the button's pending/disabled state and blocks double-submits.
   const [registering, setRegistering] = useState(false);
-  const packsView = listViewState({
-    loading: packs.loading,
-    error: packs.error,
-    count: packs.packs.length,
-  });
+  const packsView = listViewState({ loading: packs.loading, error: packs.error, count: packs.packs.length });
 
   async function register() {
     if (registering) return;
@@ -69,16 +65,10 @@ export function PacksSection(props: {
         <div className="min-w-0">
           <h2 className="text-sm font-semibold text-fg">Packs</h2>
           <p className="mt-1 max-w-xl text-xs leading-5 text-fg-muted">
-            Complete agent capabilities — a sandbox image, skills, tools, connectors, knowledge, and
-            schedule templates that enable as one unit.
+            Complete agent capabilities — a sandbox image, skills, tools, connectors, knowledge, and schedule templates that enable as one unit.
           </p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setRegisterOpen((open) => !open)}
-        >
+        <Button type="button" variant="outline" size="sm" onClick={() => setRegisterOpen((open) => !open)}>
           <PlusIcon />
           Add manifest
         </Button>
@@ -97,15 +87,8 @@ export function PacksSection(props: {
             aria-label="Pack manifest JSON"
           />
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={registering || !manifestDraft.trim()}
-              onClick={() => void register()}
-            >
+            <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>Cancel</Button>
+            <Button type="button" size="sm" disabled={registering || !manifestDraft.trim()} onClick={() => void register()}>
               {registering ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
               Register pack
             </Button>
@@ -119,22 +102,18 @@ export function PacksSection(props: {
           <Skeleton className="mt-2 h-3 w-3/4" />
         </div>
       ) : packsView === "error" ? (
-        <LoadErrorState
-          title="Couldn't load packs"
-          error={packs.error}
-          onRetry={() => void packs.refresh()}
-        />
+        <LoadErrorState title="Couldn't load packs" error={packs.error} onRetry={() => void packs.refresh()} />
       ) : packsView === "empty" ? (
         <EmptyState
           icon={<PackageIcon className="size-4" />}
           title="No packs yet"
           description="Register a pack manifest to add a complete agent capability to this workspace."
-          action={
+          action={(
             <Button type="button" size="sm" onClick={() => setRegisterOpen(true)}>
               <PlusIcon />
               Add manifest
             </Button>
-          }
+          )}
         />
       ) : (
         <div className="grid gap-3">
@@ -143,9 +122,9 @@ export function PacksSection(props: {
               key={pack.id}
               pack={pack}
               installation={packs.installationFor(pack.id)}
-              environments={props.environments}
+              variableSets={props.variableSets}
               busy={props.busyPackId === pack.id}
-              onEnable={(environmentId) => props.onEnable(pack, environmentId)}
+              onEnable={(variableSetId) => props.onEnable(pack, variableSetId)}
               onDisable={() => props.onDisable(pack)}
               onUnregister={() => props.onUnregister(pack)}
             />
@@ -159,18 +138,18 @@ export function PacksSection(props: {
 function PackCard(props: {
   pack: CapabilityPack;
   installation: PackInstallation | null;
-  environments: Array<{ id: string; name: string }>;
+  variableSets: Array<{ id: string; name: string }>;
   busy: boolean;
-  onEnable: (environmentId: string | undefined) => void;
+  onEnable: (variableSetId: string | undefined) => void;
   onDisable: () => void;
   onUnregister: () => Promise<boolean>;
 }) {
   const { pack, installation } = props;
   const enabled = installation?.status === "active";
   const [expanded, setExpanded] = useState(false);
-  const [environmentId, setEnvironmentId] = useState("");
+  const [variableSetId, setVariableSetId] = useState("");
   const [confirmUnregister, setConfirmUnregister] = useState(false);
-  const needsEnvironment = pack.environment?.required === true;
+  const needsVariableSet = pack.variableSet?.required === true;
 
   return (
     <article className="rounded-xl border border-border bg-surface/50 p-4">
@@ -193,9 +172,7 @@ function PackCard(props: {
               </div>
               <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 text-2xs text-fg-subtle">
                 <span>{pack.role}</span>
-                <span aria-hidden className="text-fg-subtle/50">
-                  ·
-                </span>
+                <span aria-hidden className="text-fg-subtle/50">·</span>
                 <span>{pack.category}</span>
               </div>
             </div>
@@ -215,25 +192,12 @@ function PackCard(props: {
 
         <div className="flex shrink-0 flex-col items-end gap-2">
           <div className="flex flex-wrap items-center justify-end gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-expanded={expanded}
-              onClick={() => setExpanded((open) => !open)}
-            >
+            <Button type="button" variant="ghost" size="sm" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
               <ChevronDownIcon className={cn("transition-transform", expanded && "rotate-180")} />
               Contents
             </Button>
             {enabled ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="min-w-24"
-                disabled={props.busy}
-                onClick={props.onDisable}
-              >
+              <Button type="button" variant="outline" size="sm" className="min-w-24" disabled={props.busy} onClick={props.onDisable}>
                 {props.busy ? <Loader2Icon className="animate-spin" /> : <XIcon />}
                 Disable
               </Button>
@@ -242,13 +206,9 @@ function PackCard(props: {
                 type="button"
                 size="sm"
                 className="min-w-24"
-                disabled={props.busy || (needsEnvironment && !environmentId)}
-                title={
-                  needsEnvironment && !environmentId
-                    ? "This pack needs an environment attached first"
-                    : undefined
-                }
-                onClick={() => props.onEnable(environmentId || undefined)}
+                disabled={props.busy || (needsVariableSet && !variableSetId)}
+                title={needsVariableSet && !variableSetId ? "This pack needs a variableSet attached first" : undefined}
+                onClick={() => props.onEnable(variableSetId || undefined)}
               >
                 {props.busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
                 Enable
@@ -267,20 +227,16 @@ function PackCard(props: {
               <Trash2Icon className="size-3.5" />
             </Button>
           </div>
-          {pack.environment ? (
+          {pack.variableSet ? (
             <Select
-              value={environmentId}
-              onChange={(event) => setEnvironmentId(event.target.value)}
-              aria-label={`Environment for ${pack.name}`}
+              value={variableSetId}
+              onChange={(event) => setVariableSetId(event.target.value)}
+              aria-label={`Variable set for ${pack.name}`}
               className="h-8 text-xs"
             >
-              <option value="">
-                {needsEnvironment ? "Choose environment (required)" : "No environment"}
-              </option>
-              {props.environments.map((environment) => (
-                <option key={environment.id} value={environment.id}>
-                  {environment.name}
-                </option>
+              <option value="">{needsVariableSet ? "Choose variableSet (required)" : "No variableSet"}</option>
+              {props.variableSets.map((variableSet) => (
+                <option key={variableSet.id} value={variableSet.id}>{variableSet.name}</option>
               ))}
             </Select>
           ) : null}
@@ -293,14 +249,10 @@ function PackCard(props: {
             {pack.tools.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {pack.tools.map((tool) => (
-                  <MetaChip key={`${tool.kind}:${tool.id}`} className="font-mono">
-                    {tool.id}
-                  </MetaChip>
+                  <MetaChip key={`${tool.kind}:${tool.id}`} className="font-mono">{tool.id}</MetaChip>
                 ))}
               </div>
-            ) : (
-              <PackNone />
-            )}
+            ) : <PackNone />}
           </PackSection>
 
           <PackSection title="Skills">
@@ -310,15 +262,12 @@ function PackCard(props: {
                   <div key={skill.name} className="min-w-0">
                     <div className="truncate text-xs font-medium">{skill.name}</div>
                     <div className="text-2xs text-fg-subtle">
-                      {skill.description ?? "No description"} · {skill.files.length} file
-                      {skill.files.length === 1 ? "" : "s"}
+                      {skill.description ?? "No description"} · {skill.files.length} file{skill.files.length === 1 ? "" : "s"}
                     </div>
                   </div>
                 ))}
               </div>
-            ) : (
-              <PackNone />
-            )}
+            ) : <PackNone />}
           </PackSection>
 
           <PackSection title="Connectors">
@@ -331,20 +280,12 @@ function PackCard(props: {
                       {connector.required ? <MetaChip dot="waiting">Required</MetaChip> : null}
                     </div>
                     <div className="text-2xs text-fg-subtle">
-                      {[
-                        connector.authModel,
-                        connector.providers.join(", "),
-                        connector.scopes.length ? `${connector.scopes.length} scopes` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" / ")}
+                      {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
                     </div>
                   </div>
                 ))}
               </div>
-            ) : (
-              <PackNone />
-            )}
+            ) : <PackNone />}
           </PackSection>
 
           <PackSection title="Knowledge">
@@ -353,17 +294,11 @@ function PackCard(props: {
                 {pack.knowledge.map((knowledge) => (
                   <div key={knowledge.id} className="min-w-0">
                     <div className="truncate text-xs font-medium">{knowledge.name}</div>
-                    {knowledge.description ? (
-                      <div className="line-clamp-2 text-2xs text-fg-subtle">
-                        {knowledge.description}
-                      </div>
-                    ) : null}
+                    {knowledge.description ? <div className="line-clamp-2 text-2xs text-fg-subtle">{knowledge.description}</div> : null}
                   </div>
                 ))}
               </div>
-            ) : (
-              <PackNone />
-            )}
+            ) : <PackNone />}
           </PackSection>
 
           <PackSection title="Schedule templates">
@@ -372,26 +307,20 @@ function PackCard(props: {
                 {pack.scheduledTaskTemplates.map((template) => (
                   <div key={template.id} className="min-w-0">
                     <div className="truncate text-xs font-medium">{template.name}</div>
-                    <div className="text-2xs text-fg-subtle">
-                      {scheduleLabel(template.defaultSchedule)}
-                    </div>
+                    <div className="text-2xs text-fg-subtle">{scheduleLabel(template.defaultSchedule)}</div>
                   </div>
                 ))}
               </div>
-            ) : (
-              <PackNone />
-            )}
+            ) : <PackNone />}
           </PackSection>
 
-          {pack.environment ? (
-            <PackSection title="Environment">
-              <div className="text-2xs text-fg-subtle">{pack.environment.description}</div>
-              {pack.environment.requiredVariables.length > 0 ? (
+          {pack.variableSet ? (
+            <PackSection title="Variable set">
+              <div className="text-2xs text-fg-subtle">{pack.variableSet.description}</div>
+              {pack.variableSet.requiredVariables.length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {pack.environment.requiredVariables.map((name) => (
-                    <MetaChip key={name} className="font-mono">
-                      {name}
-                    </MetaChip>
+                  {pack.variableSet.requiredVariables.map((name) => (
+                    <MetaChip key={name} className="font-mono">{name}</MetaChip>
                   ))}
                 </div>
               ) : null}
@@ -404,11 +333,9 @@ function PackCard(props: {
         open={confirmUnregister}
         onOpenChange={setConfirmUnregister}
         title={`Unregister ${pack.name}?`}
-        description={
-          enabled
-            ? "This pack is enabled. Unregistering removes it from the workspace and disables it for every session."
-            : "This removes the pack from the workspace. You can register its manifest again later."
-        }
+        description={enabled
+          ? "This pack is enabled. Unregistering removes it from the workspace and disables it for every session."
+          : "This removes the pack from the workspace. You can register its manifest again later."}
         confirmLabel="Unregister pack"
         onConfirm={props.onUnregister}
       />
@@ -419,9 +346,7 @@ function PackCard(props: {
 function PackSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0">
-      <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-fg-subtle">
-        {title}
-      </div>
+      <div className="mb-1.5 text-2xs font-semibold uppercase tracking-wide text-fg-subtle">{title}</div>
       {children}
     </section>
   );

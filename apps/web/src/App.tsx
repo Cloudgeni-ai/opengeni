@@ -5,7 +5,9 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/environments             → environments + variables
+//   /workspaces/:id/variable-sets            → variable sets + variables
+//   /workspaces/:id/rigs                     → rigs list + create
+//   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
 //   /workspaces/:id/packs                    → redirect to capabilities (Packs subsection)
 //   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
 //   /workspaces/:id/schedules                → scheduled tasks + run history
@@ -29,10 +31,12 @@ import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { CapabilitiesRoute } from "@/routes/capabilities";
 import { DeviceRoute } from "@/routes/device";
 import { DocumentsRoute } from "@/routes/documents";
-import { EnvironmentsRoute } from "@/routes/environments";
+import { VariableSetsRoute } from "@/routes/variable-sets";
 import { MachinesRoute } from "@/routes/machines";
 import { OrgSettingsRoute } from "@/routes/org-settings";
 import { ResetPasswordRoute } from "@/routes/reset-password";
+import { RigsRoute } from "@/routes/rigs";
+import { RigDetailRoute } from "@/routes/rig-detail";
 import { SchedulesRoute } from "@/routes/schedules";
 import { SessionRoute } from "@/routes/session";
 import { SessionsIndexRoute } from "@/routes/sessions-index";
@@ -111,10 +115,25 @@ const workspaceSessionRoute = createRoute({
   path: "sessions/$sessionId",
   component: SessionView,
 });
+const workspaceVariableSetsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "variable-sets",
+  component: VariableSets,
+});
 const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "environments",
-  component: Environments,
+  component: VariableSetsRedirect,
+});
+const workspaceRigsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "rigs",
+  component: Rigs,
+});
+const workspaceRigDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "rigs/$rigId",
+  component: RigDetail,
 });
 const workspaceMachinesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -190,7 +209,10 @@ const routeTree = rootRoute.addChildren([
     workspaceAgentRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
+    workspaceVariableSetsRoute,
     workspaceEnvironmentsRoute,
+    workspaceRigsRoute,
+    workspaceRigDetailRoute,
     workspaceMachinesRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
@@ -250,9 +272,24 @@ function SessionView() {
   return <SessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
 }
 
-function Environments() {
+function VariableSets() {
+  const { workspaceId } = workspaceVariableSetsRoute.useParams();
+  return <VariableSetsRoute workspaceId={workspaceId} />;
+}
+
+function VariableSetsRedirect() {
   const { workspaceId } = workspaceEnvironmentsRoute.useParams();
-  return <EnvironmentsRoute workspaceId={workspaceId} />;
+  return <Navigate to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }} replace />;
+}
+
+function Rigs() {
+  const { workspaceId } = workspaceRigsRoute.useParams();
+  return <RigsRoute workspaceId={workspaceId} />;
+}
+
+function RigDetail() {
+  const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
+  return <RigDetailRoute workspaceId={workspaceId} rigId={rigId} />;
 }
 
 function Machines() {

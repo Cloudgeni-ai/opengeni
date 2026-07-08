@@ -1,9 +1,5 @@
 import { OpenGeniApiError } from "./errors";
-import {
-  streamSessionEvents,
-  type SessionEventStreamTransport,
-  type StreamSessionEventsOptions,
-} from "./stream";
+import { streamSessionEvents, type SessionEventStreamTransport, type StreamSessionEventsOptions } from "./stream";
 import type {
   AccessContext,
   AddWorkspaceMemberRequest,
@@ -42,7 +38,8 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
-  CreateWorkspaceEnvironmentRequest,
+  CreateVariableSetRequest,
+  CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
@@ -68,6 +65,7 @@ import type {
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
+  MachineView,
   MetricSample,
   MachineMetricsSeriesResponse,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
@@ -131,13 +129,19 @@ import type {
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   UpdateSessionTurnRequest,
-  UpdateWorkspaceEnvironmentRequest,
+  UpdateVariableSetRequest,
+  UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  SetWorkspaceDefaultRigRequest,
   UploadFileInput,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
+  VariableSet,
+  VariableSetVariableMetadata,
+  Rig,
+  RigVersion,
+  RigChange,
+  ProposeRigChangeRequest,
   WorkspaceMember,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
@@ -197,80 +201,41 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so environments that polyfill fetch after module load work.
+    // Bind lazily so variable sets that polyfill fetch after module load work.
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
   }
 
   // --- Session lifecycle ---------------------------------------------------
 
   async createSession(workspaceId: string, request: CreateSessionRequest): Promise<Session> {
-    return await this.requestJson<Session>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions`,
-      request,
-    );
+    return await this.requestJson<Session>("POST", `/v1/workspaces/${workspaceId}/sessions`, request);
   }
 
   async getSession(workspaceId: string, sessionId: string): Promise<Session> {
-    return await this.requestJson<Session>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-    );
+    return await this.requestJson<Session>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`);
   }
 
-  async updateSession(
-    workspaceId: string,
-    sessionId: string,
-    request: UpdateSessionRequest,
-  ): Promise<Session> {
-    return await this.requestJson<Session>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
-      request,
-    );
+  async updateSession(workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
+    return await this.requestJson<Session>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`, request);
   }
 
-  async listSessions(
-    workspaceId: string,
-    options: { limit?: number; parentSessionId?: string | null } = {},
-  ): Promise<Session[]> {
-    return await this.requestJson<Session[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions`,
-      undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-        options.parentSessionId !== undefined
-          ? {
-              parentSessionId:
-                options.parentSessionId === null ? "null" : String(options.parentSessionId),
-            }
-          : {}),
-      },
-    );
+  async listSessions(workspaceId: string, options: { limit?: number; parentSessionId?: string | null } = {}): Promise<Session[]> {
+    return await this.requestJson<Session[]>("GET", `/v1/workspaces/${workspaceId}/sessions`, undefined, {
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") && options.parentSessionId !== undefined
+        ? { parentSessionId: options.parentSessionId === null ? "null" : String(options.parentSessionId) }
+        : {}),
+    });
   }
 
   async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    return await this.requestJson<SessionLineageResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`,
-    );
+    return await this.requestJson<SessionLineageResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`);
   }
 
-  async listTurns(
-    workspaceId: string,
-    sessionId: string,
-    options: { limit?: number } = {},
-  ): Promise<SessionTurn[]> {
-    return await this.requestJson<SessionTurn[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns`,
-      undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-      },
-    );
+  async listTurns(workspaceId: string, sessionId: string, options: { limit?: number } = {}): Promise<SessionTurn[]> {
+    return await this.requestJson<SessionTurn[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns`, undefined, {
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+    });
   }
 
   // --- Bring-your-own-compute: Machines dashboard + metrics (M10) ------------
@@ -281,18 +246,10 @@ export class OpenGeniClient {
    * sharedSessionCount. Pass `sessionId` for an in-session view, which adds the
    * session's synthetic Modal group box + the active-sandbox pointer.
    */
-  async listMachines(
-    workspaceId: string,
-    options: { sessionId?: string } = {},
-  ): Promise<MachinesResponse> {
-    return await this.requestJson<MachinesResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/machines`,
-      undefined,
-      {
-        ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
-      },
-    );
+  async listMachines(workspaceId: string, options: { sessionId?: string } = {}): Promise<MachinesResponse> {
+    return await this.requestJson<MachinesResponse>("GET", `/v1/workspaces/${workspaceId}/machines`, undefined, {
+      ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
+    });
   }
 
   /**
@@ -325,11 +282,7 @@ export class OpenGeniClient {
    * the request.
    */
   async lookupDeviceEnrollment(userCode: string): Promise<DeviceEnrollmentLookupResponse> {
-    return await this.requestJson<DeviceEnrollmentLookupResponse>(
-      "POST",
-      "/v1/enrollments/device/lookup",
-      { userCode },
-    );
+    return await this.requestJson<DeviceEnrollmentLookupResponse>("POST", "/v1/enrollments/device/lookup", { userCode });
   }
 
   /**
@@ -399,25 +352,14 @@ export class OpenGeniClient {
 
   // --- Scheduled tasks -------------------------------------------------------
 
-  async listScheduledTasks(
-    workspaceId: string,
-    options: { limit?: number } = {},
-  ): Promise<ScheduledTask[]> {
-    return await this.requestJson<ScheduledTask[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks`,
-      undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-      },
-    );
+  async listScheduledTasks(workspaceId: string, options: { limit?: number } = {}): Promise<ScheduledTask[]> {
+    return await this.requestJson<ScheduledTask[]>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks`, undefined, {
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+    });
   }
 
   async getScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
-    );
+    return await this.requestJson<ScheduledTask>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`);
   }
 
   // --- Events: replay, send, stream ----------------------------------------
@@ -433,37 +375,20 @@ export class OpenGeniClient {
     sessionId: string,
     options: { after?: number; before?: number; limit?: number; compact?: boolean } = {},
   ): Promise<SessionEvent[]> {
-    return await this.requestJson<SessionEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
-      undefined,
-      {
-        ...(options.after !== undefined ? { after: String(options.after) } : {}),
-        ...(options.before !== undefined ? { before: String(options.before) } : {}),
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.compact ? { compact: "1" } : {}),
-      },
-    );
+    return await this.requestJson<SessionEvent[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, undefined, {
+      ...(options.after !== undefined ? { after: String(options.after) } : {}),
+      ...(options.before !== undefined ? { before: String(options.before) } : {}),
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      ...(options.compact ? { compact: "1" } : {}),
+    });
   }
 
   /** POST a user/control event to the session. Returns the accepted event. */
-  async sendEvent(
-    workspaceId: string,
-    sessionId: string,
-    event: ClientSessionEventInput,
-  ): Promise<SessionEvent> {
-    return await this.requestJson<SessionEvent>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
-      event,
-    );
+  async sendEvent(workspaceId: string, sessionId: string, event: ClientSessionEventInput): Promise<SessionEvent> {
+    return await this.requestJson<SessionEvent>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, event);
   }
 
-  async sendMessage(
-    workspaceId: string,
-    sessionId: string,
-    message: string | SendMessageInput,
-  ): Promise<SessionEvent> {
+  async sendMessage(workspaceId: string, sessionId: string, message: string | SendMessageInput): Promise<SessionEvent> {
     const input = typeof message === "string" ? { text: message } : message;
     const { clientEventId, ...payload } = input;
     return await this.sendEvent(workspaceId, sessionId, {
@@ -488,12 +413,7 @@ export class OpenGeniClient {
   async sendApprovalDecision(
     workspaceId: string,
     sessionId: string,
-    decision: {
-      approvalId: string;
-      decision: "approve" | "reject";
-      message?: string;
-      clientEventId?: string;
-    },
+    decision: { approvalId: string; decision: "approve" | "reject"; message?: string; clientEventId?: string },
   ): Promise<SessionEvent> {
     const { clientEventId, ...payload } = decision;
     return await this.sendEvent(workspaceId, sessionId, {
@@ -519,13 +439,8 @@ export class OpenGeniClient {
   /** The transport `streamEvents` runs on; useful for custom streaming layers. */
   eventStreamTransport(workspaceId: string, sessionId: string): SessionEventStreamTransport {
     return {
-      openStream: async (after, signal) =>
-        await this.openEventStream(workspaceId, sessionId, {
-          after,
-          ...(signal ? { signal } : {}),
-        }),
-      listEvents: async (after, limit) =>
-        await this.listEvents(workspaceId, sessionId, { after, limit }),
+      openStream: async (after, signal) => await this.openEventStream(workspaceId, sessionId, { after, ...(signal ? { signal } : {}) }),
+      listEvents: async (after, limit) => await this.listEvents(workspaceId, sessionId, { after, limit }),
     };
   }
 
@@ -572,11 +487,7 @@ export class OpenGeniClient {
    * Reorder the queued turns. `turnIds` must all reference queued turns; the
    * server assigns positions in the given order and returns the queue.
    */
-  async reorderQueuedTurns(
-    workspaceId: string,
-    sessionId: string,
-    turnIds: string[],
-  ): Promise<SessionTurn[]> {
+  async reorderQueuedTurns(workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/reorder`,
@@ -585,11 +496,7 @@ export class OpenGeniClient {
   }
 
   /** Cancel a queued turn before it is claimed. Returns the cancelled turn. */
-  async deleteQueuedTurn(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-  ): Promise<SessionTurn> {
+  async deleteQueuedTurn(workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
     return await this.requestJson<SessionTurn>(
       "DELETE",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
@@ -656,10 +563,9 @@ export class OpenGeniClient {
     // between this read and the interrupt landing is accepted (an interrupt
     // can never be atomic with a status read over HTTP).
     const steerTurnAlreadyActive = steerTurn !== null && session.activeTurnId === steerTurn.id;
-    const interrupted =
-      canDeliverNext &&
-      !steerTurnAlreadyActive &&
-      (session.status === "running" || session.status === "requires_action");
+    const interrupted = canDeliverNext
+      && !steerTurnAlreadyActive
+      && (session.status === "running" || session.status === "requires_action");
     if (interrupted) {
       await this.interrupt(workspaceId, sessionId, { reason: "steer" });
     }
@@ -670,22 +576,11 @@ export class OpenGeniClient {
 
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-    );
+    return await this.requestJson<SessionGoal>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`);
   }
 
-  async updateGoal(
-    workspaceId: string,
-    sessionId: string,
-    request: UpdateSessionGoalRequest,
-  ): Promise<SessionGoal> {
-    return await this.requestJson<SessionGoal>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`,
-      request,
-    );
+  async updateGoal(workspaceId: string, sessionId: string, request: UpdateSessionGoalRequest): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`, request);
   }
 
   async deleteGoal(workspaceId: string, sessionId: string): Promise<void> {
@@ -693,11 +588,7 @@ export class OpenGeniClient {
   }
 
   /** Pause the goal loop: the session stops self-continuing until resumed. */
-  async pauseGoal(
-    workspaceId: string,
-    sessionId: string,
-    options: { rationale?: string } = {},
-  ): Promise<SessionGoal> {
+  async pauseGoal(workspaceId: string, sessionId: string, options: { rationale?: string } = {}): Promise<SessionGoal> {
     return await this.updateGoal(workspaceId, sessionId, {
       status: "paused",
       ...(options.rationale !== undefined ? { rationale: options.rationale } : {}),
@@ -719,11 +610,7 @@ export class OpenGeniClient {
    * context — the destructive intent is explicit on the wire.
    */
   async clearSessionContext(workspaceId: string, sessionId: string): Promise<void> {
-    await this.requestVoid(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/clear`,
-      { confirm: true },
-    );
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/clear`, { confirm: true });
   }
 
   /**
@@ -732,15 +619,8 @@ export class OpenGeniClient {
    * (`status:"queued"`); on a server-managed provider or when compaction is off
    * it is a no-op (`status:"noop"`) with an explanatory message.
    */
-  async compactSessionContext(
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<CompactSessionContextResult> {
-    return await this.requestJson<CompactSessionContextResult>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/compact`,
-      {},
-    );
+  async compactSessionContext(workspaceId: string, sessionId: string): Promise<CompactSessionContextResult> {
+    return await this.requestJson<CompactSessionContextResult>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/compact`, {});
   }
 
   // --- Channel-A structured services (P4.4) ------------------------------------
@@ -749,232 +629,96 @@ export class OpenGeniClient {
   // notifications + the PTY output stream arrive on the existing event SSE.
 
   /** FileSystem: list a directory tree (feeds the Pierre file tree). */
-  async fsList(
-    workspaceId: string,
-    sessionId: string,
-    request: FsListRequest = {},
-  ): Promise<FsListResponse> {
-    return await this.requestJson<FsListResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`,
-      request,
-    );
+  async fsList(workspaceId: string, sessionId: string, request: FsListRequest = {}): Promise<FsListResponse> {
+    return await this.requestJson<FsListResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`, request);
   }
 
   /** FileSystem: read a file (text or base64; binary-safe, size-capped). */
-  async fsRead(
-    workspaceId: string,
-    sessionId: string,
-    request: FsReadRequest,
-  ): Promise<FsReadResponse> {
-    return await this.requestJson<FsReadResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
-      request,
-    );
+  async fsRead(workspaceId: string, sessionId: string, request: FsReadRequest): Promise<FsReadResponse> {
+    return await this.requestJson<FsReadResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`, request);
   }
 
   /** FileSystem: write a file (last-writer-wins; emits fs.changed). */
-  async fsWrite(
-    workspaceId: string,
-    sessionId: string,
-    request: FsWriteRequest,
-  ): Promise<FsWriteResponse> {
-    return await this.requestJson<FsWriteResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/write`,
-      request,
-    );
+  async fsWrite(workspaceId: string, sessionId: string, request: FsWriteRequest): Promise<FsWriteResponse> {
+    return await this.requestJson<FsWriteResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/write`, request);
   }
 
   /** FileSystem: delete a path (emits fs.changed). */
-  async fsDelete(
-    workspaceId: string,
-    sessionId: string,
-    request: FsDeleteRequest,
-  ): Promise<FsDeleteResponse> {
-    return await this.requestJson<FsDeleteResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/delete`,
-      request,
-    );
+  async fsDelete(workspaceId: string, sessionId: string, request: FsDeleteRequest): Promise<FsDeleteResponse> {
+    return await this.requestJson<FsDeleteResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/delete`, request);
   }
 
   /** FileSystem: move/rename a path (emits fs.changed; 409 if destination exists and overwrite is false). */
-  async fsMove(
-    workspaceId: string,
-    sessionId: string,
-    request: FsMoveRequest,
-  ): Promise<FsMoveResponse> {
-    return await this.requestJson<FsMoveResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/move`,
-      request,
-    );
+  async fsMove(workspaceId: string, sessionId: string, request: FsMoveRequest): Promise<FsMoveResponse> {
+    return await this.requestJson<FsMoveResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/move`, request);
   }
 
   /** FileSystem: create a directory (emits fs.changed; recursive defaults to true). */
-  async fsMkdir(
-    workspaceId: string,
-    sessionId: string,
-    request: FsMkdirRequest,
-  ): Promise<FsMkdirResponse> {
-    return await this.requestJson<FsMkdirResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/mkdir`,
-      request,
-    );
+  async fsMkdir(workspaceId: string, sessionId: string, request: FsMkdirRequest): Promise<FsMkdirResponse> {
+    return await this.requestJson<FsMkdirResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/mkdir`, request);
   }
 
   /** Git: working-tree/index status (the Pierre file-status feed). */
-  async gitStatus(
-    workspaceId: string,
-    sessionId: string,
-    request: GitStatusRequest = {},
-  ): Promise<GitStatusResponse> {
-    return await this.requestJson<GitStatusResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`,
-      request,
-    );
+  async gitStatus(workspaceId: string, sessionId: string, request: GitStatusRequest = {}): Promise<GitStatusResponse> {
+    return await this.requestJson<GitStatusResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`, request);
   }
 
   /** Git: structured diff hunks (the Pierre diff feed). */
-  async gitDiff(
-    workspaceId: string,
-    sessionId: string,
-    request: GitDiffRequest = {},
-  ): Promise<GitDiffResponse> {
-    return await this.requestJson<GitDiffResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
-      request,
-    );
+  async gitDiff(workspaceId: string, sessionId: string, request: GitDiffRequest = {}): Promise<GitDiffResponse> {
+    return await this.requestJson<GitDiffResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`, request);
   }
 
   /** Git: commit log. */
-  async gitLog(
-    workspaceId: string,
-    sessionId: string,
-    request: GitLogRequest = {},
-  ): Promise<GitLogResponse> {
-    return await this.requestJson<GitLogResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/log`,
-      request,
-    );
+  async gitLog(workspaceId: string, sessionId: string, request: GitLogRequest = {}): Promise<GitLogResponse> {
+    return await this.requestJson<GitLogResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/log`, request);
   }
 
   /** Git: show a commit (diff vs first parent) or fetch a raw blob at a ref. */
-  async gitShow(
-    workspaceId: string,
-    sessionId: string,
-    request: GitShowRequest,
-  ): Promise<GitShowResponse> {
-    return await this.requestJson<GitShowResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/show`,
-      request,
-    );
+  async gitShow(workspaceId: string, sessionId: string, request: GitShowRequest): Promise<GitShowResponse> {
+    return await this.requestJson<GitShowResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/show`, request);
   }
 
   /** Workspace capture: the latest turn-end snapshot of the session's workspace
    *  (tree + per-repo diff + file after-image refs), served from durable storage
    *  WITHOUT warming a machine — the workbench cold-paint source. Returns
    *  `{available:false}` when no capture exists yet (fall back to the live path). */
-  async getWorkspaceCapture(
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<GetWorkspaceCaptureResponse> {
-    return await this.requestJson<GetWorkspaceCaptureResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`,
-    );
+  async getWorkspaceCapture(workspaceId: string, sessionId: string): Promise<GetWorkspaceCaptureResponse> {
+    return await this.requestJson<GetWorkspaceCaptureResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`);
   }
 
   /** Workspace capture: a single file's after-image from the capture (revision
    *  pins a specific one; omitted → latest). Content is inline for small files,
    *  else a short-TTL signed URL; a tooLarge file returns metadata only. */
-  async getWorkspaceCaptureFile(
-    workspaceId: string,
-    sessionId: string,
-    path: string,
-    revision?: number,
-  ): Promise<GetWorkspaceCaptureFileResponse> {
+  async getWorkspaceCaptureFile(workspaceId: string, sessionId: string, path: string, revision?: number): Promise<GetWorkspaceCaptureFileResponse> {
     const query: Record<string, string> = { path };
     if (revision !== undefined) query.revision = String(revision);
-    return await this.requestJson<GetWorkspaceCaptureFileResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`,
-      undefined,
-      query,
-    );
+    return await this.requestJson<GetWorkspaceCaptureFileResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`, undefined, query);
   }
 
   /** Terminal: run a bounded command, returning buffered stdout/stderr inline. */
-  async terminalExec(
-    workspaceId: string,
-    sessionId: string,
-    request: TerminalExecRequest,
-  ): Promise<TerminalExecResponse> {
-    return await this.requestJson<TerminalExecResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/exec`,
-      request,
-    );
+  async terminalExec(workspaceId: string, sessionId: string, request: TerminalExecRequest): Promise<TerminalExecResponse> {
+    return await this.requestJson<TerminalExecResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/exec`, request);
   }
 
   /** Terminal: open an interactive PTY. Output streams on the event SSE as
    *  terminal.pty.output.delta; drive it with terminalPtyWrite. */
-  async terminalPtyOpen(
-    workspaceId: string,
-    sessionId: string,
-    request: PtyOpenRequest = {},
-  ): Promise<PtyOpenResponse> {
-    return await this.requestJson<PtyOpenResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty`,
-      request,
-    );
+  async terminalPtyOpen(workspaceId: string, sessionId: string, request: PtyOpenRequest = {}): Promise<PtyOpenResponse> {
+    return await this.requestJson<PtyOpenResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty`, request);
   }
 
   /** Terminal: send stdin to an open PTY (output rides A1). */
-  async terminalPtyWrite(
-    workspaceId: string,
-    sessionId: string,
-    request: PtyWriteRequest,
-  ): Promise<void> {
-    await this.requestVoid(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/write`,
-      request,
-    );
+  async terminalPtyWrite(workspaceId: string, sessionId: string, request: PtyWriteRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/write`, request);
   }
 
   /** Terminal: resize an open PTY. */
-  async terminalPtyResize(
-    workspaceId: string,
-    sessionId: string,
-    request: PtyResizeRequest,
-  ): Promise<void> {
-    await this.requestVoid(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/resize`,
-      request,
-    );
+  async terminalPtyResize(workspaceId: string, sessionId: string, request: PtyResizeRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/resize`, request);
   }
 
   /** Terminal: close an open PTY (idempotent). */
-  async terminalPtyClose(
-    workspaceId: string,
-    sessionId: string,
-    request: PtyCloseRequest,
-  ): Promise<void> {
-    await this.requestVoid(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/close`,
-      request,
-    );
+  async terminalPtyClose(workspaceId: string, sessionId: string, request: PtyCloseRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/close`, request);
   }
 
   // --- Stream surfacing: capability negotiation + viewer lifecycle (Phase 5) ---
@@ -989,29 +733,19 @@ export class OpenGeniClient {
    *  liveness the client polls on while `cold`/`warming`. The desktop URL/token
    *  are minted in-process only when the box is warm AND the principal has
    *  acknowledged the un-redacted plane. */
-  async getStreamCapabilities(
-    workspaceId: string,
-    sessionId: string,
-  ): Promise<SessionCapabilities> {
+  async getStreamCapabilities(workspaceId: string, sessionId: string): Promise<SessionCapabilities> {
     return await this.requestJson<SessionCapabilities>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`,
-    );
+      "GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`);
   }
 
   /** Record the calling principal's acknowledgment of the un-redacted desktop
    *  pixel plane (and, when the box is shared, the shared-exposure disclosure).
    *  The desktop viewer-attach path returns 409 until this is recorded. */
   async acknowledgeStream(
-    workspaceId: string,
-    sessionId: string,
-    request: AcknowledgeStreamRequest = {},
+    workspaceId: string, sessionId: string, request: AcknowledgeStreamRequest = {},
   ): Promise<AcknowledgeStreamResponse> {
     return await this.requestJson<AcknowledgeStreamResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities/acknowledge`,
-      request,
-    );
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities/acknowledge`, request);
   }
 
   /** Attach a viewer holder (refcounted liveness — keeps the box warm while
@@ -1023,39 +757,25 @@ export class OpenGeniClient {
    *  (`desktop` omitted/false) warms the box + mints the pty-ws terminal cell with
    *  NO consent gate. An omitted `viewerId` mints a fresh one. */
   async attachViewer(
-    workspaceId: string,
-    sessionId: string,
-    request: AttachViewerRequest = {},
+    workspaceId: string, sessionId: string, request: AttachViewerRequest = {},
   ): Promise<AttachViewerResponse> {
     return await this.requestJson<AttachViewerResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers`,
-      request,
-    );
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers`, request);
   }
 
   /** Heartbeat a viewer holder (Channel-A app-level liveness). A closed laptop
    *  stops sending these → the reaper drops the holder within ~90s. Echoes
    *  `leaseEpoch` so a superseded epoch is rejected (`alive:false` → re-attach). */
   async heartbeatViewer(
-    workspaceId: string,
-    sessionId: string,
-    viewerId: string,
-    request: ViewerHeartbeatRequest,
+    workspaceId: string, sessionId: string, viewerId: string, request: ViewerHeartbeatRequest,
   ): Promise<ViewerHeartbeatResponse> {
     return await this.requestJson<ViewerHeartbeatResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}/heartbeat`,
-      request,
-    );
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}/heartbeat`, request);
   }
 
   /** Detach a viewer (delete this holder; idempotent delete-my-row). */
   async detachViewer(workspaceId: string, sessionId: string, viewerId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}`,
-    );
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}`);
   }
 
   // --- Access + workspaces -----------------------------------------------------
@@ -1104,10 +824,7 @@ export class OpenGeniClient {
 
   /** The workspace's members (user + api_key subjects). */
   async listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-    const response = await this.requestJson<ListWorkspaceMembersResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/members`,
-    );
+    const response = await this.requestJson<ListWorkspaceMembersResponse>("GET", `/v1/workspaces/${workspaceId}/members`);
     return response.members;
   }
 
@@ -1115,22 +832,11 @@ export class OpenGeniClient {
    * Add an already-registered user by email. 404s when no user with that email
    * exists (email invites for unknown users are deferred).
    */
-  async addWorkspaceMember(
-    workspaceId: string,
-    request: AddWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/members`,
-      request,
-    );
+  async addWorkspaceMember(workspaceId: string, request: AddWorkspaceMemberRequest): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>("POST", `/v1/workspaces/${workspaceId}/members`, request);
   }
 
-  async updateWorkspaceMember(
-    workspaceId: string,
-    subjectId: string,
-    request: UpdateWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
+  async updateWorkspaceMember(workspaceId: string, subjectId: string, request: UpdateWorkspaceMemberRequest): Promise<WorkspaceMember> {
     return await this.requestJson<WorkspaceMember>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`,
@@ -1143,49 +849,25 @@ export class OpenGeniClient {
    * member who can still manage the workspace.
    */
   async removeWorkspaceMember(workspaceId: string, subjectId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`,
-    );
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`);
   }
 
   // --- Scheduled tasks (write + runs) -------------------------------------------
 
-  async createScheduledTask(
-    workspaceId: string,
-    request: CreateScheduledTaskRequest,
-  ): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks`,
-      request,
-    );
+  async createScheduledTask(workspaceId: string, request: CreateScheduledTaskRequest): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks`, request);
   }
 
-  async updateScheduledTask(
-    workspaceId: string,
-    taskId: string,
-    request: UpdateScheduledTaskRequest,
-  ): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
-      request,
-    );
+  async updateScheduledTask(workspaceId: string, taskId: string, request: UpdateScheduledTaskRequest): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("PATCH", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`, request);
   }
 
   async pauseScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/pause`,
-    );
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/pause`);
   }
 
   async resumeScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/resume`,
-    );
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/resume`);
   }
 
   /**
@@ -1193,11 +875,7 @@ export class OpenGeniClient {
    * Pass a stable `triggerId` to make a retried trigger idempotent — the same
    * token charges once and starts one run. Omit it and each call is distinct.
    */
-  async triggerScheduledTask(
-    workspaceId: string,
-    taskId: string,
-    options: { triggerId?: string } = {},
-  ): Promise<ScheduledTask> {
+  async triggerScheduledTask(workspaceId: string, taskId: string, options: { triggerId?: string } = {}): Promise<ScheduledTask> {
     return await this.requestJson<ScheduledTask>(
       "POST",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/trigger`,
@@ -1206,10 +884,7 @@ export class OpenGeniClient {
   }
 
   async deleteScheduledTask(workspaceId: string, taskId: string): Promise<void> {
-    await this.requestJson<unknown>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`,
-    );
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`);
   }
 
   async listScheduledTaskRuns(
@@ -1225,90 +900,183 @@ export class OpenGeniClient {
     );
   }
 
-  // --- Environments --------------------------------------------------------------
+  // --- VariableSets --------------------------------------------------------------
   // Variable values are write-only: reads return name/version metadata only.
 
-  async listEnvironments(workspaceId: string): Promise<WorkspaceEnvironment[]> {
-    return await this.requestJson<WorkspaceEnvironment[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/environments`,
-    );
+  async listVariableSets(workspaceId: string): Promise<VariableSet[]> {
+    return await this.requestJson<VariableSet[]>("GET", `/v1/workspaces/${workspaceId}/variable-sets`);
   }
 
-  async createEnvironment(
+  async createVariableSet(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>("POST", `/v1/workspaces/${workspaceId}/variable-sets`, request);
+  }
+
+  async getVariableSet(workspaceId: string, variableSetId: string): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>("GET", `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`);
+  }
+
+  async updateVariableSet(
     workspaceId: string,
-    request: CreateWorkspaceEnvironmentRequest,
-  ): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/environments`,
-      request,
-    );
-  }
-
-  async getEnvironment(workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}`,
-    );
-  }
-
-  async updateEnvironment(
-    workspaceId: string,
-    environmentId: string,
-    request: UpdateWorkspaceEnvironmentRequest,
-  ): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>(
+    variableSetId: string,
+    request: UpdateVariableSetRequest,
+  ): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`,
       request,
     );
   }
 
-  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
-    await this.requestJson<unknown>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}`,
-    );
+  async deleteVariableSet(workspaceId: string, variableSetId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`);
   }
 
   /** Create or rotate a variable. The value never comes back on any read. */
-  async setEnvironmentVariable(
+  async setVariableSetVariable(
     workspaceId: string,
-    environmentId: string,
+    variableSetId: string,
     name: string,
     value: string,
-  ): Promise<WorkspaceEnvironmentVariableMetadata> {
-    return await this.requestJson<WorkspaceEnvironmentVariableMetadata>(
+  ): Promise<VariableSetVariableMetadata> {
+    return await this.requestJson<VariableSetVariableMetadata>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
       { value },
     );
   }
 
-  async deleteEnvironmentVariable(
-    workspaceId: string,
-    environmentId: string,
-    name: string,
-  ): Promise<void> {
+  async deleteVariableSetVariable(workspaceId: string, variableSetId: string, name: string): Promise<void> {
     await this.requestJson<unknown>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
     );
+  }
+
+  // --- Rigs ------------------------------------------------------------------
+  // Workspace-scoped, versioned sandbox machine definitions. rigs:use gates read
+  // + proposeRigChange; rigs:manage gates create / update / delete / activate.
+
+  async listRigs(workspaceId: string): Promise<Rig[]> {
+    return await this.requestJson<Rig[]>("GET", `/v1/workspaces/${workspaceId}/rigs`);
+  }
+
+  async createRig(workspaceId: string, request: CreateRigRequest): Promise<Rig> {
+    return await this.requestJson<Rig>("POST", `/v1/workspaces/${workspaceId}/rigs`, request);
+  }
+
+  async getRig(workspaceId: string, rigId: string): Promise<Rig> {
+    return await this.requestJson<Rig>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}`);
+  }
+
+  async updateRig(workspaceId: string, rigId: string, request: UpdateRigRequest): Promise<Rig> {
+    return await this.requestJson<Rig>("PATCH", `/v1/workspaces/${workspaceId}/rigs/${rigId}`, request);
+  }
+
+  async deleteRig(workspaceId: string, rigId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/rigs/${rigId}`);
+  }
+
+  async listRigVersions(workspaceId: string, rigId: string): Promise<RigVersion[]> {
+    return await this.requestJson<RigVersion[]>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`);
+  }
+
+  /** Roll the active version to an existing one (rollback / promote-activate). */
+  async activateRigVersion(workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/${versionId}/activate`,
+    );
+  }
+
+  async listRigChanges(workspaceId: string, rigId: string): Promise<RigChange[]> {
+    return await this.requestJson<RigChange[]>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes`);
+  }
+
+  /** Propose a change against the rig's active version (rigs:use). */
+  async proposeRigChange(workspaceId: string, rigId: string, request: ProposeRigChangeRequest): Promise<RigChange> {
+    return await this.requestJson<RigChange>("POST", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes`, request);
+  }
+
+  async getRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    return await this.requestJson<RigChange>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}`);
+  }
+
+  /**
+   * Re-run verification for a change (rigs:use). Verification is asynchronous:
+   * this returns the change immediately with status `verifying`; poll
+   * `getRigChange`/`listRigChanges` for the terminal outcome + logs.
+   */
+  async verifyRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    return await this.requestJson<RigChange>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}/verify`,
+    );
+  }
+
+  /**
+   * Promote a verified `definition_edit` change into a new active rig version
+   * (rigs:manage). Only valid once the change's verification passed; returns the
+   * newly minted version.
+   */
+  async promoteRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}/promote`,
+    );
+  }
+
+  /**
+   * Re-run the active version's checks in a clean throwaway sandbox (rigs:use).
+   * Asynchronous — returns the version id being verified; the outcome lands on
+   * the version's audit trail.
+   */
+  async verifyRig(workspaceId: string, rigId: string): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/verify`,
+    );
+  }
+
+  /** @deprecated use listVariableSets */
+  async listEnvironments(workspaceId: string): Promise<VariableSet[]> {
+    return await this.listVariableSets(workspaceId);
+  }
+
+  /** @deprecated use createVariableSet */
+  async createEnvironment(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+    return await this.createVariableSet(workspaceId, request);
+  }
+
+  /** @deprecated use getVariableSet */
+  async getEnvironment(workspaceId: string, environmentId: string): Promise<VariableSet> {
+    return await this.getVariableSet(workspaceId, environmentId);
+  }
+
+  /** @deprecated use updateVariableSet */
+  async updateEnvironment(workspaceId: string, environmentId: string, request: UpdateVariableSetRequest): Promise<VariableSet> {
+    return await this.updateVariableSet(workspaceId, environmentId, request);
+  }
+
+  /** @deprecated use deleteVariableSet */
+  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
+    await this.deleteVariableSet(workspaceId, environmentId);
+  }
+
+  /** @deprecated use setVariableSetVariable */
+  async setEnvironmentVariable(workspaceId: string, environmentId: string, name: string, value: string): Promise<VariableSetVariableMetadata> {
+    return await this.setVariableSetVariable(workspaceId, environmentId, name, value);
+  }
+
+  /** @deprecated use deleteVariableSetVariable */
+  async deleteEnvironmentVariable(workspaceId: string, environmentId: string, name: string): Promise<void> {
+    await this.deleteVariableSetVariable(workspaceId, environmentId, name);
   }
 
   // --- Files -----------------------------------------------------------------------
 
   /** Step 1 of the upload flow: returns the pre-signed PUT target. */
-  async beginFileUpload(
-    workspaceId: string,
-    request: CreateFileUploadRequest,
-  ): Promise<CreateFileUploadResponse> {
-    return await this.requestJson<CreateFileUploadResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/files/uploads`,
-      request,
-    );
+  async beginFileUpload(workspaceId: string, request: CreateFileUploadRequest): Promise<CreateFileUploadResponse> {
+    return await this.requestJson<CreateFileUploadResponse>("POST", `/v1/workspaces/${workspaceId}/files/uploads`, request);
   }
 
   /** Step 3 of the upload flow: server verifies the object and marks it ready. */
@@ -1328,14 +1096,12 @@ export class OpenGeniClient {
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
     // Copy Uint8Array views into a Blob so byte offsets/shared buffers can't
     // leak surrounding bytes into the PUT body.
-    const body: Blob | ArrayBuffer | string =
-      input.data instanceof Uint8Array ? new Blob([input.data.slice()]) : input.data;
-    const sizeBytes =
-      typeof body === "string"
-        ? new TextEncoder().encode(body).byteLength
-        : body instanceof Blob
-          ? body.size
-          : body.byteLength;
+    const body: Blob | ArrayBuffer | string = input.data instanceof Uint8Array
+      ? new Blob([input.data.slice()])
+      : input.data;
+    const sizeBytes = typeof body === "string"
+      ? new TextEncoder().encode(body).byteLength
+      : body instanceof Blob ? body.size : body.byteLength;
     const upload = await this.beginFileUpload(workspaceId, {
       filename: input.filename,
       contentType: input.contentType,
@@ -1360,76 +1126,39 @@ export class OpenGeniClient {
   }
 
   async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
-    return await this.requestJson<FileAsset>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/files/${fileId}`,
-    );
+    return await this.requestJson<FileAsset>("GET", `/v1/workspaces/${workspaceId}/files/${fileId}`);
   }
 
   /** Mint a short-lived signed download URL for a ready file. */
-  async createFileDownloadUrl(
-    workspaceId: string,
-    fileId: string,
-  ): Promise<FileDownloadUrlResponse> {
-    return await this.requestJson<FileDownloadUrlResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
-    );
+  async createFileDownloadUrl(workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>("POST", `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`);
   }
 
   // --- Documents ----------------------------------------------------------------------
 
-  async createDocumentBase(
-    workspaceId: string,
-    request: CreateDocumentBaseRequest,
-  ): Promise<DocumentBase> {
-    return await this.requestJson<DocumentBase>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/document-bases`,
-      request,
-    );
+  async createDocumentBase(workspaceId: string, request: CreateDocumentBaseRequest): Promise<DocumentBase> {
+    return await this.requestJson<DocumentBase>("POST", `/v1/workspaces/${workspaceId}/document-bases`, request);
   }
 
   async listDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
-    return await this.requestJson<DocumentBase[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-bases`,
-    );
+    return await this.requestJson<DocumentBase[]>("GET", `/v1/workspaces/${workspaceId}/document-bases`);
   }
 
   async getDocumentBase(workspaceId: string, baseId: string): Promise<DocumentBase> {
-    return await this.requestJson<DocumentBase>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-bases/${baseId}`,
-    );
+    return await this.requestJson<DocumentBase>("GET", `/v1/workspaces/${workspaceId}/document-bases/${baseId}`);
   }
 
   /** Index an uploaded file into the base. The file must be `ready`. */
-  async addDocument(
-    workspaceId: string,
-    baseId: string,
-    request: AddDocumentRequest,
-  ): Promise<Document> {
-    return await this.requestJson<Document>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`,
-      request,
-    );
+  async addDocument(workspaceId: string, baseId: string, request: AddDocumentRequest): Promise<Document> {
+    return await this.requestJson<Document>("POST", `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`, request);
   }
 
   async listDocuments(workspaceId: string, baseId: string): Promise<Document[]> {
-    return await this.requestJson<Document[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`,
-    );
+    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`);
   }
 
   /** Retry indexing for a failed document. */
-  async reindexDocument(
-    workspaceId: string,
-    baseId: string,
-    documentId: string,
-  ): Promise<Document> {
+  async reindexDocument(workspaceId: string, baseId: string, documentId: string): Promise<Document> {
     return await this.requestJson<Document>(
       "POST",
       `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents/${documentId}/reindex`,
@@ -1463,17 +1192,10 @@ export class OpenGeniClient {
     workspaceId: string,
     request: DocumentSearchRequest,
   ): Promise<DocumentSearchResponse> {
-    return await this.requestJson<DocumentSearchResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/search`,
-      request,
-    );
+    return await this.requestJson<DocumentSearchResponse>("POST", `/v1/workspaces/${workspaceId}/knowledge/search`, request);
   }
 
-  async listKnowledgeMemories(
-    workspaceId: string,
-    request: KnowledgeMemorySearchRequest = {},
-  ): Promise<KnowledgeMemory[]> {
+  async listKnowledgeMemories(workspaceId: string, request: KnowledgeMemorySearchRequest = {}): Promise<KnowledgeMemory[]> {
     const params = new URLSearchParams();
     if (request.query) params.set("query", request.query);
     if (request.status) params.set("status", request.status);
@@ -1481,64 +1203,33 @@ export class OpenGeniClient {
     if (request.scope) params.set("scope", request.scope);
     if (request.limit) params.set("limit", String(request.limit));
     const query = params.toString();
-    return await this.requestJson<KnowledgeMemory[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/knowledge/memories${query ? `?${query}` : ""}`,
-    );
+    return await this.requestJson<KnowledgeMemory[]>("GET", `/v1/workspaces/${workspaceId}/knowledge/memories${query ? `?${query}` : ""}`);
   }
 
   async getKnowledgeMemory(workspaceId: string, memoryId: string): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`,
-    );
+    return await this.requestJson<KnowledgeMemory>("GET", `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`);
   }
 
-  async createKnowledgeMemory(
-    workspaceId: string,
-    request: CreateKnowledgeMemoryRequest,
-  ): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/memories`,
-      request,
-    );
+  async createKnowledgeMemory(workspaceId: string, request: CreateKnowledgeMemoryRequest): Promise<KnowledgeMemory> {
+    return await this.requestJson<KnowledgeMemory>("POST", `/v1/workspaces/${workspaceId}/knowledge/memories`, request);
   }
 
-  async updateKnowledgeMemory(
-    workspaceId: string,
-    memoryId: string,
-    request: UpdateKnowledgeMemoryRequest,
-  ): Promise<KnowledgeMemory> {
-    return await this.requestJson<KnowledgeMemory>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`,
-      request,
-    );
+  async updateKnowledgeMemory(workspaceId: string, memoryId: string, request: UpdateKnowledgeMemoryRequest): Promise<KnowledgeMemory> {
+    return await this.requestJson<KnowledgeMemory>("PATCH", `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`, request);
   }
 
   /** Hybrid (semantic + keyword) search over the workspace's agent-visible memory. */
-  async searchWorkspaceMemories(
-    workspaceId: string,
-    request: WorkspaceMemorySearchRequest,
-  ): Promise<WorkspaceMemorySearchResponse> {
-    return await this.requestJson<WorkspaceMemorySearchResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/knowledge/memories/search`,
-      request,
-    );
+  async searchWorkspaceMemories(workspaceId: string, request: WorkspaceMemorySearchRequest): Promise<WorkspaceMemorySearchResponse> {
+    return await this.requestJson<WorkspaceMemorySearchResponse>("POST", `/v1/workspaces/${workspaceId}/knowledge/memories/search`, request);
   }
 
   /** Deep-merge a settings patch into the workspace (preserves unknown keys). */
-  async updateWorkspaceSettings(
-    workspaceId: string,
-    request: UpdateWorkspaceSettingsRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/settings`,
-      request,
-    );
+  async updateWorkspaceSettings(workspaceId: string, request: UpdateWorkspaceSettingsRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}/settings`, request);
+  }
+
+  async setWorkspaceDefaultRig(workspaceId: string, request: SetWorkspaceDefaultRigRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("PUT", `/v1/workspaces/${workspaceId}/default-rig`, request);
   }
 
   // --- Capability packs ------------------------------------------------------------------
@@ -1549,29 +1240,15 @@ export class OpenGeniClient {
   }
 
   /** Register (or replace) a workspace-scoped pack from a manifest. */
-  async registerPack(
-    workspaceId: string,
-    manifest: RegisterCapabilityPackRequest,
-  ): Promise<WorkspaceRegisteredPack> {
-    return await this.requestJson<WorkspaceRegisteredPack>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs`,
-      manifest,
-    );
+  async registerPack(workspaceId: string, manifest: RegisterCapabilityPackRequest): Promise<WorkspaceRegisteredPack> {
+    return await this.requestJson<WorkspaceRegisteredPack>("POST", `/v1/workspaces/${workspaceId}/packs`, manifest);
   }
 
   async getPack(workspaceId: string, packId: string): Promise<GetPackResponse> {
-    return await this.requestJson<GetPackResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
+    return await this.requestJson<GetPackResponse>("GET", `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`);
   }
 
-  async enablePack(
-    workspaceId: string,
-    packId: string,
-    request: EnablePackRequest = {},
-  ): Promise<PackInstallation> {
+  async enablePack(workspaceId: string, packId: string, request: EnablePackRequest = {}): Promise<PackInstallation> {
     return await this.requestJson<PackInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/enable`,
@@ -1581,38 +1258,22 @@ export class OpenGeniClient {
 
   /** Unregister a workspace-scoped pack (built-in packs cannot be deleted). */
   async deletePack(workspaceId: string, packId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`);
   }
 
   async listPackInstallations(workspaceId: string): Promise<PackInstallation[]> {
-    return await this.requestJson<PackInstallation[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/installations`,
-    );
+    return await this.requestJson<PackInstallation[]>("GET", `/v1/workspaces/${workspaceId}/packs/installations`);
   }
 
   // --- Capabilities -------------------------------------------------------------------------
 
   async listCapabilities(workspaceId: string): Promise<CapabilityCatalogResponse> {
-    return await this.requestJson<CapabilityCatalogResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/capabilities`,
-    );
+    return await this.requestJson<CapabilityCatalogResponse>("GET", `/v1/workspaces/${workspaceId}/capabilities`);
   }
 
   /** Add a manual capability catalog item (e.g. a remote MCP server). */
-  async createCapability(
-    workspaceId: string,
-    request: CreateCapabilityCatalogItemRequest,
-  ): Promise<CapabilityCatalogItem> {
-    return await this.requestJson<CapabilityCatalogItem>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/capabilities`,
-      request,
-    );
+  async createCapability(workspaceId: string, request: CreateCapabilityCatalogItemRequest): Promise<CapabilityCatalogItem> {
+    return await this.requestJson<CapabilityCatalogItem>("POST", `/v1/workspaces/${workspaceId}/capabilities`, request);
   }
 
   async enableCapability(
@@ -1627,10 +1288,7 @@ export class OpenGeniClient {
     );
   }
 
-  async disableCapability(
-    workspaceId: string,
-    capabilityId: string,
-  ): Promise<CapabilityInstallation> {
+  async disableCapability(workspaceId: string, capabilityId: string): Promise<CapabilityInstallation> {
     return await this.requestJson<CapabilityInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
@@ -1656,56 +1314,28 @@ export class OpenGeniClient {
   // --- Connections -------------------------------------------------------------------------------
 
   async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
-    const response = await this.requestJson<ListConnectionsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/connections`,
-    );
+    const response = await this.requestJson<ListConnectionsResponse>("GET", `/v1/workspaces/${workspaceId}/connections`);
     return response.connections;
   }
 
-  async createConnection(
-    workspaceId: string,
-    request: CreateConnectionRequest,
-  ): Promise<ConnectionMetadata> {
-    const response = await this.requestJson<ConnectionResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/connections`,
-      request,
-    );
+  async createConnection(workspaceId: string, request: CreateConnectionRequest): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>("POST", `/v1/workspaces/${workspaceId}/connections`, request);
     return response.connection;
   }
 
-  async updateConnection(
-    workspaceId: string,
-    connectionId: string,
-    request: UpdateConnectionRequest,
-  ): Promise<ConnectionMetadata> {
-    const response = await this.requestJson<ConnectionResponse>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
-      request,
-    );
+  async updateConnection(workspaceId: string, connectionId: string, request: UpdateConnectionRequest): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>("PATCH", `/v1/workspaces/${workspaceId}/connections/${connectionId}`, request);
     return response.connection;
   }
 
   async deleteConnection(workspaceId: string, connectionId: string): Promise<ConnectionMetadata> {
-    const response = await this.requestJson<ConnectionResponse>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/connections/${connectionId}`,
-    );
+    const response = await this.requestJson<ConnectionResponse>("DELETE", `/v1/workspaces/${workspaceId}/connections/${connectionId}`);
     return response.connection;
   }
 
   /** Start an OAuth connection flow; redirect the user to the returned `authorizationUrl`. */
-  async startConnectionOAuth(
-    workspaceId: string,
-    request: OAuthStartRequest,
-  ): Promise<OAuthStartResponse> {
-    return await this.requestJson<OAuthStartResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/connections/oauth/start`,
-      request,
-    );
+  async startConnectionOAuth(workspaceId: string, request: OAuthStartRequest): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>("POST", `/v1/workspaces/${workspaceId}/connections/oauth/start`, request);
   }
 
   /** Public, immutably-cached URL for a catalog item's logo, or null when the item has none. */
@@ -1730,18 +1360,12 @@ export class OpenGeniClient {
   }
 
   async listGitHubRepositories(workspaceId: string): Promise<GitHubRepositoriesResponse> {
-    return await this.requestJson<GitHubRepositoriesResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/github/repositories`,
-    );
+    return await this.requestJson<GitHubRepositoriesResponse>("GET", `/v1/workspaces/${workspaceId}/github/repositories`);
   }
 
   /** Re-sync the installation's repository list from GitHub. */
   async syncGitHubRepositories(workspaceId: string): Promise<GitHubRepositoriesResponse> {
-    return await this.requestJson<GitHubRepositoriesResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/github/repositories/sync`,
-    );
+    return await this.requestJson<GitHubRepositoriesResponse>("POST", `/v1/workspaces/${workspaceId}/github/repositories/sync`);
   }
 
   /** Build a GitHub App manifest + the GitHub URL to submit it to. */
@@ -1759,31 +1383,18 @@ export class OpenGeniClient {
   // --- API keys ----------------------------------------------------------------------------------
 
   async listApiKeys(workspaceId: string): Promise<ApiKey[]> {
-    const response = await this.requestJson<ListApiKeysResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/api-keys`,
-    );
+    const response = await this.requestJson<ListApiKeysResponse>("GET", `/v1/workspaces/${workspaceId}/api-keys`);
     return response.apiKeys;
   }
 
   /** The returned `token` is shown once; only its prefix is stored. */
-  async createApiKey(
-    workspaceId: string,
-    request: CreateApiKeyRequest,
-  ): Promise<CreateApiKeyResponse> {
-    return await this.requestJson<CreateApiKeyResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/api-keys`,
-      request,
-    );
+  async createApiKey(workspaceId: string, request: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    return await this.requestJson<CreateApiKeyResponse>("POST", `/v1/workspaces/${workspaceId}/api-keys`, request);
   }
 
   /** Revoke an API key. Returns the revoked key. */
   async deleteApiKey(workspaceId: string, apiKeyId: string): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/api-keys/${apiKeyId}`,
-    );
+    return await this.requestJson<ApiKey>("DELETE", `/v1/workspaces/${workspaceId}/api-keys/${apiKeyId}`);
   }
 
   // --- Billing (account-scoped) --------------------------------------------------------------------
@@ -1794,26 +1405,17 @@ export class OpenGeniClient {
     });
   }
 
-  async getBillingUsage(
-    options: { accountId?: string; workspaceId?: string } = {},
-  ): Promise<BillingUsageResponse> {
+  async getBillingUsage(options: { accountId?: string; workspaceId?: string } = {}): Promise<BillingUsageResponse> {
     return await this.requestJson<BillingUsageResponse>("GET", "/v1/billing/usage", undefined, {
       ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
       ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
     });
   }
 
-  async getBillingEntitlements(
-    options: { accountId?: string } = {},
-  ): Promise<BillingEntitlementsResponse> {
-    return await this.requestJson<BillingEntitlementsResponse>(
-      "GET",
-      "/v1/billing/entitlements",
-      undefined,
-      {
-        ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
-      },
-    );
+  async getBillingEntitlements(options: { accountId?: string } = {}): Promise<BillingEntitlementsResponse> {
+    return await this.requestJson<BillingEntitlementsResponse>("GET", "/v1/billing/entitlements", undefined, {
+      ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+    });
   }
 
   /** Start a Stripe checkout for prepaid credits. */
@@ -1824,8 +1426,7 @@ export class OpenGeniClient {
   // --- Internals -------------------------------------------------------------
 
   private headers(): Record<string, string> {
-    const extra =
-      typeof this.options.headers === "function" ? this.options.headers() : this.options.headers;
+    const extra = typeof this.options.headers === "function" ? this.options.headers() : this.options.headers;
     return {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
@@ -1841,27 +1442,17 @@ export class OpenGeniClient {
 
   /** Connection state + the codex models the workspace may select (empty until connected). */
   async codexStatus(workspaceId: string): Promise<CodexConnectionStatus> {
-    return await this.requestJson<CodexConnectionStatus>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/codex/status`,
-    );
+    return await this.requestJson<CodexConnectionStatus>("GET", `/v1/workspaces/${workspaceId}/codex/status`);
   }
 
   /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
   async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
-    return await this.requestJson<CodexConnectStart>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/codex/connect/start`,
-    );
+    return await this.requestJson<CodexConnectStart>("POST", `/v1/workspaces/${workspaceId}/codex/connect/start`);
   }
 
   /** Poll device-code authorization with the `state` from {@link codexConnectStart}. */
   async codexConnectPoll(workspaceId: string, state: string): Promise<CodexConnectPoll> {
-    return await this.requestJson<CodexConnectPoll>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/codex/connect/poll`,
-      { state },
-    );
+    return await this.requestJson<CodexConnectPoll>("POST", `/v1/workspaces/${workspaceId}/codex/connect/poll`, { state });
   }
 
   /** Remaining usage / limits for the connected (ACTIVE) subscription. Back-compat. */
@@ -1871,105 +1462,53 @@ export class OpenGeniClient {
 
   /** Live per-account usage read (refreshes THIS account's bearer; writes the cache). */
   async codexAccountUsage(workspaceId: string, accountId: string): Promise<CodexUsage> {
-    return await this.requestJson<CodexUsage>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/usage`,
-    );
+    return await this.requestJson<CodexUsage>("GET", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/usage`);
   }
 
   /** Batched live refresh across every connected account, keyed by credential id. */
   async refreshCodexUsage(workspaceId: string): Promise<{ usage: CodexUsageMap }> {
-    return await this.requestJson<{ usage: CodexUsageMap }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/codex/usage/refresh`,
-    );
+    return await this.requestJson<{ usage: CodexUsageMap }>("POST", `/v1/workspaces/${workspaceId}/codex/usage/refresh`);
   }
 
   /** Disconnect ALL accounts (legacy workspace-wide). Prefer `disconnectCodexAccount`. */
   async codexDisconnect(workspaceId: string): Promise<{ disconnected: boolean }> {
-    return await this.requestJson<{ disconnected: boolean }>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/codex`,
-    );
+    return await this.requestJson<{ disconnected: boolean }>("DELETE", `/v1/workspaces/${workspaceId}/codex`);
   }
 
   /** List every connected Codex account + the workspace active pointer + settings. */
   async listCodexAccounts(workspaceId: string): Promise<CodexAccountsResponse> {
-    return await this.requestJson<CodexAccountsResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/codex/accounts`,
-    );
+    return await this.requestJson<CodexAccountsResponse>("GET", `/v1/workspaces/${workspaceId}/codex/accounts`);
   }
 
   /** Switch the workspace ACTIVE Codex account (the one unpinned sessions use). */
-  async activateCodexAccount(
-    workspaceId: string,
-    accountId: string,
-  ): Promise<{ activated: boolean; accountId: string }> {
-    return await this.requestJson<{ activated: boolean; accountId: string }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/activate`,
-    );
+  async activateCodexAccount(workspaceId: string, accountId: string): Promise<{ activated: boolean; accountId: string }> {
+    return await this.requestJson<{ activated: boolean; accountId: string }>("POST", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/activate`);
   }
 
   /** P3: enable/disable Codex auto-rotation and/or pick the strategy. Returns the effective settings. */
   async setCodexRotationSettings(
     workspaceId: string,
-    patch: {
-      rotationEnabled?: boolean;
-      rotationStrategy?: CodexRotationSettings["rotationStrategy"];
-    },
+    patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationSettings["rotationStrategy"] },
   ): Promise<CodexRotationSettings> {
-    return await this.requestJson<CodexRotationSettings>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/codex/settings`,
-      patch,
-    );
+    return await this.requestJson<CodexRotationSettings>("PATCH", `/v1/workspaces/${workspaceId}/codex/settings`, patch);
   }
 
   /** Disconnect ONE Codex account by id (re-picks active when the removed one was active). */
-  async disconnectCodexAccount(
-    workspaceId: string,
-    accountId: string,
-  ): Promise<{ disconnected: boolean; newActiveId: string | null }> {
-    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`,
-    );
+  async disconnectCodexAccount(workspaceId: string, accountId: string): Promise<{ disconnected: boolean; newActiveId: string | null }> {
+    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>("DELETE", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`);
   }
 
   /** Rename a Codex account (label only in P1). */
-  async renameCodexAccount(
-    workspaceId: string,
-    accountId: string,
-    label: string | null,
-  ): Promise<CodexAccount> {
-    return await this.requestJson<CodexAccount>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`,
-      { label },
-    );
+  async renameCodexAccount(workspaceId: string, accountId: string, label: string | null): Promise<CodexAccount> {
+    return await this.requestJson<CodexAccount>("PATCH", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`, { label });
   }
 
   /** Pin (or unpin via "auto") a session's Codex account. Applies on the next turn. */
-  async pinSessionCodexAccount(
-    workspaceId: string,
-    sessionId: string,
-    target: string,
-  ): Promise<{ pinned: string }> {
-    return await this.requestJson<{ pinned: string }>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`,
-      { target },
-    );
+  async pinSessionCodexAccount(workspaceId: string, sessionId: string, target: string): Promise<{ pinned: string }> {
+    return await this.requestJson<{ pinned: string }>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`, { target });
   }
 
-  private async requestJson<T>(
-    method: string,
-    path: string,
-    body?: unknown,
-    query: Record<string, string> = {},
-  ): Promise<T> {
+  private async requestJson<T>(method: string, path: string, body?: unknown, query: Record<string, string> = {}): Promise<T> {
     const response = await this.fetchImpl(this.url(path, query), {
       method,
       headers: {

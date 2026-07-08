@@ -21,6 +21,8 @@ export type {
   ConnectionStatus,
   CreateConnectionRequest,
   CreateFileUploadResponse,
+  CreateRigRequest,
+  ProposeRigChangeRequest,
   McpServerConnectionRef,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -45,6 +47,14 @@ export type {
   Permission as SdkPermission,
   ReasoningEffort,
   ResourceRef,
+  Rig,
+  RigChange,
+  RigChangeKind,
+  RigChangeStatus,
+  RigChangeVerification,
+  RigCheck,
+  RigCheckResult,
+  RigVersion,
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAgentConfig,
@@ -62,21 +72,19 @@ export type {
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceMemorySearchMode,
   WorkspaceMemorySearchResponse,
   WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
+
+export type WorkspaceVariableSet = VariableSet;
+export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
-import type {
-  ClientModel,
-  GoalSpec,
-  ReasoningEffort,
-  ResourceRef,
-  SandboxBackend,
-  ToolRef,
-} from "@opengeni/sdk";
+import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef, VariableSet, VariableSetVariableMetadata } from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";
 
 export type TurnSubmission = {
@@ -86,7 +94,11 @@ export type TurnSubmission = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sandboxBackend?: SandboxBackend;
+  variableSetId?: string;
+  /**  use variableSetId */
   environmentId?: string;
+  /** The rig this session rides (resolved + frozen at create). */
+  rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
 };

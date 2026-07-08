@@ -128,3 +128,39 @@ export function settingsWithPackSandboxImage(
     modalImageRef: sandboxImage,
   };
 }
+
+/**
+ * Applies the session's frozen rig-version image to run settings. Rig image is
+ * the TOP of the image precedence chain (rig > pack > deployment default): when
+ * the rig version pins an image it OVERRIDES both the deployment
+ * dockerImage/modalImageRef AND any pack-declared sandboxImage. When the rig
+ * pins no image (`null`), the settings pass through untouched so the pack /
+ * deployment chain below still resolves exactly as today. Applied AFTER
+ * settingsWithPackSandboxImage so it wins the collision; identical mechanics to
+ * the pack equivalent (write both image fields so docker and modal agree).
+ */
+export function settingsWithRigImage(settings: Settings, rigImage: string | null): Settings {
+  if (!rigImage) {
+    return settings;
+  }
+  return {
+    ...settings,
+    dockerImage: rigImage,
+    modalImageRef: rigImage,
+  };
+}
+
+/**
+ * Layers the rig version's default variable sets BELOW the session's own set:
+ * the session's values WIN on any key collision (explicit precedence). Both maps
+ * are already the decrypted-and-merged values (rig defaults merged in listed
+ * order upstream). Pure and deterministic — given the same inputs it returns the
+ * same env, which is what keeps a session's box-manifest env stable across turns
+ * (the rig version is frozen per session, so its default-set list is fixed).
+ */
+export function mergeRigDefaultVariableSetEnvironment(
+  rigDefaultValues: Record<string, string>,
+  sessionValues: Record<string, string>,
+): Record<string, string> {
+  return { ...rigDefaultValues, ...sessionValues };
+}

@@ -1,4 +1,4 @@
-// Workspace configuration nav: the four config surfaces (Environments,
+// Workspace configuration nav: the four config surfaces (Variable sets,
 // Capabilities, Schedules, Documents) as individual items, then a slightly
 // separated Settings (Workspace settings). Collapsed → centered icons with
 // tooltips. Active route gets a left accent bar + subtle surface tint.
@@ -9,6 +9,7 @@ import {
   FileSearchIcon,
   LaptopIcon,
   PlugIcon,
+  ServerCogIcon,
   SettingsIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -19,46 +20,22 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils";
 
 type NavTarget =
-  | "/workspaces/$workspaceId/environments"
+  | "/workspaces/$workspaceId/variable-sets"
+  | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/capabilities"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/settings";
 
-const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
-  [
-    {
-      to: "/workspaces/$workspaceId/environments",
-      icon: BoxIcon,
-      label: "Environments",
-      description: "Secret variable sets for sandboxes",
-    },
-    {
-      to: "/workspaces/$workspaceId/machines",
-      icon: LaptopIcon,
-      label: "Machines",
-      description: "Your own connected computers",
-    },
-    {
-      to: "/workspaces/$workspaceId/capabilities",
-      icon: PlugIcon,
-      label: "Capabilities",
-      description: "Packs, MCP servers, and tools",
-    },
-    {
-      to: "/workspaces/$workspaceId/schedules",
-      icon: CalendarClockIcon,
-      label: "Schedules",
-      description: "Run agents on a schedule",
-    },
-    {
-      to: "/workspaces/$workspaceId/documents",
-      icon: FileSearchIcon,
-      label: "Documents",
-      description: "Indexed knowledge for agents",
-    },
-  ];
+const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> = [
+  { to: "/workspaces/$workspaceId/variable-sets", icon: BoxIcon, label: "Variable sets", description: "Secret variableSets for sandboxes" },
+  { to: "/workspaces/$workspaceId/rigs", icon: ServerCogIcon, label: "Rigs", description: "Versioned sandbox machine definitions" },
+  { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines", description: "Your own connected computers" },
+  { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities", description: "Packs, MCP servers, and tools" },
+  { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules", description: "Run agents on a schedule" },
+  { to: "/workspaces/$workspaceId/documents", icon: FileSearchIcon, label: "Documents", description: "Indexed knowledge for agents" },
+];
 
 export function WorkspaceNav() {
   const rail = useRail();

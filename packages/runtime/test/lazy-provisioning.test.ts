@@ -104,6 +104,34 @@ describe("lazy provisioning synthetic manifest", () => {
     );
   });
 
+  // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the
+  // provided session skips the client create/resume decoration). A rig-bound turn
+  // MUST run its frozen setup script here — a merge with the #315 lazy-provisioning
+  // refactor once left the rig hooks only on the inert decoration, so rig setup was
+  // silently skipped on every lease-owned turn.
+  test("runOwnedSandboxSetup runs the rig setup hook on the owned path", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      rigSetup: { rigId: "rig-1", rigName: "dev-machine", versionId: "ver-9", script: "echo hi", timeoutMs: 60_000 },
+    });
+    const execCmds: string[] = [];
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        execCmds.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, { settings, environment });
+
+    // The rig-setup hook exec'd its marker-guarded program against the box.
+    expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+  });
+
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability
   // calls session.createEditor() SYNCHRONOUSLY at tool-BIND time (every turn, before
   // any tool runs) and throws "Filesystem sandbox sessions must provide createEditor()"

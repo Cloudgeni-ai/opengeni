@@ -59,14 +59,14 @@ const settings = testSettings({
   sandboxLeaseTtlMs: 1_000,
   sandboxViewerHolderTtlMs: 1_000,
   sandboxIdleGraceMs: 500,
-  // env-aware grouping tests attach a workspace Environment at create.
+  // env-aware grouping tests attach a workspace Environment/Variable Set at create.
   environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
 });
 
-/** A workspace Environment row (no variables needed — grouping compares ids). */
+/** A workspace Variable Set row (no variables needed — grouping compares ids). */
 async function freshEnvironment(accountId: string, workspaceId: string): Promise<string> {
   const [e] = await admin<{ id: string }[]>`
-    insert into workspace_environments (account_id, workspace_id, name)
+    insert into workspace_variable_sets (account_id, workspace_id, name)
     values (${accountId}, ${workspaceId}, 'env') returning id`;
   return e!.id;
 }
@@ -364,7 +364,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Simulate a LEGACY env-blind share: force an env-carrying member row into
     // A's group directly (the env-aware check would refuse this today).
     await admin`
-      insert into sessions (account_id, workspace_id, initial_message, environment_id, sandbox_group_id, model, sandbox_backend)
+      insert into sessions (account_id, workspace_id, initial_message, variable_set_id, sandbox_group_id, model, sandbox_backend)
       values (${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
     const g = {
       ...grant(accountId, workspaceId),

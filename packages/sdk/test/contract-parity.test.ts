@@ -40,6 +40,14 @@ import {
   ScheduledTaskOverlapPolicy as ContractScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode as ContractScheduledTaskRunMode,
   ScheduledTaskStatus as ContractScheduledTaskStatus,
+  Rig as ContractRig,
+  RigVersion as ContractRigVersion,
+  RigChange as ContractRigChange,
+  RigChangeKind as ContractRigChangeKind,
+  RigChangeStatus as ContractRigChangeStatus,
+  CreateRigRequest as ContractCreateRigRequest,
+  UpdateRigRequest as ContractUpdateRigRequest,
+  ProposeRigChangeRequest as ContractProposeRigChangeRequest,
   UpdateWorkspaceMemberRequest as ContractUpdateWorkspaceMemberRequest,
   WorkspaceMember as ContractWorkspaceMember,
 } from "@opengeni/contracts";
@@ -74,6 +82,14 @@ import type {
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode,
   ScheduledTaskStatus,
+  Rig,
+  RigVersion,
+  RigChange,
+  RigChangeKind,
+  RigChangeStatus,
+  CreateRigRequest,
+  UpdateRigRequest,
+  ProposeRigChangeRequest,
   Session,
   SessionCapabilities,
   SessionEvent,
@@ -178,6 +194,44 @@ describe("SDK / contracts parity", () => {
     const acceptScheduledTask = (value: z.infer<typeof ContractScheduledTask>): ScheduledTask =>
       value;
     expect(typeof acceptScheduledTask).toBe("function");
+  });
+
+  test("rig literals and shapes match the contracts (compile-time + runtime, M2)", () => {
+    const kinds: readonly RigChangeKind[] = ContractRigChangeKind.options;
+    const statuses: readonly RigChangeStatus[] = ContractRigChangeStatus.options;
+    expect([...kinds].sort()).toEqual([...ContractRigChangeKind.options].sort());
+    expect([...statuses].sort()).toEqual([...ContractRigChangeStatus.options].sort());
+
+    // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
+    const acceptRig = (value: z.infer<typeof ContractRig>): Rig => value;
+    const acceptVersion = (value: z.infer<typeof ContractRigVersion>): RigVersion => value;
+    const acceptChange = (value: z.infer<typeof ContractRigChange>): RigChange => value;
+    expect([acceptRig, acceptVersion, acceptChange].every((fn) => typeof fn === "function")).toBe(true);
+
+    // Client -> server: SDK-sent bodies parse under the contract schemas.
+    const create: CreateRigRequest = {
+      name: "dev-machine",
+      description: "cloudgeni-dev stress rig",
+      image: "ubuntu:24.04",
+      setupScript: "apt-get install -y ripgrep",
+      checks: [{ name: "rg", command: "rg --version" }],
+      credentialHooks: ["azure-cli-login"],
+      defaultVariableSetIds: [],
+    };
+    const update: UpdateRigRequest = { name: "dev-machine-2", description: null };
+    const append: ProposeRigChangeRequest = { kind: "setup_append", payload: { command: "apt-get install -y jq", note: "needed jq" } };
+    const edit: ProposeRigChangeRequest = { kind: "definition_edit", payload: { image: "ubuntu:24.10", changelog: "bump base" } };
+    expect(ContractCreateRigRequest.safeParse(create).success).toBe(true);
+    expect(ContractUpdateRigRequest.safeParse(update).success).toBe(true);
+    expect(ContractProposeRigChangeRequest.safeParse(append).success).toBe(true);
+    expect(ContractProposeRigChangeRequest.safeParse(edit).success).toBe(true);
+    // Bad check shape and unknown change kind are rejected.
+    expect(ContractCreateRigRequest.safeParse({ name: "x", checks: [{ name: "" }] }).success).toBe(false);
+    expect(ContractProposeRigChangeRequest.safeParse({ kind: "nope", payload: {} }).success).toBe(false);
+    // setup_append requires a command.
+    expect(ContractProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success).toBe(false);
+    // Defaults: checks/hooks/ids default to [].
+    expect(ContractCreateRigRequest.parse({ name: "bare" }).checks).toEqual([]);
   });
 
   test("SDK-built control events parse under the contracts schema", () => {
