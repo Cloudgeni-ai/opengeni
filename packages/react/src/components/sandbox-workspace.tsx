@@ -136,6 +136,14 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
+  // The FS is writable only when it's live AND not read-only. A self-hosted box
+  // that's offline (or any read-only advertisement) or a capture-served cold tree
+  // must not offer create/rename/delete/edit affordances — you cannot mutate a
+  // machine you can't reach (dossier §12-A2/C3). Tree-structure ops need a warm
+  // writable box; content editing on a cold CLOUD box is the wake-on-edit path in
+  // the editor, not tree mutation.
+  const fsReadOnly = capabilities?.FileSystem.readOnly ?? false;
+  const filesEditable = fileSystemOn && !fsReadOnly;
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = (capabilities?.Terminal.transport ?? null) !== null;
   // The REAL interactive terminal is the ttyd pty-ws stream. When it's live the
@@ -263,6 +271,7 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
           git={git}
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
+          editable={filesEditable}
           className="h-full"
         />
       ),

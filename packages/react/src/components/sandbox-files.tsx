@@ -210,6 +210,7 @@ export function SandboxFiles({
             result={files}
             selectedPath={effectiveSelected ?? undefined}
             onSelectFile={selectFile}
+            editable={editable}
             emptyState="This directory is empty"
             className="min-w-0 flex-1"
           />
