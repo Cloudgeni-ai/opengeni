@@ -6624,8 +6624,14 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
 
       // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
       // liveness. The spawner exclusively owns warming->warm.
+      // TTL: a WARMING attach must keep the warming budget — re-stamping the
+      // plain (90s) TTL while a spawner's create() is still in flight would
+      // collapse expires_at and let the warming-death reaper reset/drain the
+      // lease before instance_id is recorded (F1). A WARM attach uses the plain
+      // TTL as before.
       await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-      const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+      const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
+      const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
       return { role: "attached" as const, lease: mapLeaseRow(updated) };
     }),
   );
