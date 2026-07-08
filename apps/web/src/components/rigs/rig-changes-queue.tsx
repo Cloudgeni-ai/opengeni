@@ -2,7 +2,13 @@
 // is a literal command (or a full definition edit) that must reproduce from a
 // clean sandbox before it merges. Setup commands auto-merge on green; a verified
 // definition edit waits here for a human to promote it.
-import { ChevronDownIcon, GitBranchIcon, Loader2Icon, RotateCwIcon, TerminalIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  GitBranchIcon,
+  Loader2Icon,
+  RotateCwIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -83,7 +89,8 @@ function ChangeRow({
   const status = rigChangeStatusView(change);
   const kindLabel = rigChangeKindLabel(change.kind);
   const promotable = changeIsPromotable(change);
-  const canReverify = change.status === "proposed" || change.status === "rejected" || change.status === "failed";
+  const canReverify =
+    change.status === "proposed" || change.status === "rejected" || change.status === "failed";
   const isVerifying = change.status === "verifying";
   const mergedLabel = change.resultVersionId ? versionLabel(change.resultVersionId) : null;
 
@@ -95,7 +102,11 @@ function ChangeRow({
         className="flex w-full items-start gap-3 px-3.5 py-3 text-left"
       >
         <span className="mt-0.5 shrink-0 text-fg-subtle">
-          {change.kind === "setup_append" ? <TerminalIcon className="size-4" /> : <GitBranchIcon className="size-4" />}
+          {change.kind === "setup_append" ? (
+            <TerminalIcon className="size-4" />
+          ) : (
+            <GitBranchIcon className="size-4" />
+          )}
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-center gap-2">
@@ -109,7 +120,12 @@ function ChangeRow({
             Proposed by {rigActorLabel(change.proposedBy)} · {formatTimestamp(change.createdAt)}
           </span>
         </span>
-        <ChevronDownIcon className={cn("mt-0.5 size-4 shrink-0 text-fg-subtle transition-transform", open ? "rotate-180" : "")} />
+        <ChevronDownIcon
+          className={cn(
+            "mt-0.5 size-4 shrink-0 text-fg-subtle transition-transform",
+            open ? "rotate-180" : "",
+          )}
+        />
       </button>
 
       {open ? (
@@ -135,11 +151,17 @@ function ChangeRow({
                 onClick={async () => {
                   const result = await onVerify(change.id);
                   if (result) {
-                    toast.success("Verification started", { description: "Replaying the change in a clean sandbox." });
+                    toast.success("Verification started", {
+                      description: "Replaying the change in a clean sandbox.",
+                    });
                   }
                 }}
               >
-                {isVerifying ? <Loader2Icon className="size-3.5 animate-spin" /> : <RotateCwIcon className="size-3.5" />}
+                {isVerifying ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <RotateCwIcon className="size-3.5" />
+                )}
                 {change.status === "proposed" ? "Verify" : "Re-verify"}
               </Button>
             ) : null}
@@ -149,11 +171,17 @@ function ChangeRow({
                 size="sm"
                 className="h-8"
                 disabled={mutating || !canManage}
-                title={canManage ? "Promote into a new active version" : "Requires the Rigs manage permission"}
+                title={
+                  canManage
+                    ? "Promote into a new active version"
+                    : "Requires the Rigs manage permission"
+                }
                 onClick={async () => {
                   const result = await onPromote(change.id);
                   if (result) {
-                    toast.success("Change promoted", { description: "A new active rig version was minted." });
+                    toast.success("Change promoted", {
+                      description: "A new active rig version was minted.",
+                    });
                   }
                 }}
               >
@@ -162,7 +190,9 @@ function ChangeRow({
             ) : null}
           </div>
           {promotable && !canManage ? (
-            <p className="text-right text-2xs text-fg-subtle">Promoting needs the Rigs manage permission.</p>
+            <p className="text-right text-2xs text-fg-subtle">
+              Promoting needs the Rigs manage permission.
+            </p>
           ) : null}
         </div>
       ) : null}
@@ -184,7 +214,9 @@ function ChangePayload({
     return (
       <div className="grid gap-1.5">
         <PayloadLabel>Command to append{baseLabel ? ` (from ${baseLabel})` : ""}</PayloadLabel>
-        <pre className="overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">{command || "—"}</pre>
+        <pre className="overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">
+          {command || "—"}
+        </pre>
         {note ? <p className="text-xs text-fg-muted">{note}</p> : null}
       </div>
     );
@@ -193,7 +225,8 @@ function ChangePayload({
   const payload = change.payload as Record<string, unknown>;
   const touched: string[] = [];
   if (typeof payload.image === "string" || payload.image === null) touched.push("base image");
-  if (typeof payload.setupScript === "string" || payload.setupScript === null) touched.push("setup script");
+  if (typeof payload.setupScript === "string" || payload.setupScript === null)
+    touched.push("setup script");
   if (Array.isArray(payload.checks)) touched.push(`checks (${payload.checks.length})`);
   if (Array.isArray(payload.defaultVariableSetIds)) touched.push("default variable sets");
   if (Array.isArray(payload.credentialHooks)) touched.push("credential hooks");
@@ -211,12 +244,16 @@ function ChangePayload({
         <p className="text-xs text-fg-subtle">No content fields set.</p>
       )}
       {setupScript ? (
-        <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">{setupScript}</pre>
+        <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4">
+          {setupScript}
+        </pre>
       ) : null}
     </div>
   );
 }
 
 function PayloadLabel({ children }: { children: React.ReactNode }) {
-  return <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">{children}</div>;
+  return (
+    <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">{children}</div>
+  );
 }

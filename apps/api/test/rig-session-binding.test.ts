@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { testSettings, acquireSharedTestDatabase, MemoryEventBus, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  testSettings,
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import {
   createDb,
   createRig,
@@ -33,14 +38,22 @@ const settings = testSettings({
 });
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
 // A rig with an active v1 (createRig seeds version 1 active). Returns rig id +
 // the active version id so tests can assert the frozen version.
-async function seedRig(accountId: string, workspaceId: string, name: string): Promise<{ rigId: string; activeVersionId: string }> {
+async function seedRig(
+  accountId: string,
+  workspaceId: string,
+  name: string,
+): Promise<{ rigId: string; activeVersionId: string }> {
   const rig = await createRig(db, {
     accountId,
     workspaceId,
@@ -54,24 +67,37 @@ async function seedRig(accountId: string, workspaceId: string, name: string): Pr
 function stubWorkflowClient(): SessionWorkflowClient {
   const noop = async () => {};
   return {
-    signalUserMessage: noop, wakeSessionWorkflow: noop, signalApprovalDecision: noop,
-    signalInterrupt: noop, syncScheduledTask: noop, deleteScheduledTaskSchedule: noop, triggerScheduledTask: noop,
+    signalUserMessage: noop,
+    wakeSessionWorkflow: noop,
+    signalApprovalDecision: noop,
+    signalInterrupt: noop,
+    syncScheduledTask: noop,
+    deleteScheduledTaskSchedule: noop,
+    triggerScheduledTask: noop,
   } as unknown as SessionWorkflowClient;
 }
 
 function deps(bus: MemoryEventBus): ApiRouteDeps {
   return {
-    settings, db, bus, workflowClient: stubWorkflowClient(),
-    githubStateSecret: "x", objectStorage: null,
+    settings,
+    db,
+    bus,
+    workflowClient: stubWorkflowClient(),
+    githubStateSecret: "x",
+    objectStorage: null,
     documentIndexer: { indexDocument: async () => {} },
-    getDocumentServices: () => ({} as never),
-    resumeBoxById: async () => { throw new Error("resumeBoxById should not be called (backend=none)"); },
+    getDocumentServices: () => ({}) as never,
+    resumeBoxById: async () => {
+      throw new Error("resumeBoxById should not be called (backend=none)");
+    },
   } as unknown as ApiRouteDeps;
 }
 
 function grant(accountId: string, workspaceId: string, fromSessionId?: string): AccessGrant {
   return {
-    accountId, workspaceId, subjectId: "subject",
+    accountId,
+    workspaceId,
+    subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
     ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
   } as AccessGrant;
@@ -91,7 +117,11 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
+  try {
+    await client?.close();
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -102,17 +132,35 @@ describe("M3 rig binding: freeze at create", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const { rigId, activeVersionId: v1 } = await seedRig(accountId, workspaceId, "dev");
 
-    const s1 = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi", rigId,
-    });
+    const s1 = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "hi",
+        rigId,
+      },
+    );
     expect(s1.rigId).toBe(rigId);
     expect(s1.rigVersionId).toBe(v1);
 
     // Promote a new active version, then bind a NEW session: it gets v2.
-    const v2 = await createRigVersion(db, workspaceId, rigId, { changelog: "v2" }, { activate: true });
-    const s2 = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi again", rigId,
-    });
+    const v2 = await createRigVersion(
+      db,
+      workspaceId,
+      rigId,
+      { changelog: "v2" },
+      { activate: true },
+    );
+    const s2 = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "hi again",
+        rigId,
+      },
+    );
     expect(s2.rigVersionId).toBe(v2.id);
 
     // The FIRST session is unchanged — it still rides v1.
@@ -128,15 +176,26 @@ describe("M3 rig binding: freeze at create", () => {
     const other = await seedRig(accountId, workspaceId, "other-rig");
     await admin`update workspaces set default_rig_id = ${def.rigId} where id = ${workspaceId}`;
 
-    const defaulted = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi",
-    });
+    const defaulted = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "hi",
+      },
+    );
     expect(defaulted.rigId).toBe(def.rigId);
     expect(defaulted.rigVersionId).toBe(def.activeVersionId);
 
-    const overridden = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi", rigId: other.rigId,
-    });
+    const overridden = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "hi",
+        rigId: other.rigId,
+      },
+    );
     expect(overridden.rigId).toBe(other.rigId);
   }, 60_000);
 
@@ -155,9 +214,12 @@ describe("M3 rig binding: freeze at create", () => {
     if (!available) return;
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
-    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi", rigId: "99999999-9999-4999-8999-999999999999",
-    })).rejects.toThrow(/unknown rigId/);
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "hi",
+        rigId: "99999999-9999-4999-8999-999999999999",
+      }),
+    ).rejects.toThrow(/unknown rigId/);
   }, 60_000);
 
   test("an explicit rig with no active version is a 422", async () => {
@@ -168,9 +230,12 @@ describe("M3 rig binding: freeze at create", () => {
     const [r] = await admin<{ id: string }[]>`
       insert into rigs (account_id, workspace_id, name, created_by)
       values (${accountId}, ${workspaceId}, 'empty', 'user:test') returning id`;
-    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "hi", rigId: r!.id,
-    })).rejects.toThrow(/no active version/);
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "hi",
+        rigId: r!.id,
+      }),
+    ).rejects.toThrow(/no active version/);
   }, 60_000);
 });
 
@@ -181,11 +246,20 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const { rigId } = await seedRig(accountId, workspaceId, "shared-rig");
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", rigId, sandboxBackend: "modal",
+      initialMessage: "a",
+      rigId,
+      sandboxBackend: "modal",
     });
-    const b = await createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
-      initialMessage: "b", rigId, sandbox: "shared",
-    });
+    const b = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, a.id),
+      workspaceId,
+      {
+        initialMessage: "b",
+        rigId,
+        sandbox: "shared",
+      },
+    );
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
@@ -196,11 +270,17 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const rigA = await seedRig(accountId, workspaceId, "rig-a");
     const rigB = await seedRig(accountId, workspaceId, "rig-b");
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", rigId: rigA.rigId, sandboxBackend: "modal",
+      initialMessage: "a",
+      rigId: rigA.rigId,
+      sandboxBackend: "modal",
     });
-    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
-      initialMessage: "b", rigId: rigB.rigId, sandbox: "shared",
-    })).rejects.toThrow(/same rig/);
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
+        initialMessage: "b",
+        rigId: rigB.rigId,
+        sandbox: "shared",
+      }),
+    ).rejects.toThrow(/same rig/);
   }, 60_000);
 
   test("INHERITED default with a different rig falls back to an own box (different group)", async () => {
@@ -210,13 +290,21 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const rigA = await seedRig(accountId, workspaceId, "rig-a2");
     const rigB = await seedRig(accountId, workspaceId, "rig-b2");
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", rigId: rigA.rigId, sandboxBackend: "modal",
+      initialMessage: "a",
+      rigId: rigA.rigId,
+      sandboxBackend: "modal",
     });
     // No explicit `sandbox` → inherited default "shared"; the rig mismatch
     // deterministically separates into the worker's own box.
-    const b = await createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
-      initialMessage: "b", rigId: rigB.rigId,
-    });
+    const b = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, a.id),
+      workspaceId,
+      {
+        initialMessage: "b",
+        rigId: rigB.rigId,
+      },
+    );
     expect(b.sandboxGroupId).not.toBe(a.sandboxGroupId);
   }, 60_000);
 
@@ -227,11 +315,17 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const rigA = await seedRig(accountId, workspaceId, "rig-a3");
     const rigB = await seedRig(accountId, workspaceId, "rig-b3");
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", rigId: rigA.rigId, sandboxBackend: "modal",
+      initialMessage: "a",
+      rigId: rigA.rigId,
+      sandboxBackend: "modal",
     });
-    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "b", rigId: rigB.rigId, sandbox: { groupId: a.sandboxGroupId },
-    })).rejects.toThrow(/different rig/);
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "b",
+        rigId: rigB.rigId,
+        sandbox: { groupId: a.sandboxGroupId },
+      }),
+    ).rejects.toThrow(/different rig/);
   }, 60_000);
 
   test("EXPLICIT shared join rejects a legacy MIXED-rig group deterministically", async () => {
@@ -241,7 +335,9 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const rigA = await seedRig(accountId, workspaceId, "rig-a-mixed");
     const rigB = await seedRig(accountId, workspaceId, "rig-b-mixed");
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", rigId: rigA.rigId, sandboxBackend: "modal",
+      initialMessage: "a",
+      rigId: rigA.rigId,
+      sandboxBackend: "modal",
     });
     // Simulate a legacy/corrupt rig-blind share: force a B-rig member row into
     // A's group directly. Today the create gate must compare the joiner against
@@ -249,11 +345,13 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     await admin`
       insert into sessions (account_id, workspace_id, initial_message, rig_id, rig_version_id, sandbox_group_id, model, sandbox_backend)
       values (${accountId}, ${workspaceId}, 'legacy mixed-rig member', ${rigB.rigId}, ${rigB.activeVersionId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
-    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
-      initialMessage: "joiner matching parent only",
-      rigId: rigA.rigId,
-      sandbox: "shared",
-    })).rejects.toThrow(/same rig/);
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
+        initialMessage: "joiner matching parent only",
+        rigId: rigA.rigId,
+        sandbox: "shared",
+      }),
+    ).rejects.toThrow(/same rig/);
   }, 60_000);
 
   test("rig-less sessions still share (null rig on both sides is compatible)", async () => {
@@ -261,11 +359,18 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
     const bus = new MemoryEventBus();
     const { accountId, workspaceId } = await freshWorkspace();
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "a", sandboxBackend: "modal",
+      initialMessage: "a",
+      sandboxBackend: "modal",
     });
-    const b = await createSessionForRequest(deps(bus), grant(accountId, workspaceId, a.id), workspaceId, {
-      initialMessage: "b", sandbox: "shared",
-    });
+    const b = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, a.id),
+      workspaceId,
+      {
+        initialMessage: "b",
+        sandbox: "shared",
+      },
+    );
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 });

@@ -2,8 +2,19 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createDb, createRigVersion, getRigChange, listRigVersions, updateRigChangeStatus, type DbClient } from "@opengeni/db";
-import { acquireSharedTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  createDb,
+  createRigVersion,
+  getRigChange,
+  listRigVersions,
+  updateRigChangeStatus,
+  type DbClient,
+} from "@opengeni/db";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { createApp } from "../src/app";
 
 const DELEGATION_SECRET = "rigs-routes-delegation-secret";
@@ -34,7 +45,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
@@ -53,7 +66,11 @@ function appWithWorkflow(calls: unknown[]) {
     settings,
     db: client.db,
     bus: {} as never,
-    workflowClient: { startRigVerification: async (input: unknown) => { calls.push(input); } } as never,
+    workflowClient: {
+      startRigVerification: async (input: unknown) => {
+        calls.push(input);
+      },
+    } as never,
     managedAuth: null,
   } as never);
 }
@@ -103,9 +120,19 @@ describe("rig route permission matrix", () => {
     expect((await app().request(base, { headers: none })).status).toBe(403);
 
     // Create: rigs:manage only.
-    const createBody = JSON.stringify({ name: "gate", image: "ubuntu:24.04", checks: [{ name: "ok", command: "true" }] });
-    expect((await app().request(base, { method: "POST", headers: useOnly, body: createBody })).status).toBe(403);
-    const created = await app().request(base, { method: "POST", headers: manage, body: createBody });
+    const createBody = JSON.stringify({
+      name: "gate",
+      image: "ubuntu:24.04",
+      checks: [{ name: "ok", command: "true" }],
+    });
+    expect(
+      (await app().request(base, { method: "POST", headers: useOnly, body: createBody })).status,
+    ).toBe(403);
+    const created = await app().request(base, {
+      method: "POST",
+      headers: manage,
+      body: createBody,
+    });
     expect(created.status).toBe(201);
     const rig = await created.json();
     expect(rig.activeVersion.version).toBe(1);
@@ -115,27 +142,49 @@ describe("rig route permission matrix", () => {
 
     // Patch/Delete: rigs:manage only.
     const patch = JSON.stringify({ description: "d" });
-    expect((await app().request(`${base}/${rig.id}`, { method: "PATCH", headers: useOnly, body: patch })).status).toBe(403);
-    expect((await app().request(`${base}/${rig.id}`, { method: "PATCH", headers: manage, body: patch })).status).toBe(200);
+    expect(
+      (await app().request(`${base}/${rig.id}`, { method: "PATCH", headers: useOnly, body: patch }))
+        .status,
+    ).toBe(403);
+    expect(
+      (await app().request(`${base}/${rig.id}`, { method: "PATCH", headers: manage, body: patch }))
+        .status,
+    ).toBe(200);
 
     // Activate: rigs:manage only.
     const versionId = rig.activeVersion.id;
     const activatePath = `${base}/${rig.id}/versions/${versionId}/activate`;
-    expect((await app().request(activatePath, { method: "POST", headers: useOnly })).status).toBe(403);
-    expect((await app().request(activatePath, { method: "POST", headers: manage })).status).toBe(200);
+    expect((await app().request(activatePath, { method: "POST", headers: useOnly })).status).toBe(
+      403,
+    );
+    expect((await app().request(activatePath, { method: "POST", headers: manage })).status).toBe(
+      200,
+    );
 
     // Propose change: rigs:use OK, none -> 403.
-    const proposeBody = JSON.stringify({ kind: "setup_append", payload: { command: "apt-get install -y jq" } });
+    const proposeBody = JSON.stringify({
+      kind: "setup_append",
+      payload: { command: "apt-get install -y jq" },
+    });
     const changesPath = `${base}/${rig.id}/changes`;
-    expect((await app().request(changesPath, { method: "POST", headers: none, body: proposeBody })).status).toBe(403);
-    const proposed = await app().request(changesPath, { method: "POST", headers: useOnly, body: proposeBody });
+    expect(
+      (await app().request(changesPath, { method: "POST", headers: none, body: proposeBody }))
+        .status,
+    ).toBe(403);
+    const proposed = await app().request(changesPath, {
+      method: "POST",
+      headers: useOnly,
+      body: proposeBody,
+    });
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
     expect(change.status).toBe("verifying");
     expect(change.baseVersionId).toBe(versionId);
 
     // Get change: rigs:use OK.
-    expect((await app().request(`${changesPath}/${change.id}`, { headers: useOnly })).status).toBe(200);
+    expect((await app().request(`${changesPath}/${change.id}`, { headers: useOnly })).status).toBe(
+      200,
+    );
 
     // Every mutation wrote an audit row.
     expect(await auditActions(ws.workspaceId, rig.id)).toEqual([
@@ -151,7 +200,11 @@ describe("rig route permission matrix", () => {
     const ws = await freshWorkspace();
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const created = await app().request(base, { method: "POST", headers: manage, body: JSON.stringify({ name: "del" }) });
+    const created = await app().request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "del" }),
+    });
     const rig = await created.json();
 
     const [session] = await shared!.admin<{ id: string }[]>`
@@ -176,7 +229,11 @@ describe("rig route permission matrix", () => {
     const http = appWithWorkflow(calls);
     const use = { authorization: await bearer(ws, "user:u", ["rigs:use", "rigs:manage"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const created = await http.request(base, { method: "POST", headers: use, body: JSON.stringify({ name: "retry-verify" }) });
+    const created = await http.request(base, {
+      method: "POST",
+      headers: use,
+      body: JSON.stringify({ name: "retry-verify" }),
+    });
     const rig = await created.json();
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
@@ -186,21 +243,31 @@ describe("rig route permission matrix", () => {
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
     expect(calls).toHaveLength(1);
-    expect((calls[0] as { workflowId: string }).workflowId).toBe(`rig-verification-change-${change.id}-attempt-1`);
+    expect((calls[0] as { workflowId: string }).workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-1`,
+    );
 
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "failed",
       verification: { error: "transient" },
     });
-    const retry = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, { method: "POST", headers: use });
+    const retry = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, {
+      method: "POST",
+      headers: use,
+    });
     expect(retry.status).toBe(202);
     const retryBody = await retry.json();
     expect(retryBody.status).toBe("verifying");
     expect(calls).toHaveLength(2);
-    expect((calls[1] as { workflowId: string }).workflowId).toBe(`rig-verification-change-${change.id}-attempt-2`);
+    expect((calls[1] as { workflowId: string }).workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-2`,
+    );
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
 
-    const duplicate = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, { method: "POST", headers: use });
+    const duplicate = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, {
+      method: "POST",
+      headers: use,
+    });
     expect(duplicate.status).toBe(409);
     expect(calls).toHaveLength(2);
   });
@@ -212,21 +279,37 @@ describe("rig route permission matrix", () => {
     const http = appWithWorkflow(calls);
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const created = await http.request(base, { method: "POST", headers: manage, body: JSON.stringify({ name: "stale-promote", setupScript: "echo v1" }) });
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "stale-promote", setupScript: "echo v1" }),
+    });
     const rig = await created.json();
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: manage,
-      body: JSON.stringify({ kind: "definition_edit", payload: { setupScript: "echo edited", checks: [] } }),
+      body: JSON.stringify({
+        kind: "definition_edit",
+        payload: { setupScript: "echo edited", checks: [] },
+      }),
     });
     const change = await proposed.json();
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "proposed",
       verification: { passed: true },
     });
-    await createRigVersion(client.db, ws.workspaceId, rig.id, { setupScript: "echo independently-promoted" }, { activate: true });
+    await createRigVersion(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+      { setupScript: "echo independently-promoted" },
+      { activate: true },
+    );
 
-    const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, { method: "POST", headers: manage });
+    const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, {
+      method: "POST",
+      headers: manage,
+    });
     expect(promoted.status).toBe(409);
     const versions = await listRigVersions(client.db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
@@ -239,7 +322,11 @@ describe("rig route permission matrix", () => {
     const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use", "workspace:read"]) };
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage", "workspace:read"]) };
     const base = `/v1/workspaces/${ws.workspaceId}`;
-    const created = await app().request(`${base}/rigs`, { method: "POST", headers: manage, body: JSON.stringify({ name: "default-target" }) });
+    const created = await app().request(`${base}/rigs`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "default-target" }),
+    });
     const rig = await created.json();
 
     const denied = await app().request(`${base}/default-rig`, {
@@ -280,15 +367,26 @@ describe("rig route permission matrix", () => {
     const ws = await freshWorkspace();
     const manage = { authorization: await bearer(ws, "user:m", ["rigs:manage"]) };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
-    const first = await app().request(base, { method: "POST", headers: manage, body: JSON.stringify({ name: "dup" }) });
+    const first = await app().request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "dup" }),
+    });
     expect(first.status).toBe(201);
-    const collision = await app().request(base, { method: "POST", headers: manage, body: JSON.stringify({ name: "dup" }) });
+    const collision = await app().request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "dup" }),
+    });
     expect(collision.status).toBe(409);
 
     const badRef = await app().request(base, {
       method: "POST",
       headers: manage,
-      body: JSON.stringify({ name: "bad-ref", defaultVariableSetIds: ["11111111-1111-4111-8111-111111111111"] }),
+      body: JSON.stringify({
+        name: "bad-ref",
+        defaultVariableSetIds: ["11111111-1111-4111-8111-111111111111"],
+      }),
     });
     expect(badRef.status).toBe(422);
   });

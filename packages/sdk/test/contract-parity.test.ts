@@ -206,7 +206,9 @@ describe("SDK / contracts parity", () => {
     const acceptRig = (value: z.infer<typeof ContractRig>): Rig => value;
     const acceptVersion = (value: z.infer<typeof ContractRigVersion>): RigVersion => value;
     const acceptChange = (value: z.infer<typeof ContractRigChange>): RigChange => value;
-    expect([acceptRig, acceptVersion, acceptChange].every((fn) => typeof fn === "function")).toBe(true);
+    expect([acceptRig, acceptVersion, acceptChange].every((fn) => typeof fn === "function")).toBe(
+      true,
+    );
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
     const create: CreateRigRequest = {
@@ -219,17 +221,29 @@ describe("SDK / contracts parity", () => {
       defaultVariableSetIds: [],
     };
     const update: UpdateRigRequest = { name: "dev-machine-2", description: null };
-    const append: ProposeRigChangeRequest = { kind: "setup_append", payload: { command: "apt-get install -y jq", note: "needed jq" } };
-    const edit: ProposeRigChangeRequest = { kind: "definition_edit", payload: { image: "ubuntu:24.10", changelog: "bump base" } };
+    const append: ProposeRigChangeRequest = {
+      kind: "setup_append",
+      payload: { command: "apt-get install -y jq", note: "needed jq" },
+    };
+    const edit: ProposeRigChangeRequest = {
+      kind: "definition_edit",
+      payload: { image: "ubuntu:24.10", changelog: "bump base" },
+    };
     expect(ContractCreateRigRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateRigRequest.safeParse(update).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(append).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(edit).success).toBe(true);
     // Bad check shape and unknown change kind are rejected.
-    expect(ContractCreateRigRequest.safeParse({ name: "x", checks: [{ name: "" }] }).success).toBe(false);
-    expect(ContractProposeRigChangeRequest.safeParse({ kind: "nope", payload: {} }).success).toBe(false);
+    expect(ContractCreateRigRequest.safeParse({ name: "x", checks: [{ name: "" }] }).success).toBe(
+      false,
+    );
+    expect(ContractProposeRigChangeRequest.safeParse({ kind: "nope", payload: {} }).success).toBe(
+      false,
+    );
     // setup_append requires a command.
-    expect(ContractProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success).toBe(false);
+    expect(
+      ContractProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success,
+    ).toBe(false);
     // Defaults: checks/hooks/ids default to [].
     expect(ContractCreateRigRequest.parse({ name: "bare" }).checks).toEqual([]);
   });

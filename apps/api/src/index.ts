@@ -155,11 +155,13 @@ export async function createTemporalWorkflowClient(
         taskQueue: settings.temporalTaskQueue,
         workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
         workflowIdReusePolicy: "ALLOW_DUPLICATE",
-        args: [{
-          workspaceId,
-          ...(changeId ? { changeId } : {}),
-          ...(versionId ? { versionId } : {}),
-        }],
+        args: [
+          {
+            workspaceId,
+            ...(changeId ? { changeId } : {}),
+            ...(versionId ? { versionId } : {}),
+          },
+        ],
       });
     },
     check: async () => {

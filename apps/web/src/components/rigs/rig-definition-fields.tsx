@@ -69,7 +69,9 @@ export function RigDefinitionFields({
           value={value.setupScript}
           disabled={disabled}
           onChange={(event) => onChange({ ...value, setupScript: event.target.value })}
-          placeholder={"# runs once on cold sandbox create — keep it idempotent\napt-get install -y ripgrep"}
+          placeholder={
+            "# runs once on cold sandbox create — keep it idempotent\napt-get install -y ripgrep"
+          }
           className="min-h-24 font-mono text-xs leading-5"
           spellCheck={false}
         />
@@ -101,11 +103,20 @@ export function RigDefinitionFields({
             {value.checks.map((check, index) => (
               // Index key: rows are positional and only edited/removed in place.
               // eslint-disable-next-line react/no-array-index-key
-              <div key={index} className="grid grid-cols-[10rem_minmax(0,1fr)_auto] items-center gap-1.5">
+              <div
+                key={index}
+                className="grid grid-cols-[10rem_minmax(0,1fr)_auto] items-center gap-1.5"
+              >
                 <Input
                   value={check.name}
                   disabled={disabled}
-                  onChange={(event) => setChecks(value.checks.map((c, i) => (i === index ? { ...c, name: event.target.value } : c)))}
+                  onChange={(event) =>
+                    setChecks(
+                      value.checks.map((c, i) =>
+                        i === index ? { ...c, name: event.target.value } : c,
+                      ),
+                    )
+                  }
                   placeholder="node present"
                   aria-label={`Check ${index + 1} name`}
                   className="h-8 text-xs"
@@ -113,7 +124,13 @@ export function RigDefinitionFields({
                 <Input
                   value={check.command}
                   disabled={disabled}
-                  onChange={(event) => setChecks(value.checks.map((c, i) => (i === index ? { ...c, command: event.target.value } : c)))}
+                  onChange={(event) =>
+                    setChecks(
+                      value.checks.map((c, i) =>
+                        i === index ? { ...c, command: event.target.value } : c,
+                      ),
+                    )
+                  }
                   placeholder="node --version"
                   aria-label={`Check ${index + 1} command`}
                   className="h-8 font-mono text-xs"
@@ -158,7 +175,8 @@ export function RigDefinitionFields({
                   />
                   <span className="min-w-0 flex-1 truncate">{variableSet.name}</span>
                   <span className="shrink-0 text-2xs text-fg-subtle">
-                    {variableSet.variables.length} var{variableSet.variables.length === 1 ? "" : "s"}
+                    {variableSet.variables.length} var
+                    {variableSet.variables.length === 1 ? "" : "s"}
                   </span>
                 </label>
               );

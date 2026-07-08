@@ -32,16 +32,18 @@ export function RigOverview({
   if (!active) {
     return (
       <Notice tone="waiting" title="This rig has no active version">
-        Create a version by proposing and promoting a change, then it will materialize into sandboxes.
+        Create a version by proposing and promoting a change, then it will materialize into
+        sandboxes.
       </Notice>
     );
   }
 
   // The active version's most recent verification: the newest change that
   // produced this version (resultVersionId) and captured check results.
-  const latestVerification: RigChangeVerification | null = changes
-    .filter((change) => change.resultVersionId === active.id && change.verification)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.verification ?? null;
+  const latestVerification: RigChangeVerification | null =
+    changes
+      .filter((change) => change.resultVersionId === active.id && change.verification)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.verification ?? null;
 
   // Use the server-derived activeVersionHealth (same source the list cards use —
   // it also reflects audit-recorded active-version re-verifications), so the
@@ -50,12 +52,12 @@ export function RigOverview({
   // shows no health chip (a version with no checks has nothing to be "unknown").
   const health = !versionHasChecks(active)
     ? null
-    : rig.activeVersionHealth?.checkHealth
-      ?? (latestVerification
+    : (rig.activeVersionHealth?.checkHealth ??
+      (latestVerification
         ? latestVerification.passed === false
           ? "failing"
           : "passing"
-        : "unknown");
+        : "unknown"));
 
   return (
     <div className="grid gap-5">
@@ -66,7 +68,10 @@ export function RigOverview({
         <Field label="Active version">
           <span className="text-sm">
             Version {active.version}
-            <span className="text-fg-subtle"> · {rigActorLabel(active.createdBy)} · {formatTimestamp(active.createdAt)}</span>
+            <span className="text-fg-subtle">
+              {" "}
+              · {rigActorLabel(active.createdBy)} · {formatTimestamp(active.createdAt)}
+            </span>
           </span>
         </Field>
         <Field label="Default variable sets">
@@ -109,18 +114,28 @@ export function RigOverview({
               onClick={async () => {
                 const result = await onVerify();
                 if (result) {
-                  toast.success("Re-verifying the active version", { description: "The checks are running in a clean sandbox. This can take a moment." });
+                  toast.success("Re-verifying the active version", {
+                    description:
+                      "The checks are running in a clean sandbox. This can take a moment.",
+                  });
                 }
               }}
             >
-              {mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <RotateCwIcon className="size-3.5" />}
+              {mutating ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <RotateCwIcon className="size-3.5" />
+              )}
               Re-run checks
             </Button>
           ) : null}
         </div>
 
         {!versionHasChecks(active) ? (
-          <p className="text-xs text-fg-subtle">This version declares no checks. Add checks via a definition edit to make the machine self-verifying.</p>
+          <p className="text-xs text-fg-subtle">
+            This version declares no checks. Add checks via a definition edit to make the machine
+            self-verifying.
+          </p>
         ) : latestVerification ? (
           <div className="rounded-md border border-border/70 bg-bg/20 p-2.5">
             <VerificationLog verification={latestVerification} />
@@ -129,7 +144,10 @@ export function RigOverview({
           <div className="grid gap-1">
             <p className="text-xs text-fg-subtle">Not verified yet. The declared checks:</p>
             {active.checks.map((check, index) => (
-              <div key={`${check.name}-${index}`} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
+              <div
+                key={`${check.name}-${index}`}
+                className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
+              >
                 <div className="truncate text-xs font-medium">{check.name}</div>
                 <div className="truncate font-mono text-2xs text-fg-subtle">{check.command}</div>
               </div>

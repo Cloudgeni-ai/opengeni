@@ -1,6 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import { bootstrapWorkspace, createDb, createRig, createRigChange, dbSql, getRig, getRigChange, setRlsContext, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createRig,
+  createRigChange,
+  dbSql,
+  getRig,
+  getRigChange,
+  setRlsContext,
+  type DbClient,
+} from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
   runRigSetupHook,
@@ -8,7 +18,12 @@ import {
   sandboxCommandOutput,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
-import { buildSandboxImage, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
+import {
+  buildSandboxImage,
+  startTestServices,
+  testSettings,
+  type TestServices,
+} from "@opengeni/testing";
 import { createRigVerificationActivities } from "../../apps/worker/src/activities/rig-verification";
 import { settingsWithRigImage } from "../../apps/worker/src/activities/packs";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";
@@ -120,11 +135,17 @@ describe("real Docker rig verification e2e", () => {
     }
     expect(verified.status).toBe("rejected");
     expect(verified.verification?.passed).toBe(false);
-    expect((verified.verification as { commandResult?: { exitCode?: number | null; output?: string } }).commandResult?.exitCode).toBe(1);
+    expect(
+      (verified.verification as { commandResult?: { exitCode?: number | null; output?: string } })
+        .commandResult?.exitCode,
+    ).toBe(1);
 
     const stored = await getRigChange(db.db, workspaceId, change.id);
     expect(stored?.status).toBe("rejected");
-    expect((stored?.verification as { commandResult?: { exitCode?: number | null; output?: string } }).commandResult?.exitCode).toBe(1);
+    expect(
+      (stored?.verification as { commandResult?: { exitCode?: number | null; output?: string } })
+        .commandResult?.exitCode,
+    ).toBe(1);
   }, 300_000);
 
   test("verification output is redacted before persistence and audit metadata", async () => {
@@ -176,13 +197,18 @@ describe("real Docker rig verification e2e", () => {
 });
 
 function verifier() {
-  return createRigVerificationActivities(async () => ({
-    settings,
-    db: db.db,
-  } as ActivityServices));
+  return createRigVerificationActivities(
+    async () =>
+      ({
+        settings,
+        db: db.db,
+      }) as ActivityServices,
+  );
 }
 
-async function expectFreshMaterializationHasTool(version: NonNullable<NonNullable<Awaited<ReturnType<typeof getRig>>>["activeVersion"]>): Promise<void> {
+async function expectFreshMaterializationHasTool(
+  version: NonNullable<NonNullable<Awaited<ReturnType<typeof getRig>>>["activeVersion"]>,
+): Promise<void> {
   const runSettings = settingsWithRigImage(settings, version.image);
   let established: EstablishedSandboxSession | null = null;
   try {
@@ -201,7 +227,9 @@ async function expectFreshMaterializationHasTool(version: NonNullable<NonNullabl
         timeoutMs: settings.rigSetupTimeoutMs,
       },
     });
-    const result = await (established.session as { exec: (args: Record<string, unknown>) => Promise<unknown> }).exec({
+    const result = await (
+      established.session as { exec: (args: Record<string, unknown>) => Promise<unknown> }
+    ).exec({
       cmd: "test -f /opt/rigtest/tool",
       workdir: "/workspace",
       runAs: "root",
@@ -224,6 +252,10 @@ async function terminate(established: EstablishedSandboxSession | null): Promise
     await client.delete(established.sessionState).catch(() => undefined);
     return;
   }
-  const session = established.session as { terminate?: () => Promise<unknown>; kill?: () => Promise<unknown>; close?: () => Promise<unknown> };
+  const session = established.session as {
+    terminate?: () => Promise<unknown>;
+    kill?: () => Promise<unknown>;
+    close?: () => Promise<unknown>;
+  };
   await (session.terminate ?? session.kill ?? session.close)?.call(session).catch(() => undefined);
 }

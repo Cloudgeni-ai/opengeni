@@ -40,7 +40,10 @@ export type UseRigsResult = {
 export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const load = useCallback(async () => await client.listRigs(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const create = useCallback(
@@ -88,7 +91,9 @@ export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
 
   const activateVersion = useCallback(
     async (rigId: string, versionId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() => client.activateRigVersion(workspaceId, rigId, versionId));
+      const result = await mutation.run(() =>
+        client.activateRigVersion(workspaceId, rigId, versionId),
+      );
       if (result) {
         await state.refresh();
       }
@@ -165,8 +170,14 @@ export type UseRigResult = {
  */
 export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.getRig(workspaceId, rigId), [client, workspaceId, rigId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const load = useCallback(
+    async () => await client.getRig(workspaceId, rigId),
+    [client, workspaceId, rigId],
+  );
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const update = useCallback(
@@ -180,20 +191,19 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     [client, workspaceId, rigId, mutation.run, state.refresh],
   );
 
-  const remove = useCallback(
-    async (): Promise<boolean> => {
-      const result = await mutation.run(async () => {
-        await client.deleteRig(workspaceId, rigId);
-        return true;
-      });
-      return result === true;
-    },
-    [client, workspaceId, rigId, mutation.run],
-  );
+  const remove = useCallback(async (): Promise<boolean> => {
+    const result = await mutation.run(async () => {
+      await client.deleteRig(workspaceId, rigId);
+      return true;
+    });
+    return result === true;
+  }, [client, workspaceId, rigId, mutation.run]);
 
   const activateVersion = useCallback(
     async (versionId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() => client.activateRigVersion(workspaceId, rigId, versionId));
+      const result = await mutation.run(() =>
+        client.activateRigVersion(workspaceId, rigId, versionId),
+      );
       if (result) {
         await state.refresh();
       }
@@ -226,7 +236,9 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
 
   const promoteChange = useCallback(
     async (changeId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() => client.promoteRigChange(workspaceId, rigId, changeId));
+      const result = await mutation.run(() =>
+        client.promoteRigChange(workspaceId, rigId, changeId),
+      );
       if (result) {
         await state.refresh();
       }
@@ -235,12 +247,9 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     [client, workspaceId, rigId, mutation.run, state.refresh],
   );
 
-  const verify = useCallback(
-    async (): Promise<{ ok: boolean; versionId: string } | null> => {
-      return await mutation.run(() => client.verifyRig(workspaceId, rigId));
-    },
-    [client, workspaceId, rigId, mutation.run],
-  );
+  const verify = useCallback(async (): Promise<{ ok: boolean; versionId: string } | null> => {
+    return await mutation.run(() => client.verifyRig(workspaceId, rigId));
+  }, [client, workspaceId, rigId, mutation.run]);
 
   return {
     rig: state.data,
@@ -273,11 +282,25 @@ export type UseRigVersionsResult = {
 };
 
 /** A rig's append-only version history, newest-first (polled). */
-export function useRigVersions(rigId: string, options: UseRigVersionsOptions = {}): UseRigVersionsResult {
+export function useRigVersions(
+  rigId: string,
+  options: UseRigVersionsOptions = {},
+): UseRigVersionsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listRigVersions(workspaceId, rigId), [client, workspaceId, rigId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
-  return { versions: state.data ?? [], loading: state.loading, error: state.error, refresh: state.refresh };
+  const load = useCallback(
+    async () => await client.listRigVersions(workspaceId, rigId),
+    [client, workspaceId, rigId],
+  );
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
+  return {
+    versions: state.data ?? [],
+    loading: state.loading,
+    error: state.error,
+    refresh: state.refresh,
+  };
 }
 
 export type UseRigChangesOptions = ClientOverride & {
@@ -296,9 +319,23 @@ export type UseRigChangesResult = {
  * A rig's change queue (polled). The default poll cadence lets a change move
  * through verifying → merged/rejected without a manual refresh.
  */
-export function useRigChanges(rigId: string, options: UseRigChangesOptions = {}): UseRigChangesResult {
+export function useRigChanges(
+  rigId: string,
+  options: UseRigChangesOptions = {},
+): UseRigChangesResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listRigChanges(workspaceId, rigId), [client, workspaceId, rigId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
-  return { changes: state.data ?? [], loading: state.loading, error: state.error, refresh: state.refresh };
+  const load = useCallback(
+    async () => await client.listRigChanges(workspaceId, rigId),
+    [client, workspaceId, rigId],
+  );
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
+  return {
+    changes: state.data ?? [],
+    loading: state.loading,
+    error: state.error,
+    refresh: state.refresh,
+  };
 }

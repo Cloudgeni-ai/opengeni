@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/contracts";
 import { createDb, createRig, type DbClient } from "@opengeni/db";
-import { buildSandboxImage, freePort, startProcess, startTestServices, type StartedProcess, type TestServices, waitFor } from "@opengeni/testing";
+import {
+  buildSandboxImage,
+  freePort,
+  startProcess,
+  startTestServices,
+  type StartedProcess,
+  type TestServices,
+  waitFor,
+} from "@opengeni/testing";
 
 // M3 rig-setup hook, driven end-to-end through the REAL turn path (API ->
 // Temporal worker -> lease -> real Docker box establishment -> rig-setup
@@ -35,14 +43,21 @@ describe("real Docker rig-setup e2e", () => {
     api = await startProcess(["bun", "apps/api/src/index.ts"], {
       cwd: repoRoot,
       env,
-      ready: async () => (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
+      ready: async () =>
+        (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
       timeoutMs: 45_000,
     });
     workspaceId = await discoverWorkspaceId();
     accountId = await discoverAccountId();
     db = createDb(services.databaseUrl);
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], { cwd: repoRoot, env });
-    await waitFor(() => worker.logs().includes("test worker listening"), { timeoutMs: 90_000, describe: () => worker.logs() });
+    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+      cwd: repoRoot,
+      env,
+    });
+    await waitFor(() => worker.logs().includes("test worker listening"), {
+      timeoutMs: 90_000,
+      describe: () => worker.logs(),
+    });
   }, 360_000);
 
   afterAll(async () => {
@@ -71,22 +86,32 @@ describe("real Docker rig-setup e2e", () => {
       body: JSON.stringify({ initialMessage: message, sandboxBackend: "docker", rigId }),
     });
     expect(create.status).toBe(202);
-    return (await create.json() as { id: string }).id;
+    return ((await create.json()) as { id: string }).id;
   }
 
   async function waitForTerminal(sessionId: string, timeoutMs = 180_000): Promise<SessionEvent[]> {
-    await waitFor(async () => {
-      const events = await sessionEvents(sessionId);
-      return events.some((e) => e.type === "session.status.changed"
-        && ["idle", "failed"].includes((e.payload as { status?: string }).status ?? ""));
-    }, { timeoutMs });
+    await waitFor(
+      async () => {
+        const events = await sessionEvents(sessionId);
+        return events.some(
+          (e) =>
+            e.type === "session.status.changed" &&
+            ["idle", "failed"].includes((e.payload as { status?: string }).status ?? ""),
+        );
+      },
+      { timeoutMs },
+    );
     return await sessionEvents(sessionId);
   }
 
   // The rig-setup hook rides sandbox.operation.* events with payload.name "rig-setup".
   function rigSetupEvents(events: SessionEvent[]): Array<{ type: string; payload: any }> {
     return events
-      .filter((e) => e.type.startsWith("sandbox.operation.") && (e.payload as { name?: string }).name === "rig-setup")
+      .filter(
+        (e) =>
+          e.type.startsWith("sandbox.operation.") &&
+          (e.payload as { name?: string }).name === "rig-setup",
+      )
       .map((e) => ({ type: e.type, payload: e.payload as any }));
   }
 
@@ -108,11 +133,18 @@ describe("real Docker rig-setup e2e", () => {
       body: JSON.stringify({ type: "user.message", payload: { text: "again" } }),
     });
     expect(followUp.ok).toBe(true);
-    await waitFor(async () => {
-      const skips = rigSetupEvents(await sessionEvents(sessionId)).filter((e) => e.payload.skipped === true);
-      return skips.length >= 1;
-    }, { timeoutMs: 180_000 });
-    const skipped = rigSetupEvents(await sessionEvents(sessionId)).find((e) => e.payload.skipped === true);
+    await waitFor(
+      async () => {
+        const skips = rigSetupEvents(await sessionEvents(sessionId)).filter(
+          (e) => e.payload.skipped === true,
+        );
+        return skips.length >= 1;
+      },
+      { timeoutMs: 180_000 },
+    );
+    const skipped = rigSetupEvents(await sessionEvents(sessionId)).find(
+      (e) => e.payload.skipped === true,
+    );
     expect(skipped?.type).toBe("sandbox.operation.completed");
   }, 300_000);
 
@@ -125,8 +157,14 @@ describe("real Docker rig-setup e2e", () => {
     expect(failed).toBeDefined();
     expect(failed?.payload.error).toContain("exited with code 7");
     // The session surfaces the failure (turn.failed / status failed).
-    expect(events.some((e) => e.type === "turn.failed"
-      || (e.type === "session.status.changed" && (e.payload as { status?: string }).status === "failed"))).toBe(true);
+    expect(
+      events.some(
+        (e) =>
+          e.type === "turn.failed" ||
+          (e.type === "session.status.changed" &&
+            (e.payload as { status?: string }).status === "failed"),
+      ),
+    ).toBe(true);
   }, 300_000);
 
   test("a setup exceeding the 2s configured timeout fails on the timeout branch", async () => {
@@ -143,13 +181,13 @@ describe("real Docker rig-setup e2e", () => {
 async function sessionEvents(sessionId: string): Promise<SessionEvent[]> {
   const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=200`));
   expect(response.ok).toBe(true);
-  return await response.json() as SessionEvent[];
+  return (await response.json()) as SessionEvent[];
 }
 
 async function discoverWorkspaceId(): Promise<string> {
   const response = await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`);
   expect(response.ok).toBe(true);
-  const context = await response.json() as { defaultWorkspaceId?: string };
+  const context = (await response.json()) as { defaultWorkspaceId?: string };
   expect(typeof context.defaultWorkspaceId).toBe("string");
   return context.defaultWorkspaceId!;
 }
@@ -157,7 +195,7 @@ async function discoverWorkspaceId(): Promise<string> {
 async function discoverAccountId(): Promise<string> {
   const response = await fetch(`http://127.0.0.1:${apiPort}/v1/workspaces`);
   expect(response.ok).toBe(true);
-  const workspaces = await response.json() as Array<{ id: string; accountId: string }>;
+  const workspaces = (await response.json()) as Array<{ id: string; accountId: string }>;
   const workspace = workspaces.find((w) => w.id === workspaceId);
   expect(workspace).toBeDefined();
   return workspace!.accountId;

@@ -15,19 +15,35 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { FILE_ONLY_MESSAGE_TEXT, useRigs, useVariableSets, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
+import {
+  FILE_ONLY_MESSAGE_TEXT,
+  useRigs,
+  useVariableSets,
+  useWorkspaceSessions,
+  type ComposerState,
+} from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerCogIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  BoxIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  FlagIcon,
+  FolderIcon,
+  GitBranchIcon,
+  MonitorOffIcon,
+  ServerCogIcon,
+  ServerIcon,
+  ShieldIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
-import {
-  EnabledMcpToolPicker,
-  ModelPicker,
-} from "@/components/pickers";
+import { EnabledMcpToolPicker, ModelPicker } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
@@ -81,7 +97,9 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     // substitutes FILE_ONLY_MESSAGE_TEXT).
     canSend:
       (message.trim().length > 0 || attachments.readyResources.length > 0) &&
-      !context.busy && !attachments.uploading && computeReady,
+      !context.busy &&
+      !attachments.uploading &&
+      computeReady,
     // Queue-vs-steer is meaningless before the session exists.
     mode: "queue",
     setMode: () => {},
@@ -90,7 +108,8 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     error: null,
     clearError: () => {},
     send: async () => {
-      const text = message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      const text =
+        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
       if (!text || context.busy || attachments.uploading || !computeReady) {
         return false;
       }
@@ -113,7 +132,10 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
       }
       setMessage("");
       attachments.clear();
-      await navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: created.id } });
+      await navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId: created.id },
+      });
       return true;
     },
   };
@@ -123,40 +145,39 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     // without it the page clips (recent sessions were unreachable below the fold).
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
-      <section className="flex flex-col items-center gap-2 text-center">
-        <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
-          What should the agent do?
-        </h1>
-      </section>
+        <section className="flex flex-col items-center gap-2 text-center">
+          <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
+            What should the agent do?
+          </h1>
+        </section>
 
-      <div className="mt-8">
-        <ConsoleComposer
-          composer={createComposer}
-          attachments={attachments}
-          autoFocus
-          fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-          placeholder="Describe a task for the agent…"
-          controls={<SessionControlStrip workspaceId={workspaceId} />}
-        />
+        <div className="mt-8">
+          <ConsoleComposer
+            composer={createComposer}
+            attachments={attachments}
+            autoFocus
+            fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+            placeholder="Describe a task for the agent…"
+            controls={<SessionControlStrip workspaceId={workspaceId} />}
+          />
 
+          <ComputeTargetControl
+            workspaceId={workspaceId}
+            draft={draft}
+            onChange={setDraft}
+            disabled={context.busy}
+          />
 
-        <ComputeTargetControl
-          workspaceId={workspaceId}
-          draft={draft}
-          onChange={setDraft}
-          disabled={context.busy}
-        />
+          <OptionalSessionOptions
+            open={optionsOpen}
+            onOpenChange={setOptionsOpen}
+            draft={draft}
+            onChange={setDraft}
+            disabled={context.busy}
+          />
+        </div>
 
-        <OptionalSessionOptions
-          open={optionsOpen}
-          onOpenChange={setOptionsOpen}
-          draft={draft}
-          onChange={setDraft}
-          disabled={context.busy}
-        />
-      </div>
-
-      <RecentSessions workspaceId={workspaceId} />
+        <RecentSessions workspaceId={workspaceId} />
       </div>
     </div>
   );
@@ -209,8 +230,11 @@ function sessionRepoLabel(session: Session): string | null {
   if (!repo || repo.kind !== "repository") {
     return null;
   }
-  const parts = repo.uri.replace(/\.git$/, "").split("/").filter(Boolean);
-  return parts.length >= 2 ? parts.slice(-2).join("/") : parts.at(-1) ?? null;
+  const parts = repo.uri
+    .replace(/\.git$/, "")
+    .split("/")
+    .filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
 }
 
 function RecentSessionRow({ workspaceId, session }: { workspaceId: string; session: Session }) {
@@ -223,12 +247,19 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
         params={{ workspaceId, sessionId: session.id }}
         className="group flex items-center gap-3 rounded-lg border border-border bg-surface/40 px-3 py-2.5 transition-colors hover:border-border-strong hover:bg-surface-2/60"
       >
-        <StatusDot tone={SESSION_STATUS_TONE[session.status]} pulse={session.status === "running"} />
+        <StatusDot
+          tone={SESSION_STATUS_TONE[session.status]}
+          pulse={session.status === "running"}
+        />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-fg">{title}</span>
-          {meta ? <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{meta}</span> : null}
+          {meta ? (
+            <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{meta}</span>
+          ) : null}
         </span>
-        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">{relativeTimeLabel(session.updatedAt)}</span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
+          {relativeTimeLabel(session.updatedAt)}
+        </span>
       </Link>
     </li>
   );
@@ -264,7 +295,13 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
 // The workspace repository picker, wired to the cross-route selection in context.
 // Reused in both compute kinds: the primary clone source on a managed sandbox,
 // and grayed/disabled on a connected machine (which uses its own checkout).
-function WorkspaceRepositoryPicker({ workspaceId, disabled }: { workspaceId: string; disabled: boolean }) {
+function WorkspaceRepositoryPicker({
+  workspaceId,
+  disabled,
+}: {
+  workspaceId: string;
+  disabled: boolean;
+}) {
   const context = useAppContext();
   return (
     <RepositoryContextPicker
@@ -284,11 +321,19 @@ function WorkspaceRepositoryPicker({ workspaceId, disabled }: { workspaceId: str
       githubAppBusy={context.githubAppBusy}
       onRefresh={() => context.refreshGitHub(workspaceId, undefined, { sync: true })}
       onToggleRepo={context.toggleGitHubRepository}
-      onRefChange={(repoId, ref) => context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))}
+      onRefChange={(repoId, ref) =>
+        context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))
+      }
       onManualOpenChange={context.setManualReposOpen}
       onManualAdd={context.addManualRepository}
-      onManualUpdate={(id, patch) => context.setManualRepos((current) => current.map((repo) => repo.id === id ? { ...repo, ...patch } : repo))}
-      onManualRemove={(id) => context.setManualRepos((current) => current.filter((repo) => repo.id !== id))}
+      onManualUpdate={(id, patch) =>
+        context.setManualRepos((current) =>
+          current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
+        )
+      }
+      onManualRemove={(id) =>
+        context.setManualRepos((current) => current.filter((repo) => repo.id !== id))
+      }
       onGitHubAppOpenChange={context.setGithubAppOpen}
       onOrgChange={context.setGithubOrg}
       onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
@@ -319,7 +364,9 @@ function ComputeTargetControl(props: {
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   // Preserve the last managed backend override across kind toggles (lossless) so
   // toggling machine→sandbox returns to the prior choice, not a forced reset.
-  const lastBackend = useRef<SandboxBackend | "">(draft.compute.kind === "sandbox" ? draft.compute.backend : "");
+  const lastBackend = useRef<SandboxBackend | "">(
+    draft.compute.kind === "sandbox" ? draft.compute.backend : "",
+  );
   if (draft.compute.kind === "sandbox") {
     lastBackend.current = draft.compute.backend;
   }
@@ -353,8 +400,16 @@ function ComputeTargetControl(props: {
     }
     // Auto-pick the first selectable machine so the common single-machine case is
     // submit-ready immediately; otherwise leave it unpicked (submit stays blocked).
-    const firstSelectable = machines.find((machine) => isMachineComputeSelectable(machine.state)) ?? null;
-    onChange({ ...draft, compute: { kind: "machine", sandboxId: firstSelectable?.sandboxId ?? null, folder: { kind: "root" } } });
+    const firstSelectable =
+      machines.find((machine) => isMachineComputeSelectable(machine.state)) ?? null;
+    onChange({
+      ...draft,
+      compute: {
+        kind: "machine",
+        sandboxId: firstSelectable?.sandboxId ?? null,
+        folder: { kind: "root" },
+      },
+    });
   };
 
   // Clean sandbox-only default: no "Where should this run?" header, no segmented
@@ -363,7 +418,9 @@ function ComputeTargetControl(props: {
   // narrowed defensively (the normalization effect keeps the draft in sync).
   if (!showComputeTarget) {
     const sandboxCompute: ManagedSandboxTarget =
-      draft.compute.kind === "sandbox" ? draft.compute : { kind: "sandbox", backend: lastBackend.current };
+      draft.compute.kind === "sandbox"
+        ? draft.compute
+        : { kind: "sandbox", backend: lastBackend.current };
     return (
       <section className="mt-5 grid gap-2">
         <ManagedSandboxFields
@@ -397,7 +454,13 @@ function ComputeTargetControl(props: {
           disabled={props.disabled || fleetEmpty}
           icon={<ServerIcon className="size-4 shrink-0" />}
           title="Connected machine"
-          subtitle={fleetLoadFailed ? "Couldn't load machines" : fleetEmpty ? "Connect one to use it" : "Run on your own machine"}
+          subtitle={
+            fleetLoadFailed
+              ? "Couldn't load machines"
+              : fleetEmpty
+                ? "Connect one to use it"
+                : "Run on your own machine"
+          }
           onClick={() => selectKind("machine")}
         />
       </div>
@@ -490,8 +553,11 @@ function ManagedSandboxFields(props: {
   const { draft, compute, onChange } = props;
   const variableSets = useVariableSets();
   const rigs = useRigs();
-  const selectedBackend = BACKEND_OPTIONS.find((option) => option.value === compute.backend) ?? BACKEND_OPTIONS[0];
-  const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])].filter(Boolean).join(" · ");
+  const selectedBackend =
+    BACKEND_OPTIONS.find((option) => option.value === compute.backend) ?? BACKEND_OPTIONS[0];
+  const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     // One flat card: hairline-separated rows, controls right-aligned, no
@@ -582,7 +648,12 @@ function ManagedSandboxFields(props: {
           <Select
             value={compute.backend}
             disabled={props.disabled}
-            onChange={(event) => onChange({ ...draft, compute: { kind: "sandbox", backend: event.target.value as SandboxBackend | "" } })}
+            onChange={(event) =>
+              onChange({
+                ...draft,
+                compute: { kind: "sandbox", backend: event.target.value as SandboxBackend | "" },
+              })
+            }
           >
             {BACKEND_OPTIONS.map((option) => (
               <option key={option.value || "default"} value={option.value}>
@@ -592,7 +663,8 @@ function ManagedSandboxFields(props: {
             ))}
           </Select>
           <p className="text-2xs text-fg-subtle">
-            Forces the underlying sandbox type. Leave on the deployment default unless you need a specific backend.
+            Forces the underlying sandbox type. Leave on the deployment default unless you need a
+            specific backend.
           </p>
         </div>
       </details>
@@ -613,7 +685,7 @@ function ConnectedMachineFields(props: {
   const { draft, compute, onChange, machines } = props;
   const setCompute = (next: ConnectedMachineTarget) => onChange({ ...draft, compute: next });
   const pickedMachine = compute.sandboxId
-    ? machines.find((machine) => machine.sandboxId === compute.sandboxId) ?? null
+    ? (machines.find((machine) => machine.sandboxId === compute.sandboxId) ?? null)
     : null;
   const customPath = compute.folder.kind === "path" ? compute.folder.path : "";
   const capabilityChips = selfhostedCapabilityChips(pickedMachine);
@@ -634,7 +706,11 @@ function ConnectedMachineFields(props: {
             Choose a machine…
           </option>
           {machines.map((machine) => (
-            <option key={machine.sandboxId} value={machine.sandboxId} disabled={!isMachineComputeSelectable(machine.state)}>
+            <option
+              key={machine.sandboxId}
+              value={machine.sandboxId}
+              disabled={!isMachineComputeSelectable(machine.state)}
+            >
               {machine.name}
               {machine.os ? ` · ${machine.os}/${machine.arch}` : ""}
               {machine.state !== "online" ? ` (${machine.state})` : ""}
@@ -653,9 +729,7 @@ function ConnectedMachineFields(props: {
           ) : null}
         </div>
         {compute.sandboxId === null ? (
-          <p className="text-2xs text-fg-muted">
-            Pick a machine to run on.
-          </p>
+          <p className="text-2xs text-fg-muted">Pick a machine to run on.</p>
         ) : null}
       </div>
 
@@ -693,7 +767,9 @@ function ConnectedMachineFields(props: {
             <Input
               value={customPath}
               disabled={props.disabled}
-              onChange={(event) => setCompute({ ...compute, folder: { kind: "path", path: event.target.value } })}
+              onChange={(event) =>
+                setCompute({ ...compute, folder: { kind: "path", path: event.target.value } })
+              }
               placeholder="e.g. ~/repos/myproject or packages/runtime"
               aria-label="Custom working directory"
               className="ml-[1.375rem] h-9 w-[calc(100%_-_1.375rem)] text-sm"
@@ -701,7 +777,8 @@ function ConnectedMachineFields(props: {
           ) : null}
         </div>
         <p className="text-2xs text-fg-subtle">
-          Where the agent, terminal, and file dock open. Defaults to the machine&apos;s workspace root.
+          Where the agent, terminal, and file dock open. Defaults to the machine&apos;s workspace
+          root.
         </p>
       </div>
 
@@ -721,7 +798,8 @@ function ConnectedMachineFields(props: {
           <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled />
         </div>
         <p className="text-2xs text-fg-subtle">
-          This machine uses its own checkout &amp; git auth, so your selected repositories aren&apos;t cloned onto it.
+          This machine uses its own checkout &amp; git auth, so your selected repositories
+          aren&apos;t cloned onto it.
         </p>
       </div>
 
@@ -755,7 +833,11 @@ function FleetErrorNotice({ onRetry }: { onRetry: () => void }) {
       tone="muted"
       className="p-2.5 text-xs"
       action={
-        <button type="button" onClick={onRetry} className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg">
+        <button
+          type="button"
+          onClick={onRetry}
+          className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg"
+        >
           Retry
         </button>
       }
@@ -785,9 +867,7 @@ function FolderRadio(props: {
       <span
         className={cn(
           "flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors",
-          props.checked
-            ? "border-brand"
-            : "border-border-strong group-hover:border-fg-subtle",
+          props.checked ? "border-brand" : "border-border-strong group-hover:border-fg-subtle",
         )}
       >
         {props.checked ? <span className="size-1.5 rounded-full bg-brand-strong" /> : null}
@@ -822,87 +902,89 @@ function OptionalSessionOptions(props: {
   return (
     <Collapsible open={props.open} onOpenChange={props.onOpenChange} className="mt-2">
       <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg-muted transition-colors hover:bg-surface-2/40 hover:text-fg"
-        >
-          <SlidersHorizontalIcon className="size-3.5 shrink-0 text-fg-subtle" />
-          <span className="font-medium">Goal &amp; tool permissions</span>
-          <span className="min-w-0 flex-1 truncate text-2xs text-fg-subtle">
-            {summary.length > 0 ? summary.join(" · ") : "Optional"}
-          </span>
-          <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")} />
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="grid gap-3 border-t border-border/70 px-3 pb-3 pt-2.5">
-          <div className="grid gap-2">
-            <Label className="flex items-center gap-1.5 text-xs">
-              <FlagIcon className="size-3 shrink-0 text-fg-subtle" />
-              Goal (optional)
-            </Label>
-            <textarea
-              value={draft.goalText}
-              disabled={props.disabled}
-              onChange={(event) => update({ goalText: event.target.value })}
-              placeholder="Keep the session working on its own between your messages…"
-              className="min-h-12 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg-muted transition-colors hover:bg-surface-2/40 hover:text-fg"
+          >
+            <SlidersHorizontalIcon className="size-3.5 shrink-0 text-fg-subtle" />
+            <span className="font-medium">Goal &amp; tool permissions</span>
+            <span className="min-w-0 flex-1 truncate text-2xs text-fg-subtle">
+              {summary.length > 0 ? summary.join(" · ") : "Optional"}
+            </span>
+            <ChevronDownIcon
+              className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")}
             />
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
-              <Input
-                value={draft.goalSuccessCriteria}
-                disabled={props.disabled || !draft.goalText.trim()}
-                onChange={(event) => update({ goalSuccessCriteria: event.target.value })}
-                placeholder="Success criteria (optional)"
-                className="h-9 text-sm"
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="grid gap-3 border-t border-border/70 px-3 pb-3 pt-2.5">
+            <div className="grid gap-2">
+              <Label className="flex items-center gap-1.5 text-xs">
+                <FlagIcon className="size-3 shrink-0 text-fg-subtle" />
+                Goal (optional)
+              </Label>
+              <textarea
+                value={draft.goalText}
+                disabled={props.disabled}
+                onChange={(event) => update({ goalText: event.target.value })}
+                placeholder="Keep the session working on its own between your messages…"
+                className="min-h-12 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               />
-              <Input
-                value={draft.goalMaxAutoContinuations}
-                disabled={props.disabled || !draft.goalText.trim()}
-                onChange={(event) => update({ goalMaxAutoContinuations: event.target.value })}
-                placeholder="Max continuations"
-                inputMode="numeric"
-                className="h-9 text-sm"
-              />
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
+                <Input
+                  value={draft.goalSuccessCriteria}
+                  disabled={props.disabled || !draft.goalText.trim()}
+                  onChange={(event) => update({ goalSuccessCriteria: event.target.value })}
+                  placeholder="Success criteria (optional)"
+                  className="h-9 text-sm"
+                />
+                <Input
+                  value={draft.goalMaxAutoContinuations}
+                  disabled={props.disabled || !draft.goalText.trim()}
+                  onChange={(event) => update({ goalMaxAutoContinuations: event.target.value })}
+                  placeholder="Max continuations"
+                  inputMode="numeric"
+                  className="h-9 text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <label className="flex items-center gap-2 text-xs text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={draft.customMcpPermissions}
+                  disabled={props.disabled}
+                  onChange={(event) => update({ customMcpPermissions: event.target.checked })}
+                  className="size-3.5 accent-brand-strong"
+                />
+                <ShieldIcon className="size-3 shrink-0 text-fg-subtle" />
+                Restrict this session&apos;s OpenGeni tool permissions
+              </label>
+              {draft.customMcpPermissions ? (
+                <PermissionGroupPicker
+                  groups={sessionMcpPermissionGroups}
+                  selected={draft.mcpPermissions}
+                  disabled={props.disabled}
+                  onToggle={(permission) => {
+                    const next = new Set(draft.mcpPermissions);
+                    if (next.has(permission)) {
+                      next.delete(permission);
+                    } else {
+                      next.add(permission);
+                    }
+                    update({ mcpPermissions: next });
+                  }}
+                />
+              ) : (
+                <p className="text-2xs text-fg-subtle">
+                  By default this session can use OpenGeni tools on your behalf in this workspace.
+                </p>
+              )}
             </div>
           </div>
-
-          <div className="grid gap-2">
-            <label className="flex items-center gap-2 text-xs text-fg-muted">
-              <input
-                type="checkbox"
-                checked={draft.customMcpPermissions}
-                disabled={props.disabled}
-                onChange={(event) => update({ customMcpPermissions: event.target.checked })}
-                className="size-3.5 accent-brand-strong"
-              />
-              <ShieldIcon className="size-3 shrink-0 text-fg-subtle" />
-              Restrict this session&apos;s OpenGeni tool permissions
-            </label>
-            {draft.customMcpPermissions ? (
-              <PermissionGroupPicker
-                groups={sessionMcpPermissionGroups}
-                selected={draft.mcpPermissions}
-                disabled={props.disabled}
-                onToggle={(permission) => {
-                  const next = new Set(draft.mcpPermissions);
-                  if (next.has(permission)) {
-                    next.delete(permission);
-                  } else {
-                    next.add(permission);
-                  }
-                  update({ mcpPermissions: next });
-                }}
-              />
-            ) : (
-              <p className="text-2xs text-fg-subtle">
-                By default this session can use OpenGeni tools on your behalf in this workspace.
-              </p>
-            )}
-          </div>
-        </div>
-      </CollapsibleContent>
+        </CollapsibleContent>
       </div>
     </Collapsible>
   );

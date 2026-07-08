@@ -21,21 +21,47 @@ function ensureNixLibraryPath() {
     return;
   }
   const attributes = [
-    "glib", "nss", "nspr", "dbus", "atk", "at-spi2-core", "cups", "libdrm", "expat", "libxkbcommon",
-    "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes",
-    "xorg.libXrandr", "xorg.libxcb", "mesa", "pango", "cairo", "alsa-lib", "libgbm", "gtk3", "gdk-pixbuf",
+    "glib",
+    "nss",
+    "nspr",
+    "dbus",
+    "atk",
+    "at-spi2-core",
+    "cups",
+    "libdrm",
+    "expat",
+    "libxkbcommon",
+    "xorg.libX11",
+    "xorg.libXcomposite",
+    "xorg.libXdamage",
+    "xorg.libXext",
+    "xorg.libXfixes",
+    "xorg.libXrandr",
+    "xorg.libxcb",
+    "mesa",
+    "pango",
+    "cairo",
+    "alsa-lib",
+    "libgbm",
+    "gtk3",
+    "gdk-pixbuf",
   ];
   const paths = new Set<string>();
   for (const attribute of attributes) {
     for (const suffix of [".out.outPath", ".lib.outPath", ".outPath"]) {
-      const result = spawnSync("nix", ["eval", "--raw", `nixpkgs#${attribute}${suffix}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const result = spawnSync("nix", ["eval", "--raw", `nixpkgs#${attribute}${suffix}`], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
       if (result.status === 0 && result.stdout.trim()) {
         paths.add(`${result.stdout.trim()}/lib`);
       }
     }
   }
   if (paths.size > 0) {
-    process.env.LD_LIBRARY_PATH = [[...paths].join(":"), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+    process.env.LD_LIBRARY_PATH = [[...paths].join(":"), process.env.LD_LIBRARY_PATH]
+      .filter(Boolean)
+      .join(":");
   }
 }
 
@@ -45,7 +71,9 @@ async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
   ensureNixLibraryPath();
 
-  const rigs = (await (await fetch(`http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}/rigs`)).json()) as Array<{ id: string; name: string }>;
+  const rigs = (await (
+    await fetch(`http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}/rigs`)
+  ).json()) as Array<{ id: string; name: string }>;
   const devRig = rigs.find((rig) => rig.name === "dev-machine");
   const ciRig = rigs.find((rig) => rig.name === "ci-runner");
   if (!devRig || !ciRig) {
@@ -55,8 +83,14 @@ async function main() {
   const { chromium } = await import("playwright");
   // Playwright's bundled chromium isn't downloaded on this host; use the nix
   // store chromium (like the staging web-verification recipe).
-  const nixChromium = spawnSync("nix", ["eval", "--raw", "nixpkgs#chromium.outPath"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-  const executablePath = nixChromium.status === 0 && nixChromium.stdout.trim() ? `${nixChromium.stdout.trim()}/bin/chromium` : undefined;
+  const nixChromium = spawnSync("nix", ["eval", "--raw", "nixpkgs#chromium.outPath"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const executablePath =
+    nixChromium.status === 0 && nixChromium.stdout.trim()
+      ? `${nixChromium.stdout.trim()}/bin/chromium`
+      : undefined;
   const browser = await chromium.launch(executablePath ? { executablePath } : {});
   const base = `http://127.0.0.1:${webPort}/workspaces/${workspaceId}`;
 
@@ -71,7 +105,9 @@ async function main() {
       url: `${base}/rigs`,
       intercepts: async (page) => {
         await page.route(`**/v1/workspaces/${workspaceId}/rigs`, (route) =>
-          route.request().method() === "GET" ? route.fulfill({ status: 200, contentType: "application/json", body: "[]" }) : route.continue(),
+          route.request().method() === "GET"
+            ? route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+            : route.continue(),
         );
       },
       prepare: async (page) => {
@@ -151,9 +187,14 @@ async function main() {
       name: "10-composer-rig-picker",
       url: `${base}/sessions`,
       prepare: async (page) => {
-        const select = page.locator("select").filter({ has: page.locator("option", { hasText: "Workspace default" }) }).first();
+        const select = page
+          .locator("select")
+          .filter({ has: page.locator("option", { hasText: "Workspace default" }) })
+          .first();
         await select.waitFor({ timeout: 15_000 });
-        const value = await select.locator("option", { hasText: "dev-machine" }).getAttribute("value");
+        const value = await select
+          .locator("option", { hasText: "dev-machine" })
+          .getAttribute("value");
         if (value) {
           await select.selectOption(value);
         }
@@ -186,9 +227,16 @@ async function main() {
           const body = await response.json();
           const strip = (grant: Record<string, unknown>) =>
             grant.workspaceId === workspaceId
-              ? { ...grant, permissions: (grant.permissions as string[]).filter((p) => p !== "rigs:use" && p !== "rigs:manage" && p !== "workspace:admin") }
+              ? {
+                  ...grant,
+                  permissions: (grant.permissions as string[]).filter(
+                    (p) => p !== "rigs:use" && p !== "rigs:manage" && p !== "workspace:admin",
+                  ),
+                }
               : grant;
-          body.workspaceGrants = (body.workspaceGrants as Array<Record<string, unknown>>).map(strip);
+          body.workspaceGrants = (body.workspaceGrants as Array<Record<string, unknown>>).map(
+            strip,
+          );
           await route.fulfill({ response, json: body });
         });
       },
@@ -200,7 +248,10 @@ async function main() {
 
   for (const shot of shots) {
     for (const width of [1440, 800]) {
-      const page = await browser.newPage({ viewport: { width, height: 900 }, deviceScaleFactor: 1 });
+      const page = await browser.newPage({
+        viewport: { width, height: 900 },
+        deviceScaleFactor: 1,
+      });
       try {
         if (shot.intercepts) {
           await shot.intercepts(page);

@@ -6,12 +6,22 @@
 // by hand-editing enable headers. Packs keep their first-class register/enable/
 // disable/unregister surface, restyled flat.
 import { usePacks, useVariableSets } from "@opengeni/react";
-import { GlobeIcon, Loader2Icon, PlugIcon, PlusIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
+import {
+  GlobeIcon,
+  Loader2Icon,
+  PlugIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SearchIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
-import { CapabilityDetailSheet, type ConnectAction } from "@/components/capabilities/capability-detail-sheet";
+import {
+  CapabilityDetailSheet,
+  type ConnectAction,
+} from "@/components/capabilities/capability-detail-sheet";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { PacksSection } from "@/components/capabilities/packs-section";
@@ -49,10 +59,19 @@ import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "
 const PAGE_SIZE = 48;
 const FILTERS: CapabilityFilter[] = ["all", "pack", "mcp", "api", "skill", "plugin"];
 
-export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId: string; initialSection?: "packs" }) {
+export function CapabilitiesRoute({
+  workspaceId,
+  initialSection,
+}: {
+  workspaceId: string;
+  initialSection?: "packs";
+}) {
   const context = useAppContext();
   const client = context.client;
-  const onRuntimeChanged = useCallback(() => void context.refreshWorkspaceMcpServers(workspaceId), [context, workspaceId]);
+  const onRuntimeChanged = useCallback(
+    () => void context.refreshWorkspaceMcpServers(workspaceId),
+    [context, workspaceId],
+  );
 
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
   // null = connections have not loaded (or the load failed, e.g. the grant lacks
@@ -63,7 +82,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const [filter, setFilter] = useState<CapabilityFilter>(initialSection === "packs" ? "pack" : "all");
+  const [filter, setFilter] = useState<CapabilityFilter>(
+    initialSection === "packs" ? "pack" : "all",
+  );
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -100,13 +121,19 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const showPacks = filter === "all" || filter === "pack";
   const showCatalog = filter !== "pack";
 
-  const logoUrl = useCallback((item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath), [client]);
+  const logoUrl = useCallback(
+    (item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath),
+    [client],
+  );
   const connectionsLoaded = connections !== null;
   // The item the sheet renders, always from the live catalog. Registry items
   // aren't in `items` until persisted, so they fall back to their snapshot; a
   // non-registry selection with no live row resolves to null and the effect
   // below closes the sheet rather than render a ghost.
-  const selectedItem: CapabilityCatalogItem | null = useMemo(() => resolveSheetItem(selected, items), [selected, items]);
+  const selectedItem: CapabilityCatalogItem | null = useMemo(
+    () => resolveSheetItem(selected, items),
+    [selected, items],
+  );
   const selectedHealth: ConnectionHealth = selectedItem
     ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
@@ -125,7 +152,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   // in `items`, e.g. after a failed refresh) legitimately isn't in the catalog
   // yet, so it renders from its snapshot instead of being closed here.
   useEffect(() => {
-    if (selected && !selected.snapshotFallback && !loading && !items.some((entry) => entry.id === selected.id)) {
+    if (
+      selected &&
+      !selected.snapshotFallback &&
+      !loading &&
+      !items.some((entry) => entry.id === selected.id)
+    ) {
       setSelected(null);
       setSheetError(null);
     }
@@ -153,7 +185,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load capabilities", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to load capabilities", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setLoading(false);
     }
@@ -176,7 +210,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   // Registry items aren't persisted; create the catalog row before connecting so
   // enable/OAuth have a real capability id to reference.
-  async function persistIfRegistry(item: CapabilityCatalogItem, registry: boolean): Promise<CapabilityCatalogItem> {
+  async function persistIfRegistry(
+    item: CapabilityCatalogItem,
+    registry: boolean,
+  ): Promise<CapabilityCatalogItem> {
     if (!registry) return item;
     const created = await client.createCapability(workspaceId, createInputFromCatalogItem(item));
     return created;
@@ -212,8 +249,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         // Trust the installation's connectionRef.kind (the sheet already chose this
         // branch from it), not the catalog plan — on drift plan.mode can read
         // "enable", so fall back to the ref's domain and the item's own MCP URL.
-        const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item.connectionRef?.providerDomain ?? null;
-        const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : item.mcpUrl ?? item.endpointUrl ?? null;
+        const providerDomain =
+          plan.mode === "oauth"
+            ? plan.providerDomain
+            : (item.connectionRef?.providerDomain ?? null);
+        const mcpUrl =
+          plan.mode === "oauth" ? plan.mcpUrl : (item.mcpUrl ?? item.endpointUrl ?? null);
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
         const response = await client.startConnectionOAuth(workspaceId, {
           ...(mcpUrl ? { mcpUrl } : {}),
@@ -243,14 +284,21 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           // The row was deleted — mint a fresh connection and re-enable the
           // installation against it (enable upserts the installation config). Domain
           // comes from the plan, or the installation's ref when the catalog drifted.
-          const providerDomain = plan.mode === "enable" ? item.connectionRef?.providerDomain ?? "" : plan.providerDomain;
+          const providerDomain =
+            plan.mode === "enable"
+              ? (item.connectionRef?.providerDomain ?? "")
+              : plan.providerDomain;
           const connection = await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
             credential: { headers: action.headers },
           });
           await client.enableCapability(workspaceId, item.id, {
-            connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
+            connectionRef: {
+              connectionId: connection.id,
+              providerDomain: connection.providerDomain,
+              kind: "api_key",
+            },
           });
         }
         await refresh();
@@ -296,7 +344,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         // catalog domain — the API may canonicalize providerDomain, and the row
         // is the authoritative match the enable path validates against.
         await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
+          connectionRef: {
+            connectionId: connection.id,
+            providerDomain: connection.providerDomain,
+            kind: "api_key",
+          },
         });
         await refresh();
         onRuntimeChanged();
@@ -309,13 +361,19 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       await client.enableCapability(workspaceId, persisted.id);
       await refresh();
       if (persisted.kind === "mcp") onRuntimeChanged();
-      toast.success(persisted.kind === "mcp" ? `Enabled ${persisted.name}` : `Tracking ${persisted.name}`);
+      toast.success(
+        persisted.kind === "mcp" ? `Enabled ${persisted.name}` : `Tracking ${persisted.name}`,
+      );
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Something went wrong");
       // In-sheet human copy; the raw missing-credentials 422 becomes a prompt to
       // connect rather than an error string.
-      setSheetError(isMissingCredentialsError(error) ? "This integration needs credentials before it can be enabled." : copy.description);
+      setSheetError(
+        isMissingCredentialsError(error)
+          ? "This integration needs credentials before it can be enabled."
+          : copy.description,
+      );
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -342,9 +400,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       void resumeOAuthConnect(itemId, params.get("connectionId"), params.get("providerDomain"));
     } else {
       const reason = params.get("reason");
-      const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
+      const item = itemId ? (items.find((candidate) => candidate.id === itemId) ?? null) : null;
       if (item) {
-        setSheetError(reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
+        setSheetError(
+          reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.",
+        );
         setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       } else {
         toast.error("Connection failed", { description: reason ?? undefined });
@@ -368,7 +428,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     window.history.replaceState(null, "", window.location.pathname);
     const target = normalizeProviderDomain(domain);
     const item = items.find(
-      (candidate) => candidate.enabled && candidate.connectionRef && normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
+      (candidate) =>
+        candidate.enabled &&
+        candidate.connectionRef &&
+        normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
     );
     if (item) {
       setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
@@ -378,7 +441,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items]);
 
-  async function resumeOAuthConnect(itemId: string | null, connectionId: string | null, providerDomain: string | null) {
+  async function resumeOAuthConnect(
+    itemId: string | null,
+    connectionId: string | null,
+    providerDomain: string | null,
+  ) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
     // fetched rows (falling back to closure items only if the fetch itself failed).
@@ -395,13 +462,16 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       // Don't clobber previously-loaded connections with null on a failed refetch
       // (that would flip healthy items to "unverified" until the next reload).
       if (conns !== null) setConnections(conns);
-      const item = (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
+      const item =
+        (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
 
       if (action === "missing") {
         // Connection was created but the catalog row is gone — never leave the
         // success half-handled silently; say plainly it wasn't enabled.
-        toast.success("Connected — but this integration is no longer in the catalog, so it wasn't enabled.");
+        toast.success(
+          "Connected — but this integration is no longer in the catalog, so it wasn't enabled.",
+        );
         return;
       }
       if (action === "no_connection") {
@@ -422,7 +492,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       // (a transient failure or a grant without connections:read would otherwise
       // leave the connection created but the capability un-enabled). Fall back to
       // the fetched row only for an older callback that omitted providerDomain.
-      const refDomain = providerDomain ?? conns?.find((candidate) => candidate.id === connectionId)?.providerDomain ?? null;
+      const refDomain =
+        providerDomain ??
+        conns?.find((candidate) => candidate.id === connectionId)?.providerDomain ??
+        null;
       if (!refDomain) {
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
         return;
@@ -434,14 +507,19 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       onRuntimeChanged();
       // An already-enabled item reached here only because its old connection row
       // was gone and OAuth minted a new one — that's a reconnect, not a first enable.
-      toast.success(item!.enabled ? `Reconnected ${item!.name}` : `Connected and enabled ${item!.name}`);
+      toast.success(
+        item!.enabled ? `Reconnected ${item!.name}` : `Connected and enabled ${item!.name}`,
+      );
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
-      const item = itemId ? (freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null : null;
-      if (item) setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+      const item = itemId
+        ? ((freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null)
+        : null;
+      if (item)
+        setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -478,7 +556,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         if (plan.mode === "enable") {
           await client.enableCapability(workspaceId, created.id);
           if (created.kind === "mcp") onRuntimeChanged();
-          toast.success(created.kind === "mcp" ? `Added and enabled ${created.name}` : `Added and tracking ${created.name}`);
+          toast.success(
+            created.kind === "mcp"
+              ? `Added and enabled ${created.name}`
+              : `Added and tracking ${created.name}`,
+          );
         } else {
           toast.success(`Added ${created.name}`);
           // Freshly created: the row isn't in `items` until refresh() lands, and
@@ -505,13 +587,18 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     if (!term) return;
     setRegistryBusy(true);
     try {
-      const response = await client.discoverMcpCapabilities(workspaceId, { query: term, limit: 30 });
+      const response = await client.discoverMcpCapabilities(workspaceId, {
+        query: term,
+        limit: 30,
+      });
       setRegistryResults(response.items);
       setRegistrySearched(term);
     } catch (error) {
       setRegistryResults([]);
       setRegistrySearched(null);
-      toast.error("Registry search failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Registry search failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setRegistryBusy(false);
     }
@@ -527,7 +614,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       return false;
     }
     try {
-      const registered = await client.registerPack(workspaceId, manifest as Parameters<typeof client.registerPack>[1]);
+      const registered = await client.registerPack(
+        workspaceId,
+        manifest as Parameters<typeof client.registerPack>[1],
+      );
       await Promise.all([packs.refresh(), refresh()]);
       toast.success(`Registered ${registered.pack.name} v${registered.pack.version}`);
       return true;
@@ -541,7 +631,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   async function enablePack(pack: CapabilityPack, variableSetId: string | undefined) {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.enableCapability(workspaceId, `pack:${pack.id}`, variableSetId ? { variableSetId } : {});
+      await client.enableCapability(
+        workspaceId,
+        `pack:${pack.id}`,
+        variableSetId ? { variableSetId } : {},
+      );
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
       toast.success(`Enabled ${pack.name}`);
@@ -594,136 +688,162 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     // scrolls); the centered max-width column lives inside it.
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <PageHeader
-        icon={<PlugIcon className="size-4" />}
-        title="Capabilities"
-        description="Connect integrations and enable the tools, packs, and skills your agents can use."
-        actions={(
-          <>
-            <Button type="button" variant="ghost" size="sm" onClick={refreshAll} disabled={loading || packs.loading}>
-              <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
-              Refresh
-            </Button>
-            <Button type="button" onClick={() => setAddOpen(true)}>
-              <PlusIcon />
-              Add custom
-            </Button>
-          </>
-        )}
-      />
-
-      {/* Primary search — front and center. */}
-      <div className="relative mt-6">
-        <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search integrations, tools, and skills"
-          className="h-12 rounded-xl pl-11 text-base"
-          aria-label="Search capabilities"
+        <PageHeader
+          icon={<PlugIcon className="size-4" />}
+          title="Capabilities"
+          description="Connect integrations and enable the tools, packs, and skills your agents can use."
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={refreshAll}
+                disabled={loading || packs.loading}
+              >
+                <RefreshCwIcon className={cn((loading || packs.loading) && "animate-spin")} />
+                Refresh
+              </Button>
+              <Button type="button" onClick={() => setAddOpen(true)}>
+                <PlusIcon />
+                Add custom
+              </Button>
+            </>
+          }
         />
-      </div>
 
-      {/* Kind filters with counts. */}
-      <div className="mt-4 flex flex-wrap gap-2">
-        {FILTERS.map((kind) => (
-          <button
-            key={kind}
-            type="button"
-            onClick={() => setFilter(kind)}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
-              filter === kind
-                ? "border-brand/40 bg-brand/10 text-brand"
-                : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
-            )}
-          >
-            {capabilityFilterLabel(kind)}
-            <span className={cn("text-2xs", filter === kind ? "text-brand/70" : "text-fg-subtle")}>{counts[kind]}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="mt-8 space-y-10">
-        {/* Enabled strip. */}
-        {showCatalog && enabledItems.length > 0 ? (
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold text-fg">Enabled</h2>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {enabledItems.map((item) => (
-                <EnabledCard
-                  key={item.id}
-                  item={item}
-                  health={connectionHealth(item, connections ?? [], connectionsLoaded)}
-                  logoSrc={logoUrl(item)}
-                  busy={busyId === item.id}
-                  onOpen={() => openItem(item)}
-                  onDisable={() => void disableFromStrip(item)}
-                />
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        {/* Packs. */}
-        {showPacks ? (
-          <PacksSection
-            packs={packs}
-            variableSets={variableSets.variableSets.map((variableSet) => ({ id: variableSet.id, name: variableSet.name }))}
-            busyPackId={packBusyId}
-            onRegister={registerPackManifest}
-            onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
-            onDisable={(pack) => void disablePack(pack)}
-            onUnregister={unregisterPack}
+        {/* Primary search — front and center. */}
+        <div className="relative mt-6">
+          <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search integrations, tools, and skills"
+            className="h-12 rounded-xl pl-11 text-base"
+            aria-label="Search capabilities"
           />
-        ) : null}
+        </div>
 
-        {/* Browse grid. */}
-        {showCatalog ? (
-          <section className="space-y-4">
-            {filter === "all" || enabledItems.length > 0 ? (
-              <h2 className="text-sm font-semibold text-fg">Browse</h2>
-            ) : null}
+        {/* Kind filters with counts. */}
+        <div className="mt-4 flex flex-wrap gap-2">
+          {FILTERS.map((kind) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => setFilter(kind)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                filter === kind
+                  ? "border-brand/40 bg-brand/10 text-brand"
+                  : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
+              )}
+            >
+              {capabilityFilterLabel(kind)}
+              <span
+                className={cn("text-2xs", filter === kind ? "text-brand/70" : "text-fg-subtle")}
+              >
+                {counts[kind]}
+              </span>
+            </button>
+          ))}
+        </div>
 
-            {catalogView === "loading" ? (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {Array.from({ length: 8 }).map((_, index) => (
-                  <div key={index} className="rounded-xl border border-border bg-surface/50 p-4">
-                    <Skeleton className="size-10 rounded-lg" />
-                    <Skeleton className="mt-3 h-4 w-24" />
-                    <Skeleton className="mt-2 h-3 w-full" />
-                    <Skeleton className="mt-1.5 h-3 w-2/3" />
-                  </div>
+        <div className="mt-8 space-y-10">
+          {/* Enabled strip. */}
+          {showCatalog && enabledItems.length > 0 ? (
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold text-fg">Enabled</h2>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {enabledItems.map((item) => (
+                  <EnabledCard
+                    key={item.id}
+                    item={item}
+                    health={connectionHealth(item, connections ?? [], connectionsLoaded)}
+                    logoSrc={logoUrl(item)}
+                    busy={busyId === item.id}
+                    onOpen={() => openItem(item)}
+                    onDisable={() => void disableFromStrip(item)}
+                  />
                 ))}
               </div>
-            ) : catalogView === "error" ? (
-              <LoadErrorState title="Couldn't load capabilities" error={loadError} onRetry={() => void refresh()} />
-            ) : browseItems.length === 0 ? (
-              <RegistryFallback
-                query={query}
-                busy={registryBusy}
-                searched={registrySearched}
-                results={visibleRegistry}
-                onSearch={() => void searchRegistry()}
-                logoUrl={logoUrl}
-                onOpen={(item) => openItem(item, true)}
-                emptyDefault={enabledItems.length === 0}
-              />
-            ) : (
-              <>
+            </section>
+          ) : null}
+
+          {/* Packs. */}
+          {showPacks ? (
+            <PacksSection
+              packs={packs}
+              variableSets={variableSets.variableSets.map((variableSet) => ({
+                id: variableSet.id,
+                name: variableSet.name,
+              }))}
+              busyPackId={packBusyId}
+              onRegister={registerPackManifest}
+              onEnable={(pack, variableSetId) => void enablePack(pack, variableSetId)}
+              onDisable={(pack) => void disablePack(pack)}
+              onUnregister={unregisterPack}
+            />
+          ) : null}
+
+          {/* Browse grid. */}
+          {showCatalog ? (
+            <section className="space-y-4">
+              {filter === "all" || enabledItems.length > 0 ? (
+                <h2 className="text-sm font-semibold text-fg">Browse</h2>
+              ) : null}
+
+              {catalogView === "loading" ? (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {visibleBrowse.map((item) => (
-                    <CapabilityTile key={item.id} item={item} logoSrc={logoUrl(item)} onOpen={() => openItem(item)} />
+                  {Array.from({ length: 8 }).map((_, index) => (
+                    <div key={index} className="rounded-xl border border-border bg-surface/50 p-4">
+                      <Skeleton className="size-10 rounded-lg" />
+                      <Skeleton className="mt-3 h-4 w-24" />
+                      <Skeleton className="mt-2 h-3 w-full" />
+                      <Skeleton className="mt-1.5 h-3 w-2/3" />
+                    </div>
                   ))}
                 </div>
-                {visibleCount < browseItems.length ? (
-                  <LoadMoreSentinel onReach={() => setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))} />
-                ) : null}
-              </>
-            )}
-          </section>
-        ) : null}
-      </div>
+              ) : catalogView === "error" ? (
+                <LoadErrorState
+                  title="Couldn't load capabilities"
+                  error={loadError}
+                  onRetry={() => void refresh()}
+                />
+              ) : browseItems.length === 0 ? (
+                <RegistryFallback
+                  query={query}
+                  busy={registryBusy}
+                  searched={registrySearched}
+                  results={visibleRegistry}
+                  onSearch={() => void searchRegistry()}
+                  logoUrl={logoUrl}
+                  onOpen={(item) => openItem(item, true)}
+                  emptyDefault={enabledItems.length === 0}
+                />
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    {visibleBrowse.map((item) => (
+                      <CapabilityTile
+                        key={item.id}
+                        item={item}
+                        logoSrc={logoUrl(item)}
+                        onOpen={() => openItem(item)}
+                      />
+                    ))}
+                  </div>
+                  {visibleCount < browseItems.length ? (
+                    <LoadMoreSentinel
+                      onReach={() =>
+                        setVisibleCount((count) => Math.min(count + PAGE_SIZE, browseItems.length))
+                      }
+                    />
+                  ) : null}
+                </>
+              )}
+            </section>
+          ) : null}
+        </div>
       </div>
 
       <CapabilityDetailSheet
@@ -742,7 +862,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         onAction={handleAction}
       />
 
-      <AddCustomDialog open={addOpen} onOpenChange={setAddOpen} busy={busyId === "add"} onSubmit={submitAddCustom} />
+      <AddCustomDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        busy={busyId === "add"}
+        onSubmit={submitAddCustom}
+      />
     </div>
   );
 }
@@ -775,24 +900,41 @@ function EnabledCard({
     ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
     : item.stale
       ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
-      : { label: health.state === "connected" ? "Connected" : "Enabled", dot: "bg-status-idle", text: "text-fg-subtle" };
+      : {
+          label: health.state === "connected" ? "Connected" : "Enabled",
+          dot: "bg-status-idle",
+          text: "text-fg-subtle",
+        };
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">
-      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+      >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-fg">{item.name}</div>
           <div className={cn("flex items-center gap-1.5 text-2xs", status.text)}>
             <span className={cn("size-1.5 rounded-full", status.dot)} />
             {status.label}
-            <span aria-hidden className="text-fg-subtle/50">·</span>
+            <span aria-hidden className="text-fg-subtle/50">
+              ·
+            </span>
             <span className="truncate">{capabilityKindLabel(item.kind)}</span>
           </div>
         </div>
       </button>
       {canDisable ? (
-        <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={onDisable} className="shrink-0">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={onDisable}
+          className="shrink-0"
+        >
           {busy ? <Loader2Icon className="animate-spin" /> : "Disable"}
         </Button>
       ) : (
@@ -831,7 +973,12 @@ function RegistryFallback({
         <p className="text-xs text-fg-subtle">From the public MCP registry</p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {results.map((item) => (
-            <CapabilityTile key={item.id} item={item} logoSrc={logoUrl(item)} onOpen={() => onOpen(item)} />
+            <CapabilityTile
+              key={item.id}
+              item={item}
+              logoSrc={logoUrl(item)}
+              onOpen={() => onOpen(item)}
+            />
           ))}
         </div>
       </div>
@@ -843,9 +990,11 @@ function RegistryFallback({
       <EmptyState
         icon={<PlugIcon className="size-4" />}
         title={emptyDefault ? "Nothing here yet" : "No matches for this filter"}
-        description={emptyDefault
-          ? "Search the catalog above, or add a custom MCP server, API, skill, or plugin."
-          : "Try a different filter or search term."}
+        description={
+          emptyDefault
+            ? "Search the catalog above, or add a custom MCP server, API, skill, or plugin."
+            : "Try a different filter or search term."
+        }
       />
     );
   }
@@ -853,14 +1002,18 @@ function RegistryFallback({
   return (
     <EmptyState
       icon={<GlobeIcon className="size-4" />}
-      title={searched && searched === term ? `No registry servers match “${term}”` : `No catalog matches for “${term}”`}
+      title={
+        searched && searched === term
+          ? `No registry servers match “${term}”`
+          : `No catalog matches for “${term}”`
+      }
       description="Search the public MCP registry for a server to connect."
-      action={(
+      action={
         <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={onSearch}>
           {busy ? <Loader2Icon className="animate-spin" /> : <SearchIcon />}
           Search the public MCP registry
         </Button>
-      )}
+      }
     />
   );
 }

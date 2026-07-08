@@ -35,7 +35,9 @@ import type {
 
 export function createScheduledTaskActivities(services: () => Promise<ActivityServices>) {
   return {
-    dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput): Promise<DispatchScheduledTaskRunResult> => {
+    dispatchScheduledTaskRun: async (
+      input: DispatchScheduledTaskRunInput,
+    ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
       // The scheduled task's model can be codex/<slug>; resolve it here so the
@@ -43,8 +45,20 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
       // codex overlay), so the predicate does its own active-credential read.
       const model = task.agentConfig.model ?? settings.openaiModel;
-      const isCodexRun = await isCodexBilledTurn({ db, settings, workspaceId: task.workspaceId, model });
-      await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId, input.agentRunUsageIdempotencyKey ? 0 : 1, isCodexRun);
+      const isCodexRun = await isCodexBilledTurn({
+        db,
+        settings,
+        workspaceId: task.workspaceId,
+        model,
+      });
+      await ensureScheduledRunAllowed(
+        settings,
+        db,
+        task.accountId,
+        task.workspaceId,
+        input.agentRunUsageIdempotencyKey ? 0 : 1,
+        isCodexRun,
+      );
       const run = await createScheduledTaskRun(db, {
         workspaceId: task.workspaceId,
         taskId: task.id,
@@ -114,19 +128,21 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           });
           const goal = goalSpec
             ? await createSessionGoal(db, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              sessionId: session.id,
-              text: goalSpec.text,
-              successCriteria: goalSpec.successCriteria ?? null,
-              maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-              createdBy: "scheduled_task",
-            })
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                sessionId: session.id,
+                text: goalSpec.text,
+                successCriteria: goalSpec.successCriteria ?? null,
+                maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                createdBy: "scheduled_task",
+              })
             : null;
           const workflowId = workflowIdForSession(session.id);
           await setTemporalWorkflowId(db, task.workspaceId, session.id, workflowId);
           if (task.runMode === "reusable_session") {
-            await updateScheduledTask(db, task.workspaceId, task.id, { reusableSessionId: session.id });
+            await updateScheduledTask(db, task.workspaceId, task.id, {
+              reusableSessionId: session.id,
+            });
           }
           const events = await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
             {
@@ -136,23 +152,35 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 scheduledTaskId: task.id,
                 scheduledTaskRunId: run.id,
                 // Names/ids only; never values.
-                ...(variableSet ? { variableSetId: variableSet.id, variableSetName: variableSet.name } : {}),
+                ...(variableSet
+                  ? { variableSetId: variableSet.id, variableSetName: variableSet.name }
+                  : {}),
               },
             },
-            ...(goal ? [{
-              type: "goal.set" as const,
-              payload: {
-                goalId: goal.id,
-                text: goal.text,
-                ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-                version: goal.version,
-                actor: "scheduled_task",
-                replaced: false,
-              },
-            }] : []),
+            ...(goal
+              ? [
+                  {
+                    type: "goal.set" as const,
+                    payload: {
+                      goalId: goal.id,
+                      text: goal.text,
+                      ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                      version: goal.version,
+                      actor: "scheduled_task",
+                      replaced: false,
+                    },
+                  },
+                ]
+              : []),
             {
               type: "user.message",
-              payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
+              payload: scheduledUserMessagePayload(
+                task.agentConfig.prompt,
+                task.agentConfig.resources,
+                taskTools,
+                task.id,
+                run.id,
+              ),
             },
             { type: "session.status.changed", payload: { status: "queued" } },
           ]);
@@ -178,11 +206,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               scheduledTaskRunId: run.id,
             },
           });
-          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [{
-            type: "turn.queued",
-            turnId: turn.id,
-            payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
-          }]);
+          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
+            {
+              type: "turn.queued",
+              turnId: turn.id,
+              payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
+            },
+          ]);
           await updateScheduledTaskRun(db, task.workspaceId, run.id, {
             status: "dispatched",
             sessionId: session.id,
@@ -207,51 +237,70 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           // its creation-time attachment, so a diverged task attachment must
           // fail the run instead of silently running with the wrong secrets.
           if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
-            throw new Error("scheduled task variableSet attachment does not match its reusable session");
+            throw new Error(
+              "scheduled task variableSet attachment does not match its reusable session",
+            );
           }
           // A recurring "maintain X" task re-establishes its objective on every
           // fire: replace the goal text, reactivate it, and reset the counters.
           const reusableGoal = goalSpec
             ? await upsertSessionGoal(db, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              sessionId: session.id,
-              text: goalSpec.text,
-              successCriteria: goalSpec.successCriteria ?? null,
-              maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-              createdBy: "scheduled_task",
-            })
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                sessionId: session.id,
+                text: goalSpec.text,
+                successCriteria: goalSpec.successCriteria ?? null,
+                maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                createdBy: "scheduled_task",
+              })
             : null;
-          const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => {
-            // Authoritative guard under the FOR UPDATE row lock: re-check the
-            // current status to close the TOCTOU between the early read and the
-            // lock (a cancel could land in between). Throwing aborts the whole
-            // append+update transaction, so no user.message is persisted.
-            assertReusableSessionRevivable(locked.status);
-            return {
-              events: [
-                ...(reusableGoal ? [{
-                  type: "goal.set" as const,
-                  payload: {
-                    goalId: reusableGoal.goal.id,
-                    text: reusableGoal.goal.text,
-                    ...(reusableGoal.goal.successCriteria ? { successCriteria: reusableGoal.goal.successCriteria } : {}),
-                    version: reusableGoal.goal.version,
-                    actor: "scheduled_task",
-                    replaced: reusableGoal.replaced,
+          const events = await appendSessionEventsWithLockedSessionUpdate(
+            db,
+            task.workspaceId,
+            session.id,
+            (locked) => {
+              // Authoritative guard under the FOR UPDATE row lock: re-check the
+              // current status to close the TOCTOU between the early read and the
+              // lock (a cancel could land in between). Throwing aborts the whole
+              // append+update transaction, so no user.message is persisted.
+              assertReusableSessionRevivable(locked.status);
+              return {
+                events: [
+                  ...(reusableGoal
+                    ? [
+                        {
+                          type: "goal.set" as const,
+                          payload: {
+                            goalId: reusableGoal.goal.id,
+                            text: reusableGoal.goal.text,
+                            ...(reusableGoal.goal.successCriteria
+                              ? { successCriteria: reusableGoal.goal.successCriteria }
+                              : {}),
+                            version: reusableGoal.goal.version,
+                            actor: "scheduled_task",
+                            replaced: reusableGoal.replaced,
+                          },
+                        },
+                      ]
+                    : []),
+                  {
+                    type: "user.message",
+                    payload: scheduledUserMessagePayload(
+                      task.agentConfig.prompt,
+                      task.agentConfig.resources,
+                      taskTools,
+                      task.id,
+                      run.id,
+                    ),
                   },
-                }] : []),
-                {
-                  type: "user.message",
-                  payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
+                ],
+                update: {
+                  resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
+                  tools: mergeToolRefs(locked.tools, taskTools),
                 },
-              ],
-              update: {
-                resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
-                tools: mergeToolRefs(locked.tools, taskTools),
-              },
-            };
-          });
+              };
+            },
+          );
           await bus.publish(task.workspaceId, session.id, events);
           const trigger = events.find((event) => event.type === "user.message");
           if (!trigger) {
@@ -275,11 +324,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               scheduledTaskRunId: run.id,
             },
           });
-          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [{
-            type: "turn.queued",
-            turnId: turn.id,
-            payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
-          }]);
+          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
+            {
+              type: "turn.queued",
+              turnId: turn.id,
+              payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
+            },
+          ]);
           await updateScheduledTaskRun(db, task.workspaceId, run.id, {
             status: "dispatched",
             sessionId: session.id,
@@ -309,7 +360,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
-        idempotencyKey: input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
+        idempotencyKey:
+          input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
       });
       return result;
     },
@@ -327,32 +379,39 @@ async function ensureScheduledRunAllowed(
   // Codex-billed runs are paid by the user's ChatGPT/Codex plan: skip the
   // credit-balance gate and the monthly model-cost cap. The agent-run COUNT cap
   // below is a volume quota (not a credit/cost gate) and is intentionally kept.
-  if (!isCodexRun && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
+  if (
+    !isCodexRun &&
+    (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
+  ) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient OpenGeni credits");
     }
   }
-	  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-	    const limits = configuredStaticUsageLimits(settings);
-	    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
-	      const used = await sumUsageQuantity(db, {
-	        accountId,
-	        eventType: "model.cost",
-	        since: startOfUtcMonth(),
-	      });
-	      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-	        throw new Error(`monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`);
-	      }
-	    }
-	    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-	      const used = await sumUsageQuantity(db, {
-	        workspaceId,
+  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
+    const limits = configuredStaticUsageLimits(settings);
+    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
+      const used = await sumUsageQuantity(db, {
+        accountId,
+        eventType: "model.cost",
+        since: startOfUtcMonth(),
+      });
+      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
+        throw new Error(
+          `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+        );
+      }
+    }
+    if (limits.maxMonthlyAgentRunsPerWorkspace) {
+      const used = await sumUsageQuantity(db, {
+        workspaceId,
         eventType: "agent_run.created",
         since: startOfUtcMonth(),
       });
       if (used + requestedAgentRuns > limits.maxMonthlyAgentRunsPerWorkspace) {
-        throw new Error(`monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
+        throw new Error(
+          `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
+        );
       }
     }
   }

@@ -80,9 +80,10 @@ function handlerBody(source: string, method: string, path: string): string {
 describe("P4.4 Channel-A route discipline", () => {
   test("all 13 routes are registered", () => {
     for (const route of CHANNEL_A_ROUTES) {
-      expect(routeRegex("post", route.path).test(sessionsRoute), `missing route ${route.path}`).toBe(
-        true,
-      );
+      expect(
+        routeRegex("post", route.path).test(sessionsRoute),
+        `missing route ${route.path}`,
+      ).toBe(true);
     }
   });
 

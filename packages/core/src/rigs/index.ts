@@ -62,12 +62,15 @@ type RigAuditAction =
   | "rig.version.activated"
   | "rig.version.promoted";
 
-export async function recordRigAuditEvent(db: Database, input: {
-  grant: AccessGrant;
-  action: RigAuditAction;
-  rigId: string;
-  metadata?: Record<string, unknown>;
-}): Promise<void> {
+export async function recordRigAuditEvent(
+  db: Database,
+  input: {
+    grant: AccessGrant;
+    action: RigAuditAction;
+    rigId: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
   await recordAuditEvent(db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
@@ -85,7 +88,11 @@ export function rigActorForGrant(grant: AccessGrant): string {
   return `user:${grant.subjectId}`;
 }
 
-export async function requireRigForApi(db: Database, workspaceId: string, rigId: string): Promise<Rig> {
+export async function requireRigForApi(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+): Promise<Rig> {
   const rig = await getRig(db, workspaceId, rigId);
   if (!rig) {
     throw new HTTPException(404, { message: "rig not found" });
@@ -93,7 +100,12 @@ export async function requireRigForApi(db: Database, workspaceId: string, rigId:
   return rig;
 }
 
-export async function requireRigChangeForApi(db: Database, workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+export async function requireRigChangeForApi(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  changeId: string,
+): Promise<RigChange> {
   const change = await getRigChange(db, workspaceId, changeId);
   // RLS + the workspace clause make a cross-workspace id indistinguishable from
   // missing; the rigId clause keeps the change addressable only under its rig.
@@ -127,7 +139,11 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
 
 // Every referenced default variable set must exist in the workspace. RLS makes a
 // cross-workspace id indistinguishable from a missing one, so both map to 422.
-async function assertVariableSetsExist(db: Database, workspaceId: string, ids: ReadonlyArray<string> | undefined): Promise<void> {
+async function assertVariableSetsExist(
+  db: Database,
+  workspaceId: string,
+  ids: ReadonlyArray<string> | undefined,
+): Promise<void> {
   if (!ids || ids.length === 0) {
     return;
   }
@@ -149,8 +165,10 @@ export async function createRigForApi(
   const name = trimmedRigName(payload.name);
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(deps.db, workspaceId, payload.defaultVariableSetIds);
-  if (await countRigs(deps.db, workspaceId) >= MAX_RIGS_PER_WORKSPACE) {
-    throw new HTTPException(422, { message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs` });
+  if ((await countRigs(deps.db, workspaceId)) >= MAX_RIGS_PER_WORKSPACE) {
+    throw new HTTPException(422, {
+      message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
+    });
   }
   if (await getRigByName(deps.db, workspaceId, name)) {
     throw new HTTPException(409, { message: `rig name is already in use: ${name}` });
@@ -206,7 +224,9 @@ export async function deleteRigForApi(
   const workspaceId = grant.workspaceId;
   const deleted = await deleteRigIfNoActiveSessions(deps.db, workspaceId, rig.id);
   if (deleted.activeSessionCount > 0) {
-    throw new HTTPException(409, { message: `rig is referenced by ${deleted.activeSessionCount} active session(s); it cannot be deleted` });
+    throw new HTTPException(409, {
+      message: `rig is referenced by ${deleted.activeSessionCount} active session(s); it cannot be deleted`,
+    });
   }
   if (!deleted.deleted) {
     throw new HTTPException(404, { message: "rig not found" });
@@ -231,7 +251,11 @@ export async function proposeRigChangeForApi(
   }
   if (request.kind === "definition_edit") {
     assertUniqueCheckNames(request.payload.checks);
-    await assertVariableSetsExist(deps.db, workspaceId, request.payload.defaultVariableSetIds ?? undefined);
+    await assertVariableSetsExist(
+      deps.db,
+      workspaceId,
+      request.payload.defaultVariableSetIds ?? undefined,
+    );
   }
   const change = await createRigChange(deps.db, {
     accountId: grant.accountId,
@@ -274,7 +298,10 @@ export function classifyRigVerificationOutcome(input: {
   return { status: "proposed", action: "await_manage_promote" };
 }
 
-export function appendRigSetupCommand(baseSetupScript: string | null | undefined, command: string): string {
+export function appendRigSetupCommand(
+  baseSetupScript: string | null | undefined,
+  command: string,
+): string {
   const base = (baseSetupScript ?? "").trimEnd();
   return base ? `${base}\n${command}` : command;
 }
@@ -308,7 +335,9 @@ export async function promoteSetupAppendChange(
   change: RigChange,
 ): Promise<{ change: RigChange; version: RigVersion }> {
   if (change.kind !== "setup_append") {
-    throw new HTTPException(422, { message: "only setup_append changes auto-promote through this path" });
+    throw new HTTPException(422, {
+      message: "only setup_append changes auto-promote through this path",
+    });
   }
   if (change.status !== "proposed" && change.status !== "verifying") {
     throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
@@ -324,16 +353,25 @@ export async function promoteSetupAppendChange(
   if (typeof payload.command !== "string" || !payload.command.trim()) {
     throw new HTTPException(422, { message: "setup_append change is missing command" });
   }
-  const { version, change: updated } = await promoteChangeWithActiveCas(deps, grant.workspaceId, rig.id, change.id, {
-    expectedActiveVersionId: change.baseVersionId,
-    image: base.image,
-    setupScript: appendRigSetupCommand(base.setupScript, payload.command),
-    checks: base.checks,
-    credentialHooks: base.credentialHooks,
-    defaultVariableSetIds: base.defaultVariableSetIds,
-    changelog: typeof payload.note === "string" && payload.note.trim() ? payload.note : "Verified setup append",
-    createdBy: change.proposedBy ?? rigActorForGrant(grant),
-  });
+  const { version, change: updated } = await promoteChangeWithActiveCas(
+    deps,
+    grant.workspaceId,
+    rig.id,
+    change.id,
+    {
+      expectedActiveVersionId: change.baseVersionId,
+      image: base.image,
+      setupScript: appendRigSetupCommand(base.setupScript, payload.command),
+      checks: base.checks,
+      credentialHooks: base.credentialHooks,
+      defaultVariableSetIds: base.defaultVariableSetIds,
+      changelog:
+        typeof payload.note === "string" && payload.note.trim()
+          ? payload.note
+          : "Verified setup append",
+      createdBy: change.proposedBy ?? rigActorForGrant(grant),
+    },
+  );
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.change.merged",
@@ -362,7 +400,9 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     throw new HTTPException(409, { message: `rig change is ${change.status}; cannot promote` });
   }
   if (change.verification?.passed !== true) {
-    throw new HTTPException(422, { message: "definition_edit change must pass verification before promote" });
+    throw new HTTPException(422, {
+      message: "definition_edit change must pass verification before promote",
+    });
   }
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
@@ -379,16 +419,34 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
-  const { version, change: updated } = await promoteChangeWithActiveCas(deps, grant.workspaceId, rig.id, change.id, {
-    expectedActiveVersionId: change.baseVersionId,
-    image: payload.image === undefined ? base.image : (payload.image as string | null),
-    setupScript: payload.setupScript === undefined ? base.setupScript : (payload.setupScript as string | null),
-    checks: Array.isArray(payload.checks) ? payload.checks as RigVersion["checks"] : base.checks,
-    credentialHooks: Array.isArray(payload.credentialHooks) ? payload.credentialHooks as string[] : base.credentialHooks,
-    defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds) ? payload.defaultVariableSetIds as string[] : base.defaultVariableSetIds,
-    changelog: typeof payload.changelog === "string" && payload.changelog.trim() ? payload.changelog : "Verified definition edit",
-    createdBy: rigActorForGrant(grant),
-  });
+  const { version, change: updated } = await promoteChangeWithActiveCas(
+    deps,
+    grant.workspaceId,
+    rig.id,
+    change.id,
+    {
+      expectedActiveVersionId: change.baseVersionId,
+      image: payload.image === undefined ? base.image : (payload.image as string | null),
+      setupScript:
+        payload.setupScript === undefined
+          ? base.setupScript
+          : (payload.setupScript as string | null),
+      checks: Array.isArray(payload.checks)
+        ? (payload.checks as RigVersion["checks"])
+        : base.checks,
+      credentialHooks: Array.isArray(payload.credentialHooks)
+        ? (payload.credentialHooks as string[])
+        : base.credentialHooks,
+      defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds)
+        ? (payload.defaultVariableSetIds as string[])
+        : base.defaultVariableSetIds,
+      changelog:
+        typeof payload.changelog === "string" && payload.changelog.trim()
+          ? payload.changelog
+          : "Verified definition edit",
+      createdBy: rigActorForGrant(grant),
+    },
+  );
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.change.merged",
@@ -414,17 +472,27 @@ export async function createRigVersionForApi(
     throw new HTTPException(422, { message: "rig has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
-  await assertVariableSetsExist(deps.db, grant.workspaceId, payload.defaultVariableSetIds ?? undefined);
+  await assertVariableSetsExist(
+    deps.db,
+    grant.workspaceId,
+    payload.defaultVariableSetIds ?? undefined,
+  );
   const base = rig.activeVersion;
-  const version = await createRigVersion(deps.db, grant.workspaceId, rig.id, {
-    image: payload.image === undefined ? base.image : payload.image,
-    setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
-    checks: payload.checks ?? base.checks,
-    credentialHooks: payload.credentialHooks ?? base.credentialHooks,
-    defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
-    changelog: payload.changelog ?? "Manager-created version",
-    createdBy: rigActorForGrant(grant),
-  }, { activate: true });
+  const version = await createRigVersion(
+    deps.db,
+    grant.workspaceId,
+    rig.id,
+    {
+      image: payload.image === undefined ? base.image : payload.image,
+      setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
+      checks: payload.checks ?? base.checks,
+      credentialHooks: payload.credentialHooks ?? base.credentialHooks,
+      defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
+      changelog: payload.changelog ?? "Manager-created version",
+      createdBy: rigActorForGrant(grant),
+    },
+    { activate: true },
+  );
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.version.promoted",
@@ -455,10 +523,19 @@ export async function activateRigVersionForApi(
 
 // Read pass-throughs (route-facing; keep the route thin and the imports in one
 // place). Versions/changes are always addressed under their rig.
-export async function listRigVersionsForApi(deps: RigServices, workspaceId: string, rigId: string): Promise<RigVersion[]> {
+export async function listRigVersionsForApi(
+  deps: RigServices,
+  workspaceId: string,
+  rigId: string,
+): Promise<RigVersion[]> {
   return await listRigVersions(deps.db, workspaceId, rigId);
 }
 
-export async function listRigChangesForApi(deps: RigServices, workspaceId: string, rigId: string, limit?: number): Promise<RigChange[]> {
+export async function listRigChangesForApi(
+  deps: RigServices,
+  workspaceId: string,
+  rigId: string,
+  limit?: number,
+): Promise<RigChange[]> {
   return await listRigChanges(deps.db, workspaceId, rigId, limit);
 }

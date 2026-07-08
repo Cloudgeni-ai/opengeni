@@ -61,7 +61,10 @@ describe("rig doctrine block (M3)", () => {
 
   test("the block is non-bypassable: it survives a white-label {{core}} template", () => {
     const template = `You are ACME's co-pilot. ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER} Stay on brand.`;
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { instructionsTemplate: template, rig });
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+      rig,
+    });
     expect(agent.instructions).toContain("You are ACME's co-pilot.");
     expect(agent.instructions).toContain("rig_propose_change");
   });
@@ -69,7 +72,11 @@ describe("rig doctrine block (M3)", () => {
 
 describe("rigSetupScriptCommand (M3)", () => {
   test("guards on the per-version marker and only touches it on success", () => {
-    const command = rigSetupScriptCommand("echo hi", "22222222-2222-4222-8222-222222222222", 600_000);
+    const command = rigSetupScriptCommand(
+      "echo hi",
+      "22222222-2222-4222-8222-222222222222",
+      600_000,
+    );
     expect(command).toContain("mkdir -p '/var/opengeni'");
     expect(command).toContain("/var/opengeni/rig-setup-22222222-2222-4222-8222-222222222222.done");
     // Skip path prints the sentinel and exits 0 without running the script.
@@ -103,7 +110,12 @@ describe("rigSetupScriptCommand (M3)", () => {
     try {
       const versionId = "22222222-2222-4222-8222-222222222222";
       const proof = join(root, "proof.log");
-      const command = rigSetupScriptCommand(`printf 'setup\\n' >> ${JSON.stringify(proof)}\nsleep 1`, versionId, 10_000, root);
+      const command = rigSetupScriptCommand(
+        `printf 'setup\\n' >> ${JSON.stringify(proof)}\nsleep 1`,
+        versionId,
+        10_000,
+        root,
+      );
       const first = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
       const second = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
       expect(await first.exited).toBe(0);
@@ -136,7 +148,9 @@ describe("runRigSetupHook (M3)", () => {
     await runRigSetupHook(session as any, {
       environment: {},
       rigSetup: rigSetup(),
-      onRuntimeEvent: (event) => { events.push(event as any); },
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
     });
     expect(events.map((e) => e.type)).toEqual(["rig.setup.started", "rig.setup.skipped"]);
     const terminal = events.at(-1)!;
@@ -150,7 +164,9 @@ describe("runRigSetupHook (M3)", () => {
     await runRigSetupHook(session as any, {
       environment: {},
       rigSetup: rigSetup(),
-      onRuntimeEvent: (event) => { events.push(event as any); },
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
     });
     expect(events.map((e) => e.type)).toEqual(["rig.setup.started", "rig.setup.completed"]);
     expect(events.at(-1)!.payload.skipped).toBe(false);
@@ -159,11 +175,15 @@ describe("runRigSetupHook (M3)", () => {
   test("nonzero exit → failed event + throw naming the rig/version with output tail", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session } = fakeSession({ status: 7, output: "boom: dependency missing" });
-    await expect(runRigSetupHook(session as any, {
-      environment: {},
-      rigSetup: rigSetup({ rigName: "broken-rig" }),
-      onRuntimeEvent: (event) => { events.push(event as any); },
-    })).rejects.toThrow(/broken-rig/);
+    await expect(
+      runRigSetupHook(session as any, {
+        environment: {},
+        rigSetup: rigSetup({ rigName: "broken-rig" }),
+        onRuntimeEvent: (event) => {
+          events.push(event as any);
+        },
+      }),
+    ).rejects.toThrow(/broken-rig/);
     expect(events.map((e) => e.type)).toEqual(["rig.setup.started", "rig.setup.failed"]);
     expect(events.at(-1)!.payload.error).toContain("exited with code 7");
     expect(events.at(-1)!.payload.error).toContain("boom: dependency missing");
@@ -173,17 +193,24 @@ describe("runRigSetupHook (M3)", () => {
     const events: Array<{ type: string; payload: any }> = [];
     // The provider signals "still running" by returning a session id.
     const { session } = fakeSession({ sessionId: 42, output: "compiling…" });
-    await expect(runRigSetupHook(session as any, {
-      environment: {},
-      rigSetup: rigSetup({ timeoutMs: 2_000 }),
-      onRuntimeEvent: (event) => { events.push(event as any); },
-    })).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
+    await expect(
+      runRigSetupHook(session as any, {
+        environment: {},
+        rigSetup: rigSetup({ timeoutMs: 2_000 }),
+        onRuntimeEvent: (event) => {
+          events.push(event as any);
+        },
+      }),
+    ).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
     expect(events.at(-1)!.type).toBe("rig.setup.failed");
   });
 
   test("passes a yield budget above the in-box hard timeout", async () => {
     const { session, calls } = fakeSession({ status: 0, output: "" });
-    await runRigSetupHook(session as any, { environment: {}, rigSetup: rigSetup({ timeoutMs: 2_000 }) });
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ timeoutMs: 2_000 }),
+    });
     expect(calls[0]?.yieldTimeMs).toBe(9_000);
     expect(String(calls[0]?.cmd)).toContain("__OG_RIG_TIMEOUT_SECS=2");
     expect(calls[0]?.workdir).toBe("/workspace");
@@ -192,7 +219,12 @@ describe("runRigSetupHook (M3)", () => {
   test("no-op when no rig setup is attached", async () => {
     const events: Array<{ type: string; payload: any }> = [];
     const { session, calls } = fakeSession({ status: 0, output: "" });
-    await runRigSetupHook(session as any, { environment: {}, onRuntimeEvent: (event) => { events.push(event as any); } });
+    await runRigSetupHook(session as any, {
+      environment: {},
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
     expect(calls).toHaveLength(0);
     expect(events).toHaveLength(0);
   });

@@ -15,12 +15,21 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
   const passed = typeof verification.passed === "boolean" ? verification.passed : undefined;
   return (
     <div className="grid gap-3">
-      {(verification.startedAt || verification.finishedAt) ? (
+      {verification.startedAt || verification.finishedAt ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-fg-subtle">
-          {verification.startedAt ? <span>Started {formatTimestamp(verification.startedAt)}</span> : null}
-          {verification.finishedAt ? <span>Finished {formatTimestamp(verification.finishedAt)}</span> : null}
+          {verification.startedAt ? (
+            <span>Started {formatTimestamp(verification.startedAt)}</span>
+          ) : null}
+          {verification.finishedAt ? (
+            <span>Finished {formatTimestamp(verification.finishedAt)}</span>
+          ) : null}
           {passed !== undefined ? (
-            <span className={cn("inline-flex items-center gap-1 font-medium", passed ? "text-status-idle" : "text-status-failed")}>
+            <span
+              className={cn(
+                "inline-flex items-center gap-1 font-medium",
+                passed ? "text-status-idle" : "text-status-failed",
+              )}
+            >
               <StatusDot tone={passed ? "idle" : "failed"} />
               {passed ? "All checks passed" : "Checks failed"}
             </span>
@@ -39,7 +48,9 @@ export function VerificationLog({ verification }: { verification: RigChangeVerif
 
       {verification.log ? (
         <div className="grid gap-1.5">
-          <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">Replay log</div>
+          <div className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
+            Replay log
+          </div>
           <pre className="max-h-72 overflow-auto rounded-md border border-border/70 bg-bg/40 p-2.5 font-mono text-2xs leading-4 text-fg-muted">
             {verification.log}
           </pre>
@@ -70,14 +81,26 @@ function CheckResultRow({ result }: { result: RigCheckResult }) {
       >
         <StatusDot tone={ok ? "idle" : "failed"} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium">{result.name || "Unnamed check"}</span>
+          <span className="block truncate text-xs font-medium">
+            {result.name || "Unnamed check"}
+          </span>
           <span className="block truncate font-mono text-2xs text-fg-subtle">{result.command}</span>
         </span>
-        <span className={cn("shrink-0 font-mono text-2xs", ok ? "text-status-idle" : "text-status-failed")}>
+        <span
+          className={cn(
+            "shrink-0 font-mono text-2xs",
+            ok ? "text-status-idle" : "text-status-failed",
+          )}
+        >
           {result.exitCode === null ? "no exit" : `exit ${result.exitCode}`}
         </span>
         {hasOutput ? (
-          <ChevronDownIcon className={cn("size-3.5 shrink-0 text-fg-subtle transition-transform", open ? "rotate-180" : "")} />
+          <ChevronDownIcon
+            className={cn(
+              "size-3.5 shrink-0 text-fg-subtle transition-transform",
+              open ? "rotate-180" : "",
+            )}
+          />
         ) : null}
       </button>
       {open && hasOutput ? (

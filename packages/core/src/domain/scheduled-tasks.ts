@@ -44,9 +44,9 @@ export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
   }
   const agentConfig = (rawPayload as { agentConfig?: unknown }).agentConfig;
   return Boolean(
-    agentConfig
-    && typeof agentConfig === "object"
-    && Object.prototype.hasOwnProperty.call(agentConfig, "tools"),
+    agentConfig &&
+    typeof agentConfig === "object" &&
+    Object.prototype.hasOwnProperty.call(agentConfig, "tools"),
   );
 }
 
@@ -64,7 +64,10 @@ export async function createValidatedScheduledTask(input: {
   // authorized with variable-sets:use when the pack was enabled.
   variableSetPreauthorized?: boolean;
 }): Promise<ScheduledTask> {
-  const agentConfig = await validateScheduledTaskAgentConfig({ ...input, workspaceId: input.grant.workspaceId });
+  const agentConfig = await validateScheduledTaskAgentConfig({
+    ...input,
+    workspaceId: input.grant.workspaceId,
+  });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
   if (input.payload.variableSetId) {
@@ -102,7 +105,11 @@ export async function createValidatedScheduledTask(input: {
 
 // Validate a scheduled task's rig reference: it must name a rig in the
 // workspace. A missing/cross-workspace id is a 422 (RLS-invisible == missing).
-async function requireScheduledTaskRig(db: Database, workspaceId: string, rigId: string): Promise<void> {
+async function requireScheduledTaskRig(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+): Promise<void> {
   const rig = await getRig(db, workspaceId, rigId);
   if (!rig) {
     throw new HTTPException(422, { message: `unknown rigId: ${rigId}` });
@@ -141,10 +148,15 @@ export async function validatedScheduledTaskUpdate(input: {
   }
   if (input.payload.variableSetId !== undefined) {
     const nextVariableSetId = input.payload.variableSetId;
-    if ((input.existing.variableSetId ?? null) !== (nextVariableSetId ?? null)
-      && input.existing.runMode === "reusable_session"
-      && input.existing.reusableSessionId) {
-      throw new HTTPException(409, { message: "cannot change variableSet of a task with a live reusable session; recreate the task" });
+    if (
+      (input.existing.variableSetId ?? null) !== (nextVariableSetId ?? null) &&
+      input.existing.runMode === "reusable_session" &&
+      input.existing.reusableSessionId
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "cannot change variableSet of a task with a live reusable session; recreate the task",
+      });
     }
     if (nextVariableSetId === null) {
       if (input.existing.variableSetId !== null) {
@@ -176,9 +188,10 @@ export async function validatedScheduledTaskUpdate(input: {
     // Editing the instructions of a task that injects workspace secrets is
     // equivalent to attaching those secrets to new instructions, so it
     // requires variable-sets:use even though plain task edits do not.
-    const willHaveVariableSet = input.payload.variableSetId !== undefined
-      ? input.payload.variableSetId !== null
-      : Boolean(input.existing.variableSetId);
+    const willHaveVariableSet =
+      input.payload.variableSetId !== undefined
+        ? input.payload.variableSetId !== null
+        : Boolean(input.existing.variableSetId);
     if (willHaveVariableSet) {
       requirePermission(input.grant, "variable-sets:use");
     }
@@ -194,7 +207,11 @@ export async function validatedScheduledTaskUpdate(input: {
   return update;
 }
 
-export async function requireScheduledTaskForApi(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask> {
+export async function requireScheduledTaskForApi(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<ScheduledTask> {
   const task = await getScheduledTask(db, workspaceId, taskId);
   if (!task) {
     throw new HTTPException(404, { message: "scheduled task not found" });
@@ -202,7 +219,10 @@ export async function requireScheduledTaskForApi(db: Database, workspaceId: stri
   return task;
 }
 
-export async function restoreScheduledTask(db: Database, task: ScheduledTask): Promise<ScheduledTask> {
+export async function restoreScheduledTask(
+  db: Database,
+  task: ScheduledTask,
+): Promise<ScheduledTask> {
   return await updateScheduledTask(db, task.workspaceId, task.id, {
     name: task.name,
     status: task.status,
@@ -224,7 +244,9 @@ export async function syncCreatedScheduledTask(input: {
   try {
     await input.workflowClient.syncScheduledTask({ task: input.task });
   } catch (error) {
-    await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id).catch(() => undefined);
+    await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id).catch(
+      () => undefined,
+    );
     throw error;
   }
 }
@@ -284,7 +306,11 @@ export function manualScheduledTaskTriggerWorkflowId(taskId: string, triggerToke
  * charge. Shares the stable trigger token with the workflow id so the charge
  * and the run dedupe together under retry.
  */
-export function manualScheduledTaskTriggerUsageKey(workspaceId: string, taskId: string, triggerToken: string): string {
+export function manualScheduledTaskTriggerUsageKey(
+  workspaceId: string,
+  taskId: string,
+  triggerToken: string,
+): string {
   return `agent_run.created:scheduled-trigger:${workspaceId}:${taskId}:${triggerToken}`;
 }
 
@@ -303,16 +329,21 @@ async function validateScheduledTaskAgentConfig(input: {
   // default downstream, which is always configured.
   assertConfiguredModel(input.settings, input.payload.agentConfig.model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(input.db, input.workspaceId, input.settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    input.db,
+    input.workspaceId,
+    input.settings,
+  );
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   // A task whose creator did not choose tools gets the workspace's enabled
   // capability MCP servers, exactly like a session created without a tools
   // key. Scheduled runs are sessions too; "no MCP servers at all" was a trap
   // every pack/template instantiation path kept falling into (a maintenance
   // task that cannot reach its workspace's notebook MCP cannot do its job).
-  const tools = (input.toolsProvided ?? true)
-    ? requestedTools
-    : withDefaultEnabledCapabilityMcpTools(requestedTools, input.settings, runtimeSettings);
+  const tools =
+    (input.toolsProvided ?? true)
+      ? requestedTools
+      : withDefaultEnabledCapabilityMcpTools(requestedTools, input.settings, runtimeSettings);
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });

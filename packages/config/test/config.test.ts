@@ -160,7 +160,9 @@ describe("sandbox preparation profiles", () => {
 
   test("rig setup timeout defaults to 10min and parses OPENGENI_RIG_SETUP_TIMEOUT_MS", () => {
     expect(withEnv({}, () => getSettings()).rigSetupTimeoutMs).toBe(600_000);
-    expect(withEnv({ OPENGENI_RIG_SETUP_TIMEOUT_MS: "2000" }, () => getSettings()).rigSetupTimeoutMs).toBe(2_000);
+    expect(
+      withEnv({ OPENGENI_RIG_SETUP_TIMEOUT_MS: "2000" }, () => getSettings()).rigSetupTimeoutMs,
+    ).toBe(2_000);
   });
 
   test("parses boolean environment values without treating false as true", () => {

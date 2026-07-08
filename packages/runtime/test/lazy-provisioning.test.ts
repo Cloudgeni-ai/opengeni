@@ -115,7 +115,13 @@ describe("lazy provisioning synthetic manifest", () => {
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
-      rigSetup: { rigId: "rig-1", rigName: "dev-machine", versionId: "ver-9", script: "echo hi", timeoutMs: 60_000 },
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-9",
+        script: "echo hi",
+        timeoutMs: 60_000,
+      },
     });
     const execCmds: string[] = [];
     const backend = {
@@ -126,7 +132,10 @@ describe("lazy provisioning synthetic manifest", () => {
       },
     };
 
-    await runOwnedSandboxSetup(agent, backend as never, backend as never, { settings, environment });
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+    });
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);

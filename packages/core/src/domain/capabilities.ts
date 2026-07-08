@@ -38,7 +38,12 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { validateVariableSetAttachment } from "./environments";
-import { assertPackSandboxImageCompatible, listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
+import {
+  assertPackSandboxImageCompatible,
+  listCapabilityPacks,
+  listWorkspaceCapabilityPacks,
+  resolveCapabilityPack,
+} from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -68,17 +73,27 @@ export async function buildCapabilityCatalog(input: {
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     discoverBundledSkills(),
   ]);
-  const capabilityInstallationById = new Map(capabilityInstallations.map((installation) => [installation.capabilityId, installation]));
-  const activePackIds = new Set(packInstallations.filter((installation) => installation.status === "active").map((installation) => installation.packId));
+  const capabilityInstallationById = new Map(
+    capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
+  );
+  const activePackIds = new Set(
+    packInstallations
+      .filter((installation) => installation.status === "active")
+      .map((installation) => installation.packId),
+  );
   const builtInPackIds = new Set(listCapabilityPacks().map((pack) => pack.id));
   const builtIns = [
-    ...workspacePacks.map((pack) => packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual")),
+    ...workspacePacks.map((pack) =>
+      packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
+    ),
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(),
     ...bundledSkills,
   ];
   const items = dedupeCatalogItems([...builtIns, ...persistedItems])
-    .map((item) => applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds))
+    .map((item) =>
+      applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds),
+    )
     .sort(compareCatalogItems);
   return {
     items,
@@ -94,12 +109,21 @@ export async function createCatalogItem(input: {
 }): Promise<CapabilityCatalogItem> {
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
   if (id.startsWith("pack:")) {
-    throw new HTTPException(422, { message: "packs are managed by OpenGeni and cannot be manually created" });
+    throw new HTTPException(422, {
+      message: "packs are managed by OpenGeni and cannot be manually created",
+    });
   }
-  const source = input.payload.source === "built_in" || input.payload.source === "configured" || input.payload.source === "registry" ? "manual" : input.payload.source;
+  const source =
+    input.payload.source === "built_in" ||
+    input.payload.source === "configured" ||
+    input.payload.source === "registry"
+      ? "manual"
+      : input.payload.source;
   const metadata = {
     ...input.payload.metadata,
-    ...(input.payload.kind === "mcp" && input.payload.endpointUrl && !input.payload.metadata.mcpServerId
+    ...(input.payload.kind === "mcp" &&
+    input.payload.endpointUrl &&
+    !input.payload.metadata.mcpServerId
       ? { mcpServerId: mcpServerIdForCapability(id, input.payload.metadata) }
       : {}),
   };
@@ -131,9 +155,16 @@ export async function enableCapability(input: {
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
 }): Promise<CapabilityInstallation> {
-  const item = await requireCatalogItem(input.db, input.workspaceId, input.settings, input.capabilityId);
+  const item = await requireCatalogItem(
+    input.db,
+    input.workspaceId,
+    input.settings,
+    input.capabilityId,
+  );
   if (item.kind === "mcp" && !item.runtime.available) {
-    throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled" });
+    throw new HTTPException(422, {
+      message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
+    });
   }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
@@ -178,8 +209,12 @@ export async function enableCapability(input: {
     // a request-supplied id is validated as a fresh attachment, otherwise the
     // attachment stored by a previous enable is preserved and re-validated.
     const existing = await getPackInstallation(input.db, input.workspaceId, packId);
-    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId
-      : typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
+    const storedVariableSetId =
+      typeof existing?.metadata.variableSetId === "string"
+        ? existing.metadata.variableSetId
+        : typeof existing?.metadata.environmentId === "string"
+          ? existing.metadata.environmentId
+          : undefined;
     const requestedVariableSetId = input.payload.variableSetId;
     const variableSetId = requestedVariableSetId ?? storedVariableSetId;
     if (pack.variableSet?.required && !variableSetId) {
@@ -198,10 +233,13 @@ export async function enableCapability(input: {
           input.workspaceId,
           requestedVariableSetId,
         );
-        const missing = (pack.variableSet?.requiredVariables ?? [])
-          .filter((name) => !variableSet.variables.some((variable) => variable.name === name));
+        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
+          (name) => !variableSet.variables.some((variable) => variable.name === name),
+        );
         if (missing.length > 0) {
-          throw new HTTPException(422, { message: `variable set is missing required variable(s): ${missing.join(", ")}` });
+          throw new HTTPException(422, {
+            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
+          });
         }
       } else {
         // The stored attachment was authorized at pack-enable time, but the
@@ -213,10 +251,13 @@ export async function enableCapability(input: {
             message: `the stored variableSet attachment for pack ${packId} no longer exists; re-enable it with variableSetId`,
           });
         }
-        const missing = (pack.variableSet?.requiredVariables ?? [])
-          .filter((name) => !variableSet.variables.some((variable) => variable.name === name));
+        const missing = (pack.variableSet?.requiredVariables ?? []).filter(
+          (name) => !variableSet.variables.some((variable) => variable.name === name),
+        );
         if (missing.length > 0) {
-          throw new HTTPException(422, { message: `variable set is missing required variable(s): ${missing.join(", ")}` });
+          throw new HTTPException(422, {
+            message: `variable set is missing required variable(s): ${missing.join(", ")}`,
+          });
         }
       }
     }
@@ -248,7 +289,12 @@ export async function enableCapability(input: {
  * credentials). Returns null when neither exists.
  */
 async function resolveMcpCredentialHeaders(
-  input: { db: Database; workspaceId: string; settings: Settings; payload: EnableCapabilityRequest },
+  input: {
+    db: Database;
+    workspaceId: string;
+    settings: Settings;
+    payload: EnableCapabilityRequest;
+  },
   item: CapabilityCatalogItem,
 ): Promise<Record<string, string> | null> {
   const provided = normalizedMcpCredentialHeaders(input.payload.headers);
@@ -258,13 +304,22 @@ async function resolveMcpCredentialHeaders(
     requireCapabilityHeaderEncryption(input.settings);
     return provided;
   }
-  const storedCiphertext = await getStoredCapabilityHeaderCiphertext(input.db, input.workspaceId, item.id);
+  const storedCiphertext = await getStoredCapabilityHeaderCiphertext(
+    input.db,
+    input.workspaceId,
+    item.id,
+  );
   if (!storedCiphertext) {
     return null;
   }
   const key = requireCapabilityHeaderEncryption(input.settings);
   try {
-    return Object.fromEntries(Object.entries(storedCiphertext).map(([name, value]) => [name, decryptVariableSetValue(key, value)]));
+    return Object.fromEntries(
+      Object.entries(storedCiphertext).map(([name, value]) => [
+        name,
+        decryptVariableSetValue(key, value),
+      ]),
+    );
   } catch {
     throw new HTTPException(422, {
       message: `stored credential headers for "${item.name}" could not be decrypted; supply them again in the enable request "headers" field`,
@@ -272,13 +327,19 @@ async function resolveMcpCredentialHeaders(
   }
 }
 
-function normalizedMcpCredentialHeaders(headers: Record<string, string>): Record<string, string> | null {
-  const entries = Object.entries(headers).map(([name, value]) => [name.trim(), value] as const).filter(([name]) => name.length > 0);
+function normalizedMcpCredentialHeaders(
+  headers: Record<string, string>,
+): Record<string, string> | null {
+  const entries = Object.entries(headers)
+    .map(([name, value]) => [name.trim(), value] as const)
+    .filter(([name]) => name.length > 0);
   if (entries.length === 0) {
     return null;
   }
   if (entries.length > maxMcpCredentialHeaders) {
-    throw new HTTPException(422, { message: `an MCP capability supports at most ${maxMcpCredentialHeaders} credential headers` });
+    throw new HTTPException(422, {
+      message: `an MCP capability supports at most ${maxMcpCredentialHeaders} credential headers`,
+    });
   }
   const seen = new Set<string>();
   for (const [name, value] of entries) {
@@ -291,13 +352,17 @@ function normalizedMcpCredentialHeaders(headers: Record<string, string>): Record
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
-      throw new HTTPException(422, { message: `credential header ${name} must be 1-${maxMcpCredentialHeaderValueLength} characters` });
+      throw new HTTPException(422, {
+        message: `credential header ${name} must be 1-${maxMcpCredentialHeaderValueLength} characters`,
+      });
     }
     // RFC 9110 §5.5: field values are HTAB / printable characters — reject
     // all other control characters (they would also fail at the HTTP client).
     // eslint-disable-next-line no-control-regex
     if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(value)) {
-      throw new HTTPException(422, { message: `credential header ${name} contains forbidden control characters` });
+      throw new HTTPException(422, {
+        message: `credential header ${name} contains forbidden control characters`,
+      });
     }
   }
   return Object.fromEntries(entries);
@@ -309,7 +374,9 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   if (ref.subjectScope === "subject") {
-    throw new HTTPException(422, { message: "subject-owned connection refs are not supported for agent runtime use yet" });
+    throw new HTTPException(422, {
+      message: "subject-owned connection refs are not supported for agent runtime use yet",
+    });
   }
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
@@ -323,26 +390,44 @@ async function validateMcpCapabilityConnectionRef(
     throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
-    throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef" });
+    throw new HTTPException(422, {
+      message:
+        "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef",
+    });
   }
   if (!normalized.connectionId) {
     return normalized;
   }
-  const connection = await getConnectionMetadata(input.db, input.workspaceId, normalized.connectionId, input.grant.subjectId);
+  const connection = await getConnectionMetadata(
+    input.db,
+    input.workspaceId,
+    normalized.connectionId,
+    input.grant.subjectId,
+  );
   if (!connection) {
-    throw new HTTPException(422, { message: "connectionRef.connectionId does not reference a visible connection" });
+    throw new HTTPException(422, {
+      message: "connectionRef.connectionId does not reference a visible connection",
+    });
   }
   if (connection.subjectId !== null) {
-    throw new HTTPException(422, { message: "agent runtime connection refs must reference workspace-shared connections in I1" });
+    throw new HTTPException(422, {
+      message: "agent runtime connection refs must reference workspace-shared connections in I1",
+    });
   }
   if (connection.status !== "active") {
-    throw new HTTPException(422, { message: `connectionRef.connectionId is not active (${connection.status})` });
+    throw new HTTPException(422, {
+      message: `connectionRef.connectionId is not active (${connection.status})`,
+    });
   }
   if (connection.providerDomain !== normalized.providerDomain) {
-    throw new HTTPException(422, { message: "connectionRef.providerDomain does not match the referenced connection" });
+    throw new HTTPException(422, {
+      message: "connectionRef.providerDomain does not match the referenced connection",
+    });
   }
   if (normalized.kind && connection.kind !== normalized.kind) {
-    throw new HTTPException(422, { message: "connectionRef.kind does not match the referenced connection" });
+    throw new HTTPException(422, {
+      message: "connectionRef.kind does not match the referenced connection",
+    });
   }
   return normalized;
 }
@@ -384,13 +469,17 @@ function requiredCapabilityHeaders(metadata: Record<string, unknown>): string[] 
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim());
+  return value
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)
+    .map((name) => name.trim());
 }
 
 function requireCapabilityHeaderEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new HTTPException(503, { message: "MCP credential headers require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
+    throw new HTTPException(503, {
+      message: "MCP credential headers require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    });
   }
   return key;
 }
@@ -407,7 +496,9 @@ export type McpCapabilityProbeResult = {
   toolCount: number;
 };
 
-export type McpCapabilityProbe = (input: McpCapabilityProbeInput) => Promise<McpCapabilityProbeResult>;
+export type McpCapabilityProbe = (
+  input: McpCapabilityProbeInput,
+) => Promise<McpCapabilityProbeResult>;
 
 export async function validateMcpCapabilityConnection(
   item: CapabilityCatalogItem,
@@ -418,7 +509,9 @@ export async function validateMcpCapabilityConnection(
     return {};
   }
   if (!item.endpointUrl || !item.runtime.mcpServerId) {
-    throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled" });
+    throw new HTTPException(422, {
+      message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
+    });
   }
   try {
     const result = await probe({
@@ -442,10 +535,15 @@ export async function validateMcpCapabilityConnection(
   }
 }
 
-async function probeStreamableHttpMcpServer(input: McpCapabilityProbeInput): Promise<McpCapabilityProbeResult> {
+async function probeStreamableHttpMcpServer(
+  input: McpCapabilityProbeInput,
+): Promise<McpCapabilityProbeResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  const client = new Client({ name: "opengeni-capability-probe", version: "0.1.0" }, { capabilities: {} });
+  const client = new Client(
+    { name: "opengeni-capability-probe", version: "0.1.0" },
+    { capabilities: {} },
+  );
   try {
     const transport = new StreamableHTTPClientTransport(new URL(input.url), {
       requestInit: {
@@ -453,8 +551,14 @@ async function probeStreamableHttpMcpServer(input: McpCapabilityProbeInput): Pro
         ...(input.headers ? { headers: input.headers } : {}),
       },
     });
-    await client.connect(transport as unknown as Transport, { timeout: input.timeoutMs, maxTotalTimeout: input.timeoutMs });
-    const tools = await client.listTools(undefined, { timeout: input.timeoutMs, maxTotalTimeout: input.timeoutMs });
+    await client.connect(transport as unknown as Transport, {
+      timeout: input.timeoutMs,
+      maxTotalTimeout: input.timeoutMs,
+    });
+    const tools = await client.listTools(undefined, {
+      timeout: input.timeoutMs,
+      maxTotalTimeout: input.timeoutMs,
+    });
     return { toolCount: tools.tools.length };
   } finally {
     clearTimeout(timeout);
@@ -466,8 +570,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = message.replace(/\s+/g, " ").trim();
   if (
-    /404|405|not found|unexpected token|not valid json|invalid json|failed to parse|streamable http error|unable to connect|fetch failed|econnrefused|enotfound|timeout|aborted/i
-      .test(normalized)
+    /404|405|not found|unexpected token|not valid json|invalid json|failed to parse|streamable http error|unable to connect|fetch failed|econnrefused|enotfound|timeout|aborted/i.test(
+      normalized,
+    )
   ) {
     return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpointUrl}. Check the endpoint URL or choose a different catalog entry.`;
   }
@@ -481,13 +586,26 @@ export async function disableCapability(input: {
   settings: Settings;
   capabilityId: string;
 }): Promise<CapabilityInstallation> {
-  const item = await requireCatalogItem(input.db, input.workspaceId, input.settings, input.capabilityId);
+  const item = await requireCatalogItem(
+    input.db,
+    input.workspaceId,
+    input.settings,
+    input.capabilityId,
+  );
   if ((item.source === "built_in" || item.source === "configured") && item.kind !== "pack") {
-    throw new HTTPException(409, { message: "built-in and configured capabilities are always available; remove them from configuration to disable them" });
+    throw new HTTPException(409, {
+      message:
+        "built-in and configured capabilities are always available; remove them from configuration to disable them",
+    });
   }
   if (item.kind === "pack") {
-    await updatePackInstallationStatus(input.db, input.workspaceId, packIdFromCapabilityId(item.id), "disabled").catch(() => undefined);
-    if (!await getCapabilityInstallation(input.db, input.workspaceId, item.id)) {
+    await updatePackInstallationStatus(
+      input.db,
+      input.workspaceId,
+      packIdFromCapabilityId(item.id),
+      "disabled",
+    ).catch(() => undefined);
+    if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
       await enableCapabilityInstallation(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -497,18 +615,25 @@ export async function disableCapability(input: {
         config: {},
       });
     }
-  } else if (!await getCapabilityInstallation(input.db, input.workspaceId, item.id)) {
+  } else if (!(await getCapabilityInstallation(input.db, input.workspaceId, item.id))) {
     throw new HTTPException(409, { message: "capability is not currently enabled" });
   }
   return await disableCapabilityInstallation(input.db, input.workspaceId, item.id);
 }
 
-export async function settingsWithEnabledCapabilityMcpServers(db: Database, workspaceId: string, settings: Settings): Promise<Settings> {
+export async function settingsWithEnabledCapabilityMcpServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+): Promise<Settings> {
   const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
   return settingsWithMcpCapabilityServers(settings, enabled);
 }
 
-export function settingsWithMcpCapabilityServers(settings: Settings, enabled: EnabledMcpCapabilityServer[]): Settings {
+export function settingsWithMcpCapabilityServers(
+  settings: Settings,
+  enabled: EnabledMcpCapabilityServer[],
+): Settings {
   if (enabled.length === 0) {
     return settings;
   }
@@ -523,18 +648,22 @@ export function settingsWithMcpCapabilityServers(settings: Settings, enabled: En
         // connect time and break agent turns; leave it out of the run.
         return [];
       }
-      return [{
-        id: server.id,
-        name: server.name,
-        url: server.url,
-        ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
-        ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
-        cacheToolsList: server.cacheToolsList ?? false,
-        ...(headers && headers !== "unavailable" ? { headers } : {}),
-        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
-      }];
+      return [
+        {
+          id: server.id,
+          name: server.name,
+          url: server.url,
+          ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+          ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+          cacheToolsList: server.cacheToolsList ?? false,
+          ...(headers && headers !== "unavailable" ? { headers } : {}),
+          ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
+        },
+      ];
     });
-  return dynamicServers.length ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] } : settings;
+  return dynamicServers.length
+    ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] }
+    : settings;
 }
 
 export async function discoverMcpRegistryCapabilities(input: {
@@ -596,19 +725,25 @@ export { officialMcpRegistryUrl };
 
 type McpRegistryFetch = (input: URL, init?: RequestInit) => Promise<Response>;
 
-async function fetchMcpRegistryPage(url: URL, options: {
-  fetchImpl?: McpRegistryFetch;
-  timeoutMs?: number;
-} = {}): Promise<McpRegistryPage> {
+async function fetchMcpRegistryPage(
+  url: URL,
+  options: {
+    fetchImpl?: McpRegistryFetch;
+    timeoutMs?: number;
+  } = {},
+): Promise<McpRegistryPage> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? mcpRegistryFetchTimeoutMs);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? mcpRegistryFetchTimeoutMs,
+  );
   try {
     const response = await fetchImpl(url, { signal: controller.signal });
     if (!response.ok) {
       throw new HTTPException(502, { message: `MCP registry returned ${response.status}` });
     }
-    return await response.json() as McpRegistryPage;
+    return (await response.json()) as McpRegistryPage;
   } catch (error) {
     if (error instanceof HTTPException) {
       throw error;
@@ -624,16 +759,26 @@ async function fetchMcpRegistryPage(url: URL, options: {
   }
 }
 
-async function requireCatalogItem(db: Database, workspaceId: string, settings: Settings, capabilityId: string): Promise<CapabilityCatalogItem> {
+async function requireCatalogItem(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  capabilityId: string,
+): Promise<CapabilityCatalogItem> {
   const catalog = await buildCapabilityCatalog({ db, workspaceId, settings });
-  const item = catalog.items.find((candidate) => candidate.id === capabilityId) ?? await getCapabilityCatalogItem(db, workspaceId, capabilityId);
+  const item =
+    catalog.items.find((candidate) => candidate.id === capabilityId) ??
+    (await getCapabilityCatalogItem(db, workspaceId, capabilityId));
   if (!item) {
     throw new HTTPException(404, { message: "capability not found" });
   }
   return item;
 }
 
-function packCatalogItem(pack: ReturnType<typeof listCapabilityPacks>[number], source: "built_in" | "manual"): CapabilityCatalogItem {
+function packCatalogItem(
+  pack: ReturnType<typeof listCapabilityPacks>[number],
+  source: "built_in" | "manual",
+): CapabilityCatalogItem {
   return CapabilityCatalogItem.parse({
     id: `pack:${pack.id}`,
     kind: "pack",
@@ -662,28 +807,32 @@ function packCatalogItem(pack: ReturnType<typeof listCapabilityPacks>[number], s
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
-  return settings.mcpServers.map((server) => CapabilityCatalogItem.parse({
-    id: `mcp:${server.id}`,
-    kind: "mcp",
-    source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
-    name: server.name ?? server.id,
-    description: firstPartyMcpDescription(server.id),
-    category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
-    tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
-    endpointUrl: server.url,
-    tools: [{ kind: "mcp", id: server.id }],
-    runtime: {
-      available: true,
-      mcpServerId: server.id,
-      transport: "streamable-http",
-      notes: firstPartyMcpServerIds.has(server.id) ? "Available from OpenGeni runtime configuration." : "Configured through OPENGENI_MCP_SERVERS.",
-    },
-    metadata: {
-      mcpServerId: server.id,
-      allowedTools: server.allowedTools ?? [],
-      cacheToolsList: server.cacheToolsList,
-    },
-  }));
+  return settings.mcpServers.map((server) =>
+    CapabilityCatalogItem.parse({
+      id: `mcp:${server.id}`,
+      kind: "mcp",
+      source: firstPartyMcpServerIds.has(server.id) ? "built_in" : "configured",
+      name: server.name ?? server.id,
+      description: firstPartyMcpDescription(server.id),
+      category: firstPartyMcpServerIds.has(server.id) ? "platform" : "configured",
+      tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
+      endpointUrl: server.url,
+      tools: [{ kind: "mcp", id: server.id }],
+      runtime: {
+        available: true,
+        mcpServerId: server.id,
+        transport: "streamable-http",
+        notes: firstPartyMcpServerIds.has(server.id)
+          ? "Available from OpenGeni runtime configuration."
+          : "Configured through OPENGENI_MCP_SERVERS.",
+      },
+      metadata: {
+        mcpServerId: server.id,
+        allowedTools: server.allowedTools ?? [],
+        cacheToolsList: server.cacheToolsList,
+      },
+    }),
+  );
 }
 
 function platformApiCatalogItems(): CapabilityCatalogItem[] {
@@ -720,76 +869,89 @@ function platformApiCatalogItems(): CapabilityCatalogItem[] {
       tags: ["api", "schedules", "agents"],
       endpointPath: "/v1/workspaces/{workspaceId}/scheduled-tasks",
     },
-  ].map((item) => CapabilityCatalogItem.parse({
-    id: item.id,
-    name: item.name,
-    description: item.description,
-    category: item.category,
-    tags: item.tags,
-    kind: "api",
-    source: "built_in",
-    runtime: {
-      available: true,
-      notes: "Available through the OpenGeni API.",
-    },
-    metadata: {
-      endpointPath: item.endpointPath,
-    },
-  }));
+  ].map((item) =>
+    CapabilityCatalogItem.parse({
+      id: item.id,
+      name: item.name,
+      description: item.description,
+      category: item.category,
+      tags: item.tags,
+      kind: "api",
+      source: "built_in",
+      runtime: {
+        available: true,
+        notes: "Available through the OpenGeni API.",
+      },
+      metadata: {
+        endpointPath: item.endpointPath,
+      },
+    }),
+  );
 }
 
 async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
-  const skillsDir = new URL("../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/", import.meta.url);
+  const skillsDir = new URL(
+    "../../../../packages/runtime/src/bundled_hashicorp_terraform_skills/",
+    import.meta.url,
+  );
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
-    const skills = await Promise.all(entries
-      .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const skill = await readSkillMetadata(new URL(`${entry.name}/SKILL.md`, skillsDir), entry.name);
-        return CapabilityCatalogItem.parse({
-          id: `skill:${entry.name}`,
-          kind: "skill",
-          source: "built_in",
-          name: skill.name,
-          description: skill.description,
-          category: skill.category,
-          tags: ["skill", skill.category],
-          runtime: {
-            available: true,
-            notes: "Bundled into the sandbox skill library.",
-          },
-          metadata: {
-            path: `packages/runtime/src/bundled_hashicorp_terraform_skills/${entry.name}/SKILL.md`,
-          },
-        });
-      }));
+    const skills = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const skill = await readSkillMetadata(
+            new URL(`${entry.name}/SKILL.md`, skillsDir),
+            entry.name,
+          );
+          return CapabilityCatalogItem.parse({
+            id: `skill:${entry.name}`,
+            kind: "skill",
+            source: "built_in",
+            name: skill.name,
+            description: skill.description,
+            category: skill.category,
+            tags: ["skill", skill.category],
+            runtime: {
+              available: true,
+              notes: "Bundled into the sandbox skill library.",
+            },
+            metadata: {
+              path: `packages/runtime/src/bundled_hashicorp_terraform_skills/${entry.name}/SKILL.md`,
+            },
+          });
+        }),
+    );
     return skills;
   } catch {
     return [];
   }
 }
 
-async function readSkillMetadata(url: URL, fallbackName: string): Promise<{ name: string; description: string | null; category: string }> {
+async function readSkillMetadata(
+  url: URL,
+  fallbackName: string,
+): Promise<{ name: string; description: string | null; category: string }> {
   const content = await readFile(url, "utf8");
   const frontMatter = content.match(/^---\n([\s\S]*?)\n---/);
   const frontMatterBody = frontMatter?.[1] ?? "";
   const name = frontMatterBody.match(/^name:\s*(.+)$/m)?.[1]?.trim() || fallbackName;
-  const blockDescription = frontMatterBody.match(/^description:\s*>-\s*\n([\s\S]*?)(?:\n[a-zA-Z_-]+:|\n?$)/m)?.[1]
+  const blockDescription = frontMatterBody
+    .match(/^description:\s*>-\s*\n([\s\S]*?)(?:\n[a-zA-Z_-]+:|\n?$)/m)?.[1]
     ?.split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
     .join(" ");
   const inlineDescription = frontMatterBody.match(/^description:\s*(?!>-\s*$)(.+)$/m)?.[1]?.trim();
-  const description = blockDescription
-    || inlineDescription
-    || content.match(/^#\s+(.+)$/m)?.[1]?.trim()
-    || null;
+  const description =
+    blockDescription || inlineDescription || content.match(/^#\s+(.+)$/m)?.[1]?.trim() || null;
   const lower = `${fallbackName} ${name} ${description ?? ""}`.toLowerCase();
-  const category = lower.includes("social") || lower.includes("marketing")
-    ? "marketing"
-    : lower.includes("checkov") || lower.includes("terraform") || lower.includes("azure")
-      ? "infrastructure"
-      : "general";
+  const category =
+    lower.includes("social") || lower.includes("marketing")
+      ? "marketing"
+      : lower.includes("checkov") || lower.includes("terraform") || lower.includes("azure")
+        ? "infrastructure"
+        : "general";
   return { name, description, category };
 }
 
@@ -801,7 +963,8 @@ export function applyCapabilityEnablement(
   if (item.kind === "pack") {
     // Pack enablement lives in pack_installations regardless of whether the
     // pack is built in or registered from a workspace manifest.
-    const enabled = activePackIds.has(packIdFromCapabilityId(item.id)) || installation?.status === "active";
+    const enabled =
+      activePackIds.has(packIdFromCapabilityId(item.id)) || installation?.status === "active";
     return {
       ...item,
       enabled,
@@ -831,13 +994,19 @@ export function applyCapabilityEnablement(
  * the enable path — see enableCapability). Headers-enabled and credential-
  * free installations never set it, so this returns null for them.
  */
-function installationConnectionRef(config: Record<string, unknown>): CapabilityCatalogItem["connectionRef"] {
+function installationConnectionRef(
+  config: Record<string, unknown>,
+): CapabilityCatalogItem["connectionRef"] {
   const ref = config.connectionRef;
   if (!ref || typeof ref !== "object") {
     return null;
   }
   const { connectionId, providerDomain, kind } = ref as Record<string, unknown>;
-  if (typeof connectionId !== "string" || typeof providerDomain !== "string" || typeof kind !== "string") {
+  if (
+    typeof connectionId !== "string" ||
+    typeof providerDomain !== "string" ||
+    typeof kind !== "string"
+  ) {
     return null;
   }
   return { connectionId, providerDomain, kind };
@@ -869,7 +1038,11 @@ function firstPartyMcpDescription(id: string): string | null {
 }
 
 function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): string {
-  const source = [payload.kind, payload.name, payload.endpointUrl ?? payload.installUrl ?? payload.homepageUrl ?? ""].join(":");
+  const source = [
+    payload.kind,
+    payload.name,
+    payload.endpointUrl ?? payload.installUrl ?? payload.homepageUrl ?? "",
+  ].join(":");
   return `${payload.kind}:${slugify(payload.name)}-${shortHash(source)}`;
 }
 
@@ -890,7 +1063,13 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function slugify(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "capability";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60) || "capability"
+  );
 }
 
 function shortHash(value: string): string {
@@ -954,7 +1133,9 @@ function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatal
   if (official?.isLatest === false) {
     return null;
   }
-  const remote = server.remotes?.find((candidate) => candidate.type === "streamable-http" && candidate.url);
+  const remote = server.remotes?.find(
+    (candidate) => candidate.type === "streamable-http" && candidate.url,
+  );
   const endpointUrl = validUrl(remote?.url);
   if (!remote || !endpointUrl) {
     return null;
@@ -971,7 +1152,12 @@ function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatal
     name: server.title || server.name,
     description: server.description ?? null,
     category: "public-mcp",
-    tags: ["mcp", "public", "registry", ...(requiredHeaders.length ? ["requires-credentials"] : [])],
+    tags: [
+      "mcp",
+      "public",
+      "registry",
+      ...(requiredHeaders.length ? ["requires-credentials"] : []),
+    ],
     homepageUrl,
     endpointUrl,
     installUrl: homepageUrl,
@@ -981,9 +1167,10 @@ function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatal
       available: true,
       mcpServerId,
       transport: "streamable-http",
-      notes: requiredHeaders.length === 0
-        ? "Remote MCP server from the official MCP Registry."
-        : `This MCP requires credential header(s) ${requiredHeaders.join(", ")} supplied in the enable request.`,
+      notes:
+        requiredHeaders.length === 0
+          ? "Remote MCP server from the official MCP Registry."
+          : `This MCP requires credential header(s) ${requiredHeaders.join(", ")} supplied in the enable request.`,
     },
     metadata: {
       registry: "official_mcp_registry",
@@ -1024,7 +1211,10 @@ function catalogSearchText(item: CapabilityCatalogItem): string {
     item.homepageUrl,
     item.installUrl,
     JSON.stringify(item.metadata),
-  ].filter(Boolean).join(" ").toLowerCase();
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 }
 
 function capabilityInstallationRuntimeReady(
@@ -1041,17 +1231,22 @@ function capabilityInstallationRuntimeReady(
     return false;
   }
   const connectivity = installation.metadata.mcpConnectivity;
-  return !!connectivity
-    && typeof connectivity === "object"
-    && "status" in connectivity
-    && (connectivity.status === "ok" || connectivity.status === "auth_deferred");
+  return (
+    !!connectivity &&
+    typeof connectivity === "object" &&
+    "status" in connectivity &&
+    (connectivity.status === "ok" || connectivity.status === "auth_deferred")
+  );
 }
 
 /**
  * Checks the redacted installation config (header names only) against the
  * capability's declared credential requirements.
  */
-function storedCredentialHeadersSatisfy(item: CapabilityCatalogItem, installation: CapabilityInstallation): boolean {
+function storedCredentialHeadersSatisfy(
+  item: CapabilityCatalogItem,
+  installation: CapabilityInstallation,
+): boolean {
   if (storedConnectionRef(installation.config)) {
     return true;
   }
@@ -1069,6 +1264,10 @@ function storedCredentialHeadersSatisfy(item: CapabilityCatalogItem, installatio
 
 function storedConnectionRef(config: Record<string, unknown>): boolean {
   const ref = config.connectionRef;
-  return !!ref && typeof ref === "object" && !Array.isArray(ref)
-    && typeof (ref as { providerDomain?: unknown }).providerDomain === "string";
+  return (
+    !!ref &&
+    typeof ref === "object" &&
+    !Array.isArray(ref) &&
+    typeof (ref as { providerDomain?: unknown }).providerDomain === "string"
+  );
 }

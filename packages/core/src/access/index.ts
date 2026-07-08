@@ -59,10 +59,14 @@ export async function requireAccessGrant(
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
   if (!hasPermission(grant.permissions, permission)) {
     if (permission === "variable-sets:use") {
-      throw new HTTPException(403, { message: "missing permission: variable-sets:use (deprecated alias: environments:use)" });
+      throw new HTTPException(403, {
+        message: "missing permission: variable-sets:use (deprecated alias: environments:use)",
+      });
     }
     if (permission === "variable-sets:manage") {
-      throw new HTTPException(403, { message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)" });
+      throw new HTTPException(403, {
+        message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)",
+      });
     }
     throw new HTTPException(403, { message: `missing permission: ${permission}` });
   }
@@ -73,9 +77,11 @@ export function hasPermission(permissions: Permission[], permission: Permission)
     "variable-sets:use": ["environments:use" as Permission],
     "variable-sets:manage": ["environments:manage" as Permission],
   };
-  return permissions.includes(permission)
-    || (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false)
-    || permissions.includes("workspace:admin");
+  return (
+    permissions.includes(permission) ||
+    (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false) ||
+    permissions.includes("workspace:admin")
+  );
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {

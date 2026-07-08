@@ -54,7 +54,9 @@ export function RigSetupSection({
           const result = await onPropose(request);
           if (result) {
             setEditing(false);
-            toast.success("Change proposed", { description: "It's being verified in a clean sandbox before it can merge." });
+            toast.success("Change proposed", {
+              description: "It's being verified in a clean sandbox before it can merge.",
+            });
             onProposed();
           }
           return result;
@@ -67,12 +69,18 @@ export function RigSetupSection({
     <div className="grid gap-4">
       <div className="flex items-start justify-between gap-3">
         <p className="max-w-xl text-xs leading-5 text-fg-muted">
-          Editing the machine doesn't change the active version in place. It proposes a change that's verified from a clean
-          sandbox, then promoted into a new immutable version — so the team's machine only ever moves forward on things that
-          actually reproduce.
+          Editing the machine doesn't change the active version in place. It proposes a change
+          that's verified from a clean sandbox, then promoted into a new immutable version — so the
+          team's machine only ever moves forward on things that actually reproduce.
         </p>
         {canPropose ? (
-          <Button type="button" variant="secondary" size="sm" className="h-8 shrink-0" onClick={() => setEditing(true)}>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-8 shrink-0"
+            onClick={() => setEditing(true)}
+          >
             <PencilIcon className="size-3.5" />
             Propose edit
           </Button>
@@ -81,9 +89,13 @@ export function RigSetupSection({
 
       <Section label="Setup script">
         {activeVersion.setupScript ? (
-          <pre className="max-h-96 overflow-auto rounded-md border border-border/70 bg-bg/40 p-3 font-mono text-2xs leading-4">{activeVersion.setupScript}</pre>
+          <pre className="max-h-96 overflow-auto rounded-md border border-border/70 bg-bg/40 p-3 font-mono text-2xs leading-4">
+            {activeVersion.setupScript}
+          </pre>
         ) : (
-          <p className="text-xs text-fg-subtle">No setup script — sandboxes boot straight from the image.</p>
+          <p className="text-xs text-fg-subtle">
+            No setup script — sandboxes boot straight from the image.
+          </p>
         )}
       </Section>
     </div>
@@ -128,10 +140,18 @@ function DefinitionEditor({
     <div className="grid gap-4 rounded-lg border border-border bg-surface p-4">
       <div>
         <h3 className="text-sm font-medium">Propose a definition edit</h3>
-        <p className="mt-0.5 text-xs text-fg-muted">Changes are verified from a clean sandbox before you can promote them.</p>
+        <p className="mt-0.5 text-xs text-fg-muted">
+          Changes are verified from a clean sandbox before you can promote them.
+        </p>
       </div>
 
-      <RigDefinitionFields value={draft} onChange={setDraft} variableSets={variableSets} disabled={mutating} idPrefix="edit-rig" />
+      <RigDefinitionFields
+        value={draft}
+        onChange={setDraft}
+        variableSets={variableSets}
+        disabled={mutating}
+        idPrefix="edit-rig"
+      />
 
       <div className="grid gap-1.5">
         <Label htmlFor="edit-rig-changelog">Changelog</Label>
@@ -148,7 +168,13 @@ function DefinitionEditor({
         <Button type="button" variant="ghost" size="sm" className="h-9" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="button" size="sm" className="h-9" disabled={mutating} onClick={() => void submit()}>
+        <Button
+          type="button"
+          size="sm"
+          className="h-9"
+          disabled={mutating}
+          onClick={() => void submit()}
+        >
           Propose change
         </Button>
       </div>

@@ -22,7 +22,14 @@ import {
   updateRigChangeStatus,
   type Database,
 } from "@opengeni/db";
-import { freePort, startProcess, startTestServices, waitFor, type StartedProcess, type TestServices } from "@opengeni/testing";
+import {
+  freePort,
+  startProcess,
+  startTestServices,
+  waitFor,
+  type StartedProcess,
+  type TestServices,
+} from "@opengeni/testing";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const STATE_FILE = `${process.env.RIG_UI_STATE_DIR ?? "/tmp"}/rig-ui-stack.json`;
@@ -57,21 +64,32 @@ async function main() {
   api = await startProcess(["bun", "apps/api/src/index.ts"], {
     cwd: repoRoot,
     env,
-    ready: async () => (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
+    ready: async () =>
+      (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
     timeoutMs: 90_000,
   });
 
   console.log("[rig-ui] starting web…");
-  web = await startProcess(["bun", "run", "vite", "dev", "--port", String(webPort), "--strictPort", "--host", "127.0.0.1"], {
-    cwd: `${repoRoot}/apps/web`,
-    env: { VITE_API_BASE_URL: `http://127.0.0.1:${apiPort}` },
-    ready: async () => (await fetch(`http://127.0.0.1:${webPort}`).catch(() => null))?.ok === true,
-    timeoutMs: 60_000,
-  });
+  web = await startProcess(
+    ["bun", "run", "vite", "dev", "--port", String(webPort), "--strictPort", "--host", "127.0.0.1"],
+    {
+      cwd: `${repoRoot}/apps/web`,
+      env: { VITE_API_BASE_URL: `http://127.0.0.1:${apiPort}` },
+      ready: async () =>
+        (await fetch(`http://127.0.0.1:${webPort}`).catch(() => null))?.ok === true,
+      timeoutMs: 60_000,
+    },
+  );
 
   // Force the local-mode workspace bootstrap, then read its ids from the API.
-  await waitFor(async () => (await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`).catch(() => null))?.ok === true, { timeoutMs: 30_000 });
-  const workspaces = (await (await fetch(`http://127.0.0.1:${apiPort}/v1/workspaces`)).json()) as Array<{ id: string; accountId: string; name: string }>;
+  await waitFor(
+    async () =>
+      (await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`).catch(() => null))?.ok === true,
+    { timeoutMs: 30_000 },
+  );
+  const workspaces = (await (
+    await fetch(`http://127.0.0.1:${apiPort}/v1/workspaces`)
+  ).json()) as Array<{ id: string; accountId: string; name: string }>;
   const local = workspaces.find((workspace) => workspace.name === "Local") ?? workspaces[0];
   if (!local) {
     throw new Error("Local workspace was not bootstrapped");
@@ -84,7 +102,14 @@ async function main() {
   await seed(db, accountId, workspaceId);
 
   mkdirSync(STATE_FILE.replace(/\/[^/]+$/, ""), { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify({ apiPort, webPort, accountId, workspaceId, baseUrl: `http://127.0.0.1:${webPort}` }, null, 2));
+  writeFileSync(
+    STATE_FILE,
+    JSON.stringify(
+      { apiPort, webPort, accountId, workspaceId, baseUrl: `http://127.0.0.1:${webPort}` },
+      null,
+      2,
+    ),
+  );
   console.log(`[rig-ui] READY  web=http://127.0.0.1:${webPort}  workspace=${workspaceId}`);
   console.log(`[rig-ui] state written to ${STATE_FILE}. Leave this running; Ctrl-C to tear down.`);
 
@@ -167,7 +192,12 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
     "Bump base image to :2026-06",
     "Add uv package manager",
   ];
-  const actors = ["user:alice", "session:9f2c1a7b-4d5e-6f70-8192-a3b4c5d6e7f8", "system", "user:you"];
+  const actors = [
+    "user:alice",
+    "session:9f2c1a7b-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "system",
+    "user:you",
+  ];
   let setup = "apt-get update\napt-get install -y ripgrep jq";
   for (let index = 0; index < changelogs.length; index += 1) {
     setup += `\n# ${changelogs[index]}\napt-get install -y tool-${index}`;
@@ -176,7 +206,10 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
       workspaceId,
       dev.id,
       {
-        image: index >= changelogs.length - 2 ? "ghcr.io/opengeni/dev:2026-06" : "ghcr.io/opengeni/dev:base",
+        image:
+          index >= changelogs.length - 2
+            ? "ghcr.io/opengeni/dev:2026-06"
+            : "ghcr.io/opengeni/dev:base",
         setupScript: setup,
         checks: [
           { name: "ripgrep present", command: "rg --version" },
@@ -197,7 +230,12 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
   const passingChecks = [
     { name: "ripgrep present", command: "rg --version", exitCode: 0, output: "ripgrep 13.0.0" },
     { name: "jq present", command: "jq --version", exitCode: 0, output: "jq-1.7" },
-    { name: "docker present", command: "docker --version", exitCode: 0, output: "Docker version 27.1.1, build 6312585" },
+    {
+      name: "docker present",
+      command: "docker --version",
+      exitCode: 0,
+      output: "Docker version 27.1.1, build 6312585",
+    },
   ];
 
   // a) A merged setup command (auto-promoted on green).
@@ -232,7 +270,10 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
   });
   await updateRigChangeStatus(db, workspaceId, verifying.id, {
     status: "verifying",
-    verification: { startedAt: new Date(Date.now() - 20_000).toISOString(), log: "+ pulling image…\n+ starting clean sandbox…" },
+    verification: {
+      startedAt: new Date(Date.now() - 20_000).toISOString(),
+      log: "+ pulling image…\n+ starting clean sandbox…",
+    },
   });
 
   // c) A rejected change — a check failed, with the log visible.
@@ -289,7 +330,15 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
       finishedAt: new Date(Date.now() - 8 * 60_000).toISOString(),
       passed: true,
       log: "+ starting clean sandbox…\n+ apt-get install -y terraform\n+ running checks…\nterraform version -> ok",
-      checkResults: [...passingChecks, { name: "terraform present", command: "terraform version", exitCode: 0, output: "Terraform v1.9.5" }],
+      checkResults: [
+        ...passingChecks,
+        {
+          name: "terraform present",
+          command: "terraform version",
+          exitCode: 0,
+          output: "Terraform v1.9.5",
+        },
+      ],
     },
   });
 

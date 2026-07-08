@@ -156,23 +156,46 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
-    return this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
+    return this.fabricateSession(
+      sessionId,
+      this.bus(sessionId).status,
+      "Ops channel — manager session",
+    );
   }
 
-  async getSessionLineage(_workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
-    const children = sessionId === MANAGER_SESSION_ID
-      ? [{ session: this.fabricateSession(WORKER_SESSION_ID, "running", "Worker session"), children: [] }]
-      : [];
+  async getSessionLineage(
+    _workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionLineageResponse> {
+    const children =
+      sessionId === MANAGER_SESSION_ID
+        ? [
+            {
+              session: this.fabricateSession(WORKER_SESSION_ID, "running", "Worker session"),
+              children: [],
+            },
+          ]
+        : [];
     return { ancestors: [], children, truncated: false };
   }
 
-  async updateSession(_workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
-    const session = this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
+  async updateSession(
+    _workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionRequest,
+  ): Promise<Session> {
+    const session = this.fabricateSession(
+      sessionId,
+      this.bus(sessionId).status,
+      "Ops channel — manager session",
+    );
     return { ...session, title: request.title, titleSource: "user" };
   }
 
   async listSessions(): Promise<Session[]> {
-    return FLEET.map((spec) => this.fabricateSession(spec.id, spec.status, spec.title, spec.agoMinutes));
+    return FLEET.map((spec) =>
+      this.fabricateSession(spec.id, spec.status, spec.title, spec.agoMinutes),
+    );
   }
 
   async listEvents(
@@ -256,7 +279,9 @@ export class MockOpenGeniClient implements SessionClientLike {
     update: UpdateSessionTurnRequest,
   ): Promise<SessionTurn> {
     const turns = this.sessionTurns(sessionId);
-    const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+    const turn = turns.find(
+      (candidate) => candidate.id === turnId && candidate.status === "queued",
+    );
     if (!turn) {
       throw new Error(`queued turn not found: ${turnId}`);
     }
@@ -270,10 +295,16 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...turn };
   }
 
-  async reorderQueuedTurns(_workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
+  async reorderQueuedTurns(
+    _workspaceId: string,
+    sessionId: string,
+    turnIds: string[],
+  ): Promise<SessionTurn[]> {
     const turns = this.sessionTurns(sessionId);
     turnIds.forEach((turnId, index) => {
-      const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+      const turn = turns.find(
+        (candidate) => candidate.id === turnId && candidate.status === "queued",
+      );
       if (turn) {
         turn.position = index + 1;
       }
@@ -282,9 +313,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     return turns.filter((turn) => turn.status === "queued").sort((a, b) => a.position - b.position);
   }
 
-  async deleteQueuedTurn(_workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
+  async deleteQueuedTurn(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+  ): Promise<SessionTurn> {
     const turns = this.sessionTurns(sessionId);
-    const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+    const turn = turns.find(
+      (candidate) => candidate.id === turnId && candidate.status === "queued",
+    );
     if (!turn) {
       throw new Error(`queued turn not found: ${turnId}`);
     }
@@ -315,14 +352,20 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...goal };
   }
 
-  async updateGoal(workspaceId: string, sessionId: string, request: UpdateSessionGoalRequest): Promise<SessionGoal> {
+  async updateGoal(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionGoalRequest,
+  ): Promise<SessionGoal> {
     const goal = await this.getGoal(workspaceId, sessionId);
     goal.status = request.status;
     goal.rationale = request.rationale ?? goal.rationale;
     goal.pausedReason = request.status === "paused" ? "api" : null;
     goal.updatedAt = new Date().toISOString();
     this.goals.set(sessionId, goal);
-    this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", { goalId: goal.id });
+    this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", {
+      goalId: goal.id,
+    });
     return { ...goal };
   }
 
@@ -338,7 +381,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     this.bus(sessionId).append("session.context.cleared", { clearedBy: "api" });
   }
 
-  async compactSessionContext(_workspaceId: string, sessionId: string): Promise<{ status: "queued" | "noop"; message: string }> {
+  async compactSessionContext(
+    _workspaceId: string,
+    sessionId: string,
+  ): Promise<{ status: "queued" | "noop"; message: string }> {
     this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
     return { status: "queued", message: "Compaction will run before the next turn." };
   }
@@ -353,7 +399,10 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
 
-  private environments: WorkspaceEnvironment[] = [fabricateEnvironment("staging"), fabricateEnvironment("production")];
+  private environments: WorkspaceEnvironment[] = [
+    fabricateEnvironment("staging"),
+    fabricateEnvironment("production"),
+  ];
 
   async listEnvironments(): Promise<WorkspaceEnvironment[]> {
     return [...this.environments];
@@ -363,13 +412,22 @@ export class MockOpenGeniClient implements SessionClientLike {
     return await this.listEnvironments();
   }
 
-  async createEnvironment(_workspaceId: string, request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment> {
-    const environment = fabricateEnvironment(request.name, request.variables?.map((variable) => variable.name) ?? []);
+  async createEnvironment(
+    _workspaceId: string,
+    request: CreateWorkspaceEnvironmentRequest,
+  ): Promise<WorkspaceEnvironment> {
+    const environment = fabricateEnvironment(
+      request.name,
+      request.variables?.map((variable) => variable.name) ?? [],
+    );
     this.environments.push(environment);
     return { ...environment };
   }
 
-  async createVariableSet(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+  async createVariableSet(
+    workspaceId: string,
+    request: CreateVariableSetRequest,
+  ): Promise<VariableSet> {
     return await this.createEnvironment(workspaceId, request);
   }
 
@@ -391,7 +449,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...environment };
   }
 
-  async updateVariableSet(workspaceId: string, variableSetId: string, request: UpdateVariableSetRequest): Promise<VariableSet> {
+  async updateVariableSet(
+    workspaceId: string,
+    variableSetId: string,
+    request: UpdateVariableSetRequest,
+  ): Promise<VariableSet> {
     return await this.updateEnvironment(workspaceId, variableSetId, request);
   }
 
@@ -425,18 +487,31 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...created };
   }
 
-  async setVariableSetVariable(workspaceId: string, variableSetId: string, name: string, value: string): Promise<VariableSetVariableMetadata> {
+  async setVariableSetVariable(
+    workspaceId: string,
+    variableSetId: string,
+    name: string,
+    value: string,
+  ): Promise<VariableSetVariableMetadata> {
     return await this.setEnvironmentVariable(workspaceId, variableSetId, name, value);
   }
 
-  async deleteEnvironmentVariable(_workspaceId: string, environmentId: string, name: string): Promise<void> {
+  async deleteEnvironmentVariable(
+    _workspaceId: string,
+    environmentId: string,
+    name: string,
+  ): Promise<void> {
     const environment = this.environments.find((candidate) => candidate.id === environmentId);
     if (environment) {
       environment.variables = environment.variables.filter((variable) => variable.name !== name);
     }
   }
 
-  async deleteVariableSetVariable(workspaceId: string, variableSetId: string, name: string): Promise<void> {
+  async deleteVariableSetVariable(
+    workspaceId: string,
+    variableSetId: string,
+    name: string,
+  ): Promise<void> {
     await this.deleteEnvironmentVariable(workspaceId, variableSetId, name);
   }
 
@@ -510,10 +585,16 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async listRigVersions(_workspaceId: string, rigId: string): Promise<RigVersion[]> {
-    return this.rigVersions.filter((candidate) => candidate.rigId === rigId).sort((a, b) => b.version - a.version);
+    return this.rigVersions
+      .filter((candidate) => candidate.rigId === rigId)
+      .sort((a, b) => b.version - a.version);
   }
 
-  async activateRigVersion(_workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+  async activateRigVersion(
+    _workspaceId: string,
+    rigId: string,
+    versionId: string,
+  ): Promise<RigVersion> {
     let activated: RigVersion | undefined;
     for (const version of this.rigVersions) {
       if (version.rigId === rigId) {
@@ -538,7 +619,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return this.rigChanges.filter((candidate) => candidate.rigId === rigId);
   }
 
-  async proposeRigChange(_workspaceId: string, rigId: string, request: ProposeRigChangeRequest): Promise<RigChange> {
+  async proposeRigChange(
+    _workspaceId: string,
+    rigId: string,
+    request: ProposeRigChangeRequest,
+  ): Promise<RigChange> {
     const rig = await this.getRig(_workspaceId, rigId);
     const now = new Date().toISOString();
     const change: RigChange = {
@@ -559,7 +644,9 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async getRigChange(_workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
-    const change = this.rigChanges.find((candidate) => candidate.id === changeId && candidate.rigId === rigId);
+    const change = this.rigChanges.find(
+      (candidate) => candidate.id === changeId && candidate.rigId === rigId,
+    );
     if (!change) {
       throw new Error(`rig change not found: ${changeId}`);
     }
@@ -573,7 +660,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return change;
   }
 
-  async promoteRigChange(_workspaceId: string, rigId: string, changeId: string): Promise<RigVersion> {
+  async promoteRigChange(
+    _workspaceId: string,
+    rigId: string,
+    changeId: string,
+  ): Promise<RigVersion> {
     const change = await this.getRigChange(_workspaceId, rigId, changeId);
     const rig = this.rigs.find((candidate) => candidate.id === rigId);
     const base = rig?.activeVersion ?? null;
@@ -607,7 +698,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     return version;
   }
 
-  async verifyRig(_workspaceId: string, rigId: string): Promise<{ ok: boolean; versionId: string }> {
+  async verifyRig(
+    _workspaceId: string,
+    rigId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
     const rig = await this.getRig(_workspaceId, rigId);
     return { ok: true, versionId: rig.activeVersion?.id ?? "" };
   }
@@ -622,7 +716,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     };
   }
 
-  async registerPack(_workspaceId: string, manifest: RegisterCapabilityPackRequest): Promise<WorkspaceRegisteredPack> {
+  async registerPack(
+    _workspaceId: string,
+    manifest: RegisterCapabilityPackRequest,
+  ): Promise<WorkspaceRegisteredPack> {
     const now = new Date().toISOString();
     const registration: WorkspaceRegisteredPack = {
       accountId: ACCOUNT_ID,
@@ -631,11 +728,18 @@ export class MockOpenGeniClient implements SessionClientLike {
       createdAt: now,
       updatedAt: now,
     };
-    this.registeredPacks = [...this.registeredPacks.filter((existing) => existing.pack.id !== manifest.id), registration];
+    this.registeredPacks = [
+      ...this.registeredPacks.filter((existing) => existing.pack.id !== manifest.id),
+      registration,
+    ];
     return registration;
   }
 
-  async enablePack(_workspaceId: string, packId: string, request: EnablePackRequest = {}): Promise<PackInstallation> {
+  async enablePack(
+    _workspaceId: string,
+    packId: string,
+    request: EnablePackRequest = {},
+  ): Promise<PackInstallation> {
     const now = new Date().toISOString();
     const installation: PackInstallation = {
       id: crypto.randomUUID(),
@@ -643,17 +747,27 @@ export class MockOpenGeniClient implements SessionClientLike {
       workspaceId: WORKSPACE_ID,
       packId,
       status: "active",
-      metadata: { ...request.metadata, ...(request.environmentId ? { environmentId: request.environmentId } : {}) },
+      metadata: {
+        ...request.metadata,
+        ...(request.environmentId ? { environmentId: request.environmentId } : {}),
+      },
       enabledAt: now,
       updatedAt: now,
     };
-    this.packInstallations = [...this.packInstallations.filter((existing) => existing.packId !== packId), installation];
+    this.packInstallations = [
+      ...this.packInstallations.filter((existing) => existing.packId !== packId),
+      installation,
+    ];
     return installation;
   }
 
   async deletePack(_workspaceId: string, packId: string): Promise<void> {
-    this.registeredPacks = this.registeredPacks.filter((registration) => registration.pack.id !== packId);
-    this.packInstallations = this.packInstallations.filter((installation) => installation.packId !== packId);
+    this.registeredPacks = this.registeredPacks.filter(
+      (registration) => registration.pack.id !== packId,
+    );
+    this.packInstallations = this.packInstallations.filter(
+      (installation) => installation.packId !== packId,
+    );
   }
 
   private workspaces: Workspace[] = [fabricateWorkspace("Acme Platform")];
@@ -681,31 +795,50 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async getBillingUsage(): Promise<BillingUsageResponse> {
     return {
-      balance: { accountId: ACCOUNT_ID, balanceMicros: 42_500_000, currency: "usd", updatedAt: new Date().toISOString() },
+      balance: {
+        accountId: ACCOUNT_ID,
+        balanceMicros: 42_500_000,
+        currency: "usd",
+        updatedAt: new Date().toISOString(),
+      },
       usage: [],
     };
   }
 
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
-    const sizeBytes = input.data instanceof Blob
-      ? input.data.size
-      : typeof input.data === "string"
-        ? new TextEncoder().encode(input.data).byteLength
-        : input.data instanceof Uint8Array
-          ? input.data.byteLength
-          : (input.data as ArrayBuffer).byteLength;
-    return this.fileAsset(workspaceId, { filename: input.filename, contentType: input.contentType, sizeBytes });
+    const sizeBytes =
+      input.data instanceof Blob
+        ? input.data.size
+        : typeof input.data === "string"
+          ? new TextEncoder().encode(input.data).byteLength
+          : input.data instanceof Uint8Array
+            ? input.data.byteLength
+            : (input.data as ArrayBuffer).byteLength;
+    return this.fileAsset(workspaceId, {
+      filename: input.filename,
+      contentType: input.contentType,
+      sizeBytes,
+    });
   }
 
   async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
     return this.fileAsset(workspaceId, { id: fileId });
   }
 
-  async createFileDownloadUrl(_workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
-    return { url: `https://example.invalid/files/${fileId}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  async createFileDownloadUrl(
+    _workspaceId: string,
+    fileId: string,
+  ): Promise<FileDownloadUrlResponse> {
+    return {
+      url: `https://example.invalid/files/${fileId}`,
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    };
   }
 
-  async getStreamCapabilities(_workspaceId: string, sessionId: string): Promise<SessionCapabilities> {
+  async getStreamCapabilities(
+    _workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionCapabilities> {
     // A full-surface advertisement so the headless harness lights up all three
     // dock tabs: a lazy FileSystem, a Git repo, an interactive PTY, and a
     // warm desktop stream (vnc-ws) in interactive mode.
@@ -716,14 +849,37 @@ export class MockOpenGeniClient implements SessionClientLike {
       liveness: "warm",
       leaseEpoch: 1,
       viewerHeartbeatIntervalMs: 30_000,
-      FileSystem: { available: true, readOnly: false, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: null },
-      Terminal: { transport: "pty-ws", ptyCapable: true, shell: "/bin/bash", url: null, token: null, reason: null },
+      FileSystem: {
+        available: true,
+        readOnly: false,
+        root: "/workspace",
+        pathSep: "/",
+        treeMode: "lazy",
+        reason: null,
+      },
+      Terminal: {
+        transport: "pty-ws",
+        ptyCapable: true,
+        shell: "/bin/bash",
+        url: null,
+        token: null,
+        reason: null,
+      },
       Git: { available: true, repos: ["."], reason: null },
       DesktopStream: {
-        transport: "vnc-ws", client: "novnc", mode: "interactive",
-        url: "wss://desktop.invalid/vnc", token: null, expiresAt: null,
-        resolution: [1024, 768], unredacted: true, requiresAcknowledgment: false, acknowledged: true,
-        shared: false, sharedSessionIds: [], reason: null,
+        transport: "vnc-ws",
+        client: "novnc",
+        mode: "interactive",
+        url: "wss://desktop.invalid/vnc",
+        token: null,
+        expiresAt: null,
+        resolution: [1024, 768],
+        unredacted: true,
+        requiresAcknowledgment: false,
+        acknowledged: true,
+        shared: false,
+        sharedSessionIds: [],
+        reason: null,
       },
       Recording: { available: false, modes: [], codecs: [], reason: "tier_headless" },
       ComputerUse: { available: false, readOnly: true, reason: "tier_headless" },
@@ -762,13 +918,29 @@ export class MockOpenGeniClient implements SessionClientLike {
     // no-op in the demo
   }
 
-  async fsList(_workspaceId: string, _sessionId: string, request?: { path?: string }): Promise<FsListResponse> {
+  async fsList(
+    _workspaceId: string,
+    _sessionId: string,
+    request?: { path?: string },
+  ): Promise<FsListResponse> {
     const dir = (name: string, path: string, children?: FsTreeNode[]): FsTreeNode => ({
-      name, path, type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false,
+      name,
+      path,
+      type: "dir",
+      sizeBytes: null,
+      mtimeMs: null,
+      mode: null,
+      truncated: false,
       ...(children ? { children } : {}),
     });
     const file = (name: string, path: string, sizeBytes = 512): FsTreeNode => ({
-      name, path, type: "file", sizeBytes, mtimeMs: Date.now(), mode: 0o644, truncated: false,
+      name,
+      path,
+      type: "file",
+      sizeBytes,
+      mtimeMs: Date.now(),
+      mode: 0o644,
+      truncated: false,
     });
     const path = request?.path ?? "";
     // Root level (depth 1) — dirs come back without children (lazy expand).
@@ -808,24 +980,52 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { root: dir(path, path, []), revision: 1, truncated: false };
   }
 
-  async fsRead(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsReadResponse> {
+  async fsRead(
+    _workspaceId: string,
+    _sessionId: string,
+    request: { path: string },
+  ): Promise<FsReadResponse> {
     const content = `// ${request.path}\nexport const ok = true;\n`;
-    return { path: request.path, encoding: "utf8", content, sizeBytes: content.length, truncated: false, isBinary: false, revision: 1 };
+    return {
+      path: request.path,
+      encoding: "utf8",
+      content,
+      sizeBytes: content.length,
+      truncated: false,
+      isBinary: false,
+      revision: 1,
+    };
   }
 
-  async fsWrite(_workspaceId: string, _sessionId: string, request: { path: string; content: string }): Promise<FsWriteResponse> {
+  async fsWrite(
+    _workspaceId: string,
+    _sessionId: string,
+    request: { path: string; content: string },
+  ): Promise<FsWriteResponse> {
     return { path: request.path, sizeBytes: request.content.length, revision: 1 };
   }
 
-  async fsDelete(_workspaceId: string, _sessionId: string, _request: { path: string }): Promise<FsDeleteResponse> {
+  async fsDelete(
+    _workspaceId: string,
+    _sessionId: string,
+    _request: { path: string },
+  ): Promise<FsDeleteResponse> {
     return { revision: 1 };
   }
 
-  async fsMove(_workspaceId: string, _sessionId: string, request: { path: string; newPath: string }): Promise<FsMoveResponse> {
+  async fsMove(
+    _workspaceId: string,
+    _sessionId: string,
+    request: { path: string; newPath: string },
+  ): Promise<FsMoveResponse> {
     return { path: request.path, newPath: request.newPath, revision: 1 };
   }
 
-  async fsMkdir(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsMkdirResponse> {
+  async fsMkdir(
+    _workspaceId: string,
+    _sessionId: string,
+    request: { path: string },
+  ): Promise<FsMkdirResponse> {
     return { path: request.path, revision: 1 };
   }
 
@@ -838,31 +1038,67 @@ export class MockOpenGeniClient implements SessionClientLike {
       ahead: 2,
       behind: 1,
       files: [
-        { path: "src/server.ts", oldPath: null, index: null, worktree: "modified", isConflicted: false },
-        { path: "infra/main.tf", oldPath: null, index: null, worktree: "modified", isConflicted: false },
-        { path: "src/config.ts", oldPath: null, index: null, worktree: "added", isConflicted: false },
+        {
+          path: "src/server.ts",
+          oldPath: null,
+          index: null,
+          worktree: "modified",
+          isConflicted: false,
+        },
+        {
+          path: "infra/main.tf",
+          oldPath: null,
+          index: null,
+          worktree: "modified",
+          isConflicted: false,
+        },
+        {
+          path: "src/config.ts",
+          oldPath: null,
+          index: null,
+          worktree: "added",
+          isConflicted: false,
+        },
       ],
       revision: 1,
     };
   }
 
-  async gitDiff(_workspaceId: string, _sessionId: string, request?: { staged?: boolean }): Promise<GitDiffResponse> {
+  async gitDiff(
+    _workspaceId: string,
+    _sessionId: string,
+    request?: { staged?: boolean },
+  ): Promise<GitDiffResponse> {
     if (request?.staged) {
       return { files: [], revision: 1 };
     }
     return {
       files: [
         {
-          path: "src/server.ts", oldPath: null, status: "modified", isBinary: false, isImage: false,
-          additions: 3, deletions: 1, truncated: false,
+          path: "src/server.ts",
+          oldPath: null,
+          status: "modified",
+          isBinary: false,
+          isImage: false,
+          additions: 3,
+          deletions: 1,
+          truncated: false,
           hunks: [
             {
-              oldStart: 12, oldLines: 4, newStart: 12, newLines: 6,
+              oldStart: 12,
+              oldLines: 4,
+              newStart: 12,
+              newLines: 6,
               header: "@@ -12,4 +12,6 @@ export function createServer() {",
               lines: [
                 { type: "context", oldNo: 12, newNo: 12, text: "  const app = express();" },
                 { type: "del", oldNo: 13, newNo: null, text: "  app.use(cors());" },
-                { type: "add", oldNo: null, newNo: 13, text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));" },
+                {
+                  type: "add",
+                  oldNo: null,
+                  newNo: 13,
+                  text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));",
+                },
                 { type: "add", oldNo: null, newNo: 14, text: "  app.use(helmet());" },
                 { type: "add", oldNo: null, newNo: 15, text: "  app.use(rateLimit());" },
                 { type: "context", oldNo: 14, newNo: 16, text: "  return app;" },
@@ -871,14 +1107,23 @@ export class MockOpenGeniClient implements SessionClientLike {
           ],
         },
         {
-          path: "infra/main.tf", oldPath: null, status: "modified", isBinary: false, isImage: false,
-          additions: 2, deletions: 0, truncated: false,
+          path: "infra/main.tf",
+          oldPath: null,
+          status: "modified",
+          isBinary: false,
+          isImage: false,
+          additions: 2,
+          deletions: 0,
+          truncated: false,
           hunks: [
             {
-              oldStart: 4, oldLines: 2, newStart: 4, newLines: 4,
-              header: "@@ -4,2 +4,4 @@ resource \"aws_instance\" \"api\" {",
+              oldStart: 4,
+              oldLines: 2,
+              newStart: 4,
+              newLines: 4,
+              header: '@@ -4,2 +4,4 @@ resource "aws_instance" "api" {',
               lines: [
-                { type: "context", oldNo: 4, newNo: 4, text: "  instance_type = \"t3.small\"" },
+                { type: "context", oldNo: 4, newNo: 4, text: '  instance_type = "t3.small"' },
                 { type: "add", oldNo: null, newNo: 5, text: "  monitoring    = true" },
                 { type: "add", oldNo: null, newNo: 6, text: "  ebs_optimized = true" },
                 { type: "context", oldNo: 5, newNo: 7, text: "  tags = local.tags" },
@@ -887,15 +1132,24 @@ export class MockOpenGeniClient implements SessionClientLike {
           ],
         },
         {
-          path: "src/config.ts", oldPath: null, status: "added", isBinary: false, isImage: false,
-          additions: 3, deletions: 0, truncated: false,
+          path: "src/config.ts",
+          oldPath: null,
+          status: "added",
+          isBinary: false,
+          isImage: false,
+          additions: 3,
+          deletions: 0,
+          truncated: false,
           hunks: [
             {
-              oldStart: 0, oldLines: 0, newStart: 1, newLines: 3,
+              oldStart: 0,
+              oldLines: 0,
+              newStart: 1,
+              newLines: 3,
               header: "@@ -0,0 +1,3 @@",
               lines: [
                 { type: "add", oldNo: null, newNo: 1, text: "export const ALLOWED_ORIGINS = [" },
-                { type: "add", oldNo: null, newNo: 2, text: "  \"https://app.acme.dev\"," },
+                { type: "add", oldNo: null, newNo: 2, text: '  "https://app.acme.dev",' },
                 { type: "add", oldNo: null, newNo: 3, text: "];" },
               ],
             },
@@ -913,7 +1167,11 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { available: false };
   }
 
-  async getWorkspaceCaptureFile(_workspaceId: string, _sessionId: string, _path: string): Promise<GetWorkspaceCaptureFileResponse> {
+  async getWorkspaceCaptureFile(
+    _workspaceId: string,
+    _sessionId: string,
+    _path: string,
+  ): Promise<GetWorkspaceCaptureFileResponse> {
     throw new Error("no capture in the demo mock");
   }
 
@@ -948,7 +1206,11 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async terminalPtyOpen(): Promise<PtyOpenResponse> {
-    return { ptyId: "00000000-0000-4000-8000-0000000000bb", streamVia: "sse-events", supportsInput: true };
+    return {
+      ptyId: "00000000-0000-4000-8000-0000000000bb",
+      streamVia: "sse-events",
+      supportsInput: true,
+    };
   }
 
   async terminalPtyWrite(): Promise<void> {
@@ -995,7 +1257,12 @@ export class MockOpenGeniClient implements SessionClientLike {
     bus.setStatus("idle");
   }
 
-  private fabricateSession(sessionId: string, status: SessionStatus, title: string, agoMinutes = 0): Session {
+  private fabricateSession(
+    sessionId: string,
+    status: SessionStatus,
+    title: string,
+    agoMinutes = 0,
+  ): Session {
     const updatedAt = new Date(Date.now() - agoMinutes * 60_000).toISOString();
     return {
       id: sessionId,
@@ -1032,7 +1299,12 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 }
 
-async function streamText(bus: SessionBus, turnId: string, text: string, delayMs = 14): Promise<void> {
+async function streamText(
+  bus: SessionBus,
+  turnId: string,
+  text: string,
+  delayMs = 14,
+): Promise<void> {
   const words = text.split(/(?<=\s)/);
   for (const word of words) {
     bus.append("agent.message.delta", { text: word }, turnId);
@@ -1053,24 +1325,47 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
     stream: "stdout",
     chunk: TERMINAL_TRANSCRIPT,
   });
-  bus.append("user.message", { text: "Set up a staging environment for the api service, then run a drift check on prod." });
+  bus.append("user.message", {
+    text: "Set up a staging environment for the api service, then run a drift check on prod.",
+  });
   await sleep(500);
   bus.setStatus("running");
   const turn = "turn-script-1";
 
-  bus.append("agent.reasoning.delta", { text: "Two asks: a staging environment (substantial — needs a worker with cloud access) and a prod drift check (the drift scheduled task can be triggered, or a read-only worker). Check what's already running first." }, turn);
+  bus.append(
+    "agent.reasoning.delta",
+    {
+      text: "Two asks: a staging environment (substantial — needs a worker with cloud access) and a prod drift check (the drift scheduled task can be triggered, or a read-only worker). Check what's already running first.",
+    },
+    turn,
+  );
   await sleep(900);
 
-  bus.append("agent.toolCall.created", { id: "call-1", name: "sessions_list", arguments: { limit: 10 } }, turn);
+  bus.append(
+    "agent.toolCall.created",
+    { id: "call-1", name: "sessions_list", arguments: { limit: 10 } },
+    turn,
+  );
   await sleep(700);
   bus.append(
     "agent.toolCall.output",
-    { id: "call-1", output: { content: [{ type: "text", text: JSON.stringify([{ id: WORKER_SESSION_ID, status: "idle" }]) }] } },
+    {
+      id: "call-1",
+      output: {
+        content: [
+          { type: "text", text: JSON.stringify([{ id: WORKER_SESSION_ID, status: "idle" }]) },
+        ],
+      },
+    },
     turn,
   );
   await sleep(400);
 
-  await streamText(bus, turn, "Nothing conflicting is running. I'll spawn a worker to stand up staging for the api service — it gets the workspace environment with your cloud credentials; I'll keep narrating its progress here.");
+  await streamText(
+    bus,
+    turn,
+    "Nothing conflicting is running. I'll spawn a worker to stand up staging for the api service — it gets the workspace environment with your cloud credentials; I'll keep narrating its progress here.",
+  );
   await sleep(500);
 
   bus.append(
@@ -1078,35 +1373,72 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
     {
       id: "call-2",
       name: "session_create",
-      arguments: { initialMessage: "Stand up the staging environment for the api service: cluster namespace, managed Postgres, deploy pipeline wired to the repo.", sandboxBackend: "modal" },
+      arguments: {
+        initialMessage:
+          "Stand up the staging environment for the api service: cluster namespace, managed Postgres, deploy pipeline wired to the repo.",
+        sandboxBackend: "modal",
+      },
     },
     turn,
   );
   await sleep(1300);
   bus.append(
     "agent.toolCall.output",
-    { id: "call-2", output: { content: [{ type: "text", text: JSON.stringify({ id: WORKER_SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" }) }] } },
+    {
+      id: "call-2",
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              id: WORKER_SESSION_ID,
+              workspaceId: WORKSPACE_ID,
+              status: "queued",
+            }),
+          },
+        ],
+      },
+    },
     turn,
   );
   await sleep(400);
 
-  bus.append("sandbox.operation.started", { name: "prepare", command: "git clone github.com/acme/api" }, turn);
+  bus.append(
+    "sandbox.operation.started",
+    { name: "prepare", command: "git clone github.com/acme/api" },
+    turn,
+  );
   await sleep(900);
   bus.append("sandbox.operation.completed", { name: "prepare" }, turn);
 
   bus.append(
     "sandbox.command.output.delta",
-    { stream: "stdout", chunk: `kubectl rollout status deploy/api -n api-staging\r\ndeployment "api" successfully rolled out\r\n${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${GREEN}Deploy reachable at https://api-staging.acme.dev${RESET}\r\n` },
+    {
+      stream: "stdout",
+      chunk: `kubectl rollout status deploy/api -n api-staging\r\ndeployment "api" successfully rolled out\r\n${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${GREEN}Deploy reachable at https://api-staging.acme.dev${RESET}\r\n`,
+    },
     turn,
   );
 
-  await streamText(bus, turn, "Worker is up and cloning the repo. For the drift check I'm triggering the existing scheduled drift task against prod rather than spawning a second worker — it already has the read-only credentials.");
+  await streamText(
+    bus,
+    turn,
+    "Worker is up and cloning the repo. For the drift check I'm triggering the existing scheduled drift task against prod rather than spawning a second worker — it already has the read-only credentials.",
+  );
   await sleep(400);
 
-  bus.append("goal.set", { goal: { text: "Staging live for api + prod drift report delivered" } }, turn);
+  bus.append(
+    "goal.set",
+    { goal: { text: "Staging live for api + prod drift report delivered" } },
+    turn,
+  );
   await sleep(700);
 
-  await streamText(bus, turn, "I'll report back when the worker has staging reachable. If the drift check finds anything that needs a decision (destructive changes, spend), I'll ask you here first.");
+  await streamText(
+    bus,
+    turn,
+    "I'll report back when the worker has staging reachable. If the drift check finds anything that needs a decision (destructive changes, spend), I'll ask you here first.",
+  );
   await sleep(600);
 
   // A rich, formatted status report — exercises the full markdown surface
@@ -1216,7 +1548,13 @@ const CLIENT_CONFIG: ClientConfig = {
   defaultModel: "gpt-5.5",
   allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
   models: [
-    { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+    {
+      id: "gpt-5.5",
+      label: "gpt-5.5",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      api: "responses",
+    },
     {
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
@@ -1284,7 +1622,10 @@ function fabricateGoal(sessionId: string): SessionGoal {
   };
 }
 
-function fabricateEnvironment(name: string, variableNames: string[] = ["CLOUD_API_TOKEN", "DATABASE_URL"]): WorkspaceEnvironment {
+function fabricateEnvironment(
+  name: string,
+  variableNames: string[] = ["CLOUD_API_TOKEN", "DATABASE_URL"],
+): WorkspaceEnvironment {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -1292,7 +1633,12 @@ function fabricateEnvironment(name: string, variableNames: string[] = ["CLOUD_AP
     workspaceId: WORKSPACE_ID,
     name,
     description: `${name} credentials`,
-    variables: variableNames.map((variableName) => ({ name: variableName, version: 1, createdAt: now, updatedAt: now })),
+    variables: variableNames.map((variableName) => ({
+      name: variableName,
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    })),
     createdAt: now,
     updatedAt: now,
   };
@@ -1344,21 +1690,67 @@ function fabricateWorkspace(name: string): Workspace {
 /* --- fleet + schedule fixtures ----------------------------------------------- */
 
 const FLEET: { id: string; status: SessionStatus; title: string; agoMinutes: number }[] = [
-  { id: MANAGER_SESSION_ID, status: "running", title: "Ops channel — manager session", agoMinutes: 0 },
-  { id: WORKER_SESSION_ID, status: "running", title: "Stand up staging for the api service", agoMinutes: 2 },
-  { id: "7385415a-aaaa-4bbb-8ccc-0123456789ab", status: "requires_action", title: "Migrate notification queue to managed Redis", agoMinutes: 34 },
-  { id: "4ecb7a70-dddd-4eee-8fff-0123456789ab", status: "idle", title: "Nightly drift check — prod", agoMinutes: 540 },
-  { id: "6d252830-1212-4343-8565-0123456789ab", status: "failed", title: "Rotate database credentials across environments", agoMinutes: 1500 },
-  { id: "9a5be230-9898-4767-8545-0123456789ab", status: "cancelled", title: "Spike: evaluate preview environments per PR", agoMinutes: 4000 },
+  {
+    id: MANAGER_SESSION_ID,
+    status: "running",
+    title: "Ops channel — manager session",
+    agoMinutes: 0,
+  },
+  {
+    id: WORKER_SESSION_ID,
+    status: "running",
+    title: "Stand up staging for the api service",
+    agoMinutes: 2,
+  },
+  {
+    id: "7385415a-aaaa-4bbb-8ccc-0123456789ab",
+    status: "requires_action",
+    title: "Migrate notification queue to managed Redis",
+    agoMinutes: 34,
+  },
+  {
+    id: "4ecb7a70-dddd-4eee-8fff-0123456789ab",
+    status: "idle",
+    title: "Nightly drift check — prod",
+    agoMinutes: 540,
+  },
+  {
+    id: "6d252830-1212-4343-8565-0123456789ab",
+    status: "failed",
+    title: "Rotate database credentials across environments",
+    agoMinutes: 1500,
+  },
+  {
+    id: "9a5be230-9898-4767-8545-0123456789ab",
+    status: "cancelled",
+    title: "Spike: evaluate preview environments per PR",
+    agoMinutes: 4000,
+  },
 ];
 
 const SCHEDULED_TASKS: ScheduledTask[] = [
-  scheduledTask("Drift check — prod", { type: "calendar", timeZone: "UTC", hour: 5, minute: 0 }, "Run a full drift check against prod and file a report."),
-  scheduledTask("Dependency upgrade sweep", { type: "calendar", timeZone: "UTC", hour: 6, minute: 30, daysOfWeek: ["MONDAY"] }, "Open PRs for safe dependency upgrades."),
-  scheduledTask("Preview-environment reaper", { type: "interval", everySeconds: 3600 }, "Tear down preview environments for merged or stale PRs."),
+  scheduledTask(
+    "Drift check — prod",
+    { type: "calendar", timeZone: "UTC", hour: 5, minute: 0 },
+    "Run a full drift check against prod and file a report.",
+  ),
+  scheduledTask(
+    "Dependency upgrade sweep",
+    { type: "calendar", timeZone: "UTC", hour: 6, minute: 30, daysOfWeek: ["MONDAY"] },
+    "Open PRs for safe dependency upgrades.",
+  ),
+  scheduledTask(
+    "Preview-environment reaper",
+    { type: "interval", everySeconds: 3600 },
+    "Tear down preview environments for merged or stale PRs.",
+  ),
 ];
 
-function scheduledTask(name: string, schedule: ScheduledTask["schedule"], prompt: string): ScheduledTask {
+function scheduledTask(
+  name: string,
+  schedule: ScheduledTask["schedule"],
+  prompt: string,
+): ScheduledTask {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
