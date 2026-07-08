@@ -117,12 +117,30 @@ function ReasoningRow({ item }: { item: ReasoningItem }) {
   );
 }
 
+/**
+ * A human title for a sandbox operation row. Named platform operations (the lazy
+ * `sandbox.provision` first-establish that now runs mid-turn) read as calm,
+ * status-aware English instead of a raw op id — the box coming up should look
+ * like "Starting sandbox", never an unexplained long-running command. Unnamed /
+ * unknown ops fall back to the generic id-to-words {@link toolDisplayName}.
+ */
+function sandboxRowTitle(item: SandboxItem): string {
+  if (item.name === "sandbox.provision") {
+    return item.status === "failed"
+      ? "Sandbox didn’t start"
+      : item.status === "running"
+        ? "Starting sandbox"
+        : "Sandbox ready";
+  }
+  return toolDisplayName(item.name);
+}
+
 function SandboxRow({ item }: { item: SandboxItem }) {
   return (
     <ActivityDisclosure
       icon={<SquareTerminalIcon className="size-3.5" />}
       iconTone={item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"}
-      title={toolDisplayName(item.name)}
+      title={sandboxRowTitle(item)}
       running={item.status === "running"}
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
