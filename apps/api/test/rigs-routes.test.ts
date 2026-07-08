@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createDb, type DbClient } from "@opengeni/db";
+import { createDb, createRigVersion, getRigChange, listRigVersions, updateRigChangeStatus, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { createApp } from "../src/app";
 
@@ -44,6 +44,16 @@ function app() {
     db: client.db,
     bus: {} as never,
     workflowClient: { startRigVerification: async () => {} } as never,
+    managedAuth: null,
+  } as never);
+}
+
+function appWithWorkflow(calls: unknown[]) {
+  return createApp({
+    settings,
+    db: client.db,
+    bus: {} as never,
+    workflowClient: { startRigVerification: async (input: unknown) => { calls.push(input); } } as never,
     managedAuth: null,
   } as never);
 }
@@ -121,7 +131,7 @@ describe("rig route permission matrix", () => {
     const proposed = await app().request(changesPath, { method: "POST", headers: useOnly, body: proposeBody });
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
-    expect(change.status).toBe("proposed");
+    expect(change.status).toBe("verifying");
     expect(change.baseVersionId).toBe(versionId);
 
     // Get change: rigs:use OK.
@@ -157,6 +167,70 @@ describe("rig route permission matrix", () => {
     const ok = await app().request(`${base}/${rig.id}`, { method: "DELETE", headers: manage });
     expect(ok.status).toBe(200);
     expect(await auditActions(ws.workspaceId, rig.id)).toContain("rig.deleted");
+  });
+
+  test("verify retries a failed change with a unique attempt workflow and rejects concurrent verifying", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = appWithWorkflow(calls);
+    const use = { authorization: await bearer(ws, "user:u", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, { method: "POST", headers: use, body: JSON.stringify({ name: "retry-verify" }) });
+    const rig = await created.json();
+    const proposed = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: use,
+      body: JSON.stringify({ kind: "setup_append", payload: { command: "true" } }),
+    });
+    expect(proposed.status).toBe(201);
+    const change = await proposed.json();
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { workflowId: string }).workflowId).toBe(`rig-verification-change-${change.id}-attempt-1`);
+
+    await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
+      status: "failed",
+      verification: { error: "transient" },
+    });
+    const retry = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, { method: "POST", headers: use });
+    expect(retry.status).toBe(202);
+    const retryBody = await retry.json();
+    expect(retryBody.status).toBe("verifying");
+    expect(calls).toHaveLength(2);
+    expect((calls[1] as { workflowId: string }).workflowId).toBe(`rig-verification-change-${change.id}-attempt-2`);
+    expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
+
+    const duplicate = await http.request(`${base}/${rig.id}/changes/${change.id}/verify`, { method: "POST", headers: use });
+    expect(duplicate.status).toBe(409);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("definition_edit promote rejects a stale active base without minting", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = appWithWorkflow(calls);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, { method: "POST", headers: manage, body: JSON.stringify({ name: "stale-promote", setupScript: "echo v1" }) });
+    const rig = await created.json();
+    const proposed = await http.request(`${base}/${rig.id}/changes`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ kind: "definition_edit", payload: { setupScript: "echo edited", checks: [] } }),
+    });
+    const change = await proposed.json();
+    await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
+      status: "proposed",
+      verification: { passed: true },
+    });
+    await createRigVersion(client.db, ws.workspaceId, rig.id, { setupScript: "echo independently-promoted" }, { activate: true });
+
+    const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, { method: "POST", headers: manage });
+    expect(promoted.status).toBe(409);
+    const versions = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(versions).toHaveLength(2);
+    expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
   });
 
   test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {

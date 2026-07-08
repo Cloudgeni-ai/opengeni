@@ -1,6 +1,7 @@
 import { CreateRigRequest, ProposeRigChangeRequest, RigDefinitionEditPayload, UpdateRigRequest } from "@opengeni/contracts";
-import { listRigs } from "@opengeni/db";
+import { beginRigChangeVerificationAttempt, listRigs, RigChangeAlreadyVerifyingError, RigChangeTransitionError } from "@opengeni/db";
 import type { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -21,12 +22,24 @@ import { boundedLimit } from "../http/common";
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
 
-  async function startChangeVerification(workspaceId: string, changeId: string): Promise<void> {
+  async function startChangeVerification(workspaceId: string, changeId: string): Promise<unknown> {
+    const startedAt = new Date().toISOString();
+    let change;
+    try {
+      change = await beginRigChangeVerificationAttempt(db, workspaceId, changeId, { startedAt });
+    } catch (error) {
+      if (error instanceof RigChangeAlreadyVerifyingError || error instanceof RigChangeTransitionError) {
+        throw new HTTPException(409, { message: error.message });
+      }
+      throw error;
+    }
+    const attempt = typeof change.verification?.attempt === "number" ? change.verification.attempt : Date.now();
     await workflowClient.startRigVerification({
       workspaceId,
       changeId,
-      workflowId: `rig-verification-change-${changeId}`,
+      workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
     });
+    return change;
   }
 
   async function startVersionVerification(workspaceId: string, versionId: string): Promise<void> {
@@ -113,8 +126,8 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await requireRigForApi(db, workspaceId, c.req.param("rigId"));
     const request = ProposeRigChangeRequest.parse(await c.req.json());
     const change = await proposeRigChangeForApi({ db }, grant, rig, request);
-    await startChangeVerification(workspaceId, change.id);
-    return c.json(change, 201);
+    const verifying = await startChangeVerification(workspaceId, change.id);
+    return c.json(verifying, 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId", async (c) => {
@@ -127,8 +140,8 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "rigs:use");
     const change = await requireRigChangeForApi(db, workspaceId, c.req.param("rigId"), c.req.param("changeId"));
-    await startChangeVerification(workspaceId, change.id);
-    return c.json(change, 202);
+    const verifying = await startChangeVerification(workspaceId, change.id);
+    return c.json(verifying, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes/:changeId/promote", async (c) => {

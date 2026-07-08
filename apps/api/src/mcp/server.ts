@@ -11,6 +11,7 @@ import {
 import {
   correctWorkspaceMemory,
   countVariableSets,
+  beginRigChangeVerificationAttempt,
   createVariableSet,
   deleteScheduledTask,
   encryptVariableSetValue,
@@ -40,6 +41,8 @@ import {
   updateScheduledTask,
   updateSessionGoal,
   upsertSessionGoal,
+  RigChangeAlreadyVerifyingError,
+  RigChangeTransitionError,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
@@ -734,6 +737,21 @@ function registerFleetTools(
   }, async ({ kind, name }) => json(await provisionSandbox(services, await fleetContext(), { kind, ...(name ? { name } : {}) })));
 }
 
+async function beginMcpRigVerificationAttempt(deps: ApiRouteDeps, workspaceId: string, changeId: string) {
+  try {
+    return await beginRigChangeVerificationAttempt(deps.db, workspaceId, changeId, { startedAt: new Date().toISOString() });
+  } catch (error) {
+    if (error instanceof RigChangeAlreadyVerifyingError || error instanceof RigChangeTransitionError) {
+      throw new Error(error.message);
+    }
+    throw error;
+  }
+}
+
+function verificationAttempt(change: { verification?: Record<string, unknown> | null }): number | string {
+  return typeof change.verification?.attempt === "number" ? change.verification.attempt : crypto.randomUUID();
+}
+
 function registerRigTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -776,12 +794,13 @@ function registerRigTools(
         kind: "setup_append",
         payload: { command, ...(note ? { note } : {}) },
       }, sessionId ? { proposedBy: `session:${sessionId}` } : {});
+      const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
       await deps.workflowClient.startRigVerification({
         workspaceId: grant.workspaceId,
         changeId: change.id,
-        workflowId: `rig-verification-change-${change.id}`,
+        workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
       });
-      return json({ change, verificationStarted: true });
+      return json({ change: verifying, verificationStarted: true });
     });
 
     server.registerTool("rig_verify", {
@@ -794,10 +813,11 @@ function registerRigTools(
       const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
       if (changeId) {
         const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        const verifying = await beginMcpRigVerificationAttempt(deps, grant.workspaceId, change.id);
         await deps.workflowClient.startRigVerification({
           workspaceId: grant.workspaceId,
           changeId: change.id,
-          workflowId: `rig-verification-change-${change.id}`,
+          workflowId: `rig-verification-change-${change.id}-attempt-${verificationAttempt(verifying)}`,
         });
         return json({ ok: true, changeId: change.id });
       }

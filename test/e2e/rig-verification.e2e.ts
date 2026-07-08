@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import { bootstrapWorkspace, createDb, createRig, createRigChange, getRig, getRigChange, type DbClient } from "@opengeni/db";
+import { bootstrapWorkspace, createDb, createRig, createRigChange, dbSql, getRig, getRigChange, setRlsContext, type DbClient } from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
   runRigSetupHook,
@@ -125,6 +125,53 @@ describe("real Docker rig verification e2e", () => {
     const stored = await getRigChange(db.db, workspaceId, change.id);
     expect(stored?.status).toBe("rejected");
     expect((stored?.verification as { commandResult?: { exitCode?: number | null; output?: string } }).commandResult?.exitCode).toBe(1);
+  }, 300_000);
+
+  test("verification output is redacted before persistence and audit metadata", async () => {
+    const secret = "rig-secret-token-123456";
+    const rig = await createRig(db.db, {
+      accountId,
+      workspaceId,
+      name: "redaction-rig",
+      createdBy: "user:e2e",
+      initialVersion: {
+        setupScript: "true",
+        checks: [{ name: "secret-echo", command: `printf 'API_KEY=${secret}\\n'` }],
+        changelog: "v1",
+      },
+    });
+    const change = await createRigChange(db.db, {
+      accountId,
+      workspaceId,
+      rigId: rig.id,
+      baseVersionId: rig.activeVersion!.id,
+      kind: "definition_edit",
+      payload: { checks: [{ name: "secret-echo", command: `printf 'API_KEY=${secret}\\n'` }] },
+      proposedBy: "session:redaction",
+    });
+
+    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    const storedSerialized = JSON.stringify(verified.verification);
+    expect(verified.status).toBe("proposed");
+    expect(storedSerialized).not.toContain(secret);
+    expect(storedSerialized).toContain("[REDACTED]");
+
+    await verifier().verifyRigVersion({ workspaceId, versionId: rig.activeVersion!.id });
+    const [audit] = await db.db.transaction(async (tx) => {
+      await setRlsContext(tx as never, { accountId, workspaceId });
+      return await tx.execute<{ metadata: unknown }>(dbSql`
+        select metadata from audit_events
+        where workspace_id = ${workspaceId}
+          and target_type = 'rig'
+          and target_id = ${rig.id}
+          and action = 'rig.verification.passed'
+          and metadata ? 'versionId'
+        order by occurred_at desc
+        limit 1`);
+    });
+    const auditSerialized = JSON.stringify(audit?.metadata);
+    expect(auditSerialized).not.toContain(secret);
+    expect(auditSerialized).toContain("[REDACTED]");
   }, 300_000);
 });
 

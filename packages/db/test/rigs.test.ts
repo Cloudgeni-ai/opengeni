@@ -8,7 +8,9 @@ import {
   createRig,
   createRigChange,
   createRigVersion,
+  createRigVersionForChangePromotion,
   deleteRig,
+  deleteRigIfNoActiveSessions,
   getRig,
   getRigByName,
   getRigChange,
@@ -16,6 +18,7 @@ import {
   listRigChanges,
   listRigVersions,
   listRigs,
+  RigActiveVersionChangedError,
   RigChangeTransitionError,
   updateRig,
   updateRigChangeStatus,
@@ -258,6 +261,65 @@ describe("rig change lifecycle", () => {
     // merged is terminal.
     await expect(updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "rejected" }))
       .rejects.toBeInstanceOf(RigChangeTransitionError);
+    await expect(updateRigChangeStatus(db, ws.workspaceId, change.id, { status: "merged" }))
+      .rejects.toBeInstanceOf(RigChangeTransitionError);
+  });
+
+  test("change promotion rejects a stale active base without minting", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "stale-base" });
+    const baseVersionId = rig.activeVersion!.id;
+    const change = await createRigChange(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      baseVersionId,
+      kind: "setup_append",
+      payload: { command: "touch /opt/tool" },
+      proposedBy: "session:s1",
+    });
+    await createRigVersion(db, ws.workspaceId, rig.id, { setupScript: "new active" }, { activate: true });
+
+    await expect(createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
+      expectedActiveVersionId: baseVersionId,
+      setupScript: "base plus append",
+    })).rejects.toBeInstanceOf(RigActiveVersionChangedError);
+
+    const versions = await listRigVersions(db, ws.workspaceId, rig.id);
+    expect(versions).toHaveLength(2);
+    expect((await getRigChange(db, ws.workspaceId, change.id))?.status).toBe("proposed");
+  });
+
+  test("concurrent change promotion mints exactly one version", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "one-promote" });
+    const baseVersionId = rig.activeVersion!.id;
+    const change = await createRigChange(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      baseVersionId,
+      kind: "definition_edit",
+      payload: { setupScript: "echo v2" },
+      proposedBy: "user:m",
+    });
+
+    const promote = () => createRigVersionForChangePromotion(db, ws.workspaceId, rig.id, change.id, {
+      expectedActiveVersionId: baseVersionId,
+      setupScript: "echo v2",
+      changelog: "verified edit",
+    });
+    const results = await Promise.allSettled([promote(), promote()]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+    const versions = await listRigVersions(db, ws.workspaceId, rig.id);
+    expect(versions).toHaveLength(2);
+    const stored = await getRigChange(db, ws.workspaceId, change.id);
+    expect(stored?.status).toBe("merged");
+    expect(stored?.resultVersionId).toBe((results.find((result) => result.status === "fulfilled") as PromiseFulfilledResult<{ version: { id: string } }>).value.version.id);
   });
 });
 
@@ -269,6 +331,19 @@ describe("rig delete guard", () => {
     expect(await countSessionsUsingRig(db, ws.workspaceId, rig.id)).toBe(0);
     await insertSessionForRig(ws, rig.id);
     expect(await countSessionsUsingRig(db, ws.workspaceId, rig.id)).toBe(1);
+  });
+
+  test("deleteRigIfNoActiveSessions refuses active sessions under the rig lock", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, name: "active-ref" });
+    const sessionId = await insertSessionForRig(ws, rig.id);
+    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({ deleted: false, activeSessionCount: 1 });
+    expect(await getRig(db, ws.workspaceId, rig.id)).not.toBeNull();
+
+    await shared!.admin`update sessions set status = 'cancelled' where id = ${sessionId}`;
+    expect(await deleteRigIfNoActiveSessions(db, ws.workspaceId, rig.id)).toEqual({ deleted: true, activeSessionCount: 0 });
+    expect(await getRig(db, ws.workspaceId, rig.id)).toBeNull();
   });
 });
 

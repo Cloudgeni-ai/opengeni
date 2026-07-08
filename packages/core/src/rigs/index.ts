@@ -17,11 +17,11 @@ import type {
 import {
   activateRigVersion,
   countRigs,
-  countSessionsUsingRig,
   createRig,
   createRigChange,
   createRigVersion,
-  deleteRig,
+  createRigVersionForChangePromotion,
+  deleteRigIfNoActiveSessions,
   getRig,
   getRigByName,
   getRigChange,
@@ -30,6 +30,8 @@ import {
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
+  RigActiveVersionChangedError,
+  RigChangeTransitionError,
   updateRigChangeStatus,
   updateRig,
   type Database,
@@ -202,11 +204,13 @@ export async function deleteRigForApi(
   rig: Rig,
 ): Promise<void> {
   const workspaceId = grant.workspaceId;
-  const referencingSessions = await countSessionsUsingRig(deps.db, workspaceId, rig.id);
-  if (referencingSessions > 0) {
-    throw new HTTPException(409, { message: `rig is referenced by ${referencingSessions} session(s); it cannot be deleted` });
+  const deleted = await deleteRigIfNoActiveSessions(deps.db, workspaceId, rig.id);
+  if (deleted.activeSessionCount > 0) {
+    throw new HTTPException(409, { message: `rig is referenced by ${deleted.activeSessionCount} active session(s); it cannot be deleted` });
   }
-  await deleteRig(deps.db, workspaceId, rig.id);
+  if (!deleted.deleted) {
+    throw new HTTPException(404, { message: "rig not found" });
+  }
   await recordRigAuditEvent(deps.db, { grant, action: "rig.deleted", rigId: rig.id });
 }
 
@@ -275,6 +279,28 @@ export function appendRigSetupCommand(baseSetupScript: string | null | undefined
   return base ? `${base}\n${command}` : command;
 }
 
+async function promoteChangeWithActiveCas(
+  deps: RigServices,
+  workspaceId: string,
+  rigId: string,
+  changeId: string,
+  input: Parameters<typeof createRigVersionForChangePromotion>[4],
+): Promise<{ version: RigVersion; change: RigChange }> {
+  try {
+    return await createRigVersionForChangePromotion(deps.db, workspaceId, rigId, changeId, input);
+  } catch (error) {
+    if (error instanceof RigActiveVersionChangedError) {
+      throw new HTTPException(409, {
+        message: `rig moved since this change was verified (base ${error.expectedVersionId}, now ${error.actualVersionId ?? "none"}); re-verify before promoting`,
+      });
+    }
+    if (error instanceof RigChangeTransitionError) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    throw error;
+  }
+}
+
 export async function promoteSetupAppendChange(
   deps: RigServices,
   grant: AccessGrant,
@@ -298,7 +324,8 @@ export async function promoteSetupAppendChange(
   if (typeof payload.command !== "string" || !payload.command.trim()) {
     throw new HTTPException(422, { message: "setup_append change is missing command" });
   }
-  const version = await createRigVersion(deps.db, grant.workspaceId, rig.id, {
+  const { version, change: updated } = await promoteChangeWithActiveCas(deps, grant.workspaceId, rig.id, change.id, {
+    expectedActiveVersionId: change.baseVersionId,
     image: base.image,
     setupScript: appendRigSetupCommand(base.setupScript, payload.command),
     checks: base.checks,
@@ -306,10 +333,6 @@ export async function promoteSetupAppendChange(
     defaultVariableSetIds: base.defaultVariableSetIds,
     changelog: typeof payload.note === "string" && payload.note.trim() ? payload.note : "Verified setup append",
     createdBy: change.proposedBy ?? rigActorForGrant(grant),
-  }, { activate: true });
-  const updated = await updateRigChangeStatus(deps.db, grant.workspaceId, change.id, {
-    status: "merged",
-    resultVersionId: version.id,
   });
   await recordRigAuditEvent(deps.db, {
     grant,
@@ -356,7 +379,8 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     defaultVariableSetIds?: unknown;
     changelog?: unknown;
   };
-  const version = await createRigVersion(deps.db, grant.workspaceId, rig.id, {
+  const { version, change: updated } = await promoteChangeWithActiveCas(deps, grant.workspaceId, rig.id, change.id, {
+    expectedActiveVersionId: change.baseVersionId,
     image: payload.image === undefined ? base.image : (payload.image as string | null),
     setupScript: payload.setupScript === undefined ? base.setupScript : (payload.setupScript as string | null),
     checks: Array.isArray(payload.checks) ? payload.checks as RigVersion["checks"] : base.checks,
@@ -364,10 +388,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     defaultVariableSetIds: Array.isArray(payload.defaultVariableSetIds) ? payload.defaultVariableSetIds as string[] : base.defaultVariableSetIds,
     changelog: typeof payload.changelog === "string" && payload.changelog.trim() ? payload.changelog : "Verified definition edit",
     createdBy: rigActorForGrant(grant),
-  }, { activate: true });
-  const updated = await updateRigChangeStatus(deps.db, grant.workspaceId, change.id, {
-    status: "merged",
-    resultVersionId: version.id,
   });
   await recordRigAuditEvent(deps.db, {
     grant,

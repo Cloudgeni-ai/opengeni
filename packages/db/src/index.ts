@@ -104,6 +104,7 @@ export {
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
 export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
+export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
 // db:migrate script use it). Re-exporting does NOT run migrate.ts's
@@ -3882,6 +3883,24 @@ export class RigChangeTransitionError extends Error {
   }
 }
 
+export class RigActiveVersionChangedError extends Error {
+  constructor(
+    public readonly rigId: string,
+    public readonly expectedVersionId: string,
+    public readonly actualVersionId: string | null,
+  ) {
+    super(`Rig ${rigId} moved since verification: expected active ${expectedVersionId}, current active ${actualVersionId ?? "none"}`);
+    this.name = "RigActiveVersionChangedError";
+  }
+}
+
+export class RigChangeAlreadyVerifyingError extends Error {
+  constructor(public readonly changeId: string) {
+    super(`Rig change ${changeId} is already verifying`);
+    this.name = "RigChangeAlreadyVerifyingError";
+  }
+}
+
 export type RigVersionContentInput = {
   image?: string | null;
   setupScript?: string | null;
@@ -4074,6 +4093,34 @@ export async function deleteRig(db: Database, workspaceId: string, rigId: string
   });
 }
 
+export async function deleteRigIfNoActiveSessions(db: Database, workspaceId: string, rigId: string): Promise<{ deleted: boolean; activeSessionCount: number }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      return { deleted: false, activeSessionCount: 0 };
+    }
+    const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
+      .from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.rigId, rigId),
+        sql`${schema.sessions.status} not in ('failed', 'cancelled')`,
+      ));
+    const activeSessionCount = Number(count);
+    if (activeSessionCount > 0) {
+      return { deleted: false, activeSessionCount };
+    }
+    const rows = await scopedDb.delete(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .returning({ id: schema.rigs.id });
+    return { deleted: rows.length > 0, activeSessionCount };
+  });
+}
+
 export async function countRigs(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb.select({ count: sql<number>`count(*)::int` })
@@ -4137,6 +4184,88 @@ export async function createRigVersion(db: Database, workspaceId: string, rigId:
     await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
     return mapRigVersion(row);
+  });
+}
+
+export async function createRigVersionForChangePromotion(db: Database, workspaceId: string, rigId: string, changeId: string, input: RigVersionContentInput & {
+  expectedActiveVersionId: string;
+}): Promise<{ version: RigVersion; change: RigChange }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb.select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) {
+      throw new Error(`Rig not found: ${rigId}`);
+    }
+    const [currentChange] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(
+        eq(schema.rigChanges.workspaceId, workspaceId),
+        eq(schema.rigChanges.rigId, rigId),
+        eq(schema.rigChanges.id, changeId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!currentChange) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    if (currentChange.status === "merged" || currentChange.status === "rejected") {
+      throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+    }
+    if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
+      throw new RigActiveVersionChangedError(rigId, input.expectedActiveVersionId, currentChange.baseVersionId);
+    }
+    const [active] = await scopedDb.select({ id: schema.rigVersions.id })
+      .from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ))
+      .limit(1);
+    if (active?.id !== input.expectedActiveVersionId) {
+      throw new RigActiveVersionChangedError(rigId, input.expectedActiveVersionId, active?.id ?? null);
+    }
+    const [{ max } = { max: 0 }] = await scopedDb.select({
+      max: sql<number>`coalesce(max(${schema.rigVersions.version}), 0)::int`,
+    }).from(schema.rigVersions)
+      .where(and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)));
+    const nextVersion = Number(max) + 1;
+    await scopedDb.update(schema.rigVersions).set({ active: false })
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.rigId, rigId),
+        eq(schema.rigVersions.active, true),
+      ));
+    const [versionRow] = await scopedDb.insert(schema.rigVersions).values({
+      accountId: rig.accountId,
+      workspaceId,
+      rigId,
+      version: nextVersion,
+      image: input.image ?? null,
+      setupScript: input.setupScript ?? null,
+      checks: input.checks ?? [],
+      credentialHooks: input.credentialHooks ?? [],
+      defaultVariableSetIds: input.defaultVariableSetIds ?? [],
+      changelog: input.changelog ?? null,
+      createdBy: input.createdBy ?? null,
+      active: true,
+    }).returning();
+    if (!versionRow) {
+      throw new Error("Failed to create rig version");
+    }
+    const [changeRow] = await scopedDb.update(schema.rigChanges).set({
+      status: "merged",
+      resultVersionId: versionRow.id,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!changeRow) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    await scopedDb.update(schema.rigs).set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
+    return { version: mapRigVersion(versionRow), change: mapRigChange(changeRow) };
   });
 }
 
@@ -4274,8 +4403,8 @@ export async function getRigChange(db: Database, workspaceId: string, changeId: 
   });
 }
 
-// Advances a change's lifecycle. merged/rejected are terminal (any different
-// target throws RigChangeTransitionError). A supplied verification payload is
+// Advances a change's lifecycle. merged/rejected are terminal (any attempted
+// transition throws RigChangeTransitionError). A supplied verification payload is
 // shallow-merged onto the existing one so a status bump can enrich it (M4).
 export async function updateRigChangeStatus(db: Database, workspaceId: string, changeId: string, input: {
   status: RigChangeStatus;
@@ -4291,7 +4420,7 @@ export async function updateRigChangeStatus(db: Database, workspaceId: string, c
       throw new Error(`Rig change not found: ${changeId}`);
     }
     const terminal = current.status === "merged" || current.status === "rejected";
-    if (terminal && current.status !== input.status) {
+    if (terminal) {
       throw new RigChangeTransitionError(changeId, current.status, input.status);
     }
     const mergedVerification = input.verification
@@ -4301,6 +4430,49 @@ export async function updateRigChangeStatus(db: Database, workspaceId: string, c
       status: input.status,
       ...(mergedVerification !== undefined ? { verification: mergedVerification } : {}),
       ...(input.resultVersionId !== undefined ? { resultVersionId: input.resultVersionId } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
+  });
+}
+
+export async function beginRigChangeVerificationAttempt(db: Database, workspaceId: string, changeId: string, input: {
+  startedAt: string;
+  allowAlreadyVerifying?: boolean;
+}): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb.select().from(schema.rigChanges)
+      .where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)))
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    if (current.status === "verifying") {
+      if (input.allowAlreadyVerifying) {
+        return mapRigChange(current);
+      }
+      throw new RigChangeAlreadyVerifyingError(changeId);
+    }
+    if (current.status === "merged") {
+      throw new RigChangeTransitionError(changeId, current.status, "verifying");
+    }
+    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const previousAttempt = typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
+    const [row] = await scopedDb.update(schema.rigChanges).set({
+      status: "verifying",
+      verification: {
+        ...previousVerification,
+        attempt: previousAttempt + 1,
+        startedAt: input.startedAt,
+        checkResults: [],
+        finishedAt: null,
+        passed: null,
+        error: null,
+      },
       updatedAt: new Date(),
     }).where(and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId))).returning();
     if (!row) {

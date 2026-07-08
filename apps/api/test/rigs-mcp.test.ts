@@ -78,12 +78,12 @@ describe("rig MCP tools", () => {
       command: "touch /opt/mcp/tool",
       note: "mcp proposal",
     });
-    expect(proposed.change.status).toBe("proposed");
+    expect(proposed.change.status).toBe("verifying");
     expect(proposed.verificationStarted).toBe(true);
     expect(workflow.rigVerifications).toEqual([{
       workspaceId,
       changeId: proposed.change.id,
-      workflowId: `rig-verification-change-${proposed.change.id}`,
+      workflowId: `rig-verification-change-${proposed.change.id}-attempt-1`,
     }]);
     const stored = await getRigChange(client.db, workspaceId, proposed.change.id);
     expect(stored?.kind).toBe("setup_append");
