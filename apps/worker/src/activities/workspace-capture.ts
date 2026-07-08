@@ -155,7 +155,6 @@ async function runCapture(
   const repos: WorkspaceCaptureRepo[] = [];
   // workspace-relative path → touched-file descriptor
   const touched = new Map<string, { status: GitFileStatusCode; deleted: boolean }>();
-  let anyChange = false;
   let additions = 0;
   let deletions = 0;
 
@@ -189,7 +188,6 @@ async function runCapture(
       deletions += f.deletions;
     }
     for (const f of status.files) {
-      anyChange = true;
       const wsPath = joinRepoPath(root, f.path);
       touched.set(wsPath, {
         status: statusCodeOf(f),
@@ -198,15 +196,16 @@ async function runCapture(
     }
   }
 
-  // ── 2. empty-turn gate (dossier §10.1 / B3) ───────────────────────────────
-  // A clean tree AND a prior revision → no new revision (revision N unchanged).
-  // A clean tree with NO prior revision writes an empty baseline rev 0 so the
-  // cold workbench paints from a real (empty) capture.
+  // Previous revision (for the empty-turn gate + revision assignment). The gate
+  // itself fires AFTER the after-image loop, once the change fingerprint is known
+  // (§10.1 / B3): uncommitted changes persist in the box across turns, so a
+  // literal "skip when git status is clean" gate would re-capture an identical
+  // dirty tree on every read-only turn. Instead we skip when the change surface
+  // is byte-identical to the previous revision — "no new revision when nothing
+  // changed" holds even with a persistently dirty tree, and content-addressed
+  // blobs already dedupe storage. (Deviation from the dossier's literal "clean"
+  // wording — same intent, strictly better; recorded in PROGRESS.)
   const prev = await latestWorkspaceCapture(input.db, input.workspaceId, input.sessionId);
-  if (!anyChange && prev) {
-    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "skipped_empty" } });
-    return;
-  }
   const revision = (prev?.revision ?? -1) + 1;
 
   // ── 3. after-images of touched files (size-gated), content-addressed ───────
@@ -268,10 +267,21 @@ async function runCapture(
     });
   }
 
-  // ── 4. tree index (bounded BFS; residue dirs collapsed, not descended) ─────
+  // ── 4. empty-turn gate (dossier §10.1 / B3) ───────────────────────────────
+  // Skip when the change surface is byte-identical to the previous revision.
+  // Fires BEFORE the tree BFS + storage PUTs (the expensive parts) so a no-op
+  // read-only turn on a persistently dirty tree costs only the (small) status/
+  // diff/after-image probes.
+  const fingerprint = changeFingerprint(repos, files);
+  if (prev && prev.stats.fingerprint === fingerprint) {
+    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "skipped_empty" } });
+    return;
+  }
+
+  // ── 5. tree index (bounded BFS; residue dirs collapsed, not descended) ─────
   const tree = await buildTreeIndex(svc, startedAt);
 
-  // ── 5. serialize manifest ─────────────────────────────────────────────────
+  // ── 6. serialize manifest ─────────────────────────────────────────────────
   const capturedAt = new Date().toISOString();
   const stats: WorkspaceCaptureStats = {
     repoCount: repos.length,
@@ -284,6 +294,7 @@ async function runCapture(
     treeEntryCount: tree.entryCount,
     treeTruncated: tree.truncated,
     durationMs: 0, // filled just before publish
+    fingerprint,
   };
   const manifest: WorkspaceCaptureManifest = {
     version: 1,
@@ -298,7 +309,7 @@ async function runCapture(
     stats,
   };
 
-  // ── 6. PUT blobs + tree + manifest (F9: all writes BEFORE any delete) ──────
+  // ── 7. PUT blobs + tree + manifest (F9: all writes BEFORE any delete) ──────
   // Key manifest/tree by the turn (one capture per turn) so the key is known
   // before the revision is committed; content blobs are content-addressed.
   const turnKey = input.turnId ?? randomUUID();
@@ -314,7 +325,7 @@ async function runCapture(
   await storage.putObject({ key: manifestKey, contentType: "application/json", body: manifestBytes });
   const sizeBytes = totalBytes + treeBytes.byteLength + manifestBytes.byteLength;
 
-  // ── 7. epoch-fenced insert (superseded lease → zero rows) ──────────────────
+  // ── 8. epoch-fenced insert (superseded lease → zero rows) ──────────────────
   const inserted = await insertWorkspaceCapture(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -338,7 +349,7 @@ async function runCapture(
     return;
   }
 
-  // ── 8. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
+  // ── 9. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
   let gcDeleted = 0;
   try {
     const plan = await planWorkspaceCaptureGc(input.db, {
@@ -362,7 +373,7 @@ async function runCapture(
     });
   }
 
-  // ── 9. announce (announce-only; hits the timeline projection default case) ──
+  // ── 10. announce (announce-only; hits the timeline projection default case) ─
   const durationMs = Date.now() - startedAt;
   stats.durationMs = durationMs;
   observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "ok" } });
@@ -385,6 +396,26 @@ async function runCapture(
 
 function statusCodeOf(f: GitFileStatus): GitFileStatusCode {
   return f.worktree ?? f.index ?? "modified";
+}
+
+/**
+ * sha256 over the CHANGE SURFACE only — per-file (path, status, hash, deleted,
+ * tooLarge) and per-repo diff summary (path, status, additions, deletions).
+ * Deliberately excludes the tree index and file mtimes (which drift without a
+ * real change) so two turns that leave the workspace in the same state produce
+ * the same fingerprint (the empty-turn gate). Order-independent (sorted).
+ */
+function changeFingerprint(repos: WorkspaceCaptureRepo[], files: WorkspaceCaptureFile[]): string {
+  const fileParts = files
+    .map((f) => `${f.path}|${f.status}|${f.hash ?? ""}|${f.deleted ? 1 : 0}|${f.tooLarge ? 1 : 0}`)
+    .sort();
+  const repoParts = repos
+    .map((r) => `${r.root}#${r.head ?? ""}#` + r.diff
+      .map((d) => `${d.path}:${d.status}:${d.additions}:${d.deletions}:${d.truncated ? 1 : 0}`)
+      .sort()
+      .join(","))
+    .sort();
+  return sha256(utf8(JSON.stringify({ files: fileParts, repos: repoParts })));
 }
 
 /** Join a repo-root-relative path onto its workspace-relative repo root. */

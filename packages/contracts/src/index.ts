@@ -3001,6 +3001,11 @@ export const WorkspaceCaptureStats = z.object({
   treeEntryCount: z.number().int().nonnegative(),
   treeTruncated: z.boolean().default(false),
   durationMs: z.number().int().nonnegative(),
+  // sha256 over the change surface (per-file path/hash/status + per-repo diff
+  // summary, tree/mtime excluded). The empty-turn gate skips a capture whose
+  // fingerprint equals the previous revision's — "no new revision when nothing
+  // changed" holds even when the tree stays dirty across read-only turns.
+  fingerprint: z.string().optional(),
 });
 export type WorkspaceCaptureStats = z.infer<typeof WorkspaceCaptureStats>;
 

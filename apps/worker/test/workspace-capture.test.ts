@@ -182,6 +182,20 @@ describe("workspace-capture — pre-service skip gates", () => {
       objectStorage: null,
     })).resolves.toBeUndefined();
   });
+
+  test("B6: a box-exec failure is swallowed — never throws past the boundary", async () => {
+    // A session whose exec rejects makes detectRepos() throw at the very first
+    // step. captureWorkspaceRevision must resolve (the turn already completed) and
+    // touch neither the db nor storage — proving "turn outcome unaffected".
+    const throwingSession = {
+      exec: async () => { throw new Error("box exec failed"); },
+    } as unknown as ChannelASession;
+    await expect(captureWorkspaceRevision({
+      ...baseInput(),
+      objectStorage: forbiddenStorage(),
+      session: throwingSession,
+    })).resolves.toBeUndefined();
+  });
 });
 
 describe("workspace-capture — B7 static safety guard", () => {
