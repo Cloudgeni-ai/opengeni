@@ -50,6 +50,17 @@ export type SessionClientLike = Pick<
   | "deleteEnvironment"
   | "setEnvironmentVariable"
   | "deleteEnvironmentVariable"
+  // Rigs
+  | "listRigs"
+  | "createRig"
+  | "getRig"
+  | "updateRig"
+  | "deleteRig"
+  | "listRigVersions"
+  | "activateRigVersion"
+  | "listRigChanges"
+  | "proposeRigChange"
+  | "getRigChange"
   // Packs
   | "listPacks"
   | "registerPack"

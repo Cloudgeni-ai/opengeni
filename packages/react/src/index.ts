@@ -39,6 +39,8 @@ export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-li
 export type { UseSessionLineageOptions, UseSessionLineageResult } from "./hooks/use-session-lineage";
 export { useVariableSets, useEnvironments } from "./hooks/use-environments";
 export type { UseVariableSetsOptions, UseVariableSetsResult, UseEnvironmentsOptions, UseEnvironmentsResult } from "./hooks/use-environments";
+export { useRigs } from "./hooks/use-rigs";
+export type { UseRigsOptions, UseRigsResult } from "./hooks/use-rigs";
 export { usePacks } from "./hooks/use-packs";
 export type { UsePacksOptions, UsePacksResult } from "./hooks/use-packs";
 export { useWorkspaces } from "./hooks/use-workspaces";

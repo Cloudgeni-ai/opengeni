@@ -16,6 +16,12 @@ import type {
   ClientConfig,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
+  CreateRigRequest,
+  UpdateRigRequest,
+  ProposeRigChangeRequest,
+  Rig,
+  RigVersion,
+  RigChange,
   CreateWorkspaceRequest,
   EnablePackRequest,
   FileAsset,
@@ -421,6 +427,132 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async deleteVariableSetVariable(workspaceId: string, variableSetId: string, name: string): Promise<void> {
     await this.deleteEnvironmentVariable(workspaceId, variableSetId, name);
+  }
+
+  // Rigs — minimal in-memory demo store (real UI lands in M5).
+  private rigs: Rig[] = [];
+  private rigVersions: RigVersion[] = [];
+  private rigChanges: RigChange[] = [];
+
+  async listRigs(): Promise<Rig[]> {
+    return [...this.rigs];
+  }
+
+  async createRig(_workspaceId: string, request: CreateRigRequest): Promise<Rig> {
+    const now = new Date().toISOString();
+    const rigId = `rig-${this.rigs.length + 1}`;
+    const version: RigVersion = {
+      id: `${rigId}-v1`,
+      rigId,
+      version: 1,
+      image: request.image ?? null,
+      setupScript: request.setupScript ?? null,
+      checks: request.checks ?? [],
+      credentialHooks: request.credentialHooks ?? [],
+      defaultVariableSetIds: request.defaultVariableSetIds ?? [],
+      changelog: "Initial version",
+      createdBy: "user:demo",
+      active: true,
+      createdAt: now,
+    };
+    const rig: Rig = {
+      id: rigId,
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      name: request.name,
+      description: request.description ?? null,
+      createdBy: "user:demo",
+      activeVersion: version,
+      versionCount: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.rigs.push(rig);
+    this.rigVersions.push(version);
+    return rig;
+  }
+
+  async getRig(_workspaceId: string, rigId: string): Promise<Rig> {
+    const rig = this.rigs.find((candidate) => candidate.id === rigId);
+    if (!rig) {
+      throw new Error(`rig not found: ${rigId}`);
+    }
+    return rig;
+  }
+
+  async updateRig(_workspaceId: string, rigId: string, request: UpdateRigRequest): Promise<Rig> {
+    const rig = await this.getRig(_workspaceId, rigId);
+    if (request.name !== undefined) {
+      rig.name = request.name;
+    }
+    if (request.description !== undefined) {
+      rig.description = request.description;
+    }
+    rig.updatedAt = new Date().toISOString();
+    return rig;
+  }
+
+  async deleteRig(_workspaceId: string, rigId: string): Promise<void> {
+    this.rigs = this.rigs.filter((candidate) => candidate.id !== rigId);
+    this.rigVersions = this.rigVersions.filter((candidate) => candidate.rigId !== rigId);
+    this.rigChanges = this.rigChanges.filter((candidate) => candidate.rigId !== rigId);
+  }
+
+  async listRigVersions(_workspaceId: string, rigId: string): Promise<RigVersion[]> {
+    return this.rigVersions.filter((candidate) => candidate.rigId === rigId).sort((a, b) => b.version - a.version);
+  }
+
+  async activateRigVersion(_workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+    let activated: RigVersion | undefined;
+    for (const version of this.rigVersions) {
+      if (version.rigId === rigId) {
+        version.active = version.id === versionId;
+        if (version.active) {
+          activated = version;
+        }
+      }
+    }
+    if (!activated) {
+      throw new Error(`rig version not found: ${versionId}`);
+    }
+    const rig = this.rigs.find((candidate) => candidate.id === rigId);
+    if (rig) {
+      rig.activeVersion = activated;
+      rig.updatedAt = new Date().toISOString();
+    }
+    return activated;
+  }
+
+  async listRigChanges(_workspaceId: string, rigId: string): Promise<RigChange[]> {
+    return this.rigChanges.filter((candidate) => candidate.rigId === rigId);
+  }
+
+  async proposeRigChange(_workspaceId: string, rigId: string, request: ProposeRigChangeRequest): Promise<RigChange> {
+    const rig = await this.getRig(_workspaceId, rigId);
+    const now = new Date().toISOString();
+    const change: RigChange = {
+      id: `${rigId}-change-${this.rigChanges.length + 1}`,
+      rigId,
+      baseVersionId: rig.activeVersion?.id ?? null,
+      kind: request.kind,
+      payload: request.payload as Record<string, unknown>,
+      status: "proposed",
+      proposedBy: "user:demo",
+      verification: null,
+      resultVersionId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.rigChanges.push(change);
+    return change;
+  }
+
+  async getRigChange(_workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    const change = this.rigChanges.find((candidate) => candidate.id === changeId && candidate.rigId === rigId);
+    if (!change) {
+      throw new Error(`rig change not found: ${changeId}`);
+    }
+    return change;
   }
 
   private registeredPacks: WorkspaceRegisteredPack[] = [];

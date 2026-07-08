@@ -824,6 +824,8 @@ export const KNOWN_PERMISSIONS = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "rigs:use",
+  "rigs:manage",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
@@ -1305,6 +1307,109 @@ export type SetVariableSetVariableRequest = {
 
 /** @deprecated use SetVariableSetVariableRequest */
 export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
+
+// --- Rigs ---------------------------------------------------------------------
+// Workspace-scoped, versioned sandbox machine definitions. Versions are
+// append-only and content-immutable; exactly one is active per rig.
+
+export type RigCheck = {
+  name: string;
+  command: string;
+};
+
+export type RigVersion = {
+  id: string;
+  rigId: string;
+  version: number;
+  image: string | null;
+  setupScript: string | null;
+  checks: RigCheck[];
+  credentialHooks: string[];
+  defaultVariableSetIds: string[];
+  changelog: string | null;
+  createdBy: string | null;
+  active: boolean;
+  createdAt: string;
+};
+
+export type Rig = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description: string | null;
+  createdBy: string | null;
+  activeVersion: RigVersion | null;
+  versionCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RigChangeKind = "setup_append" | "definition_edit";
+
+export type RigChangeStatus = "proposed" | "verifying" | "merged" | "rejected" | "failed";
+
+export type RigCheckResult = {
+  name: string;
+  command: string;
+  exitCode: number | null;
+  output?: string | undefined;
+};
+
+export type RigChangeVerification = {
+  startedAt?: string | undefined;
+  finishedAt?: string | undefined;
+  log?: string | undefined;
+  checkResults?: RigCheckResult[] | undefined;
+  [key: string]: unknown;
+};
+
+export type RigChange = {
+  id: string;
+  rigId: string;
+  baseVersionId: string | null;
+  kind: RigChangeKind;
+  payload: Record<string, unknown>;
+  status: RigChangeStatus;
+  proposedBy: string | null;
+  verification: RigChangeVerification | null;
+  resultVersionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateRigRequest = {
+  name: string;
+  description?: string | undefined;
+  image?: string | undefined;
+  setupScript?: string | undefined;
+  checks?: RigCheck[] | undefined;
+  credentialHooks?: string[] | undefined;
+  defaultVariableSetIds?: string[] | undefined;
+};
+
+export type UpdateRigRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+};
+
+export type RigSetupAppendPayload = {
+  command: string;
+  note?: string | undefined;
+};
+
+export type RigDefinitionEditPayload = {
+  image?: string | null | undefined;
+  setupScript?: string | null | undefined;
+  checks?: RigCheck[] | undefined;
+  credentialHooks?: string[] | undefined;
+  defaultVariableSetIds?: string[] | undefined;
+  changelog?: string | null | undefined;
+};
+
+export type ProposeRigChangeRequest =
+  | { kind: "setup_append"; payload: RigSetupAppendPayload }
+  | { kind: "definition_edit"; payload: RigDefinitionEditPayload };
 
 // --- Files ---------------------------------------------------------------------
 

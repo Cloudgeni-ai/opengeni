@@ -39,6 +39,7 @@ import type {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
+  CreateRigRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
@@ -126,12 +127,17 @@ import type {
   UpdateSessionRequest,
   UpdateSessionTurnRequest,
   UpdateVariableSetRequest,
+  UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   UploadFileInput,
   VariableSet,
   VariableSetVariableMetadata,
+  Rig,
+  RigVersion,
+  RigChange,
+  ProposeRigChangeRequest,
   WorkspaceMember,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
@@ -919,6 +925,55 @@ export class OpenGeniClient {
       "DELETE",
       `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
     );
+  }
+
+  // --- Rigs ------------------------------------------------------------------
+  // Workspace-scoped, versioned sandbox machine definitions. rigs:use gates read
+  // + proposeRigChange; rigs:manage gates create / update / delete / activate.
+
+  async listRigs(workspaceId: string): Promise<Rig[]> {
+    return await this.requestJson<Rig[]>("GET", `/v1/workspaces/${workspaceId}/rigs`);
+  }
+
+  async createRig(workspaceId: string, request: CreateRigRequest): Promise<Rig> {
+    return await this.requestJson<Rig>("POST", `/v1/workspaces/${workspaceId}/rigs`, request);
+  }
+
+  async getRig(workspaceId: string, rigId: string): Promise<Rig> {
+    return await this.requestJson<Rig>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}`);
+  }
+
+  async updateRig(workspaceId: string, rigId: string, request: UpdateRigRequest): Promise<Rig> {
+    return await this.requestJson<Rig>("PATCH", `/v1/workspaces/${workspaceId}/rigs/${rigId}`, request);
+  }
+
+  async deleteRig(workspaceId: string, rigId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/rigs/${rigId}`);
+  }
+
+  async listRigVersions(workspaceId: string, rigId: string): Promise<RigVersion[]> {
+    return await this.requestJson<RigVersion[]>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`);
+  }
+
+  /** Roll the active version to an existing one (rollback / promote-activate). */
+  async activateRigVersion(workspaceId: string, rigId: string, versionId: string): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/${versionId}/activate`,
+    );
+  }
+
+  async listRigChanges(workspaceId: string, rigId: string): Promise<RigChange[]> {
+    return await this.requestJson<RigChange[]>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes`);
+  }
+
+  /** Propose a change against the rig's active version (rigs:use). */
+  async proposeRigChange(workspaceId: string, rigId: string, request: ProposeRigChangeRequest): Promise<RigChange> {
+    return await this.requestJson<RigChange>("POST", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes`, request);
+  }
+
+  async getRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    return await this.requestJson<RigChange>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}`);
   }
 
   /** @deprecated use listVariableSets */
