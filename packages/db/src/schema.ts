@@ -31,6 +31,9 @@ export const workspaces = pgTable("workspaces", {
   // White-label agent persona template override. NULL means the deployment
   // default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE / DEFAULT_AGENT_INSTRUCTIONS).
   agentInstructions: text("agent_instructions"),
+  // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
+  // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
+  settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -487,6 +490,21 @@ export const knowledgeMemories = pgTable("knowledge_memories", {
   createdBySessionId: uuid("created_by_session_id").references(() => sessions.id, { onDelete: "set null" }),
   reviewedBy: text("reviewed_by"),
   reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  // Workspace Memory V1 (migration 0045). Embedding is nullable: fail-soft writes
+  // (embedder unavailable) persist keyword-searchable rows without a vector.
+  embedding: vector("embedding"),
+  embeddingModel: text("embedding_model"),
+  pinned: boolean("pinned").notNull().default(false),
+  usageCount: integer("usage_count").notNull().default(0),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  // Self-referential supersession chain. FKs live in migration 0045 (ON DELETE SET
+  // NULL); declared here as plain columns like the migration-only composite FK.
+  supersedesId: uuid("supersedes_id"),
+  supersededById: uuid("superseded_by_id"),
+  validFrom: timestamp("valid_from", { withTimezone: true }).notNull().defaultNow(),
+  validUntil: timestamp("valid_until", { withTimezone: true }),
+  // sha256(normalizeMemoryText(text)) — exact-dedup key; see memory-domain.
+  textHash: text("text_hash"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
@@ -494,6 +512,14 @@ export const knowledgeMemories = pgTable("knowledge_memories", {
   workspaceKind: index("knowledge_memories_workspace_kind_idx").on(table.workspaceId, table.kind),
   workspaceScope: index("knowledge_memories_workspace_scope_idx").on(table.workspaceId, table.scope),
   createdBySession: index("knowledge_memories_workspace_created_by_session_idx").on(table.workspaceId, table.createdBySessionId),
+  // Working-set selection (partial index mirrors migration 0045).
+  workspaceVisible: index("knowledge_memories_workspace_visible_idx")
+    .on(table.workspaceId, table.pinned, table.updatedAt)
+    .where(sql`${table.status} in ('active', 'approved')`),
+  workspaceTextHash: index("knowledge_memories_workspace_text_hash_idx").on(table.workspaceId, table.textHash),
+  workspaceVisibleTextHashUnique: uniqueIndex("knowledge_memories_workspace_visible_text_hash_uq")
+    .on(table.workspaceId, table.textHash)
+    .where(sql`${table.status} in ('active', 'approved') and ${table.textHash} is not null`),
 }));
 
 export const sessionTurns = pgTable("session_turns", {

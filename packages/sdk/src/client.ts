@@ -80,6 +80,7 @@ import type {
   Session,
   SessionEvent,
   SessionGoal,
+  SessionLineageResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -127,10 +128,13 @@ import type {
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
+  UpdateWorkspaceSettingsRequest,
   UploadFileInput,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemorySearchRequest,
+  WorkspaceMemorySearchResponse,
   WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
@@ -205,10 +209,17 @@ export class OpenGeniClient {
     return await this.requestJson<Session>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`, request);
   }
 
-  async listSessions(workspaceId: string, options: { limit?: number } = {}): Promise<Session[]> {
+  async listSessions(workspaceId: string, options: { limit?: number; parentSessionId?: string | null } = {}): Promise<Session[]> {
     return await this.requestJson<Session[]>("GET", `/v1/workspaces/${workspaceId}/sessions`, undefined, {
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") && options.parentSessionId !== undefined
+        ? { parentSessionId: options.parentSessionId === null ? "null" : String(options.parentSessionId) }
+        : {}),
     });
+  }
+
+  async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+    return await this.requestJson<SessionLineageResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`);
   }
 
   async listTurns(workspaceId: string, sessionId: string, options: { limit?: number } = {}): Promise<SessionTurn[]> {
@@ -1054,6 +1065,16 @@ export class OpenGeniClient {
 
   async updateKnowledgeMemory(workspaceId: string, memoryId: string, request: UpdateKnowledgeMemoryRequest): Promise<KnowledgeMemory> {
     return await this.requestJson<KnowledgeMemory>("PATCH", `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`, request);
+  }
+
+  /** Hybrid (semantic + keyword) search over the workspace's agent-visible memory. */
+  async searchWorkspaceMemories(workspaceId: string, request: WorkspaceMemorySearchRequest): Promise<WorkspaceMemorySearchResponse> {
+    return await this.requestJson<WorkspaceMemorySearchResponse>("POST", `/v1/workspaces/${workspaceId}/knowledge/memories/search`, request);
+  }
+
+  /** Deep-merge a settings patch into the workspace (preserves unknown keys). */
+  async updateWorkspaceSettings(workspaceId: string, request: UpdateWorkspaceSettingsRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}/settings`, request);
   }
 
   // --- Capability packs ------------------------------------------------------------------

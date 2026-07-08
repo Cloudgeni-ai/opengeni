@@ -134,6 +134,16 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
+  test("listSessions sends parent filters and getSessionLineage hits lineage route", async () => {
+    const { client, requests } = makeClient(() => jsonResponse([]));
+    await client.listSessions(WORKSPACE_ID, { limit: 5, parentSessionId: null });
+    await client.listSessions(WORKSPACE_ID, { parentSessionId: SESSION_ID });
+    await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`);
+    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?parentSessionId=${SESSION_ID}`);
+    expect(requests[2]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`);
+  });
+
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
     const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
     const { client, requests } = makeClient((request) => {

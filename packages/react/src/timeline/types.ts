@@ -85,6 +85,20 @@ export type WorkerItem = {
   occurredAt: string;
 };
 
+export type WorkerCompletionItem = {
+  kind: "worker-completion";
+  id: string;
+  turnId: string | null;
+  occurredAt: string;
+  childSessionId: string;
+  childStatus: string;
+  goalStatus: string | null;
+  goalText: string | null;
+  evidence: string | null;
+  pausedReason: string | null;
+  text: string;
+};
+
 export type SandboxItem = {
   kind: "sandbox";
   id: string;
@@ -166,6 +180,7 @@ export type TimelineItem =
   | ReasoningItem
   | ToolCallItem
   | WorkerItem
+  | WorkerCompletionItem
   | SandboxItem
   | SessionStatusItem
   | GoalItem

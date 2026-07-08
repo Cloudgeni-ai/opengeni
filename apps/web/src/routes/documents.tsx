@@ -1,29 +1,28 @@
 // Documents: indexed document bases for agent search, with upload, reindex,
 // and semantic search — all through the SDK client.
-import { BrainCircuitIcon, CheckIcon, CheckCircle2Icon, FileSearchIcon, FilesIcon, Loader2Icon, PlusIcon, RefreshCwIcon, XCircleIcon } from "lucide-react";
+import { CheckIcon, FileSearchIcon, FilesIcon, Loader2Icon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { MemoryPane } from "@/components/knowledge/memory-pane";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
-import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
-import type { DocumentBase, DocumentSearchMode, DocumentSearchResult, IndexedDocument, KnowledgeMemory, KnowledgeMemoryKind, KnowledgeMemoryStatus, KnowledgeSourceKind } from "@/types";
+import type { DocumentBase, DocumentSearchMode, DocumentSearchResult, IndexedDocument, KnowledgeSourceKind } from "@/types";
 
 const sourceKindOptions: KnowledgeSourceKind[] = ["manual_upload", "meeting_transcript", "repository", "email", "chat", "document", "web", "other"];
-const memoryKindOptions: KnowledgeMemoryKind[] = ["semantic", "episodic", "procedural", "decision", "preference"];
-const memoryStatusOptions: KnowledgeMemoryStatus[] = ["proposed", "approved", "rejected"];
 
 export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
+  const memoryEnabled = context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings?.memoryEnabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
   const [basesError, setBasesError] = useState<Error | null>(null);
@@ -42,14 +41,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const [uploadSourceTitle, setUploadSourceTitle] = useState("");
   const [uploadSourceAuthor, setUploadSourceAuthor] = useState("");
   const [uploadAclTags, setUploadAclTags] = useState("");
-  const [memories, setMemories] = useState<KnowledgeMemory[]>([]);
-  const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryText, setMemoryText] = useState("");
-  const [memoryKind, setMemoryKind] = useState<KnowledgeMemoryKind>("semantic");
-  const [memoryStatusFilter, setMemoryStatusFilter] = useState<KnowledgeMemoryStatus | "">("proposed");
-  const [memoriesLoading, setMemoriesLoading] = useState(false);
-  const [proposingMemory, setProposingMemory] = useState(false);
-  const [reviewingMemoryIds, setReviewingMemoryIds] = useState<Set<string>>(() => new Set());
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [searching, setSearching] = useState(false);
@@ -73,7 +64,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
 
   useEffect(() => {
     void refreshBases();
-    void refreshMemories();
   }, [workspaceId]);
 
   useEffect(() => {
@@ -128,21 +118,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       toast.error("Failed to load documents", { description: String(error) });
     } finally {
       setDocumentsLoading(false);
-    }
-  }
-
-  async function refreshMemories() {
-    setMemoriesLoading(true);
-    try {
-      setMemories(await client.listKnowledgeMemories(workspaceId, {
-        ...(memoryQuery.trim() ? { query: memoryQuery.trim() } : {}),
-        ...(memoryStatusFilter ? { status: memoryStatusFilter } : {}),
-        limit: 20,
-      }));
-    } catch (error) {
-      toast.error("Failed to load memories", { description: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setMemoriesLoading(false);
     }
   }
 
@@ -214,44 +189,6 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       toast.error("Document search failed", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setSearching(false);
-    }
-  }
-
-  async function handleProposeMemory() {
-    const text = memoryText.trim();
-    if (!text) return;
-    setProposingMemory(true);
-    try {
-      const memory = await client.createKnowledgeMemory(workspaceId, {
-        text,
-        kind: memoryKind,
-        status: "proposed",
-        confidence: 0.7,
-      });
-      setMemories((current) => [memory, ...current]);
-      setMemoryText("");
-      toast.success("Memory proposed");
-    } catch (error) {
-      toast.error("Failed to propose memory", { description: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setProposingMemory(false);
-    }
-  }
-
-  async function handleReviewMemory(memory: KnowledgeMemory, status: "approved" | "rejected") {
-    setReviewingMemoryIds((current) => new Set(current).add(memory.id));
-    try {
-      const updated = await client.updateKnowledgeMemory(workspaceId, memory.id, { status });
-      setMemories((current) => current.map((item) => item.id === updated.id ? updated : item));
-      toast.success(status === "approved" ? "Memory approved" : "Memory rejected");
-    } catch (error) {
-      toast.error("Failed to review memory", { description: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setReviewingMemoryIds((current) => {
-        const next = new Set(current);
-        next.delete(memory.id);
-        return next;
-      });
     }
   }
 
@@ -607,114 +544,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
               )}
             </div>
 
-            <div className="mt-6 border-t border-[color:var(--color-border)] pt-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                  <BrainCircuitIcon className="size-4 text-[color:var(--color-brand)]" />
-                  Memory
-                </div>
-                <Button type="button" variant="ghost" size="icon-sm" onClick={() => void refreshMemories()} disabled={memoriesLoading} aria-label="Refresh memories" title="Refresh memories">
-                  {memoriesLoading ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
-                </Button>
-              </div>
-
-              <div className="mt-3 grid gap-2">
-                <Textarea
-                  value={memoryText}
-                  onChange={(event) => setMemoryText(event.target.value)}
-                  placeholder="Propose a reusable fact, decision, or preference"
-                  className="min-h-20 text-xs"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <select
-                    value={memoryKind}
-                    onChange={(event) => setMemoryKind(event.target.value as KnowledgeMemoryKind)}
-                    className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
-                  >
-                    {memoryKindOptions.map((kind) => <option key={kind} value={kind}>{formatToken(kind)}</option>)}
-                  </select>
-                  <Button type="button" size="sm" className="h-8" disabled={proposingMemory || !memoryText.trim()} onClick={() => void handleProposeMemory()}>
-                    {proposingMemory ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
-                    Propose
-                  </Button>
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-2">
-                <div className="grid grid-cols-[1fr_120px] gap-2">
-                  <Input
-                    value={memoryQuery}
-                    onChange={(event) => setMemoryQuery(event.target.value)}
-                    placeholder="Search memory"
-                    className="h-8 text-xs"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void refreshMemories();
-                    }}
-                  />
-                  <select
-                    value={memoryStatusFilter}
-                    onChange={(event) => setMemoryStatusFilter(event.target.value as KnowledgeMemoryStatus | "")}
-                    className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
-                  >
-                    <option value="">All</option>
-                    {memoryStatusOptions.map((status) => <option key={status} value={status}>{formatToken(status)}</option>)}
-                  </select>
-                </div>
-                <Button type="button" variant="secondary" size="sm" className="h-8" onClick={() => void refreshMemories()} disabled={memoriesLoading}>
-                  {memoriesLoading ? <Loader2Icon className="size-3.5 animate-spin" /> : <FileSearchIcon className="size-3.5" />}
-                  Load memories
-                </Button>
-              </div>
-
-              <div className="mt-3 space-y-2">
-                {memories.length > 0 ? memories.map((memory) => (
-                  <div key={memory.id} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0 text-xs font-medium text-[color:var(--color-fg)]">
-                        {formatToken(memory.kind)}
-                      </div>
-                      <span className="shrink-0 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[11px] text-[color:var(--color-fg-subtle)]">
-                        {formatToken(memory.status)}
-                      </span>
-                    </div>
-                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">{memory.text}</p>
-                    <div className="mt-2 text-[11px] text-[color:var(--color-fg-subtle)]">
-                      {memory.scope} · {Math.round(memory.confidence * 100)}%
-                    </div>
-                    {memory.status === "proposed" ? (
-                      <div className="mt-3 flex gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="secondary"
-                          className="h-7 flex-1"
-                          disabled={reviewingMemoryIds.has(memory.id)}
-                          onClick={() => void handleReviewMemory(memory, "approved")}
-                        >
-                          <CheckCircle2Icon className="size-3.5" />
-                          Approve
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 flex-1"
-                          disabled={reviewingMemoryIds.has(memory.id)}
-                          onClick={() => void handleReviewMemory(memory, "rejected")}
-                        >
-                          <XCircleIcon className="size-3.5" />
-                          Reject
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                )) : (
-                  <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-                    No memory records match this view.
-                  </div>
-                )}
-              </div>
-            </div>
+            <MemoryPane workspaceId={workspaceId} memoryEnabled={memoryEnabled} />
           </aside>
         </div>
       </section>

@@ -263,6 +263,16 @@ function missingRequestedScopes(requested: string[] | undefined, granted: string
   return requested.filter((scope) => !grantedSet.has(scope));
 }
 
+/**
+ * Normalizes an OAuth token_type into the Authorization scheme to send. RFC 6750
+ * says the scheme is case-insensitive, but some MCP servers (e.g. Linear) reject
+ * a lowercase `bearer` — so a `bearer`/`BEARER` (or absent) token_type is sent as
+ * the canonical `Bearer`. A non-bearer scheme is passed through unchanged.
+ */
+export function normalizeBearerScheme(tokenType: string | null | undefined): string {
+  return !tokenType || /^bearer$/i.test(tokenType) ? "Bearer" : tokenType;
+}
+
 function headersForCredential(cred: ConnectionCredentialForBroker): Record<string, string> | null {
   if (cred.kind === "api_key") {
     return stringRecord((cred.credential as { headers?: unknown }).headers);
@@ -272,8 +282,7 @@ function headersForCredential(cred: ConnectionCredentialForBroker): Record<strin
     if (!accessToken) {
       return null;
     }
-    const tokenType = stringValue((cred.credential as { token_type?: unknown }).token_type) || "Bearer";
-    return { authorization: `${tokenType} ${accessToken}` };
+    return { authorization: `${normalizeBearerScheme(stringValue((cred.credential as { token_type?: unknown }).token_type))} ${accessToken}` };
   }
   return stringRecord((cred.credential as { headers?: unknown }).headers);
 }

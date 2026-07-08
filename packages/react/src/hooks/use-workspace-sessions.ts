@@ -5,6 +5,7 @@ import { usePolledValue } from "./internal";
 
 export type UseWorkspaceSessionsOptions = ClientOverride & {
   limit?: number | undefined;
+  parentSessionId?: string | null | undefined;
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -21,9 +22,13 @@ export type UseWorkspaceSessionsResult = {
 export function useWorkspaceSessions(options: UseWorkspaceSessionsOptions = {}): UseWorkspaceSessionsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const limit = options.limit;
+  const parentSessionId = options.parentSessionId;
   const load = useCallback(
-    async () => await client.listSessions(workspaceId, limit !== undefined ? { limit } : {}),
-    [client, workspaceId, limit],
+    async () => await client.listSessions(workspaceId, {
+      ...(limit !== undefined ? { limit } : {}),
+      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+    }),
+    [client, workspaceId, limit, parentSessionId],
   );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
   return { sessions: state.data ?? [], loading: state.loading, error: state.error, refresh: state.refresh };

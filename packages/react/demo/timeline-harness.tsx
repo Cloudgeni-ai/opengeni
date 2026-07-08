@@ -19,6 +19,7 @@ import {
   failedTurnEvents,
   liveTurnEvents,
   tourEvents,
+  workerCompletionEvents,
   workerGoalEvents,
 } from "./timeline-fixtures";
 import "./styles.css";
@@ -142,6 +143,13 @@ function Harness() {
             </Section>
 
             <Section
+              title="Worker completions — inbound results, not user bubbles"
+              hint="A child's childCompletion payload → a quiet result card (completed / paused / failed) with the report behind a fold and a deep-link into the child."
+            >
+              <RawRail events={workerCompletionEvents()} />
+            </Section>
+
+            <Section
               title="Completed turn — folded to a summary chip"
               hint="Prompt bubble → one turn chip → final answer; expand for narration and nested tool clusters."
             >
@@ -204,39 +212,43 @@ function RawRail({ events }: { events: ReturnType<typeof tourEvents> }) {
   );
 }
 
-function RawGroup({ group }: { group: TimelineGroup }) {
+function RawGroup({ group, insideTurn = false }: { group: TimelineGroup; insideTurn?: boolean }) {
   switch (group.kind) {
     case "activity":
       return group.outcome ? (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
-          failureText={group.failureText}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          failureText={insideTurn ? undefined : group.failureText}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
         </TurnSummary>
       ) : (
-        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
       );
-    case "turn":
+    case "turn": {
+      const body = group.groups.map((child) => <RawGroup key={rawGroupKey(child)} group={child} insideTurn />);
       return (
         <TurnSummary
           items={flattenActivities(group.groups)}
           outcome={group.outcome}
           failureText={group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <div className="flex flex-col gap-4">
-            {group.groups.map((child) => (
-              <RawGroup key={rawGroupKey(child)} group={child} />
-            ))}
-          </div>
+          {insideTurn ? (
+            <div className="flex flex-col gap-4">{body}</div>
+          ) : (
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+          )}
         </TurnSummary>
       );
+    }
     case "item":
-      return <TimelineRow item={group.item} />;
+      return <TimelineRow item={group.item} onOpenSession={(id) => window.alert(`Open session ${id}`)} />;
   }
 }
 

@@ -13,6 +13,22 @@ page exists so you pick the right one in one read.
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; credentials rotatable on every user turn | Host-supplied headers, encrypted, write-only, `credentialVersion`-bumped | An embedding host injects its OWN tool server with per-session, short-lived bearers |
 | **Codex Apps MCP** | Automatic for Codex-subscription runs | Per turn, only on the ChatGPT/Codex model path | Workspace's Codex tokens | You don't — it rides along with the Codex subscription provider |
 
+First-party OpenGeni MCP memory tools:
+
+- `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
+- `memory_save` — save one durable, future-useful workspace memory through the deterministic write gate.
+- `memory_correct` — archive or supersede an incorrect/outdated workspace memory by id.
+
+These tools are session-scoped: they register only when the delegated bearer carries
+a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
+setting is true. The REST/UI memory audit and seed surfaces remain available when
+the setting is off.
+
+Docs MCP also has a `memory_search`, but it is the curated documents surface, not
+the first-party turn tool. It now reads both `active` and `approved` memory records
+so the curated lane and Workspace Memory V1 share the same agent-visible set;
+`memory_propose` still writes `proposed` records for human review.
+
 Rules of thumb:
 
 - Building a product **on top of** OpenGeni (embed or API)? Per-session MCP is

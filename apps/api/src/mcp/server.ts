@@ -9,6 +9,7 @@ import {
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
+  correctWorkspaceMemory,
   countWorkspaceEnvironments,
   createWorkspaceEnvironment,
   deleteScheduledTask,
@@ -25,9 +26,14 @@ import {
   listSocialConnections,
   listSocialPosts,
   listWorkspaceEnvironments,
+  MEMORY_CORRECT_TOOL_DESCRIPTION,
+  MEMORY_SAVE_TOOL_DESCRIPTION,
+  MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireFile,
   requireScheduledTask,
   requireSession,
+  saveWorkspaceMemory,
+  searchWorkspaceMemories,
   setSessionGoalStatus,
   setWorkspaceEnvironmentVariable,
   updateScheduledTask,
@@ -85,6 +91,7 @@ export type McpServerOptions = {
   // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
+  workspaceMemoryEnabled?: boolean | undefined;
 };
 
 export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, options: McpServerOptions = {}): McpServer {
@@ -114,6 +121,13 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // Goal tools require goals:manage (in the default first-party permission set).
   if (sessionId !== null && can("goals:manage")) {
     registerGoalTools(server, deps, grant, sessionId, json);
+  }
+  // Toolspace grants are the sandbox's narrowed proxy surface. Unlike the
+  // normal first-party worker token, a bare toolspace:call token does not see
+  // unpermissioned session tools; memory follows that title/goal parity and
+  // stays on the normal first-party MCP surface only.
+  if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
+    registerMemoryTools(server, deps, grant, sessionId, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -544,6 +558,103 @@ function registerGoalTools(
 }
 
 type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+
+const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
+
+function memoryPreview(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 119)}…`;
+}
+
+function registerMemoryTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool("memory_search", {
+    description: MEMORY_SEARCH_TOOL_DESCRIPTION,
+    inputSchema: {
+      query: z4.string().min(1),
+      kind: MemoryKindSchema.optional(),
+      limit: z4.number().int().positive().max(20).optional(),
+    },
+  }, async ({ query, kind, limit }) => json({
+    results: await searchWorkspaceMemories(deps.db, grant.workspaceId, {
+      query,
+      ...(kind ? { kind } : {}),
+      ...(limit ? { limit } : {}),
+    }, deps.getDocumentServices().embedder),
+  }));
+
+  server.registerTool("memory_save", {
+    description: MEMORY_SAVE_TOOL_DESCRIPTION,
+    inputSchema: {
+      text: z4.string().min(1),
+      kind: MemoryKindSchema,
+      confidence: z4.number().min(0).max(1).optional(),
+      replaces_id: z4.string().min(1).optional(),
+    },
+  }, async ({ text, kind, confidence, replaces_id }) => {
+    const result = await saveWorkspaceMemory(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      text,
+      kind,
+      ...(confidence !== undefined ? { confidence } : {}),
+      ...(replaces_id ? { replacesId: replaces_id } : {}),
+      origin: "agent",
+    }, deps.getDocumentServices().embedder);
+    await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+      type: "memory.saved",
+      payload: {
+        memoryId: result.memory.id,
+        kind: result.memory.kind,
+        preview: memoryPreview(result.memory.text),
+        deduped: result.deduped,
+        ...(result.superseded ? { supersededMemoryId: result.superseded.id } : {}),
+      },
+    }]);
+    return json(result);
+  });
+
+  server.registerTool("memory_correct", {
+    description: MEMORY_CORRECT_TOOL_DESCRIPTION,
+    inputSchema: {
+      id: z4.string().min(1),
+      reason: z4.string().min(1).optional(),
+      replacement_text: z4.string().min(1).optional(),
+    },
+  }, async ({ id, reason, replacement_text }) => {
+    const result = await correctWorkspaceMemory(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      id,
+      ...(reason ? { reason } : {}),
+      ...(replacement_text ? { replacementText: replacement_text } : {}),
+    }, deps.getDocumentServices().embedder);
+    await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+      type: "memory.corrected",
+      payload: {
+        memoryId: result.memory.id,
+        kind: result.memory.kind,
+        preview: memoryPreview(result.memory.text),
+        action: result.action,
+        ...(reason ? { reason: memoryPreview(reason) } : {}),
+        ...(result.replacement
+          ? {
+            replacementMemoryId: result.replacement.id,
+            replacementPreview: memoryPreview(result.replacement.text),
+          }
+          : {}),
+      },
+    }]);
+    return json(result);
+  });
+}
 
 // Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
 // session's active-sandbox pointer + reach the workspace's enrolled machines),

@@ -11,6 +11,7 @@ export type SessionClientLike = Pick<
   | "getClientConfig"
   // Sessions, events, composer
   | "getSession"
+  | "getSessionLineage"
   | "updateSession"
   | "listSessions"
   | "sendMessage"

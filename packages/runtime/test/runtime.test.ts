@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, appendWorkspaceMemory, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelCallUsageTelemetry, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -52,7 +53,7 @@ describe("runtime event normalization", () => {
   });
 
   test("extracts model usage from streamed response completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent({
+    const event = {
       type: "raw_model_stream_event",
       data: {
         type: "response_done",
@@ -63,10 +64,12 @@ describe("runtime event normalization", () => {
             outputTokens: 5,
             totalTokens: 15,
             inputTokensDetails: { cached_tokens: 3 },
+            outputTokensDetails: { reasoning_tokens: 2 },
           },
         },
       },
-    } as any);
+    } as any;
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-1",
@@ -75,12 +78,25 @@ describe("runtime event normalization", () => {
         outputTokens: 5,
         totalTokens: 15,
         inputTokensDetails: { cached_tokens: 3 },
+        outputTokensDetails: { reasoning_tokens: 2 },
       },
     });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-1",
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 3,
+          reasoningTokens: 2,
+        },
+      },
+    ]);
   });
 
   test("extracts model usage from raw Responses completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent(new RunRawModelStreamEvent({
+    const event = new RunRawModelStreamEvent({
       type: "model",
       providerData: {
         rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
@@ -94,10 +110,12 @@ describe("runtime event normalization", () => {
             output_tokens: 8,
             total_tokens: 28,
             input_tokens_details: { cached_tokens: 4 },
+            output_tokens_details: { reasoning_tokens: 6 },
           },
         },
       },
-    } as any));
+    } as any);
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-2",
@@ -106,7 +124,44 @@ describe("runtime event normalization", () => {
         outputTokens: 8,
         totalTokens: 28,
         inputTokensDetails: { cached_tokens: 4 },
+        outputTokensDetails: { reasoning_tokens: 6 },
       },
+    });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-2",
+          inputTokens: 20,
+          outputTokens: 8,
+          cachedTokens: 4,
+          reasoningTokens: 6,
+        },
+      },
+    ]);
+  });
+
+  test("normalizes model-call usage telemetry fields defensively", () => {
+    expect(modelCallUsageTelemetry({
+      inputTokens: 100,
+      outputTokens: 20,
+      inputTokensDetails: { cached_tokens: 80 },
+      outputTokensDetails: { reasoning_tokens: 7 },
+    })).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedTokens: 80,
+      reasoningTokens: 7,
+    });
+    expect(modelCallUsageTelemetry({
+      inputTokens: 50,
+      outputTokens: 10,
+      inputTokensDetails: { cached_input_tokens: 30 },
+    })).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedTokens: 30,
+      reasoningTokens: null,
     });
   });
 
@@ -774,6 +829,32 @@ describe("runtime event normalization", () => {
     expect(base.instructions).toBe(CURRENT_DEFAULT_INSTRUCTIONS);
   });
 
+  test("absent workspace memory is byte-identical to today's composition", () => {
+    expect(appendWorkspaceMemory("base")).toBe("base");
+    expect(appendWorkspaceMemory("base", "   ")).toBe("base");
+
+    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: undefined });
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: "   " });
+    expect(withUndefined.instructions).toBe(base.instructions);
+    expect(withBlank.instructions).toBe(base.instructions);
+    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+    });
+
+    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`);
+    expect(agent.instructions.indexOf(workspaceMemory))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
   test("the genesis title directive stays LAST, after per-session instructions", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
@@ -833,6 +914,25 @@ describe("runtime event normalization", () => {
       `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
     );
     expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
+  test("workspace memory composes after the toolspace directive and before the per-session slice", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+      toolspaceTokenSeed: "ogd_seed",
+    });
+
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+    );
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf(workspaceMemory));
+    expect(agent.instructions.indexOf(workspaceMemory))
       .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
   });
 
@@ -977,11 +1077,47 @@ describe("runtime event normalization", () => {
     });
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("set -eu");
+    expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("reports signed file download failures without throwing", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const result = await materializeSandboxFileDownloads({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      execCommand: async () => [
+        "Chunk ID: abc123",
+        "Wall time: 0.0000 seconds",
+        "Process exited with code 2",
+        "Output:",
+        "/bin/sh: 1: set: Illegal option -o pipefail",
+      ].join("\n"),
+    } as any, [{
+      fileId: "file-1",
+      mountPath: "files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt?sig=secret",
+      sizeBytes: 5,
+    }], {
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.filename).toBe("input.txt");
+    expect(result.failures[0]?.exitCode).toBe(2);
+    expect(result.failures[0]?.reason).toContain("failed with exit code 2");
+    expect(result.failures[0]?.reason).toContain("Illegal option");
+    expect(events.map((event) => event.type)).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    expect(events[1]?.payload.exitCode).toBe(2);
+    expect(events[1]?.payload.error).toContain("Illegal option");
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
   test("wraps sandbox clients with signed file downloads on create and resume", async () => {
@@ -2394,39 +2530,41 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
-  test("callModelInputFilterForSettings elides stale screenshots in server mode without budget trimming", async () => {
+  test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(testSettings({
       openaiProvider: "openai",
       contextCompactionMode: "auto",
       contextWindowTokens: 100,
       contextReservedOutputTokens: 0,
     }))!;
-    const oldHuge = { type: "message", role: "assistant", content: "x".repeat(10_000) } as any;
     const image = (n: number) => `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
-    const out = await filter({
-      modelData: {
-        input: [
-          { type: "message", role: "user", content: "old" },
-          oldHuge,
-          { type: "function_call_result", callId: "a", output: image(1) },
-          { type: "function_call_result", callId: "b", output: image(2) },
-          { type: "function_call_result", callId: "c", output: image(3) },
-          { type: "function_call_result", callId: "d", output: image(4) },
-          { type: "message", role: "user", content: "recent" },
-        ] as any,
-      },
+    const prefix = [
+      { type: "message", role: "user", content: "old" },
+      { type: "function_call_result", callId: "a", output: image(1) },
+      { type: "function_call_result", callId: "b", output: image(2) },
+      { type: "function_call_result", callId: "c", output: image(3) },
+      { type: "function_call_result", callId: "d", output: image(4) },
+    ] as any;
+    const first = await filter({
+      modelData: { input: prefix },
+      agent: {} as any,
+      context: undefined,
+    });
+    const secondInput = [
+      ...prefix,
+      { type: "function_call_result", callId: "e", output: image(5) },
+    ] as any;
+    const second = await filter({
+      modelData: { input: secondInput },
       agent: {} as any,
       context: undefined,
     });
 
-    // Server mode: image policy is always safe and always on.
-    expect((out.input[2] as any).output).toBe(SCREENSHOT_OMITTED_PLACEHOLDER);
-    expect((out.input[3] as any).output).toBe(image(2));
-    expect((out.input[4] as any).output).toBe(image(3));
-    expect((out.input[5] as any).output).toBe(image(4));
-    // Budget guard is client-mode only, so the oversized assistant item remains.
-    expect(out.input).toHaveLength(7);
-    expect(out.input).toContainEqual(oldHuge);
+    expect(first.input).toEqual(prefix);
+    expect(second.input.slice(0, prefix.length)).toEqual(first.input);
+    expect((second.input[1] as any).output).toBe(image(1));
+    expect((second.input[4] as any).output).toBe(image(4));
+    expect((second.input[5] as any).output).toBe(image(5));
   });
 
   test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {

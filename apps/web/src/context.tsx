@@ -62,6 +62,7 @@ import type {
   ResourceRef,
   Session,
   TurnSubmission,
+  UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
 
@@ -120,6 +121,7 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  updateWorkspaceSettings: (workspaceId: string, settings: UpdateWorkspaceSettingsRequest) => Promise<Workspace | null>;
   updateSessionTitle: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
@@ -373,6 +375,20 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to rename workspace", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
+  // Settings PATCH deep-merges server-side; upsert the returned workspace so the
+  // cached list (and any settings-derived UI, e.g. the Documents memory pane)
+  // reflects the change without a reload.
+  async function updateWorkspaceSettings(workspaceId: string, settings: UpdateWorkspaceSettingsRequest): Promise<Workspace | null> {
+    try {
+      const updated = await client.updateWorkspaceSettings(workspaceId, settings);
+      setWorkspaces((current) => upsertWorkspace(current, updated));
+      return updated;
+    } catch (error) {
+      toast.error("Failed to update workspace settings", { description: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }
@@ -666,6 +682,7 @@ export function RootRouteComponent() {
     handleManagedSignOut,
     createWorkspace,
     renameWorkspace,
+    updateWorkspaceSettings,
     updateSessionTitle,
     deleteWorkspace,
     refreshGitHub,

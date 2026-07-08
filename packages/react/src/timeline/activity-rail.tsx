@@ -161,20 +161,15 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
             : cancelled
               ? "Worker interrupted"
               : "Worker messaged";
+  // A worker is a first-class actor but still a STEP on the rail — a borderless
+  // row (no card), aligned to its sibling tool rows: the chevron column is an
+  // empty spacer (a worker doesn't expand), then the bot glyph, then the title
+  // with a quiet prompt/id beneath, and one right-gutter affordance.
   return (
-    <div
-      className={cn(
-        "my-0.5 flex items-start gap-3 rounded-og-md border bg-og-surface-1 p-3",
-        failed ? "border-og-status-failed/40" : "border-og-border",
-      )}
-    >
-      <span
-        className={cn(
-          "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center",
-          failed ? "text-og-status-failed" : "text-og-accent",
-        )}
-      >
-        <BotIcon className="size-4" />
+    <div className="flex items-start gap-2 px-1.5 py-1.5">
+      <span className="size-3.5 shrink-0" aria-hidden />
+      <span className={cn("mt-px shrink-0", failed ? "text-og-status-failed" : "text-og-accent")}>
+        <BotIcon className="size-3.5" />
       </span>
       <div className="min-w-0 flex-1">
         {/* In-flight state is carried ONLY by the shimmering title (no detached
@@ -188,7 +183,8 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
         ) : null}
       </div>
       {/* Right gutter: failed gets a red chip; cancelled gets a calm "interrupted"
-          chip (no dot, no red); a live complete worker shows an "Open session" button. */}
+          chip (no dot, no red); a live complete worker shows a quiet "Open session"
+          affordance (borderless, matching the worker-completion deep-link). */}
       {failed ? (
         <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
           <span className="size-1.5 rounded-full bg-og-status-failed" />
@@ -203,8 +199,8 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
           type="button"
           onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}
           className={cn(
-            "shrink-0 self-center rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-            "outline-none transition-colors duration-150 hover:border-og-border-strong hover:text-og-fg",
+            "-my-0.5 -mr-1 inline-flex shrink-0 self-center items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
+            "outline-none transition-colors duration-150 hover:bg-og-surface-1 hover:text-og-fg",
             "focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >

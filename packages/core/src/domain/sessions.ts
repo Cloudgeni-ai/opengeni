@@ -29,6 +29,7 @@ import {
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
+  getSessionLineage,
   getSessionTurn,
   requireSession,
   setTemporalWorkflowId,
@@ -1006,6 +1007,14 @@ export async function updateSessionTitle(
     }]);
   }
   return result;
+}
+
+export async function readSessionLineage(db: Database, workspaceId: string, sessionId: string) {
+  const lineage = await getSessionLineage(db, workspaceId, sessionId);
+  if (!lineage) {
+    throw new HTTPException(404, { message: "session not found" });
+  }
+  return lineage;
 }
 
 function withFirstPartyTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
