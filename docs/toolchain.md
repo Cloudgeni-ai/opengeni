@@ -30,19 +30,32 @@ publishable packages (`dts: true`) — it is never invoked as a gating typecheck
 CI runs the same `bun run typecheck` step (`.github/workflows/ci.yml`), so there is nothing
 special to configure locally beyond `bun install`.
 
-## Lint: oxlint (landing in a follow-up PR)
+## Lint: oxlint
 
-**oxlint** is the planned linter — there is no ESLint/Prettier/Biome config in this repo today, so
-this is a greenfield add rather than a migration. It is not wired up yet; when it lands, `bun run
-lint` will run it and CI will gate on it. See `docs/architecture.md` for where package boundaries
-live if you're setting up per-package lint scope.
+**oxlint** is the linter — a greenfield add (there was never an ESLint/Prettier/Biome config in
+this repo). `bun run lint` runs it and CI gates on it (0 errors; warnings are advisory). Config is
+`.oxlintrc.json` at the repo root: a lean plugin set (`react`, `react-hooks`, `typescript`,
+`import`) to stay clear of the multi-plugin perf cliff. Notable rule choices:
 
-## Format: oxfmt (landing in a follow-up PR)
+- `react/react-in-jsx-scope` off (React 19's automatic JSX runtime — no `import React` needed).
+- `react-hooks/exhaustive-deps` at `warn` (oxlint asks for whole-object deps where the intent is
+  member-level; audit before adding a dep, don't mass-autofix).
+- `no-control-regex` off (this repo's control-char sanitizers legitimately match them, and even the
+  recommended `\u`-escape form trips the rule).
+- A test-scoped override drops `no-unsafe-optional-chaining` to `warn` and turns off
+  `no-this-alias` — both fire only on test scaffolding, so the rules stay strict for `src`.
 
-**oxfmt** is the planned formatter (Prettier-compatible output). Also not wired up yet; when it
-lands, `bun run format` / `bun run format:check` will run it and CI will gate on `format:check`.
-The initial adoption reformats the whole repo in one dedicated commit (large, mechanical diff) —
-don't hand-format ahead of that landing to avoid fighting it.
+Warnings are intentionally non-blocking. Run `bun run lint` locally to see them.
+
+## Format: oxfmt
+
+**oxfmt** is the formatter (Prettier-compatible output, printWidth 100). `bun run format` writes,
+`bun run format:check` verifies, and CI gates on `format:check`. Config is `.oxfmtrc.json`, scoped
+to **TS/JS/JSON only**. It deliberately excludes markdown/YAML/TOML/CSS, `*.d.ts`, generated files
+(`*.gen.*`), drizzle migrations/meta, the golden event-grammar fixtures, all `fixtures/` and
+`evidence/` directories, and the Rust `agent/` crate — reformatting byte-exact fixtures or
+templated YAML would break tests or Helm rendering. If you add a new byte-exact fixture directory,
+add it to `ignorePatterns`.
 
 ## Where this fits
 
