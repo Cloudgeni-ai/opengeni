@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
-import { settingsWithPackSandboxImage, workspacePackRuntimeFromPacks } from "../src/activities/packs";
+import { settingsWithPackSandboxImage, settingsWithRigImage, workspacePackRuntimeFromPacks } from "../src/activities/packs";
 
 function pack(overrides: Record<string, unknown>): CapabilityPack {
   return CapabilityPack.parse({
@@ -99,5 +99,40 @@ describe("pack sandbox image settings", () => {
     // The original settings object is never mutated.
     expect(settings.dockerImage).toBe("opengeni-sandbox:local");
     expect(settings.modalImageRef).toBeUndefined();
+  });
+});
+
+describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
+  const DEPLOYMENT = "opengeni-sandbox:local";
+  const PACK = "ghcr.io/example/pack@sha256:pack";
+  const RIG = "ghcr.io/example/rig@sha256:rig";
+
+  // The exact composition agent-turn uses: rig applied OUTERMOST over pack over
+  // the deployment default settings.
+  function resolve(rigImage: string | null, packImage: string | null): Settings {
+    const base = { dockerImage: DEPLOYMENT, modalImageRef: undefined } as unknown as Settings;
+    return settingsWithRigImage(settingsWithPackSandboxImage(base, packImage), rigImage);
+  }
+
+  // All 8 combinations of {rig, pack, deployment} image presence. Deployment is
+  // always present (the settings default), so the axis that varies is rig/pack.
+  const matrix: Array<{ rig: string | null; pack: string | null; expected: string; expectModal: string | undefined }> = [
+    { rig: RIG, pack: PACK, expected: RIG, expectModal: RIG },   // rig wins over pack+deployment
+    { rig: RIG, pack: null, expected: RIG, expectModal: RIG },   // rig wins over deployment
+    { rig: null, pack: PACK, expected: PACK, expectModal: PACK }, // pack wins over deployment
+    { rig: null, pack: null, expected: DEPLOYMENT, expectModal: undefined }, // deployment default
+  ];
+
+  for (const { rig, pack, expected, expectModal } of matrix) {
+    test(`rig=${rig ? "set" : "none"} pack=${pack ? "set" : "none"} → ${expected}`, () => {
+      const resolved = resolve(rig, pack);
+      expect(resolved.dockerImage).toBe(expected);
+      expect(resolved.modalImageRef).toBe(expectModal as never);
+    });
+  }
+
+  test("a rig with no image is a pass-through (pack/deployment chain unchanged)", () => {
+    const base = { dockerImage: DEPLOYMENT, modalImageRef: undefined } as unknown as Settings;
+    expect(settingsWithRigImage(base, null)).toBe(base);
   });
 });
