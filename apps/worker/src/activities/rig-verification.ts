@@ -67,6 +67,7 @@ async function runCommand(session: CommandSession, command: string, timeoutMs: n
   const args = {
     cmd: command,
     workdir: "/workspace",
+    runAs: "root",
     yieldTimeMs: timeoutMs,
     maxOutputTokens: 40_000,
   };
@@ -168,6 +169,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         if ((candidateVersion.setupScript ?? "").trim()) {
           await runRigSetupHook(established.session as never, {
             environment: {},
+            runAs: "root",
             rigSetup: {
               rigId: rig.id,
               rigName: rig.name,
@@ -256,6 +258,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         if ((version.setupScript ?? "").trim()) {
           await runRigSetupHook(established.session as never, {
             environment: {},
+            runAs: "root",
             rigSetup: {
               rigId: rig.id,
               rigName: rig.name,
