@@ -3,29 +3,26 @@
 // overlay drawer (<1024px), and the slim canvas top strip that carries
 // session-contextual actions on session routes. The rail itself is composed
 // from the brand, switcher, workspace nav, session list, and footer sections.
-import { SessionStatus as SessionStatusBadge, useSessionLineage } from "@opengeni/react";
+import { useSessionLineage } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon } from "lucide-react";
+import { MenuIcon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 
-import { ConnectionPill } from "@/components/common";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { SessionHeader } from "@/components/rail/session-header";
 import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
-import { SessionAgentsChip, SpawnedByBreadcrumb } from "@/components/session/subagents";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
-import { SESSION_TITLE_MAX_LENGTH, sessionDisplayTitle, useInlineRename } from "@/lib/session-rename";
 import { cn } from "@/lib/utils";
-import type { Session } from "@/types";
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
 function RailBody() {
@@ -234,13 +231,12 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const isSessionRoute = /\/sessions\/[^/]+/.test(pathname);
   const showSessionActions = Boolean(context.session) && isSessionRoute;
-  // One lineage read for the whole header — shared by the "N agents" chip and
-  // the "spawned by" breadcrumb (disabled when there is no session). The header
-  // lives outside the session route's event feed, so spawn events can't trigger
-  // a refresh here (the goal pill's panel gets that via `events`); a modest poll
-  // keeps the agent count honest without threading the stream into the rail.
+  // A lineage read for the header's "spawned by" breadcrumb (disabled when there
+  // is no session). The header lives outside the session route's event feed, so
+  // spawn events can't trigger a refresh here; a modest poll keeps the ancestor
+  // link honest without threading the stream into the rail. (The child-agents
+  // count moved to the composer pill, which reads lineage off the live feed.)
   const lineage = useSessionLineage(context.session?.id ?? null, { pollIntervalMs: 30_000 });
-  const childNodes = lineage.lineage?.children ?? [];
   const ancestors = lineage.lineage?.ancestors ?? [];
   const parentSession = ancestors.length > 0 ? ancestors[ancestors.length - 1]! : null;
 
@@ -249,157 +245,59 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
     return null;
   }
 
-  return (
-    <header
-      className={cn(
-        "flex shrink-0 items-center gap-3 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4",
-        // The session strip carries a two-line block (title + meta) — it gets
-        // breathing room; the plain mobile brand strip stays slim.
-        showSessionActions ? "h-14" : "h-12",
-      )}
+  const hamburger = rail.isMobile ? (
+    <Button
+      ref={hamburgerRef}
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      aria-label="Open navigation"
+      onClick={() => rail.setDrawerOpen(true)}
     >
-      {rail.isMobile ? (
-        <Button
-          ref={hamburgerRef}
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Open navigation"
-          onClick={() => rail.setDrawerOpen(true)}
-        >
-          <MenuIcon className="size-4" />
-        </Button>
-      ) : null}
+      <MenuIcon className="size-4" />
+    </Button>
+  ) : null;
 
-      {showSessionActions && context.session ? (
-        <>
-          <div className="flex min-w-0 flex-1 flex-col justify-center gap-px">
-            {/* Child sessions link back to the manager that spawned them. */}
-            <SpawnedByBreadcrumb workspaceId={context.session.workspaceId} parent={parentSession} />
-            <SessionTitleEditor session={context.session} onRename={context.updateSessionTitle} />
-            {/* One quiet metadata voice: no label-colon grammar, no separator
-                soup — the model·effort token, then the sandbox pill (its own
-                shape, no interposed dot), then the codex indicator. */}
-            <div className="flex min-w-0 items-center gap-1.5 text-2xs leading-4 text-fg-subtle">
-              <span className="shrink-0">
-                {context.session.model} · {String(context.session.metadata.reasoningEffort ?? "low")}
-              </span>
-              <SessionSandboxSwitcher workspaceId={context.session.workspaceId} sessionId={context.session.id} />
-              {/* Codex-prefix-gated inside the component: absent for host-credit sessions. */}
-              <CodexAccountIndicator
-                workspaceId={context.session.workspaceId}
-                sessionId={context.session.id}
-                model={context.session.model}
-              />
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            {/* Sessions that spawned workers surface an "N agents" chip opening
-                the shared subagent lineage panel. */}
-            <SessionAgentsChip workspaceId={context.session.workspaceId} nodes={childNodes} />
-            <ConnectionPill state={context.connectionState} />
-            <SessionStatusBadge status={context.session.status} />
-            {context.keyAuthRequired ? (
-              <Button type="button" variant="ghost" size="icon-sm" onClick={context.forgetAccessKey} aria-label="Clear access key">
-                <LockIcon className="size-4" />
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant={context.inspectorOpen ? "secondary" : "ghost"}
-              size="icon-sm"
-              onClick={() => context.setInspectorOpen((open) => !open)}
-              aria-label={context.inspectorOpen ? "Hide session panel" : "Show session panel"}
-            >
-              <PanelRightIcon className="size-4" />
-            </Button>
-          </div>
-        </>
-      ) : rail.isMobile ? (
-        <Link
-          to="/workspaces/$workspaceId/sessions"
-          params={{ workspaceId: rail.workspaceId }}
-          className="flex items-center gap-2 text-sm font-semibold"
-        >
-          <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
-            <BrandMark className="size-3.5" />
-          </span>
-          OpenGeni
-        </Link>
-      ) : null}
-    </header>
-  );
-}
-
-/**
- * The session header title — display by default, click the title (or the
- * always-visible pencil) to rename inline. Prefers the durable session.title
- * (agent- or user-set), falling back to the initial message / "Untitled
- * session" exactly like the rail list. Enter saves, Esc cancels, blur saves; an
- * empty/unchanged value is a no-op cancel. The live title (context.session)
- * flows in through the session.title_set SSE event the react useSession hook
- * applies, so cross-client renames and agent titling reflect here without a
- * reload. The shared `useInlineRename` hook keeps this behaviour identical to
- * the rail row's rename.
- */
-function SessionTitleEditor(props: {
-  session: Session;
-  onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-}) {
-  const display = sessionDisplayTitle(props.session);
-  const rename = useInlineRename(props.session, props.onRename);
-
-  if (rename.editing) {
+  // Session route: the full identity + status header (its own bar). The live
+  // sandbox switcher and codex indicator flow in as slots so the header stays a
+  // pure, screenshot-testable component.
+  if (showSessionActions && context.session) {
+    const session = context.session;
     return (
-      // A calm in-place edit: same size and position as the display title, a
-      // soft surface tint + hairline instead of a loud focus ring. The global
-      // focus-ring rule is what painted the old blue box; opting out here keeps
-      // the rename feeling like editing the text, not filling in a form field.
-      <input
-        ref={rename.inputRef}
-        value={rename.draft}
-        onChange={(event) => rename.setDraft(event.target.value)}
-        onBlur={() => void rename.commit()}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            void rename.commit();
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            rename.cancel();
-          }
-        }}
-        maxLength={SESSION_TITLE_MAX_LENGTH}
-        aria-label="Session title"
-        className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-sm font-medium leading-5 outline-none ring-1 ring-border-strong focus:outline-none focus-visible:outline-none"
-        style={{ outline: "none" }}
+      <SessionHeader
+        session={session}
+        parent={parentSession}
+        connectionState={context.connectionState}
+        status={session.status}
+        keyAuthRequired={context.keyAuthRequired}
+        onForgetAccessKey={context.forgetAccessKey}
+        inspectorOpen={context.inspectorOpen}
+        onToggleInspector={() => context.setInspectorOpen((open) => !open)}
+        onRename={context.updateSessionTitle}
+        leading={hamburger}
+        sandboxSlot={<SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />}
+        // Codex-prefix-gated inside the component: absent for host-credit sessions.
+        codexSlot={<CodexAccountIndicator workspaceId={session.workspaceId} sessionId={session.id} model={session.model} />}
+        // The "N agents" indicator now lives above the composer (front and
+        // center) as ComposerAgentsPill, not in this header — see session.tsx.
       />
     );
   }
 
+  // Mobile, off a session route: the slim brand strip.
   return (
-    <div className="group/title flex min-w-0 items-center gap-0.5">
-      <button
-        type="button"
-        onClick={rename.startEditing}
-        title={`${display} · click to rename`}
-        className="min-w-0 shrink truncate rounded-sm text-left text-sm font-medium leading-5 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
+    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4">
+      {hamburger}
+      <Link
+        to="/workspaces/$workspaceId/sessions"
+        params={{ workspaceId: rail.workspaceId }}
+        className="flex items-center gap-2 text-sm font-semibold"
       >
-        {display}
-      </button>
-      {/* The pencil earns its pixels only when relevant: hidden at rest,
-          revealed on hover/focus, always present on coarse pointers where
-          hover doesn't exist. */}
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-xs"
-        onClick={rename.startEditing}
-        aria-label="Rename session"
-        className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/title:opacity-100 pointer-coarse:opacity-100"
-      >
-        <PencilIcon className="size-3" />
-      </Button>
-    </div>
+        <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
+          <BrandMark className="size-3.5" />
+        </span>
+        OpenGeni
+      </Link>
+    </header>
   );
 }
