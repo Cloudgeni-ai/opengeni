@@ -31,6 +31,8 @@ function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandbox
     deleteEntry: async () => {},
     moveEntry: async () => {},
     refresh: async () => {},
+    source: "live",
+    capturedAt: null,
     loading: false,
     error: null,
     ...overrides,

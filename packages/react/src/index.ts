@@ -84,6 +84,24 @@ export type {
 export { useSandboxGit } from "./hooks/use-sandbox-git";
 export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sandbox-git";
 
+// Workbench v2 turn-end capture (the cold-paint data layer)
+export { useWorkspaceCapture } from "./hooks/use-workspace-capture";
+export type { UseWorkspaceCaptureOptions, UseWorkspaceCaptureResult } from "./hooks/use-workspace-capture";
+export { useWorkspaceEdit } from "./hooks/use-workspace-edit";
+export type {
+  UseWorkspaceEditOptions,
+  UseWorkspaceEditResult,
+  WorkspaceEditConflict,
+  WorkspaceEditState,
+} from "./hooks/use-workspace-edit";
+export { deriveMachineChip, formatAsOf, useMachineChip } from "./hooks/use-machine-chip";
+export type {
+  DeriveMachineChipInput,
+  MachineChip,
+  MachineChipState,
+  UseMachineChipOptions,
+} from "./hooks/use-machine-chip";
+
 // Pending-approvals projection
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
