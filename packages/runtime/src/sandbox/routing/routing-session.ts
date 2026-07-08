@@ -417,12 +417,34 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return Boolean(s?.supportsPty?.());
   }
 
-  /** createEditor is a synchronous factory in the SDK surface; it binds to the
-   *  last-resolved backend's editor (or the default backend before the first op).
-   *  Returns undefined when the active backend has no editor (channel-a falls back
-   *  to its exec-based write path). */
+  /** createEditor is a synchronous factory in the SDK surface. The SDK's filesystem
+   *  capability calls it ONCE at tool-BIND time — `FilesystemCapability.tools()`,
+   *  every turn, before any tool runs — and throws "Filesystem sandbox sessions must
+   *  provide createEditor()" if it returns falsy. When a backend is already resolved
+   *  (eager/selfhosted routing) we bind to its editor directly, byte-for-byte as
+   *  before. But under LAZY provisioning the backend is not established yet
+   *  (defaultResolved is the synthetic unprovisioned session with no editor), so a
+   *  direct delegate returns undefined and every lazy turn would die at bind. Return a
+   *  LAZY EDITOR PROXY instead: a non-null editor whose async ops resolve the active
+   *  backend (establishing the box on first use, via `dispatch`) and delegate to its
+   *  real editor — mirroring how this proxy defers exec/readFile. */
   createEditor(runAs?: string): unknown {
-    return (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
+    const eager = (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
+    if (eager) {
+      return eager;
+    }
+    const op = (name: "createFile" | "updateFile" | "deleteFile") =>
+      (operation: unknown, context?: unknown): Promise<unknown> =>
+        this.dispatch(`editor.${name}`, async (s) => {
+          const editor = s.createEditor?.(runAs) as
+            | Record<string, (operation: unknown, context?: unknown) => Promise<unknown>>
+            | undefined;
+          if (!editor?.[name]) {
+            throw new RoutingUnsupportedError(`editor.${name}`, this.cached?.kind ?? "unknown");
+          }
+          return editor[name](operation, context);
+        });
+    return { createFile: op("createFile"), updateFile: op("updateFile"), deleteFile: op("deleteFile") };
   }
 
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {

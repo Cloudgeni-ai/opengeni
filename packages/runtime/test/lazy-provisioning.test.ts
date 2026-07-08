@@ -88,4 +88,60 @@ describe("lazy provisioning synthetic manifest", () => {
     expect(events.filter((event) => event.type === "sandbox.env.drift")).toEqual([]);
     expect(await manifestEnv((agent as { defaultManifest: never }).defaultManifest)).toEqual(environment);
   });
+
+  // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability
+  // calls session.createEditor() SYNCHRONOUSLY at tool-BIND time (every turn, before
+  // any tool runs) and throws "Filesystem sandbox sessions must provide createEditor()"
+  // if it returns falsy. Under lazy provisioning the default backend is the synthetic
+  // unprovisioned session with NO editor, so a direct delegate returned undefined and
+  // EVERY lazy turn died at bind — even chat-only turns. createEditor must return a
+  // non-null lazy editor whose ops resolve (establish) the backend on first use.
+  test("createEditor returns a non-null lazy editor before establish; editor ops resolve the backend", async () => {
+    let resolveCount = 0;
+    const realEditorCalls: Array<{ op: string; operation: unknown }> = [];
+    const realBackend: RoutableBackendSession = {
+      state: { manifest: {} },
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          realEditorCalls.push({ op: "createFile", operation });
+          return { output: "created" };
+        },
+        updateFile: async (operation: unknown) => {
+          realEditorCalls.push({ op: "updateFile", operation });
+          return { output: "updated" };
+        },
+        deleteFile: async (operation: unknown) => {
+          realEditorCalls.push({ op: "deleteFile", operation });
+          return { output: "deleted" };
+        },
+      }),
+    } as unknown as RoutableBackendSession;
+    const proxy = new RoutingSandboxSession({
+      // Synthetic unprovisioned default: NO createEditor (this is what broke bind).
+      defaultResolved: { session: { state: { manifest: {} } }, sandboxId: null, kind: "unprovisioned" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 1 }),
+      resolveActiveBackend: async () => {
+        resolveCount += 1;
+        return { session: realBackend, sandboxId: null, kind: "modal" };
+      },
+    });
+
+    // The exact SDK bind-time check: createEditor() must be non-null. Before this
+    // fix it returned undefined (the synthetic backend had no editor) and threw.
+    const editor = proxy.createEditor("root") as {
+      createFile: (op: unknown) => Promise<unknown>;
+      updateFile: (op: unknown) => Promise<unknown>;
+      deleteFile: (op: unknown) => Promise<unknown>;
+    };
+    expect(editor).toBeTruthy();
+    expect(typeof editor.createFile).toBe("function");
+    // No backend resolved yet: returning the editor must NOT have established a box.
+    expect(resolveCount).toBe(0);
+
+    // The editor op establishes the backend (resolve) on first use and delegates.
+    const result = await editor.createFile({ type: "create_file", path: "/workspace/x", diff: "+hi" });
+    expect(resolveCount).toBe(1);
+    expect(result).toEqual({ output: "created" });
+    expect(realEditorCalls).toEqual([{ op: "createFile", operation: { type: "create_file", path: "/workspace/x", diff: "+hi" } }]);
+  });
 });
