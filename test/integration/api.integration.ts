@@ -3980,6 +3980,10 @@ describe("API component integration", () => {
     const listedBody = await listed.json() as Array<{ id: string }>;
     expect(listedBody.some((environment) => environment.id === created.id)).toBe(true);
     expect(JSON.stringify(listedBody)).not.toContain("tok-write-only-123456");
+    const canonicalListed = await app.request(workspacePath(workspaceId, "/variable-sets"));
+    expect(canonicalListed.status).toBe(200);
+    const canonicalListedBody = await canonicalListed.json() as Array<{ id: string }>;
+    expect(canonicalListedBody).toEqual(listedBody);
 
     const rotated = await app.request(workspacePath(workspaceId, `/environments/${created.id}/variables/API_TOKEN`), {
       method: "PUT",
@@ -4132,6 +4136,9 @@ describe("API component integration", () => {
     expect(forbiddenCreate.status).toBe(403);
     const forbiddenList = await app.request(workspacePath(grant.workspaceId, "/environments"), { headers: limitedAuth });
     expect(forbiddenList.status).toBe(403);
+    const legacyUseAuth = { authorization: await signToken(["workspace:read", "environments:use" as Permission]) };
+    const legacyUseList = await app.request(workspacePath(grant.workspaceId, "/variable-sets"), { headers: legacyUseAuth });
+    expect(legacyUseList.status).toBe(200);
 
     const createdResponse = await app.request(workspacePath(grant.workspaceId, "/environments"), {
       method: "POST",
