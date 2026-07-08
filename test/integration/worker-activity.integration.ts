@@ -2520,7 +2520,7 @@ describe("worker activities integration", () => {
       environment.id,
     )).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     await expect(loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()))
-      .rejects.toThrow("workspace environment not found");
+      .rejects.toThrow("variable set not found");
   });
 
   test("layers workspace environment values between deployment env and GitHub run auth", async () => {
@@ -2562,7 +2562,7 @@ describe("worker activities integration", () => {
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
-      environmentId: environment.id,
+      variableSetId: environment.id,
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
@@ -2607,7 +2607,7 @@ describe("worker activities integration", () => {
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
-      environmentId: environment.id,
+      variableSetId: environment.id,
     });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
@@ -2643,7 +2643,7 @@ describe("worker activities integration", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
       agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-      environmentId: environment.id,
+      variableSetId: environment.id,
       metadata: {},
     });
     const activities = createActivities({
@@ -2666,7 +2666,7 @@ describe("worker activities integration", () => {
     expect(session?.environmentId).toBe(environment.id);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, dispatched.sessionId, 0, 10);
     const createdEvent = events.find((event) => event.type === "session.created");
-    expect(createdEvent?.payload).toMatchObject({ environmentId: environment.id, environmentName: environment.name });
+    expect(createdEvent?.payload).toMatchObject({ variableSetId: environment.id, variableSetName: environment.name });
     expect(JSON.stringify(events)).not.toContain("task-secret-123456");
   });
 
@@ -2688,7 +2688,7 @@ describe("worker activities integration", () => {
       runMode: "reusable_session",
       overlapPolicy: "allow_concurrent",
       agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-      environmentId: environment.id,
+      variableSetId: environment.id,
       metadata: {},
     });
     await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { reusableSessionId: session.id });
@@ -2706,7 +2706,7 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
-    })).rejects.toThrow("scheduled task environment attachment does not match its reusable session");
+    })).rejects.toThrow("scheduled task variableSet attachment does not match its reusable session");
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
   });
@@ -3766,7 +3766,7 @@ async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: 
     await setWorkspaceEnvironmentVariable(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      environmentId: environment.id,
+      variableSetId: environment.id,
       name,
       valueEncrypted: encryptEnvironmentValue(key, value),
     });
