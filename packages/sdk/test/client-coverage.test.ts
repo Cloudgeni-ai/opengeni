@@ -376,27 +376,39 @@ describe("OpenGeniClient scheduled tasks", () => {
   });
 });
 
-describe("OpenGeniClient environments", () => {
-  test("environment CRUD + write-only variable PUT/DELETE", async () => {
+describe("OpenGeniClient variable sets", () => {
+  test("variable set CRUD + write-only variable PUT/DELETE", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: ENVIRONMENT_ID, variables: [] }));
-    await client.listEnvironments(WORKSPACE_ID);
-    await client.createEnvironment(WORKSPACE_ID, { name: "staging", variables: [{ name: "EXAMPLE_TOKEN", value: "v" }] });
-    await client.getEnvironment(WORKSPACE_ID, ENVIRONMENT_ID);
-    await client.updateEnvironment(WORKSPACE_ID, ENVIRONMENT_ID, { description: "staging env" });
-    await client.setEnvironmentVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
-    await client.deleteEnvironmentVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN");
-    await client.deleteEnvironment(WORKSPACE_ID, ENVIRONMENT_ID);
+    await client.listVariableSets(WORKSPACE_ID);
+    await client.createVariableSet(WORKSPACE_ID, { name: "staging", variables: [{ name: "EXAMPLE_TOKEN", value: "v" }] });
+    await client.getVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
+    await client.updateVariableSet(WORKSPACE_ID, ENVIRONMENT_ID, { description: "staging vars" });
+    await client.setVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
+    await client.deleteVariableSetVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN");
+    await client.deleteVariableSet(WORKSPACE_ID, ENVIRONMENT_ID);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
-      `GET /v1/workspaces/${WORKSPACE_ID}/environments`,
-      `POST /v1/workspaces/${WORKSPACE_ID}/environments`,
-      `GET /v1/workspaces/${WORKSPACE_ID}/environments/${ENVIRONMENT_ID}`,
-      `PATCH /v1/workspaces/${WORKSPACE_ID}/environments/${ENVIRONMENT_ID}`,
-      `PUT /v1/workspaces/${WORKSPACE_ID}/environments/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-      `DELETE /v1/workspaces/${WORKSPACE_ID}/environments/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
-      `DELETE /v1/workspaces/${WORKSPACE_ID}/environments/${ENVIRONMENT_ID}`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
+      `PATCH /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
+      `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
+      `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
+      `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
     ]);
     // The variable PUT sends only the value; nothing else carries the secret.
     expect(JSON.parse(requests[4]!.body!)).toEqual({ value: "v2" });
+  });
+
+  test("deprecated environment method names delegate to the canonical variable-set paths", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: ENVIRONMENT_ID, variables: [] }));
+    await client.listEnvironments(WORKSPACE_ID);
+    await client.setEnvironmentVariable(WORKSPACE_ID, ENVIRONMENT_ID, "EXAMPLE_TOKEN", "v2");
+    await client.deleteEnvironment(WORKSPACE_ID, ENVIRONMENT_ID);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      `GET /v1/workspaces/${WORKSPACE_ID}/variable-sets`,
+      `PUT /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}/variables/EXAMPLE_TOKEN`,
+      `DELETE /v1/workspaces/${WORKSPACE_ID}/variable-sets/${ENVIRONMENT_ID}`,
+    ]);
   });
 });
 
