@@ -157,6 +157,66 @@ function providerInternalFailureDisplayMessage(message: string): string {
   return "Sandbox setup failed while preparing the execution environment. Start a new session.";
 }
 
+// Human labels for NAMED sandbox operations (the op `name` on a
+// `sandbox.operation.*` payload), translated at the UI boundary so the raw op id
+// never renders as a label. Additive: an unknown op falls back to the generic
+// event-type label. "sandbox.provision" is the lazy first-establish that now
+// happens mid-turn — the user should read "Starting sandbox", not an unexplained
+// long-running operation.
+const SANDBOX_OPERATION_LABELS: Record<string, string> = {
+  "sandbox.provision": "Starting sandbox",
+};
+
+/** The named op on a `sandbox.operation.*` payload, or null. */
+function sandboxOperationName(event: SessionEvent): string | null {
+  if (
+    (event.type === "sandbox.operation.started"
+      || event.type === "sandbox.operation.completed"
+      || event.type === "sandbox.operation.failed")
+    && event.payload
+    && typeof event.payload === "object"
+    && !Array.isArray(event.payload)
+  ) {
+    const name = (event.payload as Record<string, unknown>).name;
+    return typeof name === "string" ? name : null;
+  }
+  return null;
+}
+
+/**
+ * The display label for an event, preferring a named-operation label over the
+ * generic event-type one (so `sandbox.provision` reads "Starting sandbox" rather
+ * than "Sandbox operation started"). Falls back to {@link eventLabel}.
+ */
+export function eventDisplayLabel(event: SessionEvent): string {
+  const opName = sandboxOperationName(event);
+  if (opName && SANDBOX_OPERATION_LABELS[opName]) {
+    return SANDBOX_OPERATION_LABELS[opName]!;
+  }
+  return eventLabel(event.type);
+}
+
+/**
+ * Whether a lazy sandbox provision is in flight on this event stream: the latest
+ * `sandbox.provision` operation event is a `.started` not yet closed by a
+ * `.completed`/`.failed`. Drives the workbench "Starting sandbox…" affordance and
+ * the renegotiate-on-settle that picks the freshly-warm box back up.
+ */
+export function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
+  let inFlight = false;
+  for (const event of events) {
+    if (sandboxOperationName(event) !== "sandbox.provision") {
+      continue;
+    }
+    if (event.type === "sandbox.operation.started") {
+      inFlight = true;
+    } else if (event.type === "sandbox.operation.completed" || event.type === "sandbox.operation.failed") {
+      inFlight = false;
+    }
+  }
+  return inFlight;
+}
+
 export function eventLabel(type: string): string {
   const labels: Record<string, string> = {
     "session.created": "Session created",
@@ -189,6 +249,16 @@ export function eventLabel(type: string): string {
     "goal.paused": "Goal paused",
     "goal.resumed": "Goal resumed",
     "goal.continuation": "Goal continuation",
+    "memory.saved": "Memory saved",
+    "memory.corrected": "Memory corrected",
   };
-  return labels[type] ?? type;
+  return labels[type] ?? humanizeEventType(type);
+}
+
+function humanizeEventType(type: string): string {
+  const words = type.split(/[._-]+/).filter(Boolean);
+  if (words.length === 0) {
+    return "Event";
+  }
+  return words.map((word) => `${word.slice(0, 1).toUpperCase()}${word.slice(1)}`).join(" ");
 }

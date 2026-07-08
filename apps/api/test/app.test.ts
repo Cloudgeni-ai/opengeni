@@ -41,6 +41,27 @@ describe("API helpers", () => {
     });
   });
 
+  test("preserves provider-neutral repository credential metadata while normalizing", () => {
+    const [resource] = normalizeResources([{
+      kind: "repository",
+      uri: "https://gitlab.com/OpenAI/example.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-123",
+      connectionId: "conn-1",
+    }]);
+
+    expect(resource).toEqual({
+      kind: "repository",
+      uri: "https://gitlab.com/OpenAI/example.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-123",
+      connectionId: "conn-1",
+      mountPath: "repos/OpenAI/example",
+    });
+  });
+
   test("normalizes file resources into sandbox mount paths", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     expect(normalizeResources([{ kind: "file", fileId }])).toEqual([{
@@ -165,6 +186,7 @@ describe("API helpers", () => {
   test("normalizes dynamic route labels for metrics", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe("/v1/workspaces/:workspaceId/sessions/:id/events/stream");
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/lineage`)).toBe("/v1/workspaces/:workspaceId/sessions/:id/lineage");
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/turns/turn-1`)).toBe("/v1/workspaces/:workspaceId/sessions/:id/turns/:turnId");
     expect(routeLabel(`/v1/workspaces/${workspace}/files/uploads/upload-1/complete`)).toBe("/v1/workspaces/:workspaceId/files/uploads/:id/complete");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents");

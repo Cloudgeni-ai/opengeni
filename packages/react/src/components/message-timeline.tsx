@@ -2,15 +2,23 @@ import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
   ArrowRightIcon,
+  BotIcon,
+  CheckCircle2Icon,
   CheckIcon,
+  ChevronRightIcon,
+  PauseCircleIcon,
   PauseIcon,
   PencilLineIcon,
   PlayIcon,
+  RefreshCwIcon,
   TargetIcon,
+  Trash2Icon,
   TriangleAlertIcon,
+  XCircleIcon,
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { Collapsible } from "radix-ui";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
@@ -23,12 +31,14 @@ import {
   LightboxProvider,
   type ActivityItem,
   type AgentMessageItem,
+  type AuthNeededItem,
   type GoalItem,
   type NoticeItem,
   type TimelineGroup,
   type TimelineItem,
   type ToolRegistry,
   type UserMessageItem,
+  type WorkerCompletionItem,
   TurnSummary,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
@@ -45,6 +55,31 @@ export type MessageTimelineProps = {
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * Deep-link a memory row (a `memory.saved` / `memory.corrected` step) to its
+   * record in the host's memory pane. Opt-in, exactly like `onReconnect`: the
+   * library draws no "View in memory" affordance without a handler — the memory
+   * row is then non-interactive rich content. This is the switch that makes the
+   * deep-link a first-party OpenGeni capability without other SDK consumers
+   * opting into it. The app supplies it (it owns routing to the memory pane).
+   */
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
+  /**
+   * Start the reconnect flow when a tool needs its connection reauthorized. The
+   * app supplies this (it owns the SDK client + workspace): it typically kicks
+   * off `startConnectionOAuth` and redirects, or routes to credential entry.
+   * Rejecting surfaces a calm inline error on the card; the library never draws
+   * a Reconnect button without a handler to run it.
+   */
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  /**
+   * Resolve a provider domain (from a reconnect card) to a logo URL the host
+   * serves itself — the app maps it through its catalog + `catalogAssetUrl`.
+   * Return null/undefined to fall back to a calm monogram. The library never
+   * fetches an off-origin favicon (CSP + privacy); an unresolved logo is a
+   * monogram, not an external image.
+   */
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   /**
    * The tool-renderer registry that resolves how each tool call is drawn.
    * Defaults to {@link defaultToolRegistry}; pass a registry from
@@ -75,6 +110,9 @@ export function MessageTimeline({
   status,
   renderMessageText,
   onOpenSession,
+  onMemoryClick,
+  onReconnect,
+  resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   autoFollow = true,
   hasOlder = false,
@@ -285,6 +323,9 @@ export function MessageTimeline({
               group={group}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
+              onMemoryClick={onMemoryClick}
+              onReconnect={onReconnect}
+              resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               foldLiveCluster={isAgentProgress(groups[index + 1])}
             />
@@ -349,6 +390,9 @@ function TimelineGroupView({
   group,
   renderMessageText,
   onOpenSession,
+  onMemoryClick,
+  onReconnect,
+  resolveProviderLogo,
   toolRegistry,
   insideTurn = false,
   foldLiveCluster = false,
@@ -356,6 +400,9 @@ function TimelineGroupView({
   group: TimelineGroup;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -374,41 +421,64 @@ function TimelineGroupView({
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+          <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
         </TurnSummary>
       ) : (
-        <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+        // A nested live cluster hangs on the turn's rail (bare); a top-level one
+        // owns its own rail.
+        <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
+      const body = group.groups.map((child) => (
+        <TimelineGroupView
+          key={timelineGroupKey(child)}
+          group={child}
+          renderMessageText={renderMessageText}
+          onOpenSession={onOpenSession}
+          onMemoryClick={onMemoryClick}
+          onReconnect={onReconnect}
+          resolveProviderLogo={resolveProviderLogo}
+          toolRegistry={toolRegistry}
+          insideTurn
+        />
+      ));
       return (
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
-          failureText={group.failureText}
+          // One loud error at the top; nested sub-turn chips stay calm — the
+          // parent already renders the failure reason, so clear it here exactly
+          // as the nested activity-cluster case does.
+          failureText={insideTurn ? undefined : group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          {/* The body wears the timeline's rail language (matching ActivityRail)
-              so nested chips read as contained by the turn, not as siblings. */}
-          <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
-            {group.groups.map((child) => (
-              <TimelineGroupView
-                key={timelineGroupKey(child)}
-                group={child}
-                renderMessageText={renderMessageText}
-                onOpenSession={onOpenSession}
-                toolRegistry={toolRegistry}
-                insideTurn
-              />
-            ))}
-          </div>
+          {insideTurn ? (
+            // A nested turn is already on an ancestor rail — its body just stacks
+            // flush (the bare-node body already indents it), so no second rule.
+            <div className="flex flex-col gap-4">{body}</div>
+          ) : (
+            // The top-level turn draws THE rail: one thin continuous rule that
+            // every nested node and step hangs off of.
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+          )}
         </TurnSummary>
       );
     }
     case "item":
-      return <TimelineRow item={group.item} renderMessageText={renderMessageText} />;
+      return (
+        <TimelineRow
+          item={group.item}
+          renderMessageText={renderMessageText}
+          onReconnect={onReconnect}
+          resolveProviderLogo={resolveProviderLogo}
+          onOpenSession={onOpenSession}
+        />
+      );
   }
 }
 
@@ -442,6 +512,10 @@ function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): 
   return group.items.every((item) => {
     if (item.kind === "reasoning") {
       return !item.streaming;
+    }
+    // A memory write is a discrete, already-settled event — it has no running state.
+    if (item.kind === "memory") {
+      return true;
     }
     return item.status !== "running";
   });
@@ -478,21 +552,31 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
 export function TimelineRow({
   item,
   renderMessageText,
+  onReconnect,
+  resolveProviderLogo,
+  onOpenSession,
 }: {
   item: TimelineItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
     case "agent-message":
       return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
+    case "worker-completion":
+      return <WorkerCompletionRow item={item} onOpenSession={onOpenSession} />;
     case "session-status":
       return <SessionStatusRow item={item} />;
     case "goal":
       return <GoalRow item={item} />;
     case "notice":
       return <NoticeRow item={item} />;
+    case "auth-needed":
+      return <AuthNeededRow item={item} onReconnect={onReconnect} resolveProviderLogo={resolveProviderLogo} />;
     default:
       return null;
   }
@@ -549,6 +633,131 @@ function AgentMessageRow({
   );
 }
 
+/**
+ * A worker session reporting back to its manager. The child's completion arrives
+ * as a `user.message` carrying a `childCompletion` payload (the raw message text
+ * used to render as an "ugly" user bubble); it projects to a `worker-completion`
+ * item and draws here as a quietly-confident card — an inbound result, not
+ * something the human said. One glyph + one line carry the outcome; the worker's
+ * full report, evidence, and any paused reason live behind a collapsed
+ * disclosure, and a "View session" affordance deep-links into the child.
+ *
+ * Color follows the timeline's restraint: green only for a completed goal, the
+ * waiting hue only for a paused one, red only for a failed child — everything
+ * else is a neutral inbound card.
+ */
+type WorkerCompletionMeta = {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  iconClass: string;
+  /** The 2px left-accent hue — color spent only on the exceptional outcomes. */
+  accentClass: string;
+};
+
+function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
+  if (item.childStatus === "failed") {
+    return { label: "Worker failed", icon: XCircleIcon, iconClass: "text-og-status-failed", accentClass: "border-og-status-failed/60" };
+  }
+  if (item.goalStatus === "paused") {
+    return { label: "Worker paused", icon: PauseCircleIcon, iconClass: "text-og-status-waiting", accentClass: "border-og-status-waiting/50" };
+  }
+  if (item.goalStatus === "completed") {
+    return { label: "Worker completed", icon: CheckCircle2Icon, iconClass: "text-og-status-idle", accentClass: "border-og-status-idle/45" };
+  }
+  return { label: "Worker reported back", icon: BotIcon, iconClass: "text-og-accent", accentClass: "border-og-border-strong" };
+}
+
+function WorkerCompletionRow({
+  item,
+  onOpenSession,
+}: {
+  item: WorkerCompletionItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  const [open, setOpen] = useState(false);
+  const meta = workerCompletionMeta(item);
+  const Icon = meta.icon;
+  // The worker's own report is the substance behind the fold; evidence and any
+  // paused reason sit alongside it as quieter, labelled context.
+  // "Paused because" only when the outcome actually IS a pause — completion
+  // payloads can carry a leftover pausedReason/rationale from earlier in the
+  // worker's life, and a "Worker completed" card must not show a pause section.
+  const showPausedReason = item.childStatus !== "failed" && item.goalStatus === "paused" && Boolean(item.pausedReason?.trim());
+  const details: { label: string; value: string; muted?: boolean }[] = [
+    ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
+    ...(item.evidence?.trim() ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }] : []),
+    ...(showPausedReason ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }] : []),
+  ];
+  const hasDetails = details.length > 0;
+  return (
+    <div className={cn(enter && "animate-og-enter", "min-w-0")}>
+      {/* An inbound result, not a bubble: a 2px left accent carries the outcome —
+          no full frame, no surface fill. The report unfolds flush beneath. */}
+      <div className={cn("flex flex-col gap-2 border-l-2 pl-3", meta.accentClass)}>
+        <div className="flex items-start gap-2.5">
+          <span className={cn("mt-0.5 shrink-0", meta.iconClass)}>
+            <Icon className="size-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-og-base leading-5 text-og-fg">
+              <span className="font-medium">{meta.label}</span>
+              {item.goalText ? <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span> : null}
+            </p>
+          </div>
+          {item.childSessionId && onOpenSession ? (
+            <button
+              type="button"
+              onClick={() => onOpenSession(item.childSessionId)}
+              className={cn(
+                "-my-0.5 -mr-1 inline-flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
+                "outline-none transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                "focus-visible:ring-2 focus-visible:ring-og-accent",
+              )}
+            >
+              View session
+              <ArrowRightIcon className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+        {hasDetails ? (
+          <Collapsible.Root open={open} onOpenChange={setOpen}>
+            <Collapsible.Trigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "group/wc -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-og-xs font-medium text-og-fg-subtle",
+                  "outline-none transition-colors duration-150 hover:text-og-fg-muted focus-visible:ring-2 focus-visible:ring-og-accent",
+                )}
+              >
+                <ChevronRightIcon className="size-3 transition-transform duration-150 ease-og-in-out group-data-[state=open]/wc:rotate-90" />
+                {open ? "Hide details" : "Show details"}
+              </button>
+            </Collapsible.Trigger>
+            <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
+              <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
+                {details.map((detail) => (
+                  <div key={detail.label} className="min-w-0">
+                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{detail.label}</p>
+                    <p
+                      className={cn(
+                        "whitespace-pre-wrap break-words text-og-sm leading-6",
+                        detail.muted ? "text-og-fg-subtle" : "text-og-fg-muted",
+                      )}
+                    >
+                      {detail.value}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
   const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
@@ -591,6 +800,7 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   completed: { label: "Goal completed", pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle", icon: CheckIcon },
   paused: { label: "Goal paused", pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting", icon: PauseIcon },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
 };
 
@@ -639,4 +849,155 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       ) : null}
     </div>
   );
+}
+
+/**
+ * The inline reconnect card: a lapsed connection surfaces as a calm, tappable
+ * affordance — provider logo, one human line, one primary Reconnect button —
+ * instead of a raw "linear.app needs to be reconnected." string. The `reason`
+ * only shapes the helper copy; no domain or enum code is shown as a label.
+ * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
+ * it, a pre-minted authorization link is offered, or the card stays informative.
+ */
+function AuthNeededRow({
+  item,
+  onReconnect,
+  resolveProviderLogo,
+}: {
+  item: AuthNeededItem;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const provider = providerLabel(item.providerDomain);
+
+  const start = async () => {
+    if (!onReconnect || busy) {
+      return;
+    }
+    setBusy(true);
+    setFailed(false);
+    try {
+      // On success the app redirects to consent (or routes to credential entry),
+      // so this row unmounts; a resolve without navigation just relaxes the button.
+      await onReconnect(item);
+      setBusy(false);
+    } catch {
+      setFailed(true);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
+      <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <AuthProviderLogo src={resolveProviderLogo?.(item.providerDomain) ?? null} label={provider} />
+          <div className="min-w-0">
+            <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
+            <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
+          </div>
+        </div>
+        {onReconnect ? (
+          <button
+            type="button"
+            onClick={() => void start()}
+            disabled={busy}
+            className={cn(
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
+            )}
+          >
+            <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
+            {busy ? "Reconnecting…" : "Reconnect"}
+          </button>
+        ) : item.authorizationUrl ? (
+          <a
+            href={item.authorizationUrl}
+            rel="noreferrer"
+            target="_blank"
+            className={cn(
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
+            )}
+          >
+            <RefreshCwIcon className="size-3.5" aria-hidden />
+            Reconnect
+          </a>
+        ) : null}
+      </div>
+      {failed ? (
+        <p className="px-1 text-og-xs text-og-status-failed">Couldn't start reconnecting {provider}. Try again.</p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The provider's logo in a rounded tile, from a URL the HOST serves itself
+ * (resolved via `resolveProviderLogo` → the app's catalog assets). A missing or
+ * failed image falls back to a calm letter monogram — same as the rest of the
+ * app — so the card never shows a broken-image glyph and never reaches off-origin
+ * for a favicon (CSP + privacy).
+ */
+function AuthProviderLogo({ src, label }: { src: string | null; label: string }) {
+  const [failed, setFailed] = useState(false);
+  // A resolver that only returns the URL after a lazy catalog fetch means `src`
+  // can arrive on a later render; reset the error latch so it gets its attempt.
+  useEffect(() => setFailed(false), [src]);
+  const showImage = src && !failed;
+  return (
+    <span
+      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-sm font-semibold text-og-fg-muted"
+      aria-hidden
+    >
+      {showImage ? (
+        <img src={src} alt="" loading="lazy" decoding="async" className="size-full object-contain p-1.5" onError={() => setFailed(true)} />
+      ) : (
+        <span>{monogram(label)}</span>
+      )}
+    </span>
+  );
+}
+
+/** First one or two initials for the monogram fallback — mirrors the app's
+    `capabilityMonogram` so the reconnect tile reads like every other logo tile. */
+function monogram(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return "?";
+  }
+  if (words.length === 1) {
+    return words[0]!.slice(0, 2).toUpperCase();
+  }
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
+}
+
+/** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
+    name for the provider — never the raw domain shown as a label. */
+function providerLabel(domain: string): string {
+  const host = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
+  const first = host.split(".")[0] ?? host;
+  if (!first) {
+    return "this service";
+  }
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
+
+/** A calm, human helper line per reauth reason — the `reason` informs the copy
+    but is never rendered as a raw enum/code. */
+function authReasonLine(reason: AuthNeededItem["reason"]): string {
+  switch (reason) {
+    case "insufficient_scope":
+      return "It needs additional access to continue.";
+    case "missing_connection":
+      return "It isn't connected yet.";
+    case "expired":
+    case "refresh_failed":
+      return "Its access expired.";
+    default:
+      return "Its connection needs attention.";
+  }
 }

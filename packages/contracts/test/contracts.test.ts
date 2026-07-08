@@ -402,7 +402,7 @@ describe("contracts", () => {
       confidence: 0.9,
     })).toEqual({
       text: "Prefer Azure Blob for production object storage.",
-      status: "proposed",
+      status: "active",
       kind: "decision",
       scope: "workspace",
       sourceRefs: [],

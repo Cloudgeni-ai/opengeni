@@ -11,6 +11,7 @@ export type SessionClientLike = Pick<
   | "getClientConfig"
   // Sessions, events, composer
   | "getSession"
+  | "getSessionLineage"
   | "updateSession"
   | "listSessions"
   | "sendMessage"
@@ -27,6 +28,7 @@ export type SessionClientLike = Pick<
   // Goal
   | "getGoal"
   | "updateGoal"
+  | "deleteGoal"
   // Operator context controls (/clear, /compact)
   | "clearSessionContext"
   | "compactSessionContext"

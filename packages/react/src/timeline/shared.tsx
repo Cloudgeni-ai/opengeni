@@ -270,6 +270,7 @@ export function TermBlock({
   output,
   live,
   tailLines = 12,
+  failed,
 }: {
   /**
    * The command shown in the prompt header. Pass `null` when the row title
@@ -282,6 +283,8 @@ export function TermBlock({
   /** The FULL output. TermBlock owns the tail/full slicing internally. */
   output: string;
   live?: boolean | undefined;
+  /** A non-zero exit / failed call — tints the left accent red (the one hue). */
+  failed?: boolean | undefined;
   /**
    * When the output exceeds the tail window, only the last `tailLines` are shown
    * with a "show full output" toggle. The component holds the full text, so the
@@ -297,10 +300,19 @@ export function TermBlock({
   const showMore = big && !full;
   const showHeader = command != null || workdir != null;
 
+  // No frame, no fill: a quiet monospace run flush on the page, marked only by a
+  // 2px left accent so it reads as terminal output at a glance without becoming
+  // yet another nested box. Color is spent only on the exception — a settled run
+  // gets a calm neutral rule, a live one the running hue, a failed one the red.
   return (
-    <div className="min-w-0 overflow-hidden rounded-og-sm border border-og-border bg-og-bg/70">
+    <div
+      className={cn(
+        "min-w-0 border-l-2 pl-3",
+        failed ? "border-og-status-failed/50" : live ? "border-og-status-running/50" : "border-og-border",
+      )}
+    >
       {showHeader ? (
-        <div className="flex items-center gap-2 border-b border-og-border/70 px-2.5 py-1.5">
+        <div className="flex items-center gap-2 pb-1">
           <span className="select-none text-og-status-idle">$</span>
           {command != null ? (
             <span className="min-w-0 flex-1 truncate font-og-mono text-og-sm text-og-fg-muted">{command}</span>
@@ -311,9 +323,9 @@ export function TermBlock({
         </div>
       ) : null}
       {empty ? (
-        <p className="px-2.5 py-2 font-og-mono text-og-xs italic text-og-fg-subtle">(no output)</p>
+        <p className="font-og-mono text-og-xs italic text-og-fg-subtle">(no output)</p>
       ) : (
-        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all px-2.5 py-2 font-og-mono text-og-xs leading-5 text-og-fg-muted">
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5 text-og-fg-muted">
           {shown}
           {live ? <span className="ml-px inline-block h-[1em] w-[2px] translate-y-[2px] animate-og-blink bg-og-accent align-middle" /> : null}
         </pre>
@@ -322,7 +334,7 @@ export function TermBlock({
         <button
           type="button"
           onClick={() => setFull(true)}
-          className="w-full border-t border-og-border/70 px-2.5 py-1.5 text-left text-og-xs text-og-fg-subtle transition-colors hover:text-og-fg"
+          className="mt-1 text-left text-og-xs text-og-fg-subtle transition-colors hover:text-og-fg"
         >
           show full output ({lines.length} lines)
         </button>
@@ -338,15 +350,16 @@ export function PayloadBlock({ label, value, failed }: { label: string; value: u
   if (!text || text.trim() === "") {
     return null;
   }
+  // Flush on the page, no frame — a labelled monospace run marked only by a 2px
+  // left accent (red when the call failed, otherwise a calm neutral rule), so a
+  // payload reads as detail hanging off the row, never a nested card.
   return (
-    <div className="min-w-0">
+    <div className={cn("min-w-0 border-l-2 pl-3", failed ? "border-og-status-failed/50" : "border-og-border")}>
       <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{label}</p>
       <pre
         className={cn(
-          "max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm border p-2.5 font-og-mono text-og-xs leading-5",
-          failed
-            ? "border-og-status-failed/30 bg-og-status-failed/5 text-og-status-failed"
-            : "border-og-border bg-og-bg/60 text-og-fg-muted",
+          "max-h-64 overflow-auto whitespace-pre-wrap break-all font-og-mono text-og-xs leading-5",
+          failed ? "text-og-status-failed" : "text-og-fg-muted",
         )}
       >
         {text}
@@ -358,8 +371,10 @@ export function PayloadBlock({ label, value, failed }: { label: string; value: u
 /** A quiet inline note inside an expanded body (lost output, empty frame, …). */
 export function BodyNote({ children, tone }: { children: ReactNode; tone?: "error" | "muted" | undefined }) {
   if (tone === "error") {
+    // A quiet error run marked by a 2px red accent — the same flush, frameless
+    // language as the payload/output blocks, not a filled callout box.
     return (
-      <div className="rounded-og-sm border border-og-status-failed/30 bg-og-status-failed/5 px-2.5 py-2 font-og-mono text-og-xs leading-5 text-og-status-failed">
+      <div className="border-l-2 border-og-status-failed/50 pl-3 font-og-mono text-og-xs leading-5 text-og-status-failed">
         {children}
       </div>
     );

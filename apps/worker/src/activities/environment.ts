@@ -7,6 +7,8 @@ import {
 import {
   signDelegatedAccessToken,
   type ConnectionCredentialsPort,
+  type GitCredentialProvider,
+  type GitCredentialRepositoryRef,
   type GitCredentials,
   type ResourceRef,
   type SandboxSecrets,
@@ -37,6 +39,8 @@ export type ConnectionScope = {
   accountId: string;
   workspaceId: string;
 };
+
+export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 
 // §7.6 P4a — load the run's workspace environment, delegating the DECRYPT to a
 // host `sandboxSecrets` provider when one is bound (the host owns the secret
@@ -98,38 +102,42 @@ export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
-  // §7.6 P4a — optional host git-credential provider + the run scope it needs
+  // §7.6 P4a - optional host git-credential provider + the run scope it needs
   // (unset, the standalone default → self-mint from `settings` byte-for-byte).
   // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
-  // token mint entirely. `= {}` default so the non-optional reads below are safe.
+  // token mint entirely and returns the stable base env unchanged. `deferGitHubToken`
+  // is the lazy CLOUD path: apply stable git-auth pointers now, mint only the token
+  // value later. `= {}` default so the non-optional reads below are safe.
   options: {
     skipGitHubToken?: boolean;
+    deferGitHubToken?: boolean;
     scope?: ConnectionScope;
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
     sessionId?: string;
     runId?: string;
   } = {},
-): Promise<{ environment: Record<string, string>; gitToken?: string; toolspaceToken?: string }> {
+): Promise<{ environment: Record<string, string>; gitToken?: string; gitTokens?: GitTokenSeeds; toolspaceToken?: string }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
-  // paths via stableSandboxEnvironmentForRun) < platform run-scoped GitHub auth
+  // paths via stableSandboxEnvironmentForRun) < platform run-scoped git auth
   // (applied below, always last). Reserved name validation at write time prevents
   // workspace values from colliding with the platform-managed entries.
   //
-  // TOKEN-BROKER (B1): the run-scoped GitHub App installation token is NO LONGER
-  // layered into the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_*
-  // extraheader). It is minted ONCE per turn and returned as `gitToken`; the caller
-  // threads it OFF-MANIFEST as a clone-seed exec env (OPENGENI_GIT_TOKEN_SEED) so the
-  // clone hook writes it to a stable FILE ($OPENGENI_GIT_TOKEN_FILE), and git auth
-  // flows through GIT_ASKPASS -> that file. The manifest carries only the stable
-  // pointers (GIT_ASKPASS, GIT_TERMINAL_PROMPT, identity, and — via the shared base —
-  // OPENGENI_GIT_TOKEN_FILE), so the token VALUE never rides the manifest and the
-  // SDK's per-turn provided-session env delta stays empty even though the token
-  // rotates. The agent can refresh the token mid-turn via the `github_token` MCP tool.
+  // TOKEN-BROKER (B1): run-scoped git provider tokens are NO LONGER layered into
+  // the box/agent MANIFEST env (no GH_TOKEN/GITHUB_TOKEN/GITLAB_TOKEN/
+  // AZURE_DEVOPS_EXT_PAT/GIT_CONFIG_* extraheader). They are minted once per turn
+  // and returned separately as provider token seeds; the caller threads them
+  // OFF-MANIFEST as clone-seed exec env vars so the clone hook writes stable token
+  // files. The manifest carries only stable pointers (GIT_ASKPASS,
+  // GIT_TERMINAL_PROMPT, identity, OPENGENI_GIT_CREDENTIALS_DIR, and
+  // OPENGENI_GIT_TOKEN_FILE), so token VALUES never ride the manifest and the SDK's
+  // per-turn provided-session env delta stays empty even though tokens rotate.
+  // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias and can still
+  // refresh mid-turn via the `github_token` MCP tool.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
   // TOOLSPACE (selfhosted parity): the toolspace token is minted for EVERY
-  // backend, including a connected machine. Unlike the platform GitHub token
+  // backend, including a connected machine. Unlike platform git provider tokens
   // (inert on selfhosted → skipped above), the toolspace token is the machine's
   // only path to programmatic tool calling, and it grants no more than the
   // machine owner's own authority (toolspace:call, own-session-bound, turn TTL,
@@ -155,45 +163,28 @@ export async function sandboxEnvironmentForRun(
     });
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.scope.workspaceId);
   }
-  const selection = githubRepositorySelection(resources);
+  const selections = gitCredentialSelections(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
-  // a connected machine (selfhosted), the platform GitHub App installation token is
-  // INERT — exec routes over NATS to the user's machine, which uses ITS OWN git
-  // credentials, and the box that the token would auth is never created. So skip the
-  // (network) token mint entirely and return the STABLE base env (no gitToken). Env-
+  // a connected machine (selfhosted), platform git provider tokens are INERT: exec
+  // routes over NATS to the user's machine, which uses ITS OWN git credentials, and
+  // the box those tokens would auth is never created. So skip the token mint entirely
+  // and return the STABLE base env (no gitToken/gitTokens). Env-
   // parity holds: the SAME base object still feeds buildManifest + the SelfhostedSession
   // manifest, so the SDK's per-turn provided-session env delta stays empty
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
-  if (!selection || options.skipGitHubToken) {
+  if (selections.length === 0 || options.skipGitHubToken) {
     return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
-  // Run-scoped sandbox preparation for GitHub App repository resources. When a
-  // host binds `gitCredentials`, the HOST mints the installation token (BYO
-  // GitHub App); otherwise OpenGeni self-mints from `settings` (today's path). A
-  // SINGLE token is minted per turn and returned as `gitToken` (seeded to the box's
-  // token file by the caller's clone hook) — NOT layered into the manifest env.
-  let token: string;
-  let identity: { name: string; email: string } | null;
-  if (options?.gitCredentials && options.scope) {
-    const minted: GitCredentials = await options.gitCredentials({
-      accountId: options.scope.accountId,
-      workspaceId: options.scope.workspaceId,
-      installationId: selection.installationId,
-      repositoryIds: selection.repositoryIds,
-    });
-    // FORK-7: assert the provider scoped the token to THIS run's workspace
-    // before accepting the token for clone seeding.
-    assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
-    token = minted.token;
-    identity = minted.identity ?? githubAppBotIdentity(settings);
-  } else {
-    token = await createGitHubAppInstallationToken(settings, {
-      installationId: selection.installationId,
-      repositoryIds: selection.repositoryIds,
-    });
-    identity = githubAppBotIdentity(settings);
+  if (options.deferGitHubToken) {
+    applyGitAuthPointerEnvironment(environment, await resolveRunGitIdentityWithSelections(settings, selections, options));
+    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
+  // Run-scoped sandbox preparation for repository resources. GitHub retains the
+  // legacy request shape and standalone self-mint path. Non-GitHub providers are
+  // host-brokered only: without a `gitCredentials` port there is no token value
+  // to seed, and the runtime wrappers degrade to passthrough.
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
   // TOKEN-BROKER (B2): the askpass helper is PROVISIONED AT SETUP (runtime) into a
   // per-box, user-writable path in the SAME dir as the token file, instead of a
   // baked image script at /usr/local/bin/opengeni-git-askpass. The clone-hook seed
@@ -204,29 +195,221 @@ export async function sandboxEnvironmentForRun(
   // surface (viewer attach, channel-A) declares the IDENTICAL env when it
   // cold-creates the box for a repo-attached session — an attach-warmed box
   // missing these keys kills the next repo turn on the SDK's manifest-env guard.
-  applyGitAuthPointerEnvironment(environment, identity);
-  return { environment, gitToken: token, ...(toolspaceToken ? { toolspaceToken } : {}) };
+  applyGitAuthPointerEnvironment(environment, minted.identity);
+  return {
+    environment,
+    ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
+    ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
+    ...(toolspaceToken ? { toolspaceToken } : {}),
+  };
 }
 
-function githubRepositorySelection(resources: ResourceRef[]): { installationId: number; repositoryIds: number[] } | null {
-  const selected = resources.flatMap((resource) => {
-    if (resource.kind !== "repository") {
-      return [];
-    }
-    const installationId = positiveInteger(resource.githubInstallationId);
-    const repositoryId = positiveInteger(resource.githubRepositoryId);
-    return installationId && repositoryId ? [{ installationId, repositoryId }] : [];
-  });
-  if (selected.length === 0) {
+export async function mintRunGitTokens(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<GitTokenSeeds | undefined> {
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
+    return undefined;
+  }
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  return Object.keys(minted.gitTokens).length > 0 ? minted.gitTokens : undefined;
+}
+
+export async function mintRunGitToken(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<string | undefined> {
+  return (await mintRunGitTokens(settings, resources, options))?.github;
+}
+
+export async function resolveRunGitIdentity(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<{ name: string; email: string } | null> {
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
     return null;
   }
-  const installationId = selected[0]!.installationId;
-  if (selected.some((item) => item.installationId !== installationId)) {
-    throw new Error("GitHub App repository resources must belong to one installation");
+  return await resolveRunGitIdentityWithSelections(settings, selections, options);
+}
+
+async function mintRunGitTokensWithIdentity(
+  settings: Settings,
+  selections: GitCredentialSelection[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  },
+): Promise<{ gitTokens: GitTokenSeeds; identity: { name: string; email: string } | null }> {
+  const gitTokens: GitTokenSeeds = {};
+  let identity: { name: string; email: string } | null = null;
+  for (const selection of selections) {
+    let token: string | null = null;
+    if (options?.gitCredentials && options.scope) {
+      const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
+      const minted: GitCredentials = await options.gitCredentials(request);
+      // FORK-7: assert the provider scoped the token to THIS run's workspace
+      // before accepting the token for clone seeding.
+      assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
+      if (!minted.token) {
+        throw new Error("connection-credential provider (gitCredentials) did not return a token for a token request");
+      }
+      token = minted.token;
+      if (minted.identity) {
+        identity = minted.identity;
+      } else if (selection.provider === "github") {
+        identity = githubAppBotIdentity(settings);
+      }
+    } else if (selection.provider === "github" && selection.installationId > 0) {
+      token = await createGitHubAppInstallationToken(settings, {
+        installationId: selection.installationId,
+        repositoryIds: selection.repositoryIds,
+      });
+      identity = githubAppBotIdentity(settings);
+    }
+    if (token) {
+      gitTokens[selection.provider] = token;
+    }
+  }
+  return { gitTokens, identity };
+}
+
+async function resolveRunGitIdentityWithSelections(
+  settings: Settings,
+  selections: GitCredentialSelection[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  },
+): Promise<{ name: string; email: string } | null> {
+  let identity: { name: string; email: string } | null = null;
+  for (const selection of selections) {
+    if (options.gitCredentials && options.scope) {
+      const resolved: GitCredentials = await options.gitCredentials(
+        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
+      );
+      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
+      if (resolved.identity) {
+        identity = resolved.identity;
+      } else if (selection.provider === "github") {
+        identity = githubAppBotIdentity(settings);
+      }
+    } else if (selection.provider === "github" && selection.installationId > 0) {
+      identity = githubAppBotIdentity(settings);
+    }
+  }
+  return identity;
+}
+
+type GitCredentialSelection = {
+  provider: GitCredentialProvider;
+  installationId: number;
+  repositoryIds: number[];
+  repositoryRefs: GitCredentialRepositoryRef[];
+};
+
+function gitCredentialsRequestForSelection(
+  scope: ConnectionScope,
+  selection: GitCredentialSelection,
+  purpose?: "token" | "identity",
+): Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0] {
+  const legacy = {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    ...(purpose ? { purpose } : {}),
+    installationId: selection.installationId,
+    repositoryIds: selection.repositoryIds,
+  };
+  if (selection.provider === "github") {
+    return {
+      ...legacy,
+      repositoryRefs: selection.repositoryRefs,
+    };
   }
   return {
-    installationId,
-    repositoryIds: selected.map((item) => item.repositoryId),
+    ...legacy,
+    provider: selection.provider,
+    repositoryRefs: selection.repositoryRefs,
+  };
+}
+
+function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
+  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
+  for (const resource of resources) {
+    if (resource.kind !== "repository") {
+      continue;
+    }
+    const provider = repositoryCredentialProvider(resource);
+    if (!provider) {
+      continue;
+    }
+    const entry = byProvider.get(provider) ?? {
+      provider,
+      installationId: 0,
+      repositoryIds: [],
+      repositoryRefs: [],
+    };
+    const ref = gitCredentialRepositoryRef(resource, provider);
+    entry.repositoryRefs.push(ref);
+    if (provider === "github") {
+      const installationId = positiveInteger(resource.githubInstallationId ?? resource.installationId);
+      const repositoryId = positiveInteger(resource.githubRepositoryId ?? resource.repositoryId);
+      if (installationId && repositoryId) {
+        if (entry.installationId > 0 && entry.installationId !== installationId) {
+          throw new Error("GitHub App repository resources must belong to one installation");
+        }
+        entry.installationId = installationId;
+        entry.repositoryIds.push(repositoryId);
+      }
+    }
+    byProvider.set(provider, entry);
+  }
+  return [...byProvider.values()];
+}
+
+function repositoryCredentialProvider(resource: Extract<ResourceRef, { kind: "repository" }>): GitCredentialProvider | null {
+  if (resource.provider) {
+    return resource.provider;
+  }
+  if (positiveInteger(resource.githubInstallationId) && positiveInteger(resource.githubRepositoryId)) {
+    return "github";
+  }
+  return null;
+}
+
+function gitCredentialRepositoryRef(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+  provider: GitCredentialProvider,
+): GitCredentialRepositoryRef {
+  return {
+    provider,
+    uri: resource.uri,
+    ref: resource.ref,
+    ...(resource.repositoryId !== undefined
+      ? { repositoryId: resource.repositoryId }
+      : resource.githubRepositoryId !== undefined
+        ? { repositoryId: resource.githubRepositoryId }
+        : {}),
+    ...(resource.installationId !== undefined
+      ? { installationId: resource.installationId }
+      : resource.githubInstallationId !== undefined
+        ? { installationId: resource.githubInstallationId }
+        : {}),
+    ...(resource.projectId !== undefined ? { projectId: resource.projectId } : {}),
+    ...(resource.connectionId ? { connectionId: resource.connectionId } : {}),
   };
 }
 

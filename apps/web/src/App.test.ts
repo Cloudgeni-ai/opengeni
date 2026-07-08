@@ -18,7 +18,7 @@ import {
 } from "./lib/permissions";
 import { orgSettingsPath, parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath, workspaceSettingsPath } from "./lib/routes";
 import { sameSessionForContext } from "./lib/session-context";
-import { groupSessionsForRail, recencyGroupFor, relativeTimeLabel } from "./lib/sessions-group";
+import { buildRailForest, groupSessionsForRail, recencyGroupFor, relativeTimeLabel, visibleForestRows } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
   emptySessionDraft,
@@ -122,6 +122,57 @@ describe("rail session grouping", () => {
     expect(relativeTimeLabel("2026-06-19T09:00:00.000Z", NOW)).toBe("3h");
     expect(relativeTimeLabel("2026-06-17T12:00:00.000Z", NOW)).toBe("2d");
   });
+
+  test("buildRailForest nests spawned children under their in-page parent", () => {
+    const forest = buildRailForest([
+      railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      railSession({ id: "worker", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
+      railSession({ id: "grandchild", parentSessionId: "worker", updatedAt: "2026-06-19T11:30:00.000Z" }),
+    ], NOW);
+
+    // Only the manager is a root; worker + grandchild nest beneath it.
+    const roots = forest.grouped.flatMap((bucket) => bucket.sessions);
+    expect(roots.map((node) => node.session.id)).toEqual(["manager"]);
+    expect(roots[0]?.children.map((node) => node.session.id)).toEqual(["worker"]);
+    expect(roots[0]?.children[0]?.children.map((node) => node.session.id)).toEqual(["grandchild"]);
+  });
+
+  test("buildRailForest keeps an orphan child (parent absent) at the root", () => {
+    const forest = buildRailForest([
+      railSession({ id: "orphan", parentSessionId: "not-in-page", updatedAt: "2026-06-19T10:00:00.000Z" }),
+    ], NOW);
+    expect(forest.grouped.flatMap((bucket) => bucket.sessions).map((node) => node.session.id)).toEqual(["orphan"]);
+  });
+
+  test("buildRailForest keeps sessions in a parent cycle visible at the root", () => {
+    const forest = buildRailForest([
+      railSession({ id: "a", parentSessionId: "b", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      railSession({ id: "b", parentSessionId: "a", updatedAt: "2026-06-19T11:00:00.000Z" }),
+    ], NOW);
+    const roots = forest.grouped.flatMap((bucket) => bucket.sessions);
+    expect(roots.map((node) => node.session.id)).toEqual(["b", "a"]);
+    expect(roots.flatMap((node) => node.children)).toEqual([]);
+  });
+
+  test("buildRailForest pins a manager whose only activity is a live child", () => {
+    const forest = buildRailForest([
+      railSession({ id: "manager", status: "idle", updatedAt: "2026-06-01T10:00:00.000Z" }),
+      railSession({ id: "worker", status: "running", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
+    ], NOW);
+    expect(forest.running.map((node) => node.session.id)).toEqual(["manager"]);
+    expect(forest.running[0]?.hasActiveDescendant).toBe(true);
+  });
+
+  test("visibleForestRows expands only where the set says so", () => {
+    const forest = buildRailForest([
+      railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      railSession({ id: "worker", parentSessionId: "manager", updatedAt: "2026-06-19T11:00:00.000Z" }),
+    ], NOW);
+    expect(visibleForestRows(forest, new Set()).map((row) => row.node.session.id)).toEqual(["manager"]);
+    const expanded = visibleForestRows(forest, new Set(["manager"]));
+    expect(expanded.map((row) => row.node.session.id)).toEqual(["manager", "worker"]);
+    expect(expanded[1]?.depth).toBe(1);
+  });
 });
 
 describe("session context equality", () => {
@@ -145,7 +196,7 @@ describe("organization helpers", () => {
     return { mode: "managed", subjectId: "s", accountGrants: [], workspaceGrants: [], defaultAccountId: null, defaultWorkspaceId: null, ...patch };
   }
   function ws(id: string, accountId: string): Workspace {
-    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
+    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, settings: {}, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
   }
 
   test("derives a label, preferring an account name in grant metadata", () => {
@@ -920,6 +971,11 @@ function session(patch: Partial<Session> = {}): Session {
     metadata: {},
     model: "scripted-model",
     sandboxBackend: "none",
+    sandboxOs: "linux",
+    sandboxGroupId: "session-1",
+    activeSandboxId: null,
+    activeEpoch: 0,
+    parentSessionId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
     mcpServers: [],
@@ -1142,6 +1198,7 @@ describe("workspace switcher helpers", () => {
       externalSource: null,
       externalId: null,
       agentInstructions: null,
+      settings: {},
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,

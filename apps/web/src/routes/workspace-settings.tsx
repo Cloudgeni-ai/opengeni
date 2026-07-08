@@ -6,6 +6,7 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   BoxIcon,
+  BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
@@ -42,6 +43,7 @@ import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
+import { cn } from "@/lib/utils";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -257,6 +259,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             </Link>
           </Button>
         </section>
+
+        {/* Workspace memory (long-lived agent memory) */}
+        <MemorySettingsSection workspaceId={workspaceId} canManage={canRename} />
 
         {/* Codex (ChatGPT) subscriptions (multi-account) */}
         <CodexSubscriptionsCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
@@ -579,6 +584,68 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
         confirmLabel="Remove access"
         onConfirm={() => (removingMember ? removeMember(removingMember) : false)}
       />
+    </section>
+  );
+}
+
+/** Workspace memory: a per-workspace toggle for the long-lived agent memory. */
+function MemorySettingsSection({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const enabled = workspace?.settings?.memoryEnabled === true;
+  const [saving, setSaving] = useState(false);
+
+  async function toggle(next: boolean) {
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, { memoryEnabled: next });
+      if (updated) {
+        toast.success(next ? "Workspace memory enabled" : "Workspace memory disabled");
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <BrainCircuitIcon className="size-3.5 text-brand" />
+            Workspace memory
+          </h2>
+          <p className="mt-1 text-xs text-fg-muted">
+            Lets agents remember durable facts — preferences, environment details, decisions — across sessions in this
+            workspace. Everything saved is visible and editable on the Documents page.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2 pt-0.5">
+          {saving ? <Loader2Icon className="size-3.5 animate-spin text-fg-subtle" /> : null}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="Workspace memory"
+            disabled={saving || !canManage}
+            onClick={() => void toggle(!enabled)}
+            className={cn(
+              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+              enabled ? "border-brand bg-brand" : "border-border bg-surface-2",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
+                enabled ? "translate-x-4" : "translate-x-0.5",
+              )}
+            />
+          </button>
+        </div>
+      </div>
+      {!canManage ? (
+        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
+      ) : null}
     </section>
   );
 }

@@ -21,8 +21,8 @@ import { afterAll, describe, expect, mock, test } from "bun:test";
 // `new ModalSandboxClient(...)` constructs our fake).
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
-// Finding 4: controls for hydrateWorkspace-throw + delete tracking.
-let hydrateWorkspaceShouldThrow = false;
+// Controls for hydrateWorkspace-throw + delete tracking.
+let hydrateWorkspaceFailuresRemaining = 0;
 const deleteCalls: unknown[] = [];
 
 class FakeModalSandboxClient {
@@ -42,7 +42,8 @@ class FakeModalSandboxClient {
     return {
       state: { sandboxId: "sb-fresh" },
       async hydrateWorkspace(data: Uint8Array) {
-        if (hydrateWorkspaceShouldThrow) {
+        if (hydrateWorkspaceFailuresRemaining > 0) {
+          hydrateWorkspaceFailuresRemaining -= 1;
           throw new Error("hydrateWorkspace: snapshot GC'd or provider timeout (test-injected failure)");
         }
         hydrateCalls.push(data);
@@ -74,6 +75,8 @@ afterAll(() => {
 const SNAPSHOT_REF = 'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-abc","workspace_persistence":"snapshot_filesystem"}';
 const SNAPSHOT_BYTES = new TextEncoder().encode(SNAPSHOT_REF);
 const SNAPSHOT_B64 = Buffer.from(SNAPSHOT_BYTES).toString("base64");
+const SNAPSHOT_PREV_REF = 'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-prev","workspace_persistence":"snapshot_filesystem"}';
+const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString("base64");
 
 function envelopeWithArchive(archiveB64: string | undefined) {
   const sessionState: Record<string, unknown> = {
@@ -85,6 +88,12 @@ function envelopeWithArchive(archiveB64: string | undefined) {
     sessionState.workspaceArchive = archiveB64;
   }
   return { backendId: "modal", sessionState };
+}
+
+function envelopeWithArchivePair(currentB64: string, previousB64: string) {
+  const envelope = envelopeWithArchive(currentB64);
+  (envelope.sessionState as Record<string, unknown>).workspaceArchivePrev = previousB64;
+  return envelope;
 }
 
 function modalSettings() {
@@ -150,42 +159,52 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.instanceId).toBe("sb-fresh");
   });
 
-  // FINDING 4: placeholder box must be deleted when hydrateWorkspace throws.
-  // client.create() allocates a live Modal box; if the subsequent hydrateWorkspace()
-  // throws (snapshot GC'd, provider timeout, corrupt archive), the freshly-created
-  // box must be best-effort deleted before re-throwing so it doesn't leak up to the
-  // full idle/hard lifetime. The original error semantics are preserved (re-thrown).
-  test("(F4) hydrateWorkspace failure deletes the placeholder box before re-throwing", async () => {
+  test("cold-restore falls back to workspaceArchivePrev when current hydrate throws", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
     deleteCalls.length = 0;
-    hydrateWorkspaceShouldThrow = true;
+    hydrateWorkspaceFailuresRemaining = 1;
 
     try {
-      let threw = false;
-      let caughtMessage = "";
-      try {
-        await establishSandboxSessionFromEnvelope(
-          modalSettings(),
-          envelopeWithArchive(SNAPSHOT_B64),
-          { sessionId: "sess-hydrate-fail", environment: {} },
-        );
-      } catch (e) {
-        threw = true;
-        caughtMessage = e instanceof Error ? e.message : String(e);
-      }
-      // The original hydrateWorkspace error is re-thrown (error semantics preserved).
-      expect(threw).toBe(true);
-      expect(caughtMessage).toContain("hydrateWorkspace");
-      // The placeholder box was best-effort deleted before re-throwing.
-      // FakeModalSandboxClient.delete() records the state passed to it.
+      const established = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
+        { sessionId: "sess-hydrate-prev", environment: {} },
+      );
+
+      expect(createArgs).toHaveLength(1);
+      expect(deleteCalls.length).toBe(0);
+      expect(hydrateCalls).toHaveLength(1);
+      expect(new TextDecoder().decode(hydrateCalls[0]!)).toBe(SNAPSHOT_PREV_REF);
+      expect(established.instanceId).toBe("sb-fresh");
+    } finally {
+      hydrateWorkspaceFailuresRemaining = 0;
+    }
+  });
+
+  test("cold-restore with unusable archive falls through to a clean box", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    deleteCalls.length = 0;
+    hydrateWorkspaceFailuresRemaining = 1;
+
+    try {
+      const established = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(SNAPSHOT_B64),
+        { sessionId: "sess-hydrate-fail-open", environment: {} },
+      );
+
+      expect(established.instanceId).toBe("sb-fresh");
       expect(deleteCalls.length).toBe(1);
       expect(deleteCalls[0]).toMatchObject({ sandboxId: "sb-fresh" });
-      // create() was called exactly once (no retry — just create then fail).
-      expect(createArgs).toHaveLength(1);
+      expect(createArgs).toHaveLength(2);
+      expect(hydrateCalls).toHaveLength(0);
+      // Nothing was actually hydrated → must NOT report as restored-from-archive
+      // (else sandbox.box.created would claim hydrated:"archive" on an empty box).
+      expect(established.origin).toBe("created");
     } finally {
-      // Reset so other tests are not affected.
-      hydrateWorkspaceShouldThrow = false;
+      hydrateWorkspaceFailuresRemaining = 0;
     }
   });
 });

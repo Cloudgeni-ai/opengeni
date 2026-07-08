@@ -42,6 +42,7 @@ import type {
   Session,
   SessionEvent,
   SessionGoal,
+  SessionLineageResponse,
   SessionStatus,
   SessionTurn,
   SteerMessageResult,
@@ -146,6 +147,13 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
+  }
+
+  async getSessionLineage(_workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+    const children = sessionId === MANAGER_SESSION_ID
+      ? [{ session: this.fabricateSession(WORKER_SESSION_ID, "running", "Worker session"), children: [] }]
+      : [];
+    return { ancestors: [], children, truncated: false };
   }
 
   async updateSession(_workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
@@ -306,6 +314,14 @@ export class MockOpenGeniClient implements SessionClientLike {
     this.goals.set(sessionId, goal);
     this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", { goalId: goal.id });
     return { ...goal };
+  }
+
+  async deleteGoal(_workspaceId: string, sessionId: string): Promise<void> {
+    const goal = this.goals.get(sessionId);
+    this.goals.delete(sessionId);
+    if (goal) {
+      this.bus(sessionId).append("goal.cleared", { goalId: goal.id });
+    }
   }
 
   async clearSessionContext(_workspaceId: string, sessionId: string): Promise<void> {
@@ -789,9 +805,14 @@ export class MockOpenGeniClient implements SessionClientLike {
       metadata: { title },
       model: "gpt-5.2",
       sandboxBackend: "modal",
+      sandboxOs: "linux",
+      sandboxGroupId: sessionId,
+      activeSandboxId: null,
+      activeEpoch: 0,
       environmentId: null,
       firstPartyMcpPermissions: null,
       mcpServers: [],
+      parentSessionId: sessionId === WORKER_SESSION_ID ? MANAGER_SESSION_ID : null,
       createIdempotencyKey: null,
       temporalWorkflowId: null,
       activeTurnId: null,
@@ -1105,6 +1126,7 @@ function fabricateWorkspace(name: string): Workspace {
     externalSource: null,
     externalId: null,
     agentInstructions: null,
+    settings: {},
     createdAt: now,
     updatedAt: now,
   };

@@ -173,6 +173,71 @@ export function wrapTurnBoxWithRouting(
   return { ...established, session: proxy };
 }
 
+export function wrapLazyTurnBoxWithRouting(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+  args: {
+    client: EstablishedSandboxSession["client"];
+    backendId: string;
+    agentDefaultManifest: unknown;
+    provisioner: { get(): Promise<{ established: EstablishedSandboxSession }> };
+  },
+): EstablishedSandboxSession {
+  const { db, settings, bus } = services;
+  const syntheticSession: RoutableBackendSession = {
+    state: { manifest: args.agentDefaultManifest },
+  };
+  const routedResolver = makeActiveBackendResolver({
+    workspaceId: ids.workspaceId,
+    defaultBackend: syntheticSession,
+    defaultKind: "unprovisioned",
+    getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
+      const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
+      return sandbox
+        ? { id: sandbox.id, kind: sandbox.kind, name: sandbox.name, enrollmentId: sandbox.enrollmentId }
+        : null;
+    },
+    controlRpcFactory: controlRpcFactory(bus),
+    relay: relayConfigFromSettings(settings),
+    ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
+  });
+
+  const proxy = new RoutingSandboxSession({
+    // Before the first op the SDK reads `state.manifest`; the synthetic backend
+    // points at agent.defaultManifest BY REFERENCE so the provided-session delta is
+    // empty. The first default-pointer op resolves the real box through the
+    // provisioner and `state` switches to that real backend by reference.
+    defaultResolved: {
+      session: syntheticSession,
+      sandboxId: null,
+      kind: "unprovisioned",
+    },
+    readPointer: async () => {
+      const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
+      return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
+    },
+    resolveActiveBackend: async (pointer) => {
+      if (pointer.activeSandboxId === null || !routingEnabled(settings)) {
+        const provisioned = await args.provisioner.get();
+        return {
+          session: provisioned.established.session as RoutableBackendSession,
+          sandboxId: null,
+          kind: provisioned.established.backendId,
+        };
+      }
+      return routedResolver(pointer);
+    },
+  });
+
+  return {
+    client: args.client,
+    session: proxy,
+    sessionState: undefined,
+    instanceId: "unprovisioned",
+    backendId: args.backendId,
+  };
+}
+
 /**
  * Stage D machine-primary establish: bind the live SelfhostedSession for a turn
  * whose ACTIVE sandbox is a connected machine — WITHOUT establishing or leasing a
@@ -229,4 +294,15 @@ export async function establishSelfhostedTurnSession(
  *  group box is injected unchanged — byte-for-byte today. */
 export function routingEnabled(settings: Settings): boolean {
   return settings.sandboxSelfhostedEnabled === true;
+}
+
+/** Whether the turn should defer sandbox provisioning to the first dispatched op
+ *  (the in-process single-flight provisioner behind the routing proxy's
+ *  resolveActiveBackend). Lazy is a property of the OWNED path only — the SDK never
+ *  creates/resumes an injected session, so we own establish timing — hence gated on
+ *  BOTH flags. With either off the turn provisions eagerly at turn start, exactly as
+ *  today. NB: under lazy the box is ALWAYS wrapped in the routing proxy (the proxy's
+ *  resolver IS the establish seam), independent of `routingEnabled`. */
+export function lazyProvisionEnabled(settings: Settings): boolean {
+  return settings.sandboxLazyProvisionEnabled === true && settings.sandboxOwnershipEnabled === true;
 }

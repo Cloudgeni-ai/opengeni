@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, appendWorkspaceMemory, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelCallUsageTelemetry, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -52,7 +53,7 @@ describe("runtime event normalization", () => {
   });
 
   test("extracts model usage from streamed response completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent({
+    const event = {
       type: "raw_model_stream_event",
       data: {
         type: "response_done",
@@ -63,10 +64,12 @@ describe("runtime event normalization", () => {
             outputTokens: 5,
             totalTokens: 15,
             inputTokensDetails: { cached_tokens: 3 },
+            outputTokensDetails: { reasoning_tokens: 2 },
           },
         },
       },
-    } as any);
+    } as any;
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-1",
@@ -75,12 +78,25 @@ describe("runtime event normalization", () => {
         outputTokens: 5,
         totalTokens: 15,
         inputTokensDetails: { cached_tokens: 3 },
+        outputTokensDetails: { reasoning_tokens: 2 },
       },
     });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-1",
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 3,
+          reasoningTokens: 2,
+        },
+      },
+    ]);
   });
 
   test("extracts model usage from raw Responses completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent(new RunRawModelStreamEvent({
+    const event = new RunRawModelStreamEvent({
       type: "model",
       providerData: {
         rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
@@ -94,10 +110,12 @@ describe("runtime event normalization", () => {
             output_tokens: 8,
             total_tokens: 28,
             input_tokens_details: { cached_tokens: 4 },
+            output_tokens_details: { reasoning_tokens: 6 },
           },
         },
       },
-    } as any));
+    } as any);
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-2",
@@ -106,7 +124,44 @@ describe("runtime event normalization", () => {
         outputTokens: 8,
         totalTokens: 28,
         inputTokensDetails: { cached_tokens: 4 },
+        outputTokensDetails: { reasoning_tokens: 6 },
       },
+    });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-2",
+          inputTokens: 20,
+          outputTokens: 8,
+          cachedTokens: 4,
+          reasoningTokens: 6,
+        },
+      },
+    ]);
+  });
+
+  test("normalizes model-call usage telemetry fields defensively", () => {
+    expect(modelCallUsageTelemetry({
+      inputTokens: 100,
+      outputTokens: 20,
+      inputTokensDetails: { cached_tokens: 80 },
+      outputTokensDetails: { reasoning_tokens: 7 },
+    })).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedTokens: 80,
+      reasoningTokens: 7,
+    });
+    expect(modelCallUsageTelemetry({
+      inputTokens: 50,
+      outputTokens: 10,
+      inputTokensDetails: { cached_input_tokens: 30 },
+    })).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedTokens: 30,
+      reasoningTokens: null,
     });
   });
 
@@ -675,11 +730,12 @@ describe("runtime event normalization", () => {
     expect(minimal.instructions).not.toContain("Environment notes from the operator:");
   });
 
-  // THE GATE. The exact preamble buildOpenGeniAgent produced before the
-  // white-label split: the historical hardcoded `instructions` array from
-  // origin/main (packages/runtime/src/index.ts), with no workspace environment,
-  // joined by " ". Captured verbatim; the composed default MUST equal it
-  // byte-for-byte so the white-label slice changes nothing on the default path.
+  // THE GATE. The exact default preamble buildOpenGeniAgent produces with no
+  // workspace environment, joined by " ". Captured verbatim; the composed
+  // default MUST equal it byte-for-byte so instruction-template changes are
+  // intentional. When the product intentionally changes the default substrate
+  // guidance, update this pin as the new canonical default rather than
+  // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
@@ -688,14 +744,14 @@ describe("runtime event normalization", () => {
     "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
-    "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
+    "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
     "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
-    "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
+    "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
   ].join(" ");
 
-  test("default template composes byte-identically to the historical preamble (no override, no environment)", () => {
+  test("default template composes byte-identically to the pinned default preamble (no override, no environment)", () => {
     // Direct composition: default template + empty CORE-with-no-env.
     expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
     // End-to-end through the agent builder with the default settings template.
@@ -775,6 +831,32 @@ describe("runtime event normalization", () => {
     expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("absent workspace memory is byte-identical to today's composition", () => {
+    expect(appendWorkspaceMemory("base")).toBe("base");
+    expect(appendWorkspaceMemory("base", "   ")).toBe("base");
+
+    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: undefined });
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: "   " });
+    expect(withUndefined.instructions).toBe(base.instructions);
+    expect(withBlank.instructions).toBe(base.instructions);
+    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+    });
+
+    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`);
+    expect(agent.instructions.indexOf(workspaceMemory))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
   test("the genesis title directive stays LAST, after per-session instructions", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
@@ -834,6 +916,25 @@ describe("runtime event normalization", () => {
       `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
     );
     expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
+  test("workspace memory composes after the toolspace directive and before the per-session slice", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+      toolspaceTokenSeed: "ogd_seed",
+    });
+
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+    );
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf(workspaceMemory));
+    expect(agent.instructions.indexOf(workspaceMemory))
       .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
   });
 
@@ -978,11 +1079,47 @@ describe("runtime event normalization", () => {
     });
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("set -eu");
+    expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
     expect(commands[0]).toContain("chmod a-w");
     expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
     expect(events.join("\n")).not.toContain("sig=secret");
     expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("reports signed file download failures without throwing", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const result = await materializeSandboxFileDownloads({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      execCommand: async () => [
+        "Chunk ID: abc123",
+        "Wall time: 0.0000 seconds",
+        "Process exited with code 2",
+        "Output:",
+        "/bin/sh: 1: set: Illegal option -o pipefail",
+      ].join("\n"),
+    } as any, [{
+      fileId: "file-1",
+      mountPath: "files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt?sig=secret",
+      sizeBytes: 5,
+    }], {
+      onRuntimeEvent: (event) => {
+        events.push(event as any);
+      },
+    });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.filename).toBe("input.txt");
+    expect(result.failures[0]?.exitCode).toBe(2);
+    expect(result.failures[0]?.reason).toContain("failed with exit code 2");
+    expect(result.failures[0]?.reason).toContain("Illegal option");
+    expect(events.map((event) => event.type)).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    expect(events[1]?.payload.exitCode).toBe(2);
+    expect(events[1]?.payload.error).toContain("Illegal option");
+    expect(JSON.stringify(events)).not.toContain("sig=secret");
   });
 
   test("wraps sandbox clients with signed file downloads on create and resume", async () => {
@@ -1102,11 +1239,11 @@ describe("runtime event normalization", () => {
     // "x-access-token" USERNAME constant (git's basic-auth username for an App token)
     // — that is not a credential. The credential guard is that no token VALUE and no
     // token-carrying env assignment ever rides the command text.
-    expect(command).not.toContain("GH_TOKEN=");
     expect(command).not.toContain("GITHUB_TOKEN=");
+    expect(command).not.toContain("ghs_liveToken123");
   });
 
-  test("TOKEN-BROKER (B1/B2): the clone command emits the gated seed block that writes the token FILE and PROVISIONS the askpass before the clone", () => {
+  test("TOKEN-BROKER (B1/B2): the clone command writes provider token FILES and provisions askpass + CLI wrappers before the clone", () => {
     const command = repositoryCloneCommand([{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
@@ -1115,18 +1252,18 @@ describe("runtime event normalization", () => {
       githubRepositoryId: 456,
     }]);
 
-    // The seed block is GATED on the per-exec OPENGENI_GIT_TOKEN_SEED (never on the
-    // manifest) and writes the STABLE token file ATOMICALLY: pid-suffixed temp under
-    // umask 077, renamed into place — concurrent readers (another turn's in-flight
-    // git fetch invoking the askpass) keep the old inode, and the token is never
-    // observable world-readable.
-    expect(command).toContain("if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then");
+    // The seed writer reads only per-exec OPENGENI_GIT_*_TOKEN_SEED vars (never
+    // manifest values) and writes STABLE token files ATOMICALLY: pid-suffixed temp
+    // under umask 077, renamed into place.
     expect(command).toContain("umask 077");
-    expect(command).toContain("git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"");
-    expect(command).toContain("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file.tmp.$$\"");
-    expect(command).toContain("mv -f \"$git_token_file.tmp.$$\" \"$git_token_file\"");
+    expect(command).toContain("write_git_provider_token github \"${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}\"");
+    expect(command).toContain("write_git_provider_token gitlab \"${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}\"");
+    expect(command).toContain("write_git_provider_token azure_devops \"${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}\"");
+    expect(command).toContain("printf '%s' \"$token\" > \"$token_file.tmp.$$\"");
+    expect(command).toContain("mv -f \"$token_file.tmp.$$\" \"$token_file\"");
+    expect(command).toContain("mv -f \"$credential_dir/github-token.tmp.$$\" \"$credential_dir/github-token\"");
 
-    // TOKEN-BROKER (B2): the SAME gated block PROVISIONS the git-askpass helper at
+    // TOKEN-BROKER (B2): the SAME setup block PROVISIONS the git-askpass helper at
     // SETUP (runtime) into the per-box, user-writable $GIT_ASKPASS (a manifest env
     // pointer, default $HOME/.opengeni/askpass), so auth is correct on ANY box image
     // without a baked script. Written via a QUOTED heredoc to a temp, chmod 0755,
@@ -1135,18 +1272,35 @@ describe("runtime event normalization", () => {
     expect(command).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(command).toContain("chmod 0755 \"$git_askpass.tmp.$$\"");
     expect(command).toContain("mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"");
-    // The provisioned askpass' Password branch reads the token FILE (this is the
-    // load-bearing wiring: GIT_ASKPASS -> askpass -> token file).
-    expect(command).toContain("*Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;");
-    expect(command).toContain("*Username*) printf '%s\\n' \"x-access-token\" ;;");
+    // The provisioned askpass' Password branch selects a provider by prompt host
+    // and reads the corresponding token FILE.
+    expect(command).toContain("*github.com*|*githubusercontent.com*) printf '%s\\n' github ;;");
+    expect(command).toContain("*gitlab*) printf '%s\\n' gitlab ;;");
+    expect(command).toContain("*dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;");
+    expect(command).toContain("*Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;");
+    expect(command).toContain("github) printf '%s\\n' \"x-access-token\" ;;");
 
-    // Both writes MUST come BEFORE the fetch that consumes them (order matters:
+    // Provider CLI shims are installed early on PATH by the manifest env. They
+    // read the CURRENT token file at invocation time and exec the real binary.
+    expect(command).toContain("wrapper_dir=\"${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}\"");
+    expect(command).toContain("for opengeni_git_cli_tool in gh glab az; do");
+    expect(command).toContain("gh) provider=github; token_env=GH_TOKEN ;;");
+    expect(command).toContain("glab) provider=gitlab; token_env=GITLAB_TOKEN ;;");
+    expect(command).toContain("az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;");
+    expect(command).toContain("GH_TOKEN) export GH_TOKEN=\"$token\" ;;");
+    expect(command).toContain("GITLAB_TOKEN) export GITLAB_TOKEN=\"$token\" ;;");
+    expect(command).toContain("AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT=\"$token\" ;;");
+
+    // Helper writes MUST come BEFORE the fetch that consumes them (order matters:
     // GIT_ASKPASS execs the provisioned script, which reads the token file, during
     // the fetch).
-    expect(command.indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\"")).toBeLessThan(
+    expect(command.indexOf("write_git_provider_token github")).toBeLessThan(
       command.indexOf("git -C \"$tmp\" fetch"),
     );
     expect(command.indexOf("cat > \"$git_askpass.tmp.$$\"")).toBeLessThan(
+      command.indexOf("git -C \"$tmp\" fetch"),
+    );
+    expect(command.indexOf("cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'")).toBeLessThan(
       command.indexOf("git -C \"$tmp\" fetch"),
     );
     // The token VALUE is never literally in the command (only the env-var reference);
@@ -1262,10 +1416,11 @@ describe("runtime event normalization", () => {
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
     expect(calls[0]?.environment).toBeUndefined();
+    expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'");
     expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
-    // The prefix precedes the gated seed block that writes the file.
+    // The prefix precedes the seed writer that writes the file.
     expect(String(calls[0]?.cmd).indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
-      String(calls[0]?.cmd).indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\""),
+      String(calls[0]?.cmd).indexOf("write_git_provider_token github"),
     );
     // TOKEN-BROKER (B2): the SAME per-exec command also provisions an EXECUTABLE git
     // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
@@ -1274,7 +1429,36 @@ describe("runtime event normalization", () => {
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(cmd).toContain("chmod 0755 \"$git_askpass.tmp.$$\"");
     expect(cmd).toContain("mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"");
-    expect(cmd).toContain("*Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;");
+    expect(cmd).toContain("*Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;");
+  });
+
+  test("TOKEN-BROKER (B1): the clone hook seeds GitLab and Azure DevOps tokens per-exec", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    await runRepositoryCloneHook({
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+      },
+    } as any, [{
+      kind: "repository",
+      uri: "https://gitlab.com/acme/private.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-456",
+    }], {
+      environment: { HOME: "/workspace" },
+      gitTokenSeeds: {
+        gitlab: "glpat_liveToken123",
+        azure_devops: "azdo_liveToken456",
+      },
+    });
+
+    const cmd = String(calls[0]?.cmd);
+    expect(calls[0]?.environment).toBeUndefined();
+    expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
+    expect(cmd).toContain("export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'");
+    expect(cmd).not.toContain("GITLAB_TOKEN='glpat_liveToken123'");
+    expect(cmd).not.toContain("AZURE_DEVOPS_EXT_PAT='azdo_liveToken456'");
   });
 
   test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
@@ -2348,39 +2532,41 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
-  test("callModelInputFilterForSettings elides stale screenshots in server mode without budget trimming", async () => {
+  test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(testSettings({
       openaiProvider: "openai",
       contextCompactionMode: "auto",
       contextWindowTokens: 100,
       contextReservedOutputTokens: 0,
     }))!;
-    const oldHuge = { type: "message", role: "assistant", content: "x".repeat(10_000) } as any;
     const image = (n: number) => `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
-    const out = await filter({
-      modelData: {
-        input: [
-          { type: "message", role: "user", content: "old" },
-          oldHuge,
-          { type: "function_call_result", callId: "a", output: image(1) },
-          { type: "function_call_result", callId: "b", output: image(2) },
-          { type: "function_call_result", callId: "c", output: image(3) },
-          { type: "function_call_result", callId: "d", output: image(4) },
-          { type: "message", role: "user", content: "recent" },
-        ] as any,
-      },
+    const prefix = [
+      { type: "message", role: "user", content: "old" },
+      { type: "function_call_result", callId: "a", output: image(1) },
+      { type: "function_call_result", callId: "b", output: image(2) },
+      { type: "function_call_result", callId: "c", output: image(3) },
+      { type: "function_call_result", callId: "d", output: image(4) },
+    ] as any;
+    const first = await filter({
+      modelData: { input: prefix },
+      agent: {} as any,
+      context: undefined,
+    });
+    const secondInput = [
+      ...prefix,
+      { type: "function_call_result", callId: "e", output: image(5) },
+    ] as any;
+    const second = await filter({
+      modelData: { input: secondInput },
       agent: {} as any,
       context: undefined,
     });
 
-    // Server mode: image policy is always safe and always on.
-    expect((out.input[2] as any).output).toBe(SCREENSHOT_OMITTED_PLACEHOLDER);
-    expect((out.input[3] as any).output).toBe(image(2));
-    expect((out.input[4] as any).output).toBe(image(3));
-    expect((out.input[5] as any).output).toBe(image(4));
-    // Budget guard is client-mode only, so the oversized assistant item remains.
-    expect(out.input).toHaveLength(7);
-    expect(out.input).toContainEqual(oldHuge);
+    expect(first.input).toEqual(prefix);
+    expect(second.input.slice(0, prefix.length)).toEqual(first.input);
+    expect((second.input[1] as any).output).toBe(image(1));
+    expect((second.input[4] as any).output).toBe(image(4));
+    expect((second.input[5] as any).output).toBe(image(5));
   });
 
   test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {

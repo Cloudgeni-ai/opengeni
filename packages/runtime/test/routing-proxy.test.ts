@@ -245,6 +245,23 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(modal.calls).toEqual(["x"]);
     expect(selfhosted.calls).toEqual(["y"]);
   });
+
+  // REGRESSION (caught live on staging 2026-07-08): the lazy wiring returned the
+  // proxy ITSELF as the resolved backend, so every op re-dispatched into resolve()
+  // forever — a silent async infinite recursion that HUNG the turn (box created, exec
+  // never returned). The guard must fail loud instead of looping.
+  test("(5) re-entrancy guard: a resolver returning the proxy itself throws, never hangs", async () => {
+    let proxy: RoutingSandboxSession;
+    proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 1 }),
+      resolveActiveBackend: async (): Promise<ResolvedActiveBackend> => ({
+        session: proxy as unknown as RoutableBackendSession,
+        sandboxId: null,
+        kind: "unprovisioned",
+      }),
+    });
+    await expect(proxy.exec({ cmd: "x" })).rejects.toThrow(/re-entrancy|proxy itself/i);
+  });
 });
 
 describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted dispatch", () => {

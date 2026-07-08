@@ -521,6 +521,52 @@ export function workerGoalEvents(): SessionEvent[] {
   return log.events;
 }
 
+/**
+ * Workers reporting BACK to their manager. Each arrives as a `user.message`
+ * carrying a `childCompletion` payload — projected to a `worker-completion` item
+ * and drawn as an inbound result card (completed / paused / failed), NOT a user
+ * bubble. REAL shape: db/index.ts stamps `{ childSessionId, status, goal:{...} }`.
+ */
+export function workerCompletionEvents(): SessionEvent[] {
+  const log = new EventLog();
+  log.push("user.message", {
+    text: "Login flow verified end-to-end across Chromium, Firefox, and WebKit. All 128 assertions passed; the dashboard screenshot is attached to the run. No flakes on three reruns.",
+    childCompletion: {
+      childSessionId: "9efcd759-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+      status: "idle",
+      goal: {
+        status: "completed",
+        text: "verify login flow end-to-end",
+        evidence: "128/128 assertions green on 3 consecutive runs; screenshot dashboard-2026-07-07.png captured.",
+      },
+    },
+  });
+  log.push("user.message", {
+    text: "I paused the migration worker — it needs the GHCR pull credentials before it can pull the base image, and I did not want to burn continuations retrying a blocked step.",
+    childCompletion: {
+      childSessionId: "1a2b3c4d-5e6f-4a3b-8c4d-9f8e7d6c5b4a",
+      status: "idle",
+      goal: {
+        status: "paused",
+        text: "migrate the billing service to the new Postgres cluster",
+        pausedReason: "missing GHCR pull credentials — cannot pull ghcr.io/acme/billing base image",
+      },
+    },
+  });
+  log.push("user.message", {
+    text: "The load-test worker failed: the staging target returned 503 for the whole window, so I could not gather a clean baseline.",
+    childCompletion: {
+      childSessionId: "7f6e5d4c-3b2a-4a3b-8c4d-1a2b3c4d5e6f",
+      status: "failed",
+      goal: {
+        status: "active",
+        text: "capture a p95 latency baseline against staging",
+      },
+    },
+  });
+  return log.events;
+}
+
 /* ----------------------------------------------------------------------------
    Segment C/D/E — completed / failed / cancelled turns (fold to a chip).
    These are full event runs; MessageTimeline folds them through the live pipeline.
@@ -581,6 +627,111 @@ export function completedTurnEvents(): SessionEvent[] {
     text: "Done. The suite is green (128/128) after patching the missing fixture import in `test-helpers.ts`, and here is the dashboard once it built. Want me to wire up CI next?",
   }, turn);
   log.push("turn.completed", {}, turn);
+  return log.events;
+}
+
+/**
+ * A settled turn in which the agent writes to workspace memory: it saves two new
+ * memories and corrects two existing ones (one superseded with a replacement, one
+ * updated in place). Folds to a chip whose summary carries the memory facets
+ * ("… · 2 memories saved · 2 memories updated"); expanded, each write is a calm
+ * neutral memory row (a supersede shows old → new; an in-place update shows the
+ * live text). `memory.saved` / `memory.corrected` payloads mirror the shapes the
+ * MCP server emits (apps/api/src/mcp/server.ts).
+ */
+export function memoryTurnEvents(): SessionEvent[] {
+  const log = new EventLog();
+  const turn = "turn-memory";
+  log.push("user.message", { text: "Note our deploy conventions for next time, and fix that stale database note — I checked and it's wrong now." });
+  log.push(
+    "agent.reasoning.delta",
+    { text: "I'll record the standing conventions as workspace memory, then correct the two facts that have drifted so future sessions don't repeat them." },
+    turn,
+  );
+  log.tool(
+    {
+      name: "exec_command",
+      id: "mem-0",
+      arguments: { cmd: "cat infra/README.md", workdir: "/workspace" },
+      output: "Chunk ID: 909\nWall time: 0.3\nProcess exited with code 0\nOutput:\nDeploys: staging from main only, via opengeni-ops.\n",
+    },
+    turn,
+  );
+  log.push("memory.saved", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000001",
+    kind: "preference",
+    preview: "Prefer Terraform over Pulumi for all new infrastructure in this workspace.",
+    deduped: false,
+  }, turn);
+  log.push("memory.saved", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000002",
+    kind: "semantic",
+    preview: "Staging deploys run from the main branch only, via the opengeni-ops workflow.",
+    deduped: false,
+  }, turn);
+  log.push("memory.corrected", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000003",
+    kind: "semantic",
+    preview: "The staging database is walrus-primary and lives in the neu region.",
+    action: "superseded",
+    reason: "Verified in-session: the instance was migrated and renamed.",
+    replacementMemoryId: "aa11bb22-0000-4000-8000-000000000004",
+    replacementPreview: "The staging database is walrus-2 (Postgres 16) in the neu region; walrus-primary was retired.",
+  }, turn);
+  log.push("memory.corrected", {
+    memoryId: "aa11bb22-0000-4000-8000-000000000005",
+    kind: "procedural",
+    preview: "Run database migrations with `make db-migrate` before every deploy.",
+    action: "updated",
+    reason: "The command moved under the ops wrapper.",
+  }, turn);
+  log.push("agent.message.completed", {
+    text: "Saved the Terraform preference and the staging-deploy rule, corrected the database note (walrus-primary → walrus-2), and updated the migration command in place. Future sessions will start with the right picture.",
+  }, turn);
+  log.push("turn.completed", {}, turn);
+  return log.events;
+}
+
+/**
+ * A turn paused on a lapsed connection: a Linear tool call trips the broker's
+ * reauth path (`tool.auth_needed`), and a second provider needs wider scope.
+ * Each projects to a clean inline reconnect card — no `turn.completed`, because
+ * the turn is genuinely waiting on the user.
+ */
+export function authNeededEvents(): SessionEvent[] {
+  const log = new EventLog();
+  const turn = "turn-reconnect";
+  log.push("user.message", { text: "File a Linear issue for the flaky test, then log the same in Notion." });
+  log.push(
+    "agent.reasoning.delta",
+    { text: "I'll create the Linear issue first, then mirror it into the Notion database." },
+    turn,
+  );
+  log.push(
+    "tool.auth_needed",
+    {
+      serverId: "mcp-linear",
+      toolName: "create_issue",
+      providerDomain: "linear.app",
+      connectionId: "conn-linear-1",
+      reason: "refresh_failed",
+      scopes: ["issues:write"],
+      resource: "https://mcp.linear.app/sse",
+    },
+    turn,
+  );
+  log.push(
+    "tool.auth_needed",
+    {
+      serverId: "mcp-notion",
+      toolName: "create_page",
+      providerDomain: "notion.so",
+      connectionId: "conn-notion-1",
+      reason: "insufficient_scope",
+      scopes: ["databases.write"],
+    },
+    turn,
+  );
   return log.events;
 }
 

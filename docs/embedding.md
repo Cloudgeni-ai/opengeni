@@ -75,12 +75,32 @@ The port can bind either or both legs:
 
 ```ts
 type ConnectionCredentialsPort = {
-  gitCredentials?: (input: GitCredentialsRequest) => Promise<GitCredentials>;
-  sandboxSecrets?: (input: SandboxSecretsRequest) => Promise<SandboxSecrets>;
+  gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 ```
 
-`gitCredentials` receives `{ accountId, workspaceId, installationId, repositoryIds }` and returns a token plus the `workspaceId` it scoped. `sandboxSecrets` receives `{ accountId, workspaceId, environmentId }` and returns plaintext environment values plus the scoped `workspaceId`. Each result is checked by the FORK-7 workspace-echo assert before the worker injects anything. A mismatch hard-fails before tenant B's credential can land in tenant A's run.
+`gitCredentials` is provider-aware and remains GitHub-backward-compatible:
+GitHub repository resources still arrive as the legacy shape
+`{ accountId, workspaceId, installationId, repositoryIds }`, with omitted
+`provider` meaning `"github"`. Non-GitHub resources arrive with
+`provider: "gitlab" | "azure_devops"` plus `repositoryRefs`. Provider-neutral
+repository refs can carry `provider`, `repositoryId`, `installationId`,
+`projectId`, and `connectionId`; `RepositoryResourceRef` accepts the same
+optional fields while retaining the existing `githubInstallationId` and
+`githubRepositoryId` aliases. The returned token plus scoped `workspaceId` is
+checked by the FORK-7 workspace-echo assert before the worker injects anything.
+A mismatch hard-fails before tenant B's credential can land in tenant A's run.
+
+The worker never writes token values into the sandbox manifest or attach-time
+environment delta. It passes current provider tokens to the runtime as
+off-manifest seeds; the sandbox setup writes them to
+`OPENGENI_GIT_CREDENTIALS_DIR/<provider>-token`, keeps
+`OPENGENI_GIT_TOKEN_FILE` as the GitHub alias, and provisions `gh`, `glab`, and
+`az` wrappers that read the current token file before each CLI invocation.
+`sandboxSecrets` receives `{ accountId, workspaceId, environmentId }` and returns
+plaintext environment values plus the scoped `workspaceId`, with the same echo
+check.
 
 Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
 

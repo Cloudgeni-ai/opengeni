@@ -58,6 +58,24 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
   });
 
+  test("a non-GitHub brokered repo gets git auth pointers without GitHub bot identity", async () => {
+    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
+      kind: "repository",
+      uri: "https://gitlab.com/acme/repo.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-123",
+    }]));
+    const expected = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      null,
+    );
+    expect(attachEnv).toEqual(expected);
+    expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
+  });
+
   test("the attach env is keyed off the SESSION's backend, not the deployment default (HOME + pointers move with it)", async () => {
     // The box is established with backendOverride: session.sandboxBackend and the
     // turn builds its env from the session's backend too — an attach env keyed

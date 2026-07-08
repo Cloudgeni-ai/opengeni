@@ -42,6 +42,7 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  LineageNode,
   SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
@@ -60,7 +61,7 @@ import type {
   WorkspaceMember,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
+import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB, resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
@@ -73,6 +74,22 @@ import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import * as schema from "./schema";
+import {
+  AGENT_VISIBLE_MEMORY_STATUSES,
+  hashMemoryText,
+  isMemoryTextTooLong,
+  MEMORY_VISIBLE_RECORD_CAP,
+  MEMORY_BLOCK_RECORD_LIMIT,
+  MEMORY_TEXT_MAX_CHARS,
+  MEMORY_NEAR_DUP_COSINE_THRESHOLD,
+  MEMORY_NEAR_DUP_NEIGHBORS,
+  MEMORY_SEARCH_DEFAULT_LIMIT,
+  MEMORY_SEARCH_MAX_LIMIT,
+  renderWorkspaceMemoryBlock,
+  sanitizeMemoryText,
+  WORKSPACE_MEMORY_BLOCK_EMPTY,
+  type MemoryBlockRecord,
+} from "./memory-domain";
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
@@ -86,6 +103,8 @@ export { migrate, runMigrations } from "./migrate";
 // role provisioning over an explicit admin connection + target schema. Importing
 // these does NOT run the modules' `import.meta.main` CLI blocks.
 export { provisionRoles, type ProvisionResult, type ProvisionRolesOptions } from "./provision-roles";
+// Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
+export * from "./memory-domain";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
 // query-layer port: every helper in this file accepts `db: Database` and uses
@@ -644,6 +663,20 @@ export async function updateWorkspace(db: Database, workspaceId: string, input: 
   return mapWorkspace(row);
 }
 
+// Deep-merge (top-level) a settings patch into workspaces.settings, atomically.
+// jsonb `||` overwrites matching keys and preserves unknown ones, so a newer
+// setting a caller doesn't know about survives the write.
+export async function updateWorkspaceSettings(db: Database, workspaceId: string, patch: Record<string, unknown>): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return mapWorkspace(row);
+}
+
 export async function getWorkspaceGrant(db: Database, subjectId: string, workspaceId: string): Promise<AccessGrant | null> {
   const [row] = await db.select({
     membership: schema.workspaceMemberships,
@@ -1164,11 +1197,12 @@ export type UpdateKnowledgeMemoryInput = {
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
   reviewedBy?: string | null | undefined;
+  pinned?: boolean | undefined;
 };
 
 export type ListKnowledgeMemoryOptions = {
   query?: string | undefined;
-  status?: KnowledgeMemoryStatus | undefined;
+  status?: KnowledgeMemoryStatus | KnowledgeMemoryStatus[] | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   limit?: number | undefined;
@@ -2499,6 +2533,7 @@ export async function createKnowledgeMemory(db: Database, input: CreateKnowledge
       kind: input.kind ?? "semantic",
       scope,
       text,
+      textHash: hashMemoryText(text),
       sourceRefs: input.sourceRefs ?? [],
       confidence: confidenceToStorage(input.confidence ?? 0.5),
       metadata: input.metadata ?? {},
@@ -2511,31 +2546,147 @@ export async function createKnowledgeMemory(db: Database, input: CreateKnowledge
   });
 }
 
-export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
+export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput, embedder?: MemoryEmbedder): Promise<KnowledgeMemory> {
   const reviewStatus = input.status === "approved" || input.status === "rejected";
   const scope = input.scope !== undefined ? requireDbString(input.scope, "knowledge memory scope") : undefined;
-  const text = input.text !== undefined ? requireDbString(input.text, "knowledge memory text") : undefined;
   const reviewedBy = input.reviewedBy === null
     ? null
     : input.reviewedBy !== undefined
       ? requireDbString(input.reviewedBy, "knowledge memory reviewer")
       : undefined;
+
+  // A text edit is a human audit action: it bypasses the dedup/cap gates (an
+  // authorized curator's edit is intentional) but still sanitizes + redacts,
+  // recomputes text_hash, and re-embeds fail-soft so the row stays coherent.
+  type MemoryTextUpdate = {
+    text: string;
+    textHash: string;
+    embedding: number[] | null;
+    embeddingModel: string | null;
+    updateEmbedding: boolean;
+  };
+  const embedForMemoryUpdate = async (sanitizedText: string): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
+    let embedding: number[] | null = null;
+    let embeddingModel: string | null = null;
+    if (embedder) {
+      try {
+        const [vector] = await embedder.embedMany([sanitizedText]);
+        if (vector && vector.length > 0) {
+          embedding = vector;
+          embeddingModel = embedder.model;
+        }
+      } catch (error) {
+        console.warn("workspace memory edit: embedding failed; storing keyword-only", {
+          workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return { embedding, embeddingModel };
+  };
+
+  let textUpdate: MemoryTextUpdate | undefined;
+  if (input.text !== undefined) {
+    const { text: sanitizedText } = sanitizeMemoryText(input.text);
+    if (sanitizedText.length === 0) {
+      throw new Error("Memory text is empty after sanitization; nothing to save.");
+    }
+    if (isMemoryTextTooLong(sanitizedText)) {
+      throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
+    }
+    const { embedding, embeddingModel } = await embedForMemoryUpdate(sanitizedText);
+    textUpdate = { text: sanitizedText, textHash: hashMemoryText(sanitizedText), embedding, embeddingModel, updateEmbedding: true };
+  }
+
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.update(schema.knowledgeMemories).set({
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(scope !== undefined ? { scope } : {}),
-      ...(text !== undefined ? { text } : {}),
-      ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
-      ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      // Re-proposing clears review metadata; an explicit reviewedBy in the same
-      // update still wins via the later spread.
-      ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
-      ...(reviewedBy !== undefined ? { reviewedBy } : {}),
-      ...(reviewStatus ? { reviewedAt: new Date() } : {}),
-      updatedAt: new Date(),
-    }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning();
+    const [existing] = await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      status: schema.knowledgeMemories.status,
+      text: schema.knowledgeMemories.text,
+      textHash: schema.knowledgeMemories.textHash,
+      embedding: schema.knowledgeMemories.embedding,
+    }).from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
+      .limit(1);
+    if (!existing) {
+      throw new Error(`Knowledge memory not found: ${memoryId}`);
+    }
+    const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
+    const wasVisible = agentVisibleMemoryStatuses.includes(existing.status as (typeof agentVisibleMemoryStatuses)[number]);
+    const willBeVisible = agentVisibleMemoryStatuses.includes(nextStatus as (typeof agentVisibleMemoryStatuses)[number]);
+    if (willBeVisible) {
+      const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+        visibleCount: sql<number>`count(*)::int`,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          ne(schema.knowledgeMemories.id, memoryId),
+        ));
+      if (Number(visibleCount) >= MEMORY_VISIBLE_RECORD_CAP) {
+        throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
+      }
+    }
+    if (!wasVisible && willBeVisible && textUpdate === undefined) {
+      const { text: sanitizedText } = sanitizeMemoryText(existing.text);
+      if (sanitizedText.length === 0) {
+        throw new Error("Memory text is empty after sanitization; nothing to save.");
+      }
+      if (isMemoryTextTooLong(sanitizedText)) {
+        throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
+      }
+      const textChanged = sanitizedText !== existing.text;
+      const missingEmbedding = existing.embedding == null;
+      const { embedding, embeddingModel } = textChanged || missingEmbedding
+        ? await embedForMemoryUpdate(sanitizedText)
+        : { embedding: null, embeddingModel: null };
+      textUpdate = {
+        text: sanitizedText,
+        textHash: hashMemoryText(sanitizedText),
+        embedding,
+        embeddingModel,
+        updateEmbedding: textChanged || missingEmbedding,
+      };
+    }
+    const nextTextHash = textUpdate?.textHash ?? existing.textHash;
+    if (!wasVisible && willBeVisible && nextTextHash) {
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
+      if (duplicate) {
+        throw new Error(visibleTextHashConflictMessage(duplicate));
+      }
+    }
+    let row: typeof schema.knowledgeMemories.$inferSelect | undefined;
+    try {
+      const rows = await scopedDb.transaction(async (tx) => await tx.update(schema.knowledgeMemories).set({
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(scope !== undefined ? { scope } : {}),
+        ...(textUpdate !== undefined
+          ? {
+            text: textUpdate.text,
+            textHash: textUpdate.textHash,
+            ...(textUpdate.updateEmbedding ? { embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
+          }
+          : {}),
+        ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        // Re-proposing clears review metadata; an explicit reviewedBy in the same
+        // update still wins via the later spread.
+        ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
+        ...(reviewedBy !== undefined ? { reviewedBy } : {}),
+        ...(reviewStatus ? { reviewedAt: new Date() } : {}),
+        updatedAt: new Date(),
+      }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning());
+      row = rows[0];
+    } catch (error) {
+      if (!isVisibleTextHashUniqueViolation(error) || !nextTextHash) {
+        throw error;
+      }
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
+      throw new Error(visibleTextHashConflictMessage(duplicate));
+    }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
@@ -2556,7 +2707,9 @@ export async function listKnowledgeMemories(db: Database, workspaceId: string, o
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
     if (options.status) {
-      conditions.push(eq(schema.knowledgeMemories.status, options.status));
+      conditions.push(Array.isArray(options.status)
+        ? inArray(schema.knowledgeMemories.status, options.status)
+        : eq(schema.knowledgeMemories.status, options.status));
     }
     if (options.kind) {
       conditions.push(eq(schema.knowledgeMemories.kind, options.kind));
@@ -2576,6 +2729,699 @@ export async function listKnowledgeMemories(db: Database, workspaceId: string, o
       .limit(limit);
     return rows.map(mapKnowledgeMemory);
   });
+}
+
+// ===========================================================================
+// Workspace Memory V1 — agent-writable, hybrid-searchable memory over
+// knowledge_memories. saveWorkspaceMemory is the single write gate; every write
+// path (first-party tools, REST, future reflector) funnels through it. The
+// embedder is a minimal structural port so packages/db need not depend on
+// packages/documents; callers pass getDocumentServices().embedder.
+// ===========================================================================
+
+export type MemoryEmbedder = {
+  model: string;
+  embedMany: (texts: string[]) => Promise<number[][]>;
+};
+
+export type WorkspaceMemoryOrigin = "agent" | "human";
+
+export type SaveWorkspaceMemoryInput = {
+  accountId: string;
+  workspaceId: string;
+  text: string;
+  kind?: KnowledgeMemoryKind | undefined;
+  confidence?: number | undefined; // 0-1
+  pinned?: boolean | undefined;
+  replacesId?: string | null | undefined; // short or full id of the record this supersedes
+  sessionId?: string | null | undefined; // provenance + event linkage
+  origin?: WorkspaceMemoryOrigin | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type SaveWorkspaceMemoryResult = {
+  memory: KnowledgeMemory;
+  // true → a matching record already existed; nothing new was inserted (NOOP).
+  deduped: boolean;
+  dedupeReason: "exact" | "near" | null;
+  // the record that `replacesId` retired, if any.
+  superseded: KnowledgeMemory | null;
+  supersededId: string | null;
+  // true when `replacesId` matched the same row and the row was updated in place
+  // instead of being superseded by a new/existing row.
+  updated: boolean;
+  redactionCount: number;
+  embedded: boolean;
+};
+
+export type CorrectWorkspaceMemoryInput = {
+  accountId: string;
+  workspaceId: string;
+  id: string; // short or full id
+  reason?: string | undefined;
+  replacementText?: string | undefined;
+  sessionId?: string | null | undefined;
+};
+
+export type CorrectWorkspaceMemoryResult = {
+  action: "archived" | "superseded" | "updated";
+  // the record that was archived, superseded, or updated in place.
+  memory: KnowledgeMemory;
+  // the replacement record when replacementText was supplied, else null.
+  replacement: KnowledgeMemory | null;
+};
+
+export type WorkspaceMemorySearchMode = "hybrid" | "vector" | "keyword";
+
+export type WorkspaceMemorySearchInput = {
+  query: string;
+  kind?: KnowledgeMemoryKind | undefined;
+  limit?: number | undefined;
+  mode?: WorkspaceMemorySearchMode | undefined;
+};
+
+export type WorkspaceMemorySearchResult = {
+  memory: KnowledgeMemory;
+  score: number;
+  matchType: WorkspaceMemorySearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
+};
+
+function memoryVectorLiteral(values: number[]): string {
+  return `[${values.join(",")}]`;
+}
+
+const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
+const visibleTextHashUniqueIndexName = "knowledge_memories_workspace_visible_text_hash_uq";
+
+function isVisibleTextHashUniqueViolation(error: unknown): boolean {
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown; cause?: unknown } | null;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+  const constraint = candidate.constraint ?? candidate.constraint_name;
+  if (candidate.code === "23505" && constraint === visibleTextHashUniqueIndexName) {
+    return true;
+  }
+  if (
+    typeof candidate.message === "string"
+    && candidate.message.includes(visibleTextHashUniqueIndexName)
+    && (candidate.code === "23505" || candidate.message.includes("duplicate key value violates unique constraint"))
+  ) {
+    return true;
+  }
+  return isVisibleTextHashUniqueViolation(candidate.cause);
+}
+
+async function findVisibleMemoryByTextHash(
+  scopedDb: Database,
+  workspaceId: string,
+  textHash: string,
+  excludeId?: string,
+): Promise<typeof schema.knowledgeMemories.$inferSelect | null> {
+  const filters = [
+    eq(schema.knowledgeMemories.workspaceId, workspaceId),
+    eq(schema.knowledgeMemories.textHash, textHash),
+    inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+  ];
+  if (excludeId) {
+    filters.push(ne(schema.knowledgeMemories.id, excludeId));
+  }
+  const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+    .where(and(...filters))
+    .orderBy(desc(schema.knowledgeMemories.updatedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+function visibleTextHashConflictMessage(existing: Pick<KnowledgeMemory, "id"> | { id: string } | null): string {
+  const suffix = existing ? ` Existing memory id: ${existing.id}.` : "";
+  return `Memory text duplicates an existing visible memory.${suffix} Search memory and update, archive, or supersede the existing record instead.`;
+}
+
+function hasMetadataOrigin(metadata: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(metadata, "origin");
+}
+
+function saveMemoryMetadata(input: SaveWorkspaceMemoryInput): Record<string, unknown> {
+  return {
+    ...(input.metadata ?? {}),
+    ...(input.origin ? { origin: input.origin } : {}),
+  };
+}
+
+function inPlaceSaveMemoryMetadata(
+  existing: Record<string, unknown>,
+  input: SaveWorkspaceMemoryInput,
+): Record<string, unknown> | undefined {
+  if (input.metadata === undefined && (!input.origin || hasMetadataOrigin(existing))) {
+    return undefined;
+  }
+  const merged = {
+    ...existing,
+    ...(input.metadata ?? {}),
+  };
+  if (hasMetadataOrigin(existing)) {
+    merged.origin = existing.origin;
+  } else if (input.origin) {
+    merged.origin = input.origin;
+  }
+  return merged;
+}
+
+// Resolve a short prefix or full uuid to the full id within a workspace. Full
+// uuid lookup is status-agnostic so correction/archive paths can still surface a
+// clear terminal-row result; prefix lookup is restricted to non-terminal rows
+// because short ids are shown only for records an agent can legitimately target.
+// Returns null when nothing matches; throws on an ambiguous live prefix.
+async function resolveWorkspaceMemoryId(scopedDb: Database, workspaceId: string, rawId: string): Promise<string | null> {
+  const candidate = rawId.trim().toLowerCase();
+  if (!/^[0-9a-f-]{4,36}$/.test(candidate)) {
+    return null;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate)) {
+    const [match] = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        eq(schema.knowledgeMemories.id, candidate),
+      ))
+      .limit(1);
+    return match?.id ?? null;
+  }
+  const matches = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+    .where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      sql`${schema.knowledgeMemories.id}::text like ${`${candidate}%`}`,
+      ne(schema.knowledgeMemories.status, "archived"),
+      ne(schema.knowledgeMemories.status, "superseded"),
+      ne(schema.knowledgeMemories.status, "rejected"),
+    ))
+    .limit(2);
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous memory id "${rawId}": it matches multiple live memory records. Run memory_search and use the full id from the intended record.`);
+  }
+  return matches[0]!.id;
+}
+
+export async function saveWorkspaceMemory(
+  db: Database,
+  input: SaveWorkspaceMemoryInput,
+  embedder?: MemoryEmbedder,
+): Promise<SaveWorkspaceMemoryResult> {
+  const { text: sanitizedText, redactionCount } = sanitizeMemoryText(input.text);
+  if (sanitizedText.length === 0) {
+    throw new Error("Memory text is empty after sanitization; nothing to save.");
+  }
+  if (isMemoryTextTooLong(sanitizedText)) {
+    throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}). Store one crisp fact per record.`);
+  }
+  const textHash = hashMemoryText(sanitizedText);
+  const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
+
+  // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
+  // write (the row stays keyword-searchable). Mirrors indexDocumentNow.
+  let embedding: number[] | null = null;
+  let embeddingModel: string | null = null;
+  if (embedder) {
+    try {
+      const [vector] = await embedder.embedMany([sanitizedText]);
+      if (vector && vector.length > 0) {
+        embedding = vector;
+        embeddingModel = embedder.model;
+      }
+    } catch (error) {
+      console.warn("workspace memory save: embedding failed; saving keyword-only", {
+        workspaceId: input.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // Resolve the supersession target first so an invalid replaces_id fails before
+    // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
+    let replacesFullId: string | null = null;
+    let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
+    if (input.replacesId) {
+      replacesFullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.replacesId);
+      if (!replacesFullId) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+      const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, replacesFullId)))
+        .limit(1);
+      if (!row) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+      replacesRow = row;
+    }
+
+    const updateReplacesInPlace = async (): Promise<SaveWorkspaceMemoryResult> => {
+      if (!replacesFullId) {
+        throw new Error("Cannot update a memory in place without replaces_id.");
+      }
+      // A caller can "replace" a row with text that exact/near-dedups only to
+      // that same row. In that case there is no supersession target; keep the
+      // row live and update its text/vector metadata so the call still has an
+      // observable effect.
+      const normalizedTextChanged = replacesRow ? hashMemoryText(replacesRow.text) !== textHash : true;
+      const metadata = replacesRow ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input) : undefined;
+      const [updated] = await scopedDb.update(schema.knowledgeMemories).set({
+        text: sanitizedText,
+        textHash,
+        ...(normalizedTextChanged
+          ? {
+            // New text with no fresh vector must clear the old vector. Keeping a
+            // stale vector would make vector search return this row for the old
+            // text's meaning; keyword search still covers the new text.
+            embedding,
+            embeddingModel,
+          }
+          : {}),
+        ...(input.kind !== undefined ? { kind } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
+      if (!updated) {
+        throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+      }
+      return {
+        memory: mapKnowledgeMemory(updated),
+        deduped: false,
+        dedupeReason: null,
+        superseded: null,
+        supersededId: null,
+        updated: true,
+        redactionCount,
+        embedded: embedding !== null,
+      };
+    };
+
+    const dedupeToExisting = async (
+      row: typeof schema.knowledgeMemories.$inferSelect,
+      dedupeReason: "exact" | "near",
+    ): Promise<SaveWorkspaceMemoryResult> => {
+      if (replacesFullId && row.id === replacesFullId) {
+        return await updateReplacesInPlace();
+      }
+      let superseded: KnowledgeMemory | null = null;
+      if (replacesFullId) {
+        const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+          status: "superseded",
+          supersededById: row.id,
+          validUntil: new Date(),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          eq(schema.knowledgeMemories.id, replacesFullId),
+        )).returning();
+        if (!old) {
+          throw new Error(`replaces_id "${input.replacesId}" does not match a memory in this workspace.`);
+        }
+        superseded = mapKnowledgeMemory(old);
+      }
+      return {
+        memory: mapKnowledgeMemory(row),
+        deduped: true,
+        dedupeReason,
+        superseded,
+        supersededId: superseded?.id ?? null,
+        updated: false,
+        redactionCount,
+        embedded: embedding !== null,
+      };
+    };
+
+    // Exact-dup gate: same normalized text among agent-visible rows → NOOP.
+    const exactMatches = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.textHash, textHash),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+      ))
+      .orderBy(replacesFullId
+        ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
+        : schema.knowledgeMemories.updatedAt)
+      .limit(replacesFullId ? 2 : 1);
+    const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
+    if (exact) {
+      return await dedupeToExisting(exact, "exact");
+    }
+
+    // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
+    // vector from the SAME model; similarity ≥ threshold → NOOP. This check is
+    // advisory: cosine similarity cannot be protected by a unique index, unlike
+    // the exact text_hash gate below.
+    if (embedding && embeddingModel) {
+      const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
+      const neighbours = await scopedDb.select({
+        id: schema.knowledgeMemories.id,
+        distance,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
+          sql`${schema.knowledgeMemories.embedding} is not null`,
+        ))
+        .orderBy(distance)
+        .limit(MEMORY_NEAR_DUP_NEIGHBORS);
+      const duplicateNeighbours = neighbours.filter((row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD);
+      const nearest = duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
+      if (nearest) {
+        const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+          .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, nearest.id)))
+          .limit(1);
+        if (row) {
+          return await dedupeToExisting(row, "near");
+        }
+      }
+    }
+
+    // Per-workspace visible-record cap: fail actionably rather than silently drop.
+    const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+      visibleCount: sql<number>`count(*)::int`,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+      ));
+    const replacesVisible = replacesRow
+      ? agentVisibleMemoryStatuses.includes(replacesRow.status as (typeof agentVisibleMemoryStatuses)[number])
+      : false;
+    const effectiveVisibleCount = Number(visibleCount) - (replacesVisible ? 1 : 0);
+    if (effectiveVisibleCount >= MEMORY_VISIBLE_RECORD_CAP) {
+      throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
+    }
+
+    const sourceRefs: KnowledgeSourceRef[] = input.sessionId
+      ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
+      : [];
+    let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
+    try {
+      const rows = await scopedDb.transaction(async (tx) => await tx.insert(schema.knowledgeMemories).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        status: "active",
+        kind,
+        scope: "workspace",
+        text: sanitizedText,
+        textHash,
+        sourceRefs,
+        confidence: confidenceToStorage(input.confidence ?? 0.5),
+        pinned: input.pinned ?? false,
+        metadata: saveMemoryMetadata(input),
+        createdBySessionId: input.sessionId ?? null,
+        supersedesId: replacesFullId,
+        ...(embedding ? { embedding, embeddingModel } : {}),
+      }).returning());
+      inserted = rows[0];
+    } catch (error) {
+      if (!isVisibleTextHashUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await findVisibleMemoryByTextHash(scopedDb, input.workspaceId, textHash);
+      if (!winner) {
+        throw error;
+      }
+      return await dedupeToExisting(winner, "exact");
+    }
+    if (!inserted) {
+      throw new Error("Failed to save workspace memory");
+    }
+
+    let superseded: KnowledgeMemory | null = null;
+    if (replacesFullId) {
+      const [old] = await scopedDb.update(schema.knowledgeMemories).set({
+        status: "superseded",
+        supersededById: inserted.id,
+        validUntil: new Date(),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+        eq(schema.knowledgeMemories.id, replacesFullId),
+      )).returning();
+      superseded = old ? mapKnowledgeMemory(old) : null;
+    }
+
+    return {
+      memory: mapKnowledgeMemory(inserted),
+      deduped: false,
+      dedupeReason: null,
+      superseded,
+      supersededId: superseded?.id ?? null,
+      updated: false,
+      redactionCount,
+      embedded: embedding !== null,
+    };
+  });
+}
+
+export async function correctWorkspaceMemory(
+  db: Database,
+  input: CorrectWorkspaceMemoryInput,
+  embedder?: MemoryEmbedder,
+): Promise<CorrectWorkspaceMemoryResult> {
+  const replacementText = input.replacementText?.trim();
+  if (replacementText) {
+    // Correction WITH a replacement is a full supersede through the one write gate.
+    const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+      const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+      if (!fullId) {
+        return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
+      }
+      return await scopedDb.select().from(schema.knowledgeMemories)
+        .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
+        .limit(1);
+    });
+    if (!old) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const result = await saveWorkspaceMemory(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      text: replacementText,
+      kind: old.kind as KnowledgeMemoryKind,
+      pinned: old.pinned,
+      replacesId: old.id,
+      sessionId: input.sessionId ?? null,
+      origin: "agent",
+    }, embedder);
+    if (result.superseded) {
+      return {
+        action: "superseded",
+        memory: result.superseded,
+        replacement: result.memory,
+      };
+    }
+    return {
+      action: "updated",
+      memory: result.memory,
+      replacement: null,
+    };
+  }
+
+  // No replacement → archive the record.
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+    if (!fullId) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const [existing] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, input.workspaceId), eq(schema.knowledgeMemories.id, fullId)))
+      .limit(1);
+    if (!existing) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    const correctionReason = cleanDbString(input.reason);
+    const [archived] = await scopedDb.update(schema.knowledgeMemories).set({
+      status: "archived",
+      validUntil: new Date(),
+      updatedAt: new Date(),
+      ...(correctionReason ? { metadata: { ...(existing.metadata ?? {}), correctionReason } } : {}),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+      eq(schema.knowledgeMemories.id, fullId),
+    )).returning();
+    if (!archived) {
+      throw new Error(`Memory "${input.id}" not found in this workspace.`);
+    }
+    return { action: "archived", memory: mapKnowledgeMemory(archived), replacement: null };
+  });
+}
+
+export async function searchWorkspaceMemories(
+  db: Database,
+  workspaceId: string,
+  input: WorkspaceMemorySearchInput,
+  embedder?: MemoryEmbedder,
+): Promise<WorkspaceMemorySearchResult[]> {
+  const query = requireDbString(input.query, "memory search query");
+  const mode: WorkspaceMemorySearchMode = input.mode ?? "hybrid";
+  const limit = Math.min(Math.max(input.limit ?? MEMORY_SEARCH_DEFAULT_LIMIT, 1), MEMORY_SEARCH_MAX_LIMIT);
+  const candidateLimit = mode === "hybrid" ? Math.min(limit * 4, 100) : limit;
+
+  const baseConditions: SQL[] = [
+    eq(schema.knowledgeMemories.workspaceId, workspaceId),
+    inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+  ];
+  if (input.kind) {
+    baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
+  }
+
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const scored = new Map<string, { vectorScore: number | null; keywordScore: number | null }>();
+
+    if (mode === "vector" || mode === "hybrid") {
+      try {
+        if (!embedder) {
+          throw new Error("no embedder configured for vector memory search");
+        }
+        const [vector] = await embedder.embedMany([query]);
+        if (!vector || vector.length === 0) {
+          throw new Error("embedder returned no query vector");
+        }
+        const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(vector)}::vector`;
+        const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, distance }).from(schema.knowledgeMemories)
+          .where(and(
+            ...baseConditions,
+            eq(schema.knowledgeMemories.embeddingModel, embedder.model),
+            sql`${schema.knowledgeMemories.embedding} is not null`,
+          ))
+          .orderBy(distance)
+          .limit(candidateLimit);
+        for (const row of rows) {
+          const vectorScore = 1 / (1 + Number(row.distance));
+          scored.set(row.id, { vectorScore, keywordScore: scored.get(row.id)?.keywordScore ?? null });
+        }
+      } catch (error) {
+        if (mode === "vector") {
+          throw error;
+        }
+        console.warn("workspace memory hybrid search vector component failed; falling back to keyword", {
+          workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (mode === "keyword" || mode === "hybrid") {
+      const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.knowledgeMemories.text}), plainto_tsquery('simple', ${query}))`;
+      const rows = await scopedDb.select({ id: schema.knowledgeMemories.id, rank }).from(schema.knowledgeMemories)
+        .where(and(
+          ...baseConditions,
+          sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
+        ))
+        .orderBy(desc(rank))
+        .limit(candidateLimit);
+      for (const row of rows) {
+        const rankValue = Number(row.rank);
+        const keywordScore = Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
+        const prev = scored.get(row.id);
+        scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
+      }
+    }
+
+    const ranked = [...scored.entries()].map(([id, { vectorScore, keywordScore }]) => {
+      const matchType: WorkspaceMemorySearchMode = vectorScore !== null && keywordScore !== null
+        ? "hybrid"
+        : vectorScore !== null
+          ? "vector"
+          : "keyword";
+      const vector = vectorScore ?? 0;
+      const keyword = keywordScore ?? 0;
+      const score = mode === "vector"
+        ? vector
+        : mode === "keyword"
+          ? keyword
+          : Math.min(1, (0.65 * vector) + (0.35 * keyword) + (matchType === "hybrid" ? 0.1 : 0));
+      return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
+    }).sort((left, right) =>
+      right.score - left.score
+      || (right.vectorScore ?? 0) - (left.vectorScore ?? 0)
+      || (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
+    ).slice(0, limit);
+
+    if (ranked.length === 0) {
+      return [];
+    }
+
+    // Bump usage_count/last_used_at for the returned rows (NOT updated_at — search
+    // must not reshuffle the working set's recency order). Returns the fresh rows.
+    const ids = ranked.map((entry) => entry.id);
+    const bumped = await scopedDb.update(schema.knowledgeMemories).set({
+      usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
+      lastUsedAt: new Date(),
+    }).where(and(
+      eq(schema.knowledgeMemories.workspaceId, workspaceId),
+      inArray(schema.knowledgeMemories.id, ids),
+    )).returning();
+    const byId = new Map(bumped.map((row) => [row.id, row] as const));
+
+    const results: WorkspaceMemorySearchResult[] = [];
+    for (const entry of ranked) {
+      const row = byId.get(entry.id);
+      if (!row) {
+        continue;
+      }
+      results.push({
+        memory: mapKnowledgeMemory(row),
+        score: entry.score,
+        matchType: entry.matchType,
+        vectorScore: entry.vectorScore,
+        keywordScore: entry.keywordScore,
+      });
+    }
+    return results;
+  });
+}
+
+// Render the per-turn working-set block for a workspace. Returns null when the
+// workspace's memory setting is off (injection no-ops); the empty-state block
+// when memory is on but there are zero visible records; otherwise the populated
+// block. Pure rendering lives in memory-domain.ts.
+export async function resolveWorkspaceMemoryBlock(db: Database, workspaceId: string): Promise<string | null> {
+  const [workspace] = await db.select({ settings: schema.workspaces.settings })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  if (!workspace || !resolveWorkspaceMemoryEnabled(workspace.settings)) {
+    return null;
+  }
+  const records = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      kind: schema.knowledgeMemories.kind,
+      text: schema.knowledgeMemories.text,
+      pinned: schema.knowledgeMemories.pinned,
+    }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+        ne(schema.knowledgeMemories.kind, "episodic"),
+      ))
+      .orderBy(desc(schema.knowledgeMemories.pinned), desc(schema.knowledgeMemories.updatedAt))
+      .limit(MEMORY_BLOCK_RECORD_LIMIT),
+  );
+  if (records.length === 0) {
+    return WORKSPACE_MEMORY_BLOCK_EMPTY;
+  }
+  const blockRecords: MemoryBlockRecord[] = records.map((row) => ({
+    id: row.id,
+    kind: row.kind as KnowledgeMemoryKind,
+    text: row.text,
+    pinned: row.pinned,
+  }));
+  return renderWorkspaceMemoryBlock(blockRecords) ?? WORKSPACE_MEMORY_BLOCK_EMPTY;
 }
 
 export async function createSocialConnection(db: Database, input: CreateSocialConnectionInput): Promise<SocialConnection> {
@@ -4325,14 +5171,144 @@ export async function listDistinctEnvironmentIdsInGroup(db: Database, workspaceI
   });
 }
 
-export async function listSessions(db: Database, workspaceId: string, limit = 50): Promise<Session[]> {
+export type ListSessionsOptions = {
+  limit?: number;
+  parentSessionId?: string | null;
+};
+
+export async function listSessions(db: Database, workspaceId: string, limit?: number): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, options?: ListSessionsOptions): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, limitOrOptions: number | ListSessionsOptions = 50): Promise<Session[]> {
+  const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
+  const limit = options.limit ?? 50;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const filters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
+      const parentSessionId = options.parentSessionId;
+      if (parentSessionId === null) {
+        filters.push(isNull(schema.sessions.parentSessionId));
+      } else if (parentSessionId !== undefined) {
+        filters.push(eq(schema.sessions.parentSessionId, parentSessionId));
+      }
+    }
     const rows = await scopedDb.select().from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId))
+      .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
     return rows.map((row) => mapSession(row, grouped.get(row.id) ?? []));
+  });
+}
+
+export type SessionLineage = {
+  ancestors: Session[];
+  children: LineageNode[];
+  truncated: boolean;
+};
+
+type LineageIdRow = {
+  id: string;
+  parentSessionId: string | null;
+  depth: number;
+  path: string[];
+};
+
+/**
+ * Read the full lineage slice around a session. Every recursive step carries
+ * workspace_id as a hard predicate; a foreign parent/child id is invisible even
+ * before RLS is considered. Ancestors are capped at 10 and returned root-first.
+ * Descendants are capped at depth 5 and 200 total rows, returned as a nested tree.
+ */
+export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
+  const descendantLimit = 200;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // Existence check on the ALREADY-SCOPED connection — never a nested
+    // withWorkspaceRls (getSession opens its own scoped transaction, which
+    // acquires a SECOND pooled connection while this one is held; under load
+    // that is a classic pool-starvation deadlock).
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) {
+      return null;
+    }
+
+    const ancestorRows = await scopedDb.execute(sql<LineageIdRow>`
+      with recursive ancestors(id, parent_session_id, depth, path) as (
+        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}]
+        from ${schema.sessions}
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = ${sessionId}
+        union all
+        select parent.id, parent.parent_session_id, ancestors.depth + 1, ancestors.path || parent.id
+        from ${schema.sessions} parent
+        join ancestors on ancestors.parent_session_id = parent.id
+        where parent.workspace_id = ${workspaceId}
+          and ancestors.depth < 10
+          and not parent.id = any(ancestors.path)
+      )
+      select id, parent_session_id as "parentSessionId", depth, path
+      from ancestors
+      where depth > 0
+      order by depth desc
+    `) as LineageIdRow[];
+
+    const childRows = await scopedDb.execute(sql<LineageIdRow>`
+      with recursive descendants(id, parent_session_id, depth, path) as (
+        select child.id, child.parent_session_id, 1, array[${sessionId}, child.id]
+        from ${schema.sessions} child
+        where child.workspace_id = ${workspaceId}
+          and child.parent_session_id = ${sessionId}
+        union all
+        select child.id, child.parent_session_id, descendants.depth + 1, descendants.path || child.id
+        from ${schema.sessions} child
+        join descendants on child.parent_session_id = descendants.id
+        where child.workspace_id = ${workspaceId}
+          and descendants.depth < 5
+          and not child.id = any(descendants.path)
+      )
+      select id, parent_session_id as "parentSessionId", depth, path
+      from descendants
+      order by path
+      limit ${descendantLimit + 1}
+    `) as LineageIdRow[];
+    const truncated = childRows.length > descendantLimit;
+    const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
+
+    const lineageRows = [...ancestorRows, ...descendantRows];
+    const ids = [...new Set(lineageRows.map((row) => row.id))];
+    if (ids.length === 0) {
+      return { ancestors: [], children: [], truncated: false };
+    }
+    const rows = await scopedDb.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
+    const sessionsById = new Map(rows.map((row) => [row.id, mapSession(row, grouped.get(row.id) ?? [])]));
+
+    const ancestors = ancestorRows
+      .map((row) => sessionsById.get(row.id))
+      .filter((session): session is Session => Boolean(session));
+
+    const nodesById = new Map<string, LineageNode>();
+    for (const row of descendantRows) {
+      const session = sessionsById.get(row.id);
+      if (session) {
+        nodesById.set(row.id, { session, children: [] });
+      }
+    }
+    const children: LineageNode[] = [];
+    for (const row of descendantRows) {
+      const node = nodesById.get(row.id);
+      if (!node) continue;
+      if (row.parentSessionId === sessionId) {
+        children.push(node);
+      } else {
+        nodesById.get(row.parentSessionId ?? "")?.children.push(node);
+      }
+    }
+    return { ancestors, children, truncated };
   });
 }
 
@@ -5414,6 +6390,10 @@ export interface AcquireLeaseInput {
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
   leaseTtlMs: number;          // refresh window for expires_at (turn-heartbeat cadence)
+  // Expiry stamped only while a cold->warming spawner is allowed to create the
+  // provider box before any instance_id exists. Warm/draining/attached refreshes
+  // must continue using leaseTtlMs.
+  warmingLeaseTtlMs?: number;
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
@@ -5535,6 +6515,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
+  const warmingLeaseTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) =>
     await scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
@@ -5625,7 +6606,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
           returning id
         `);
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-        const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+        const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
         // casRows.length === 0 cannot happen under the held row lock (defensive):
         // a lost CAS means a sibling flipped it first, so we attach.
         const role = casRows.length === 0 ? "attached" as const : "spawner" as const;
@@ -5643,8 +6624,14 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
 
       // -- warm / warming: attach (A2 / A1). refcount++ ONLY; never touch
       // liveness. The spawner exclusively owns warming->warm.
+      // TTL: a WARMING attach must keep the warming budget — re-stamping the
+      // plain (90s) TTL while a spawner's create() is still in flight would
+      // collapse expires_at and let the warming-death reaper reset/drain the
+      // lease before instance_id is recorded (F1). A WARM attach uses the plain
+      // TTL as before.
       await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-      const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+      const attachTtlMs = liveness === "warming" ? warmingLeaseTtlMs : input.leaseTtlMs;
+      const updated = await recomputeAndStampLease(tx, row.id, attachTtlMs, null);
       return { role: "attached" as const, lease: mapLeaseRow(updated) };
     }),
   );
@@ -5709,16 +6696,23 @@ export async function recordWarmingSandboxCreated(db: Database, input: {
   resumeBackendId?: string | null;
   resumeState?: Record<string, unknown> | null;
   leaseTtlMs: number;
+  /** The still-WARMING lease must keep the warming budget after create() returns:
+   *  the spawner has yet to run display-stack setup, port expose, and
+   *  commitWarmingToWarm, which can exceed the 90s turn TTL and trip the
+   *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
+   *  for legacy callers/tests. */
+  warmingLeaseTtlMs?: number;
 }): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
+      const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
           instance_id       = ${input.instanceId},
           resume_backend_id = ${input.resumeBackendId ?? null},
           resume_state      = ${resumeStateJson}::jsonb,
-          expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
+          expires_at        = now() + (${String(warmingTtlMs)} || ' milliseconds')::interval,
           updated_at        = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
@@ -5757,8 +6751,15 @@ export async function failWarmingToCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
@@ -5897,6 +6898,8 @@ export interface ReapDrainable {
   leaseEpoch: number;
 }
 
+let loggedLegacyReapFunctionFallback = false;
+
 export async function reapStaleLeaseHolders(db: Database, input: {
   workspaceId: string;
   viewerHolderTtlMs: number;   // delete viewer rows older than this
@@ -6028,10 +7031,29 @@ export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   turnHolderTtlMs?: number;
   idleGraceMs: number;
 }): Promise<ReapDrainable[]> {
-  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
-    select workspace_id, sandbox_group_id, instance_id, lease_epoch
-    from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
-  `);
+  let rows: Array<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>;
+  try {
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
+    `);
+  } catch (error) {
+    // Deploy normally runs migrations before rollout, but a newly-started worker
+    // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
+    // function. Fall back for that sweep only: viewer/warming/drain reaping stays
+    // active, dead-turn-holder reaping is skipped until migration 0044 lands.
+    if ((error as { code?: unknown })?.code !== "42883") {
+      throw error;
+    }
+    if (!loggedLegacyReapFunctionFallback) {
+      loggedLegacyReapFunctionFallback = true;
+      console.warn("sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep");
+    }
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
+    `);
+  }
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
@@ -6184,8 +7206,15 @@ export async function confirmDrainCold(db: Database, input: {
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
                 'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
-                'sessionState', jsonb_build_object(
-                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}'))
+                -- Carry BOTH archives (+ the capture time) into the minimal cold
+                -- envelope: the mid-session fallback (workspaceArchivePrev) was
+                -- retained and never GC'd, so dropping it here would strand the
+                -- provider snapshot AND lose the restore fallback across a
+                -- drain/warming-death. strip_nulls omits prev/at when absent.
+                'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                  'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                  'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                  'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
             else null
           end,
           resume_backend_id = case
@@ -6233,7 +7262,7 @@ export async function persistDrainSnapshot(db: Database, input: {
   /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
    *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
   workspaceArchive: string | null;
-}): Promise<{ wrote: boolean; priorArchive: string | null }> {
+}): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -6243,21 +7272,24 @@ export async function persistDrainSnapshot(db: Database, input: {
       // (1) Lock + read the PRIOR archive under the CAS guard (draining AND
       // refcount=0 AND lease_epoch=expected). A miss (re-armed / newer epoch /
       // vanished) returns no row → wrote:false, the caller must NOT terminate.
-      const guard = await scopedDb.execute<{ prior_archive: string | null }>(sql`
-        select resume_state #>> '{sessionState,workspaceArchive}' as prior_archive
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null }>(sql`
+        select
+          resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, priorArchive: null };
+        return { wrote: false, priorArchive: null, priorArchivePrev: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
-        return { wrote: true, priorArchive: null };
+        return { wrote: true, priorArchive: null, priorArchivePrev: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -6265,8 +7297,9 @@ export async function persistDrainSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "draining",
+        clearPreviousArchive: true,
       });
-      return { wrote: true, priorArchive };
+      return { wrote: true, priorArchive, priorArchivePrev };
     });
 }
 
@@ -6290,10 +7323,18 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
   workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
   workspaceArchive: string;
   livenessGuard: "draining" | "warm";
+  priorCurrentArchive?: string | null;
+  clearPreviousArchive?: boolean;
+  /** The wall-clock (ISO) this archive's capture STARTED. Stamped as
+   *  workspaceArchiveAt so warm-snapshot ordering is by capture-initiation, not
+   *  land time — a late, older capture is superseded (persistWarmSnapshot's
+   *  monotonic guard). Absent (drain) → now(). */
+  archiveAtIso?: string;
 }): Promise<void> {
   const livenessGuard = input.livenessGuard === "draining"
     ? sql`liveness = 'draining' and refcount = 0`
     : sql`liveness = 'warm'`;
+  const archiveAt = input.archiveAtIso ? sql`to_jsonb(${input.archiveAtIso}::text)` : sql`to_jsonb(now()::timestamptz::text)`;
   await scopedDb.execute(sql`
     update sandbox_leases set
       resume_state = jsonb_set(
@@ -6302,12 +7343,19 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
         -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
         case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
         '{sessionState}',
-        (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-              then resume_state -> 'sessionState' else '{}'::jsonb end)
-          || jsonb_build_object(
-            'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-            'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
-          ),
+        jsonb_strip_nulls(
+          (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
+                then resume_state -> 'sessionState' else '{}'::jsonb end)
+            || jsonb_build_object(
+              'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
+              'workspaceArchiveAt', ${archiveAt},
+              'workspaceArchivePrev', case
+                when ${input.clearPreviousArchive ? "yes" : "no"}::text = 'yes' then null::jsonb
+                when ${input.priorCurrentArchive ?? null}::text is null then null::jsonb
+                else to_jsonb(${input.priorCurrentArchive ?? null}::text)
+              end
+            )
+        ),
         true
       ),
       updated_at = now()
@@ -6334,12 +7382,20 @@ export async function persistWarmSnapshot(db: Database, input: {
   workspaceArchive: string;
   /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
   minIntervalMs: number;
-}): Promise<{ wrote: boolean; throttled: boolean; priorArchive: string | null }> {
+  /** Wall-clock (ms) this capture STARTED. Ordering is by capture-initiation,
+   *  NOT land time: a capture that started at or before the archive already on
+   *  the lease is SUPERSEDED (a stale heartbeat capture that timed out its wait
+   *  and landed late must never overwrite a fresher turn-end snapshot or refresh
+   *  the throttle clock). Defaults to Date.now() for legacy callers/tests. */
+  capturedAtMs?: number;
+}): Promise<{ wrote: boolean; throttled: boolean; superseded: boolean; priorArchiveForGc: string | null }> {
+  const capturedAtMs = input.capturedAtMs ?? Date.now();
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_at: string | null }>(sql`
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null; prior_archive_at: string | null }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -6347,16 +7403,24 @@ export async function persistWarmSnapshot(db: Database, input: {
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, priorArchive: null };
+        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
+      // MONOTONIC guard: a capture whose start is at/before the stored archive's
+      // capture is stale (a slower-but-earlier heartbeat capture landing after a
+      // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
+      // throttle clock. This is what makes the bounded snapshot wait safe.
+      if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
+        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+      }
       if (
         input.minIntervalMs > 0
         && Number.isFinite(priorAtMs)
-        && Date.now() - priorAtMs < input.minIntervalMs
+        && capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, priorArchive: null };
+        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -6364,8 +7428,94 @@ export async function persistWarmSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "warm",
+        priorCurrentArchive: priorArchive,
+        archiveAtIso: new Date(capturedAtMs).toISOString(),
       });
-      return { wrote: true, throttled: false, priorArchive };
+      return { wrote: true, throttled: false, superseded: false, priorArchiveForGc: priorArchivePrev };
+  });
+}
+
+export async function getMaterializedSandboxFileResources(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+}): Promise<Set<string>> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ file_ids: unknown }>(sql`
+        select coalesce(
+          jsonb_path_query_array(
+            resume_state,
+            '$.opengeniFileMaterialization[*] ? (@.instanceId == $instanceId).fileIds[*]',
+            jsonb_build_object('instanceId', to_jsonb(${input.instanceId}::text))
+          ),
+          '[]'::jsonb
+        ) as file_ids
+        from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.instanceId}
+        limit 1
+      `);
+      const raw = rows[0]?.file_ids;
+      const values = Array.isArray(raw) ? raw : [];
+      return new Set(values.filter((value): value is string => typeof value === "string"));
+    });
+}
+
+export async function markSandboxFileResourcesMaterialized(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+  fileIds: string[];
+}): Promise<{ wrote: boolean }> {
+  const fileIds = [...new Set(input.fileIds.filter((fileId) => fileId.length > 0))];
+  if (fileIds.length === 0) {
+    return { wrote: false };
+  }
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          resume_state = jsonb_set(
+            case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
+            '{opengeniFileMaterialization}',
+            (
+              select jsonb_agg(entry order by entry ->> 'instanceId')
+              from (
+                select jsonb_build_object(
+                  'instanceId', ${input.instanceId}::text,
+                  'fileIds', (
+                    select jsonb_agg(distinct value order by value)
+                    from jsonb_array_elements_text(
+                      coalesce(
+                        (
+                          select existing -> 'fileIds'
+                          from jsonb_array_elements(coalesce(resume_state -> 'opengeniFileMaterialization', '[]'::jsonb)) existing
+                          where existing ->> 'instanceId' = ${input.instanceId}
+                          limit 1
+                        ),
+                        '[]'::jsonb
+                      )
+                      || ${JSON.stringify(fileIds)}::jsonb
+                    ) as merged(value)
+                  )
+                ) as entry
+                union all
+                select existing as entry
+                from jsonb_array_elements(coalesce(resume_state -> 'opengeniFileMaterialization', '[]'::jsonb)) existing
+                where existing ->> 'instanceId' <> ${input.instanceId}
+              ) entries
+            ),
+            true
+          ),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+          and instance_id = ${input.instanceId}
+        returning id
+      `);
+      return { wrote: rows.length > 0 };
     });
 }
 
@@ -8099,6 +9249,45 @@ export async function getSessionGoal(db: Database, workspaceId: string, sessionI
   });
 }
 
+export async function clearSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [existing] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      return { cleared: false, goal: null, event: null };
+    }
+    await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
+    const [session] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const sequence = session.lastSequence + 1;
+    const [event] = await tx.insert(schema.sessionEvents).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId,
+      sequence,
+      type: "goal.cleared",
+      payload: sanitizeEventPayload({
+        goalId: existing.id,
+        text: existing.text,
+        version: existing.version,
+      }),
+    }).returning();
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    if (!event) {
+      throw new Error("Failed to append goal.cleared event");
+    }
+    return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+  }));
+}
+
 /**
  * goal_set semantics: insert, or replace the existing goal in place. A replace
  * re-activates the goal (even when paused or completed), bumps the version,
@@ -8733,7 +9922,16 @@ export async function finishTurn(db: Database, workspaceId: string, turnId: stri
  * without a fresh claim, so the row still carries the approval-wait status
  * while the rerun activity executes.
  */
-export async function requeuePreemptedTurn(db: Database, workspaceId: string, turnId: string, triggerEventId: string): Promise<void> {
+export async function requeuePreemptedTurn(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  triggerEventId: string,
+  // Prior statuses the reset is allowed to match. Defaults to the live-turn
+  // set; the worker-death redispatch also passes "cancelled" so it can reset a
+  // turn the dying attempt stamped `cancelled` in its CancelledFailure cleanup.
+  fromStatuses: string[] = ["running", "requires_action"],
+): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.update(schema.sessionTurns).set({
       status: "queued",
@@ -8741,7 +9939,7 @@ export async function requeuePreemptedTurn(db: Database, workspaceId: string, tu
       startedAt: null,
       finishedAt: null,
       updatedAt: new Date(),
-    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, ["running", "requires_action"]))).returning({ id: schema.sessionTurns.id });
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, fromStatuses))).returning({ id: schema.sessionTurns.id });
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
@@ -8774,6 +9972,37 @@ export async function incrementTurnWorkerDeathRedispatches(db: Database, workspa
       throw new Error(`Session turn not found: ${turnId}`);
     }
     return Number(count);
+  });
+}
+
+/**
+ * Settle a turn `cancelled` from a DYING attempt (the generic CancelledFailure
+ * cleanup of a worker that lost its heartbeat), fenced so a zombie can never
+ * clobber a turn that worker-death recovery has already moved on. It only
+ * writes when BOTH hold:
+ *   • the turn is still live (running / requires_action) — not a turn recovery
+ *     already reset to `queued`; and
+ *   • the redispatch counter is unchanged since this dispatch started —
+ *     requeueTurnAfterWorkerDeath bumps it BEFORE re-queuing, so a mismatch
+ *     means a successor dispatch owns the turn now (do not touch it).
+ * Returns true when it actually settled (caller emits turn.cancelled only then).
+ */
+export async function cancelTurnFromDyingDispatch(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  expectedRedispatches: number,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute(sql`
+      update session_turns
+      set status = 'cancelled', finished_at = now(), updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${turnId}
+        and status in ('running', 'requires_action')
+        and coalesce((metadata->>'workerDeathRedispatches')::int, 0) = ${expectedRedispatches}
+      returning id
+    `);
+    return rows.length > 0;
   });
 }
 
@@ -8877,6 +10106,43 @@ export async function appendSessionEvents(db: Database, workspaceId: string, ses
     }));
     const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
     await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return inserted.map(mapEvent);
+  }));
+}
+
+export async function appendSessionEventToSandboxGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  input: AppendEventInput,
+): Promise<SessionEvent[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const rows = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
+      .orderBy(asc(schema.sessions.createdAt))
+      .for("update");
+    if (rows.length === 0) {
+      return [];
+    }
+    const occurredAt = input.occurredAt ?? new Date();
+    const values = rows.map((row) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.id,
+      sequence: row.lastSequence + 1,
+      type: input.type,
+      payload: sanitizeEventPayload(input.payload ?? {}),
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sql`${schema.sessions.lastSequence} + 1`,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
     return inserted.map(mapEvent);
   }));
 }
@@ -9296,6 +10562,7 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     externalSource: row.externalSource,
     externalId: row.externalId,
     agentInstructions: row.agentInstructions ?? null,
+    settings: (row.settings ?? {}) as Record<string, unknown>,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -9397,6 +10664,13 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     createdBySessionId: row.createdBySessionId,
     reviewedBy: row.reviewedBy,
     reviewedAt: row.reviewedAt ? row.reviewedAt.toISOString() : null,
+    pinned: row.pinned,
+    usageCount: row.usageCount,
+    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    supersedesId: row.supersedesId,
+    supersededById: row.supersededById,
+    validFrom: row.validFrom.toISOString(),
+    validUntil: row.validUntil ? row.validUntil.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

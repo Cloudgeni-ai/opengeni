@@ -91,6 +91,11 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         ref: resource.ref.trim(),
         mountPath,
         ...(resource.subpath ? { subpath: normalizeMountPath(resource.subpath) } : {}),
+        ...(resource.provider ? { provider: resource.provider } : {}),
+        ...(resource.repositoryId !== undefined ? { repositoryId: resource.repositoryId } : {}),
+        ...(resource.installationId !== undefined ? { installationId: resource.installationId } : {}),
+        ...(resource.projectId !== undefined ? { projectId: resource.projectId } : {}),
+        ...(resource.connectionId ? { connectionId: resource.connectionId } : {}),
         ...(resource.githubInstallationId ? { githubInstallationId: resource.githubInstallationId } : {}),
         ...(resource.githubRepositoryId ? { githubRepositoryId: resource.githubRepositoryId } : {}),
       };
@@ -133,8 +138,8 @@ export function validateGitHubRepositorySelectionShape(resources: ResourceRef[])
     if (resource.kind !== "repository") {
       return [];
     }
-    const installationRaw = resource.githubInstallationId;
-    const repositoryRaw = resource.githubRepositoryId;
+    const installationRaw = resource.githubInstallationId ?? (resource.provider === "github" ? resource.installationId : undefined);
+    const repositoryRaw = resource.githubRepositoryId ?? (resource.provider === "github" ? resource.repositoryId : undefined);
     if (installationRaw === null && repositoryRaw === null) {
       return [];
     }

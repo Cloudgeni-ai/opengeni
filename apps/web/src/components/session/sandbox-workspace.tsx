@@ -9,7 +9,6 @@
 import { SandboxWorkspace, type WorkspaceNotification, type WorkspaceTab } from "@opengeni/react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
-
 import type { SessionEvent } from "@/types";
 
 function notify(notification: WorkspaceNotification) {

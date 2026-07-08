@@ -72,6 +72,37 @@ export function initialWorkspaceTab(events: SessionEvent[] | undefined, override
   return bestFileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
 }
 
+/**
+ * Whether a lazy sandbox provision is in flight on this event stream: the latest
+ * `sandbox.provision` operation event is a `.started` not yet closed by a
+ * `.completed`/`.failed`. Package-local twin of apps/web's events helper so the
+ * dock brain can wake its on-demand capability negotiation when the box warms.
+ */
+function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
+  let inFlight = false;
+  for (const event of events) {
+    if (
+      event.type !== "sandbox.operation.started" &&
+      event.type !== "sandbox.operation.completed" &&
+      event.type !== "sandbox.operation.failed"
+    ) {
+      continue;
+    }
+    const payload = event.payload;
+    const name =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).name
+        : null;
+    if (name !== "sandbox.provision") continue;
+    if (event.type === "sandbox.operation.started") {
+      inFlight = true;
+    } else {
+      inFlight = false;
+    }
+  }
+  return inFlight;
+}
+
 export type WorkspaceMachine = {
   /** The derived live/waking/offline chip model (dossier §3 #10). */
   chip: MachineChip;
@@ -155,6 +186,22 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
+
+  // Lazy provisioning (#315) creates the box mid-turn on the first sandbox tool
+  // call, emitting sandbox.provision started→completed/failed on the live stream.
+  // The on-demand resting hook rests without polling, so when the box warms the
+  // cold capability doc never refreshes on its own — Terminal/Desktop would stay
+  // hidden. Watch the provision edge and renegotiate when it settles so the
+  // freshly-warm box's surfaces fill in.
+  const provisioning = sandboxProvisionInFlight(events);
+  const renegotiate = caps.renegotiate;
+  const provisioningRef = useRef(provisioning);
+  useEffect(() => {
+    if (provisioningRef.current && !provisioning) {
+      renegotiate();
+    }
+    provisioningRef.current = provisioning;
+  }, [provisioning, renegotiate]);
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git

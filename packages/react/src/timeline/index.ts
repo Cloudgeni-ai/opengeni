@@ -22,7 +22,9 @@ export { buildTimeline, creditExhaustedFromEvents, extractSessionRef, groupTimel
 export type {
   ActivityItem,
   AgentMessageItem,
+  AuthNeededItem,
   GoalItem,
+  MemoryItem,
   NoticeItem,
   ReasoningItem,
   SandboxItem,
@@ -32,6 +34,7 @@ export type {
   TurnEndItem,
   ToolCallItem,
   UserMessageItem,
+  WorkerCompletionItem,
   WorkerItem,
 } from "./types";
 

@@ -16,19 +16,20 @@ import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { usePacks } from "../src/hooks/use-packs";
 import { useSessionControl } from "../src/hooks/use-session-control";
+import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 
 registerDom();
 
-function makeEvent(sequence: number, type: string): SessionEvent {
+function makeEvent(sequence: number, type: string, payload: Record<string, unknown> = {}): SessionEvent {
   return {
     id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
     sequence,
     type,
-    payload: {},
+    payload,
     occurredAt: new Date().toISOString(),
   };
 }
@@ -214,6 +215,68 @@ describe("useTurnQueue", () => {
   });
 });
 
+describe("useSessionLineage", () => {
+  test("loads lineage and refreshes on session lineage events", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getSessionLineage: async () => {
+        reads += 1;
+        return {
+          ancestors: [],
+          children: [{ session: { id: `child-${reads}` }, children: [] }],
+          truncated: false,
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-1");
+    await hook.rerender([makeEvent(1, "agent.message.delta")]);
+    await flush(200);
+    expect(reads).toBe(1);
+    await hook.rerender([makeEvent(1, "agent.message.delta"), makeEvent(2, "session.status.changed")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
+    await hook.unmount();
+  });
+
+  test("refreshes immediately and once later when a child session create tool starts", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getSessionLineage: async () => {
+        reads += 1;
+        return {
+          ancestors: [],
+          children: [{ session: { id: `child-${reads}` }, children: [] }],
+          truncated: false,
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await hook.rerender([
+      makeEvent(1, "agent.toolCall.created", { name: "session_create" }),
+    ]);
+    await flush(50);
+    expect(reads).toBe(2);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
+
+    await flush(2700);
+    expect(reads).toBe(3);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-3");
+    await hook.unmount();
+  });
+});
+
 describe("useGoal", () => {
   test("exposes the goal with its autonomy counters", async () => {
     const goal = fakeGoal({ autoContinuations: 7, noProgressStreak: 2 });
@@ -291,6 +354,54 @@ describe("useGoal", () => {
       { status: "paused", rationale: "operator break" },
       { status: "active", rationale: undefined },
     ]);
+    await hook.unmount();
+  });
+
+  test("clearGoal DELETEs the goal and clears local state", async () => {
+    let deletes = 0;
+    const client = fakeClient({
+      getGoal: async () => fakeGoal(),
+      deleteGoal: async () => {
+        deletes += 1;
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => {
+      await hook.result.current.clearGoal();
+    });
+    expect(deletes).toBe(1);
+    expect(hook.result.current.goal).toBeNull();
+    expect(hook.result.current.isActive).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a FAILED clearGoal keeps the goal (and surfaces the error), never hides the pill", async () => {
+    const client = fakeClient({
+      getGoal: async () => fakeGoal(),
+      deleteGoal: async () => {
+        throw new Error("server 5xx");
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    // Populate the goal (shared-feed skips the initial auto-load).
+    await flushing(async () => {
+      await hook.result.current.refresh();
+    });
+    expect(hook.result.current.goal).not.toBeNull();
+    await flushing(async () => {
+      await hook.result.current.clearGoal();
+    });
+    // The delete failed → the goal must remain so the panel's mutationError renders.
+    expect(hook.result.current.goal).not.toBeNull();
+    expect(hook.result.current.mutationError).not.toBeNull();
     await hook.unmount();
   });
 

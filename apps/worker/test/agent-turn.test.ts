@@ -1,10 +1,12 @@
 import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
+import { SandboxImageConflictError, SandboxLeaseSupersededError } from "@opengeni/db";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { classifyContextWindowOverflowError, computerToolModeForTurn, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, createTurnSandboxProvisioner, emitModelCallUsage, ensureTurnModalRegistryImage, filterUnmaterializedSandboxFileDownloads, historyRowsToAppend, isLazySandboxProvisionRetryable, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
+import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -290,6 +292,68 @@ describe("model usage source key (re-dispatch charge stability)", () => {
   });
 });
 
+describe("model call usage observability", () => {
+  test("logs and emits normalized cache/reasoning usage fields", async () => {
+    const infos: Array<Record<string, unknown>> = [];
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const observability = {
+      info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+      warn: mock(),
+    };
+
+    await emitModelCallUsage({
+      observability: observability as any,
+      publish: async (batch) => {
+        events.push(...batch.map((event) => ({ type: event.type, payload: event.payload })));
+      },
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.5",
+      sourceKey: "resp-1",
+      usage: {
+        responseId: "resp-1",
+        usage: {
+          inputTokens: 1200,
+          outputTokens: 100,
+          totalTokens: 1300,
+          inputTokensDetails: { cached_tokens: 1024 },
+          outputTokensDetails: { reasoning_tokens: 12 },
+        },
+      },
+    });
+
+    expect(infos[0]).toMatchObject({
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.5",
+      sourceKey: "resp-1",
+      inputTokens: 1200,
+      outputTokens: 100,
+      cachedTokens: 1024,
+      reasoningTokens: 12,
+    });
+    expect(events).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: expect.objectContaining({
+          provider: "openai",
+          providerApi: "responses",
+          model: "gpt-5.5",
+          sourceKey: "resp-1",
+          inputTokens: 1200,
+          outputTokens: 100,
+          cachedTokens: 1024,
+          reasoningTokens: 12,
+        }),
+      },
+    ]);
+  });
+});
+
 describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)", () => {
   const selfhostedPointer = async () => ({ activeSandboxId: "sbx_machine" });
   const selfhostedKind = async () => "selfhosted";
@@ -463,6 +527,57 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
   });
 });
 
+describe("lazy sandbox provisioner single-flight", () => {
+  test("concurrent callers share one establish promise", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { ok: true, attempt: establishes };
+    });
+
+    const results = await Promise.all(Array.from({ length: 12 }, () => provisioner.get()));
+
+    expect(establishes).toBe(1);
+    expect(results.every((result) => result === results[0])).toBe(true);
+    expect(results[0]).toEqual({ ok: true, attempt: 1 });
+  });
+
+  test("final failure rejects all waiters and resets the memo for the next op", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      throw new SandboxImageConflictError("group-1", "old", "new");
+    });
+
+    const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
+    expect(first.every((result) => result.status === "rejected")).toBe(true);
+    expect(establishes).toBe(1);
+
+    await expect(provisioner.get()).rejects.toThrow(SandboxImageConflictError);
+    expect(establishes).toBe(2);
+  });
+
+  test("transient supersession retries inside the single-flight", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      if (establishes === 1) {
+        throw new SandboxLeaseSupersededError("group-1", 7);
+      }
+      return "ready";
+    }, { backoffMs: 1 });
+
+    await expect(provisioner.get()).resolves.toBe("ready");
+    expect(establishes).toBe(2);
+  });
+
+  test("image conflict is actionable and not retried", async () => {
+    expect(isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new"))).toBe(false);
+    expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(true);
+  });
+});
+
 describe("worker shutdown preemption", () => {
   test("classifies only WORKER_SHUTDOWN cancellations as graceful preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("WORKER_SHUTDOWN"))).toBe(true);
@@ -477,6 +592,34 @@ describe("worker shutdown preemption", () => {
   test("resume notice tells the agent to verify in-flight side effects", () => {
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("TURN RESUMED AFTER WORKER RESTART");
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("check whether it already happened");
+  });
+});
+
+describe("sandbox file materialization note", () => {
+  test("filters downloads already materialized on the current box", () => {
+    const downloads = [
+      { fileId: "file-1", mountPath: "files/file-1", filename: "one.txt", url: "https://example.com/1" },
+      { fileId: "file-2", mountPath: "files/file-2", filename: "two.txt", url: "https://example.com/2" },
+    ];
+
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"]))).toEqual([downloads[1]]);
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(downloads);
+  });
+
+  test("appends unavailable attachment details to model-facing text", () => {
+    const text = withUnavailableSandboxFilesNote(
+      "Analyze the attachment",
+      [
+        "The following attached files could not be loaded into the sandbox and are unavailable this turn:",
+        "- report.csv (Sandbox file resource download file-1 failed with exit code 2)",
+        "Continue without them or tell the user.",
+      ].join("\n"),
+    );
+
+    expect(text).toContain("Analyze the attachment");
+    expect(text).toContain("report.csv");
+    expect(text).toContain("failed with exit code 2");
+    expect(text).toContain("Continue without them or tell the user.");
   });
 });
 
@@ -533,6 +676,25 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("acceptsPromptCacheKeyForTurn", () => {
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, builtin = false) =>
+    ({ provider: { kind, api, builtin } }) as Parameters<typeof acceptsPromptCacheKeyForTurn>[0];
+
+  test("accepts the legacy built-in OpenAI/Azure fallback", () => {
+    expect(acceptsPromptCacheKeyForTurn(null)).toBe(true);
+  });
+
+  test("accepts built-in OpenAI/Azure providers and the codex backend", () => {
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses", true))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("codex-subscription", "responses"))).toBe(true);
+  });
+
+  test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
   });
 });
 

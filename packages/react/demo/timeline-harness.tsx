@@ -13,11 +13,14 @@ import {
   type TimelineGroup,
 } from "../src/index";
 import {
+  authNeededEvents,
   cancelledTurnEvents,
   completedTurnEvents,
   failedTurnEvents,
   liveTurnEvents,
+  memoryTurnEvents,
   tourEvents,
+  workerCompletionEvents,
   workerGoalEvents,
 } from "./timeline-fixtures";
 import "./styles.css";
@@ -37,6 +40,16 @@ import "./styles.css";
 
 /** One overline/eyebrow recipe, used for every uppercase section label. */
 const EYEBROW = "text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle";
+
+/** Demo-only stand-in for the app's catalog-asset logos (an inline data-URI so
+    the harness needs no network). The real app resolves these via catalogAssetUrl. */
+const DEMO_PROVIDER_LOGOS: Record<string, string> = {
+  "linear.app":
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="24" fill="#5e6ad2"/><g stroke="#fff" stroke-width="7" stroke-linecap="round"><line x1="24" y1="62" x2="62" y2="24"/><line x1="24" y1="44" x2="44" y2="24"/><line x1="38" y1="76" x2="76" y2="38"/></g></svg>`,
+    ),
+};
 
 /**
  * A demo section. The `hint` is intentionally ONE short line (never a wrapping
@@ -131,6 +144,13 @@ function Harness() {
             </Section>
 
             <Section
+              title="Worker completions — inbound results, not user bubbles"
+              hint="A child's childCompletion payload → a quiet result card (completed / paused / failed) with the report behind a fold and a deep-link into the child."
+            >
+              <RawRail events={workerCompletionEvents()} />
+            </Section>
+
+            <Section
               title="Completed turn — folded to a summary chip"
               hint="Prompt bubble → one turn chip → final answer; expand for narration and nested tool clusters."
             >
@@ -139,6 +159,31 @@ function Harness() {
 
             <Section title="Failed turn — folds, but the error is never hidden" hint="Failed turns start open so the error and folded context stay visible.">
               <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
+            </Section>
+
+            <Section
+              title="Memory writes — a first-class step, saved & corrected"
+              hint="memory.saved / memory.corrected fold into the chip summary ('… · 2 memories saved · 2 memories updated'); expanded, each is a calm neutral row (supersede = old → new, in-place = live text). With a host onMemoryClick, expanding reveals a 'View in memory' deep-link.">
+              <MessageTimeline
+                events={memoryTurnEvents()}
+                onMemoryClick={(id) => window.alert(`Open memory ${id}`)}
+                className="max-h-none"
+              />
+            </Section>
+
+            <Section
+              title="Reconnect — a lapsed connection, inline"
+              hint="tool.auth_needed → a clean card: self-hosted logo (or monogram), one human line, a Reconnect button."
+            >
+              {/* In the app the logo URL comes from our own catalog assets; here
+                  a fixture resolver serves one provider (logo) and lets the other
+                  fall back to its monogram — both states in one shot. */}
+              <MessageTimeline
+                events={authNeededEvents()}
+                onReconnect={() => new Promise(() => {})}
+                resolveProviderLogo={(domain) => DEMO_PROVIDER_LOGOS[domain] ?? null}
+                className="max-h-none"
+              />
             </Section>
 
             <Section title="Interrupted turn — cancelled mid-run">
@@ -178,39 +223,43 @@ function RawRail({ events }: { events: ReturnType<typeof tourEvents> }) {
   );
 }
 
-function RawGroup({ group }: { group: TimelineGroup }) {
+function RawGroup({ group, insideTurn = false }: { group: TimelineGroup; insideTurn?: boolean }) {
   switch (group.kind) {
     case "activity":
       return group.outcome ? (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
-          failureText={group.failureText}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          failureText={insideTurn ? undefined : group.failureText}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
         </TurnSummary>
       ) : (
-        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} bare={insideTurn} />
       );
-    case "turn":
+    case "turn": {
+      const body = group.groups.map((child) => <RawGroup key={rawGroupKey(child)} group={child} insideTurn />);
       return (
         <TurnSummary
           items={flattenActivities(group.groups)}
           outcome={group.outcome}
           failureText={group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
+          bare={insideTurn}
         >
-          <div className="flex flex-col gap-4">
-            {group.groups.map((child) => (
-              <RawGroup key={rawGroupKey(child)} group={child} />
-            ))}
-          </div>
+          {insideTurn ? (
+            <div className="flex flex-col gap-4">{body}</div>
+          ) : (
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+          )}
         </TurnSummary>
       );
+    }
     case "item":
-      return <TimelineRow item={group.item} />;
+      return <TimelineRow item={group.item} onOpenSession={(id) => window.alert(`Open session ${id}`)} />;
   }
 }
 

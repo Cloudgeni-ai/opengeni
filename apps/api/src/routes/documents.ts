@@ -8,12 +8,16 @@ import {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   UpdateKnowledgeMemoryRequest,
+  WorkspaceMemorySearchRequest,
+  WorkspaceMemorySearchResponse,
 } from "@opengeni/contracts";
 import {
   createKnowledgeMemory,
   getKnowledgeMemory,
   listKnowledgeMemories,
   updateKnowledgeMemory,
+  saveWorkspaceMemory,
+  searchWorkspaceMemories,
 } from "@opengeni/db";
 import {
   addDocumentToBase,
@@ -219,10 +223,50 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(KnowledgeMemory.parse(memory));
   });
 
+  // Hybrid search over the workspace's agent-visible memory (active ∪ approved).
+  // Available regardless of the workspace memory setting (human/audit lane).
+  app.post("/v1/workspaces/:workspaceId/knowledge/memories/search", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const parsed = WorkspaceMemorySearchRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid workspace memory search request" });
+    }
+    const results = await searchWorkspaceMemories(db, workspaceId, parsed.data, getDocumentServices().embedder);
+    return c.json(WorkspaceMemorySearchResponse.parse({
+      results: results.map((result) => ({ ...result, memory: KnowledgeMemory.parse(result.memory) })),
+    }));
+  });
+
   app.post("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    const payload = CreateKnowledgeMemoryRequest.parse(await c.req.json());
+    const parsedBody = CreateKnowledgeMemoryRequest.safeParse(await c.req.json());
+    if (!parsedBody.success) {
+      throw new HTTPException(400, { message: "invalid knowledge memory request" });
+    }
+    const payload = parsedBody.data;
+    // status `active` (the default) is a memory write → route through the single
+    // gate (sanitize + embed + dedup). Explicit proposed/approved/rejected keeps
+    // the legacy curated create.
+    if (payload.status === "active") {
+      try {
+        const result = await saveWorkspaceMemory(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          text: payload.text,
+          kind: payload.kind,
+          confidence: payload.confidence,
+          pinned: payload.pinned,
+          replacesId: payload.replacesId ?? null,
+          metadata: payload.metadata,
+          origin: "human",
+        }, getDocumentServices().embedder);
+        return c.json(KnowledgeMemory.parse(result.memory), 201);
+      } catch (error) {
+        throw documentHttpException(error);
+      }
+    }
     return c.json(KnowledgeMemory.parse(await createKnowledgeMemory(db, {
       ...payload,
       accountId: grant.accountId,
@@ -240,7 +284,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(KnowledgeMemory.parse(await updateKnowledgeMemory(db, workspaceId, c.req.param("memoryId"), {
         ...payload,
         ...(reviewedBy ? { reviewedBy } : {}),
-      })));
+      }, getDocumentServices().embedder)));
     } catch (error) {
       throw documentHttpException(error);
     }
@@ -264,6 +308,16 @@ function documentHttpException(error: unknown): HTTPException {
   }
   if (message.includes("pending") || message.includes("failed") || message.includes("deleted")) {
     return new HTTPException(422, { message });
+  }
+  // Workspace-memory write-gate rejections are client errors, not server faults.
+  if (
+    message.includes("too long")
+    || message.includes("visible memory is full")
+    || message.includes("empty after sanitization")
+    || message.includes("does not match")
+    || message.includes("Ambiguous memory id")
+  ) {
+    return new HTTPException(400, { message });
   }
   return new HTTPException(500, { message });
 }

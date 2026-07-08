@@ -33,6 +33,7 @@ import {
 import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
+  clearSessionGoal,
   clearSessionContext,
   closePtySession,
   getOpenPtySession,
@@ -59,6 +60,7 @@ import {
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
+import { z } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -78,6 +80,7 @@ import {
   assertConfiguredModel,
   createSessionForRequest,
   requireQueuedTurnForApi,
+  readSessionLineage,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -98,7 +101,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await listSessions(db, workspaceId, boundedLimit(c.req.query("limit"))));
+    const parentSessionId = c.req.query("parentSessionId");
+    // "null" = roots only; a uuid = children of that session; anything else is
+    // a client error (an unvalidated value would surface as a Postgres uuid
+    // cast failure -> 500).
+    if (parentSessionId !== undefined && parentSessionId !== "null" && !z.string().uuid().safeParse(parentSessionId).success) {
+      throw new HTTPException(400, { message: "parentSessionId must be a session id or the literal \"null\"" });
+    }
+    return c.json(await listSessions(db, workspaceId, {
+      limit: boundedLimit(c.req.query("limit")),
+      ...(parentSessionId !== undefined ? { parentSessionId: parentSessionId === "null" ? null : parentSessionId } : {}),
+    }));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -109,6 +122,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await readSessionLineage(db, workspaceId, c.req.param("sessionId")));
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
@@ -219,6 +238,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
     }
     return c.json(goal);
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const { event } = await clearSessionGoal(db, workspaceId, sessionId);
+    if (event) {
+      try {
+        await bus.publish(workspaceId, sessionId, [event]);
+      } catch (error) {
+        console.warn(`[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`, error);
+      }
+    }
+    return c.body(null, 204);
   });
 
   // Operator context controls (slash-command palette: /clear, /compact). These

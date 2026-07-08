@@ -28,8 +28,8 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
-import { wrapTurnBoxWithRouting, routingEnabled } from "../src/sandbox-routing";
+import { buildManifest, subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
+import { wrapLazyTurnBoxWithRouting, wrapTurnBoxWithRouting, routingEnabled } from "../src/sandbox-routing";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -152,5 +152,42 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
   test("routingEnabled is false when the selfhosted flag is off (the proxy is not wrapped)", () => {
     const off = testSettings({ sandboxSelfhostedEnabled: false });
     expect(routingEnabled(off)).toBe(false);
+  });
+
+  test("lazy wrapper seeds synthetic manifest and default-pointer ops single-flight through the provisioner", async () => {
+    if (!available) return;
+    const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct-lazy') returning id`;
+    const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy') returning id`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
+      model: "gpt-test", sandboxBackend: "modal",
+    });
+    const manifest = buildManifest(settings, [], { HOME: "/workspace", LAZY: "1" });
+    let provisions = 0;
+    const real = fakeGroupBox("lazy-real");
+    const lazy = wrapLazyTurnBoxWithRouting(
+      { db, settings, bus: new MemoryEventBus() as never },
+      { workspaceId, sessionId: session.id, environment: { HOME: "/workspace", LAZY: "1" } },
+      {
+        client: { backendId: "modal" },
+        backendId: "modal",
+        agentDefaultManifest: manifest,
+        provisioner: {
+          get: async () => {
+            provisions += 1;
+            return { established: real };
+          },
+        },
+      },
+    );
+    const proxy = lazy.session as { state: { manifest: unknown }; exec: (a: unknown) => Promise<{ stdout: string }> };
+
+    expect(proxy.state.manifest).toBe(manifest);
+    expect((await proxy.exec({ cmd: "echo hi" })).stdout).toBe("lazy-real");
+    expect(provisions).toBe(1);
+    expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
+    expect(provisions).toBe(1);
   });
 });

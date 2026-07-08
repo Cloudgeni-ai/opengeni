@@ -51,7 +51,34 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
-  test("a cold lease degrades gracefully: state cold, then polls toward warm", async () => {
+  test("a boxless cold lease with no warm-up rests on-demand — it never polls or errors", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        calls += 1;
+        return fakeColdCapabilities();
+      },
+    });
+    const hook = await renderHook(
+      // No attach requested: under lazy provisioning a chat-only turn creates no
+      // box, so the cold lease is the benign on-demand resting state — NOT an
+      // error, and it must NOT poll (that is what falsely drove "sandbox offline").
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 20 }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("on-demand");
+    // The structured surfaces are still negotiated (a value, never a crash).
+    expect(hook.result.current.capabilities?.FileSystem.available).toBe(true);
+    // Well past several poll windows: it stays on-demand and issues no further
+    // reads (the single negotiate read is the only call).
+    await flush(200);
+    expect(hook.result.current.state).toBe("on-demand");
+    expect(calls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("a cold lease WITH a warm-up in flight polls toward warm (then ready)", async () => {
     let calls = 0;
     const client = fakeClient({
       getStreamCapabilities: async () => {
@@ -59,11 +86,14 @@ describe("useSessionCapabilities", () => {
         // First read cold; subsequent polls return warm.
         return calls >= 2 ? fakeCapabilities({ liveness: "warm" }) : fakeColdCapabilities();
       },
+      // The viewer cap is reached, so no holder is acquired — but a warm-up WAS
+      // requested (attachDesktop), so the hook keeps polling toward warm.
+      attachViewer: async () => {
+        throw new OpenGeniApiError(429, "viewer cap reached");
+      },
     });
     const hook = await renderHook(
-      // A generous poll interval keeps the initial "cold" window observable even
-      // under heavy parallel test load (a 5ms window raced the render flush).
-      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 80 }),
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachDesktop: true, warmingPollMs: 80 }),
       undefined,
     );
     await flush();

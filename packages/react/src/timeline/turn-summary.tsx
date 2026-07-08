@@ -36,11 +36,18 @@ export type TurnSummaryProps = {
   durationMs?: number | undefined;
   /** Start expanded. */
   defaultOpen?: boolean | undefined;
+  /**
+   * A nested fold — a cluster or sub-turn INSIDE an already-expanded turn. It
+   * drops the bordered/filled chip and renders as a plain disclosure node on the
+   * parent's rail (chevron + glyph + facets), so expanding a turn reveals a thread
+   * of nodes, never a stack of boxes-in-boxes. The top-level fold stays a chip.
+   */
+  bare?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: React.ReactNode;
 };
 
-export function TurnSummary({ items, outcome, failureText, durationMs, defaultOpen, children }: TurnSummaryProps) {
+export function TurnSummary({ items, outcome, failureText, durationMs, defaultOpen, bare, children }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
@@ -49,34 +56,42 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
   const facets = summarizeTurn(items, durationMs);
 
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen} className={enter ? "animate-og-enter" : undefined}>
+    <Collapsible.Root open={open} onOpenChange={setOpen} className={enter && !bare ? "animate-og-enter" : undefined}>
       <Collapsible.Trigger
         className={cn(
-          "group flex w-full items-center gap-2.5 rounded-og-md border px-3 py-2 text-left text-og-base transition-colors",
-          // A folded turn is a touch target on coarse pointers: grow the row so
-          // it clears the 40px minimum without disturbing the calm desktop rhythm.
+          // Both the top-level turn fold and a nested cluster fold render as a
+          // FLAT rail row — chevron + glyph + facets on the page background, no
+          // border, no fill. Only a hover tint hints the row is expandable, so a
+          // collapsed turn never reads as a boxed card. The top-level row is a
+          // touch larger (base text, size-5 glyph, wider gap) so it still reads
+          // as a turn landmark above the nested cluster rows it groups.
+          "group flex w-full items-center rounded-og-sm text-left transition-colors",
+          // A folded turn is a touch target on coarse pointers: grow the row so it
+          // clears the 40px minimum without disturbing the calm desktop rhythm.
           "pointer-coarse:py-2.5",
-          // Only a failed turn earns the one filled/tinted card in the timeline;
-          // complete and cancelled stay flat and calm.
+          bare
+            ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
+            : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
+          // A failed fold keeps its red accent (glyph + inline reason below) and a
+          // faint red hover wash so attention still lands there; every other
+          // outcome gets the neutral surface hover.
           outcome === "failed"
-            ? "border-og-status-failed/30 bg-og-status-failed/[0.06] hover:border-og-status-failed/50"
-            : "border-og-border bg-og-surface-1/50 hover:border-og-border-strong",
+            ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
+            : "hover:bg-og-surface-1 hover:text-og-fg",
         )}
       >
         {/* Disclosure grammar matches the rows: chevron leads (far left), then the
             outcome glyph, then the facets — one expand affordance side everywhere. */}
         <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
-        {/* Only the exceptional outcomes earn a filled tinted circle. A clean
-            (complete) run draws a bare muted check — zero colored fills, so the
-            eye is pulled only to a turn that needs attention. */}
+        {/* The outcome glyph carries the state by hue alone — no filled circle, no
+            card. A clean (complete) run draws a bare muted check; a failed one a
+            red triangle; a cancelled one a muted slash; a still-running cluster a
+            quiet pulse dot in the glyph's place so alignment holds. */}
         <span
           className={cn(
-            "inline-flex size-5 shrink-0 items-center justify-center rounded-full",
-            outcome === "failed"
-              ? "bg-og-status-failed/15 text-og-status-failed"
-              : outcome === "cancelled"
-                ? "bg-og-fg-subtle/15 text-og-fg-subtle"
-                : "text-og-fg-subtle",
+            "inline-flex shrink-0 items-center justify-center",
+            bare ? "size-3.5" : "size-5",
+            outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
           )}
         >
           {outcome === "failed" ? (
@@ -84,12 +99,12 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
           ) : outcome === "cancelled" ? (
             <CircleSlashIcon className="size-3" />
           ) : outcome === "complete" ? (
-            <CheckIcon className="size-3.5" />
+            <CheckIcon className={bare ? "size-3" : "size-3.5"} />
           ) : (
             <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
           )}
         </span>
-        <span className="min-w-0 flex-1 truncate text-og-fg-muted">
+        <span className={cn("min-w-0 flex-1 truncate", bare ? "text-og-sm" : "text-og-fg-muted")}>
           {facets}
           {outcome === "failed" && failureText ? (
             <span className="text-og-status-failed"> · {failureText}</span>
@@ -113,7 +128,9 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
         </span>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
-        <div className="pt-2">{children}</div>
+        {/* A nested node indents its revealed rows under the glyph (thread nesting
+            off the parent rail); the top-level turn body owns its own rail. */}
+        <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
       </Collapsible.Content>
     </Collapsible.Root>
   );
@@ -124,7 +141,19 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   let files = 0;
   let commands = 0;
   let screenshots = 0;
+  let memoriesSaved = 0;
+  let memoriesUpdated = 0;
   for (const item of items) {
+    if (item.kind === "memory") {
+      // A memory write is a first-class facet — the "wrote 1 memory" signal the
+      // fold should make prominent — counted saved vs updated separately.
+      if (item.variant === "corrected") {
+        memoriesUpdated += 1;
+      } else {
+        memoriesSaved += 1;
+      }
+      continue;
+    }
     if (item.kind !== "tool-call") {
       continue;
     }
@@ -148,6 +177,12 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   }
   if (screenshots) {
     parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
+  }
+  if (memoriesSaved) {
+    parts.push(`${memoriesSaved} ${memoriesSaved === 1 ? "memory" : "memories"} saved`);
+  }
+  if (memoriesUpdated) {
+    parts.push(`${memoriesUpdated} ${memoriesUpdated === 1 ? "memory" : "memories"} updated`);
   }
   const duration = formatDurationFacet(durationMs);
   if (duration) {

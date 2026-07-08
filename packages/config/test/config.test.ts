@@ -398,6 +398,28 @@ describe("sandbox preparation profiles", () => {
     });
   });
 
+  test("adds stable git credential pointers and provider CLI wrapper PATH for provisioned sandboxes", () => {
+    const settings = withEnv({}, () => getSettings());
+    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+
+    expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
+    expect(env.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
+    expect(env.OPENGENI_GIT_CLI_WRAPPER_DIR).toBe("/workspace/.opengeni/bin");
+    expect(env.PATH?.split(":")[0]).toBe("/workspace/.opengeni/bin");
+    expect(Object.values(env)).not.toContain("ghs_liveToken123");
+  });
+
+  test("does not add git credential pointers or wrapper PATH for selfhosted sandboxes", () => {
+    const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "selfhosted" }, () => getSettings());
+    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+
+    expect(env).toEqual({ HOME: "/" });
+    expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
+    expect(env.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
+    expect(env.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();
+    expect(env.PATH).toBeUndefined();
+  });
+
   test("requires a delegation secret when toolspace is enabled", () => {
     expect(() => withEnv({
       OPENGENI_TOOLSPACE_ENABLED: "true",

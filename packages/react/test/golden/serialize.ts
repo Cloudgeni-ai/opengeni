@@ -63,6 +63,20 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         workerSessionId: item.workerSessionId,
         ...(item.mode ? { mode: item.mode } : {}),
       };
+    case "worker-completion":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        childSessionId: item.childSessionId,
+        childStatus: item.childStatus,
+        goalStatus: item.goalStatus,
+        goalText: item.goalText,
+        evidence: item.evidence,
+        pausedReason: item.pausedReason,
+        text: item.text,
+      };
     case "sandbox":
       return {
         kind: item.kind,
@@ -89,6 +103,21 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         action: item.action,
         text: item.text,
       };
+    case "memory":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        variant: item.variant,
+        memoryKind: item.memoryKind,
+        preview: item.preview,
+        deduped: item.deduped === true,
+        replacementPreview: item.replacementPreview ?? null,
+        action: item.action ?? null,
+        memoryId: item.memoryId,
+        replacementMemoryId: item.replacementMemoryId ?? null,
+      };
     case "notice":
       return {
         kind: item.kind,
@@ -96,6 +125,20 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         occurredAt: item.occurredAt,
         tone: item.tone,
         text: item.text,
+      };
+    case "auth-needed":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        providerDomain: item.providerDomain,
+        connectionId: item.connectionId,
+        reason: item.reason,
+        scopes: stableValue(item.scopes),
+        resource: item.resource,
+        toolName: item.toolName,
+        authorizationUrl: item.authorizationUrl,
       };
     case "turn-end":
       return {

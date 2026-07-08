@@ -535,10 +535,36 @@ export const Workspace = z.object({
   // non-bypassable CORE (goal-loop ownership + environment block), so an
   // override restyles the persona without dropping that contract.
   agentInstructions: z.string().nullable(),
+  // Growth-ready per-workspace settings bag (migration 0045). Known keys are
+  // validated by WorkspaceSettingsSchema; unknown keys are preserved across
+  // PATCH merges so newer settings survive an older server.
+  settings: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type Workspace = z.infer<typeof Workspace>;
+
+// Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
+// (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
+// V1 agent surfaces (turn injection + first-party memory tools); default false.
+export const WorkspaceSettingsSchema = z.object({
+  memoryEnabled: z.boolean().optional(),
+}).passthrough();
+export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+// Resolve the effective memoryEnabled flag from a raw settings bag (default off).
+export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+// PATCH body for workspace settings: a partial patch that deep-merges into the
+// stored bag. memoryEnabled is the only typed key today; passthrough carries
+// forward-compatible unknown keys through validation.
+export const UpdateWorkspaceSettingsRequest = z.object({
+  memoryEnabled: z.boolean().optional(),
+}).passthrough();
+export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
 
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
@@ -1079,14 +1105,30 @@ export type EntitlementsPort = {
   admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
 };
 
+export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
+export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
+
+const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
+
+export const GitCredentialRepositoryRef = z.object({
+  provider: GitCredentialProvider.optional(),
+  uri: z.string().min(1),
+  ref: z.string().min(1),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
+});
+export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
+
 // ============ P4a — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
 // run-scoped credential sites in the worker:
-//   - GIT credentials: the GitHub App installation token minted in
-//     `sandboxEnvironmentForRun` (today `createGitHubAppInstallationToken`
-//     from `settings`) and injected as `GH_TOKEN`/`GITHUB_TOKEN`/the git
-//     extraheader.
+//   - GIT credentials: run-scoped provider tokens minted in
+//     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
+//     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
+//     and seeded off-manifest into sandbox token files for git + provider CLIs.
 //   - SANDBOX secrets: the decrypted workspace environment values loaded in
 //     `loadWorkspaceEnvironmentForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
@@ -1100,25 +1142,34 @@ export type EntitlementsPort = {
 // FORK-7 CROSS-CHECK (the host-mapping safety guardrail): a credential
 // provider returns the `workspaceId` it scoped the credential to, and the
 // activity ASSERTS it agrees with the run's workspace BEFORE injecting
-// `GH_TOKEN` (or applying the decrypted values). A host mapping bug that
+// any git provider token seed (or applying decrypted environment values). A host mapping bug that
 // returns tenant B's creds while the run is tenant A is thereby caught at the
 // seam, never silently injected into tenant A's sandbox.
 
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
-  // The GitHub App installation the run's repository resources resolved to,
-  // and the specific repositories the token must be scoped to. Mirrors the
-  // shape `createGitHubAppInstallationToken` consumes today.
+  // Provider defaults to "github" for the legacy request shape. GitHub-only
+  // hosts can keep reading installationId/repositoryIds exactly as before;
+  // provider-aware hosts should branch on this and repositoryRefs.
+  provider?: GitCredentialProvider;
+  // Token requests are the existing behavior. Identity requests let lazy
+  // sandbox provisioning resolve stable git author/committer identity before
+  // the box exists while deferring the rotating token value to first provision.
+  purpose?: "token" | "identity";
+  // Provider-neutral repository refs for hosts that broker non-GitHub tokens.
+  // For GitHub requests these are additive to the legacy fields below.
+  repositoryRefs?: GitCredentialRepositoryRef[];
+  // Legacy GitHub App installation shape retained for 0.x compatibility.
   installationId: number;
   repositoryIds: number[];
 };
 
 export type GitCredentials = {
-  // The minted installation token the activity injects as GH_TOKEN/GITHUB_TOKEN
-  // and into the git http extraheader (identical downstream handling to the
-  // self-mint path).
-  token: string;
+  // The minted provider token. Required for purpose="token"; optional for
+  // purpose="identity" so hosts can return only stable git identity before lazy
+  // sandbox provision. The value never enters the manifest.
+  token?: string;
   // FORK-7 echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
@@ -1154,8 +1205,8 @@ export type ConnectionCredentialsPort = {
   // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
   // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
   // unset leg falls through to today's self-mint for THAT leg only.
-  gitCredentials?: (input: GitCredentialsRequest) => Promise<GitCredentials>;
-  sandboxSecrets?: (input: SandboxSecretsRequest) => Promise<SandboxSecrets>;
+  gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 
 // ============ P4a — GitHub App API port (BYO-App, §7.6 / SPIKE-2 remainder) ===
@@ -1223,6 +1274,11 @@ export const RepositoryResourceRef = z.object({
   ref: z.string().min(1),
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
+  provider: GitCredentialProvider.optional(),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
 });
@@ -1389,7 +1445,19 @@ export const DocumentSearchRequest = z.object({
 });
 export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 
-export const KnowledgeMemoryStatus = z.enum(["proposed", "approved", "rejected"]);
+// proposed/approved/rejected are the legacy curated-knowledge review states
+// (docs-MCP memory_propose lane). active/superseded/archived are Workspace
+// Memory V1: agent-written memories land `active` (usable immediately — human is
+// auditor, not gatekeeper), get `superseded` when replaced, `archived` when
+// retired. Agent-visible set = active ∪ approved.
+export const KnowledgeMemoryStatus = z.enum([
+  "proposed",
+  "approved",
+  "rejected",
+  "active",
+  "superseded",
+  "archived",
+]);
 export type KnowledgeMemoryStatus = z.infer<typeof KnowledgeMemoryStatus>;
 
 export const KnowledgeMemoryKind = z.enum(["semantic", "episodic", "procedural", "decision", "preference"]);
@@ -1417,13 +1485,29 @@ export const KnowledgeMemory = z.object({
   createdBySessionId: z.string().uuid().nullable(),
   reviewedBy: z.string().nullable(),
   reviewedAt: z.string().nullable(),
+  // Workspace Memory V1 fields. usageCount/lastUsedAt feed end-state ranking and
+  // decay; supersedesId/supersededById link correction chains; validFrom/validUntil
+  // are the point-in-time window. embedding/embeddingModel/textHash are internal
+  // and never exposed on the wire.
+  pinned: z.boolean(),
+  usageCount: z.number().int(),
+  lastUsedAt: z.string().nullable(),
+  supersedesId: z.string().uuid().nullable(),
+  supersededById: z.string().uuid().nullable(),
+  validFrom: z.string(),
+  validUntil: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
 export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 
+// Default status is `active`: a create through this request lands an
+// agent-visible memory via the one write gate (saveWorkspaceMemory). Passing an
+// explicit `proposed`/`approved`/`rejected` status routes to the legacy curated
+// create instead (the docs-MCP memory_propose lane). pinned/replacesId apply to
+// the active (memory) path.
 export const CreateKnowledgeMemoryRequest = z.object({
-  status: KnowledgeMemoryStatus.default("proposed"),
+  status: KnowledgeMemoryStatus.default("active"),
   kind: KnowledgeMemoryKind.default("semantic"),
   scope: z.string().min(1).default("workspace"),
   text: z.string().min(1),
@@ -1431,6 +1515,8 @@ export const CreateKnowledgeMemoryRequest = z.object({
   confidence: z.number().min(0).max(1).default(0.5),
   metadata: z.record(z.string(), z.unknown()).default({}),
   createdBySessionId: z.string().uuid().optional(),
+  pinned: z.boolean().optional(),
+  replacesId: z.string().min(1).optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
@@ -1443,9 +1529,12 @@ export const UpdateKnowledgeMemoryRequest = z.object({
   confidence: z.number().min(0).max(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   reviewedBy: z.string().min(1).optional(),
+  // Human audit action: pin (never decays) / unpin.
+  pinned: z.boolean().optional(),
 });
 export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
 
+// GET list/filter over knowledge memories (curated + memory).
 export const KnowledgeMemorySearchRequest = z.object({
   query: z.string().min(1).optional(),
   status: KnowledgeMemoryStatus.optional(),
@@ -1454,6 +1543,32 @@ export const KnowledgeMemorySearchRequest = z.object({
   limit: z.number().int().positive().max(100).default(20),
 });
 export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
+
+export const WorkspaceMemorySearchMode = z.enum(["hybrid", "vector", "keyword"]);
+export type WorkspaceMemorySearchMode = z.infer<typeof WorkspaceMemorySearchMode>;
+
+// POST hybrid search over the workspace's agent-visible memory (active ∪ approved).
+export const WorkspaceMemorySearchRequest = z.object({
+  query: z.string().min(1),
+  kind: KnowledgeMemoryKind.optional(),
+  limit: z.number().int().positive().max(20).optional(),
+  mode: WorkspaceMemorySearchMode.optional(),
+});
+export type WorkspaceMemorySearchRequest = z.infer<typeof WorkspaceMemorySearchRequest>;
+
+export const WorkspaceMemorySearchResult = z.object({
+  memory: KnowledgeMemory,
+  score: z.number(),
+  matchType: WorkspaceMemorySearchMode,
+  vectorScore: z.number().nullable(),
+  keywordScore: z.number().nullable(),
+});
+export type WorkspaceMemorySearchResult = z.infer<typeof WorkspaceMemorySearchResult>;
+
+export const WorkspaceMemorySearchResponse = z.object({
+  results: z.array(WorkspaceMemorySearchResult),
+});
+export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
@@ -2480,6 +2595,27 @@ export const Session = z.object({
 });
 export type Session = z.infer<typeof Session>;
 
+export type SessionSummary = Session;
+
+// Recursive: the TS type is declared first so the schema annotation can carry
+// the FULL recursive shape (a shallow annotation loses type information for
+// contracts consumers after one level of nesting).
+export type LineageNode = {
+  session: SessionSummary;
+  children: LineageNode[];
+};
+export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
+  session: Session,
+  children: z.array(LineageNode),
+}));
+
+export const SessionLineageResponse = z.object({
+  ancestors: z.array(Session),
+  children: z.array(LineageNode),
+  truncated: z.boolean().default(false),
+});
+export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
+
 export const SessionEventType = z.enum([
   "session.created",
   "session.status.changed",
@@ -2501,6 +2637,7 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.usage",
   "tool.auth_needed",
   "agent.updated",
   "sandbox.operation.started",
@@ -2513,7 +2650,10 @@ export const SessionEventType = z.enum([
   "goal.completed",
   "goal.paused",
   "goal.resumed",
+  "goal.cleared",
   "goal.continuation",
+  "memory.saved",
+  "memory.corrected",
   // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
   // carries opaque RFB and cannot carry a control message the client can act on,
   // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.

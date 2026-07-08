@@ -3,6 +3,7 @@ import {
   createTurn,
   applyCreditDebitUpToBalance,
   finishTurn,
+  cancelTurnFromDyingDispatch,
   getBillingBalance,
   getSandbox,
   readActiveSandbox,
@@ -19,6 +20,7 @@ import {
   recordSessionActiveCodexCredential,
   recordCodexAccountUsage,
   recordCodexAccountConnectors,
+  resolveWorkspaceMemoryBlock,
   setActiveCodexCredential,
   setCodexCredentialExhausted,
   countConsecutiveReactiveRotations,
@@ -37,7 +39,10 @@ import {
   sumUsageQuantity,
   heartbeatLeaseHolder,
   accrueWarmSeconds,
+  getMaterializedSandboxFileResources,
+  markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
+  SandboxImageConflictError,
   buildConnectionTokenResolver,
   type AppendEventInput,
 } from "@opengeni/db";
@@ -46,16 +51,23 @@ import {
   sandboxStateEntryFromRunState,
   agentsErrorRunState,
   maxTurnsExceededRunState,
+  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   ensureModalRegistryImage,
   findCompactionNeededError,
+  materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
+  runOwnedSandboxSetup,
   type SandboxFileDownload,
+  type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type ModelResponseUsage,
+  type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type ModelProviderApi, type RegistryProviderKind, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
@@ -77,7 +89,7 @@ import {
   mergeToolRefs,
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
-import { loadWorkspaceEnvironmentForRunWithCredentials, sandboxEnvironmentForRun } from "./environment";
+import { loadWorkspaceEnvironmentForRunWithCredentials, mintRunGitTokens, sandboxEnvironmentForRun } from "./environment";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
@@ -94,8 +106,8 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./types";
-import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../sandbox-resume";
-import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
+import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorkspaceSnapshot, waitForWarmSnapshot, SandboxWarmingTimeoutError, type ResumedTurnSandbox } from "../sandbox-resume";
+import { wrapTurnBoxWithRouting, wrapLazyTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled, lazyProvisionEnabled } from "../sandbox-routing";
 import { recordCreditMicros, runtimeMetricsHooksForObservability, turnLifecycleMetricsFor, type TurnOutcome } from "../observability-metrics";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { captureWorkspaceRevision } from "./workspace-capture";
@@ -131,6 +143,16 @@ export function selectCodexCredentialForTurn(args: {
     return active;
   }
   return null;
+}
+
+export function filterUnmaterializedSandboxFileDownloads(
+  downloads: SandboxFileDownload[],
+  materializedFileIds: Set<string>,
+): SandboxFileDownload[] {
+  if (downloads.length === 0 || materializedFileIds.size === 0) {
+    return downloads;
+  }
+  return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
 // Resume notice fed to the model when a turn re-enters after a graceful
@@ -278,6 +300,73 @@ export function modelUsageSourceKey(input: {
     return input.responseId;
   }
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
+type TurnEventPublisher = (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>;
+
+export async function emitModelCallUsage(input: {
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  sourceKey: string;
+  usage: ModelResponseUsage | { usage?: unknown | null } | null;
+}): Promise<void> {
+  const usage = input.usage && typeof input.usage === "object" && "usage" in input.usage
+    ? (input.usage as { usage?: unknown }).usage
+    : null;
+  if (!usage || typeof usage !== "object") {
+    return;
+  }
+  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  try {
+    input.observability.info("model call usage", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      sourceKey: input.sourceKey,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+    });
+  } catch {
+    // Usage observability is best-effort.
+  }
+  try {
+    await input.publish?.([
+      {
+        type: "agent.model.usage",
+        payload: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          sourceKey: input.sourceKey,
+          ...telemetry,
+        },
+      },
+    ], true);
+  } catch (error) {
+    input.observability.warn("model call usage event publish failed", {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export function historyRowsToAppend(
@@ -506,6 +595,126 @@ export function computerToolModeForTurn(
   return "hosted";
 }
 
+export type TurnSandboxProvisioner<T> = {
+  get(): Promise<T>;
+  hasStarted(): boolean;
+  waitForSettled(timeoutMs: number): Promise<T | null>;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function isLazySandboxProvisionRetryable(error: unknown): boolean {
+  if (error instanceof SandboxImageConflictError) {
+    return false;
+  }
+  if (error instanceof SandboxLeaseSupersededError || error instanceof SandboxWarmingTimeoutError) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:capacity|create|creation|provider|sandbox).*(?:timeout|timed out)|(?:timeout|timed out).*(?:capacity|create|creation|provider|sandbox)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|temporar/i.test(message);
+}
+
+export function createTurnSandboxProvisioner<T>(
+  establish: () => Promise<T>,
+  options: {
+    maxRetries?: number;
+    backoffMs?: number;
+    onStarted?: () => Promise<void> | void;
+    onCompleted?: () => Promise<void> | void;
+    onFailed?: (error: unknown) => Promise<void> | void;
+  } = {},
+): TurnSandboxProvisioner<T> {
+  const maxRetries = options.maxRetries ?? 2;
+  const backoffMs = options.backoffMs ?? 250;
+  let memo: Promise<T> | null = null;
+
+  const run = async (): Promise<T> => {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await establish();
+      } catch (error) {
+        if (attempt >= maxRetries || !isLazySandboxProvisionRetryable(error)) {
+          throw error;
+        }
+        attempt += 1;
+        await sleep(backoffMs * attempt);
+      }
+    }
+  };
+
+  return {
+    get(): Promise<T> {
+      if (!memo) {
+        memo = (async () => {
+          await options.onStarted?.();
+          try {
+            const result = await run();
+            await options.onCompleted?.();
+            return result;
+          } catch (error) {
+            await options.onFailed?.(error);
+            throw error;
+          }
+        })().catch((error) => {
+          memo = null;
+          throw error;
+        });
+      }
+      return memo;
+    },
+    hasStarted(): boolean {
+      return memo !== null;
+    },
+    async waitForSettled(timeoutMs: number): Promise<T | null> {
+      if (!memo) {
+        return null;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          memo.catch(() => null),
+          new Promise<null>((resolve) => {
+            timer = setTimeout(() => resolve(null), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      }
+    },
+  };
+}
+
+function sdkBackendIdForSandboxBackend(backend: Settings["sandboxBackend"]): string {
+  return backend === "local" ? "unix_local" : backend;
+}
+
+/**
+ * Decide whether THIS turn may send OpenAI's `prompt_cache_key` request field.
+ *
+ * Accepted transports:
+ *   - legacy/built-in OpenAI or Azure Responses fallback (resolvedModel null);
+ *   - resolved built-in OpenAI/Azure providers;
+ *   - ChatGPT/Codex subscription backend (its strict allowlist permits the field).
+ *
+ * Registry API-key providers are intentionally excluded. Fireworks' prompt-cache
+ * docs prescribe `user` or `x-session-affinity`, not `prompt_cache_key`; Z.AI/GLM
+ * documents automatic context caching plus `user_id`. Sending OpenAI-only fields
+ * to unknown OpenAI-compatible providers risks unsupported-parameter 400s.
+ */
+export function acceptsPromptCacheKeyForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind; builtin?: boolean } } | null,
+): boolean {
+  if (!resolvedModel) {
+    return true;
+  }
+  return resolvedModel.provider.builtin === true || resolvedModel.provider.kind === "codex-subscription";
+}
+
 /**
  * SELF-HEAL helper for the all-capped rotation idle (invariant 4: BOUNDED, no thrash).
  * The turn hot path never refreshes Codex usage — only the usage API route does — so a
@@ -547,12 +756,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let turnId: string | undefined;
+    // Worker-death redispatch counter observed when THIS dispatch claimed the
+    // turn. If a dying-attempt cancel later fences on this and the turn's
+    // current value differs, recovery already re-queued/re-dispatched the turn
+    // and the zombie must not clobber it.
+    let redispatchesAtDispatch = 0;
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
     // the one box by id from the group lease and injects it NON-OWNED into the
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
+    let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
     // Platform setup (beforeAgentStart hooks + file materialization) execs against
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
@@ -595,6 +811,148 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+    const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
+      const established = sandbox.established;
+      if (publish && established.origin && established.origin !== "resumed") {
+        const lifecycleEvents: Array<{ type: "sandbox.box.lost" | "sandbox.box.created"; payload: unknown }> = [];
+        if (established.lostInstanceId) {
+          lifecycleEvents.push({ type: "sandbox.box.lost", payload: { sandboxId: established.lostInstanceId } });
+        }
+        lifecycleEvents.push({
+          type: "sandbox.box.created",
+          payload: {
+            sandboxId: established.instanceId,
+            hydrated: established.origin === "restored" ? "archive" : "none",
+          },
+        });
+        await publish(lifecycleEvents).catch(() => undefined);
+      }
+    };
+    const startLeaseHeartbeat = (
+      sandbox: ResumedTurnSandbox,
+      warmBackend: Settings["sandboxBackend"] | undefined,
+    ): void => {
+      if (!sandboxHolderId || !sandboxGroupId) {
+        return;
+      }
+      // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
+      // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
+      // is rejected (returns false) and we stop refreshing — the box rides the
+      // provider idle-timeout and the next dispatch re-establishes it. Best-
+      // effort: a transient DB error must never fail the turn.
+      const heartbeatEpoch = sandbox.leaseEpoch;
+      const heartbeatHolderId = sandboxHolderId;
+      const heartbeatGroupId = sandboxGroupId;
+      // P2.1 warm-meter (tick A): while a turn runs, the heartbeat is also the
+      // warm-seconds tick. GROUP+epoch+tick keyed (one box = one stream, shared
+      // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
+      // metered when a per-backend rate is configured. Best-effort: a metering
+      // failure must never fail the turn.
+      //
+      // Keyed off the EFFECTIVE backend (Stage D): a machine-primary turn has NO
+      // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
+      // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
+      // cloud seconds for a box that does not exist (a real money bug). Non-machine
+      // turns fall back to groupBoxBackend (the REAL box that ran): for a machine-
+      // home turn that degraded to the cloud group box (swap-away / flag-off), that
+      // is the deployment default (modal), so the fallback box is warm-metered at
+      // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
+      const warmRate = sandboxWarmRateMicrosPerSecond(settings, warmBackend ?? sandbox.established.backendId as Settings["sandboxBackend"]);
+      leaseHeartbeatTimer = setInterval(() => {
+        void heartbeatLeaseHolder(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: heartbeatGroupId,
+          kind: "turn",
+          holderId: heartbeatHolderId,
+          leaseTtlMs: settings.sandboxLeaseTtlMs,
+          expectedEpoch: heartbeatEpoch,
+        }).catch(() => undefined);
+        void accrueWarmSeconds(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: heartbeatGroupId,
+          expectedEpoch: heartbeatEpoch,
+          warmRateMicrosPerSecond: warmRate,
+          subjectId: input.sessionId,
+        })
+          .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
+          .catch(() => undefined);
+        // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
+        // the box, fold a fresh /workspace snapshot onto the lease every
+        // sandboxSnapshotIntervalMs, so a box death the reaper never sees
+        // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
+        // of work — a legit multi-day turn is otherwise completely unprotected
+        // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
+        // session (setupBoxSession): the routing veneer could swap mid-op and a
+        // selfhosted target has no persistWorkspace anyway. Best-effort +
+        // single-flight; throttling lives in the helper.
+        const snapshotSession = setupBoxSession;
+        if (snapshotSession && !snapshotInFlight) {
+          snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
+            { db, settings },
+            { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId: heartbeatGroupId },
+            snapshotSession,
+            heartbeatEpoch,
+          )
+            .then(async (persisted) => {
+              if (persisted && publish) {
+                await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "heartbeat" } }]);
+              }
+            })
+            .catch(() => undefined)
+            .finally(() => {
+              snapshotInFlight = null;
+            });
+        }
+      }, 10_000);
+      if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
+        leaseHeartbeatTimer.unref();
+      }
+    };
+    const maybeStartOnTurnRecording = async (
+      sandbox: ResumedTurnSandbox,
+      effectiveBackend: Settings["sandboxBackend"] | undefined,
+    ): Promise<void> => {
+      // P4.3 on-turn recording. The box's :0 display stack was brought up by
+      // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
+      // the duration of this turn so the human can watch the agent work and the
+      // agent's computer-use proofs are captured. Best-effort: a recording start
+      // failure NEVER fails the turn (the desktop is a value-add). Finalized in
+      // `finally` (read+PUT in this same activity — never a Temporal payload).
+      if (
+        shouldStartOnTurnRecording({
+          recordingEnabled: settings.recordingEnabled,
+          desktopEnabled: settings.sandboxDesktopEnabled,
+          establishedBackendId: sandbox.established.backendId,
+          // EFFECTIVE (active) backend, not the session home: a machine-primary turn
+          // resolves to "selfhosted" and skips; a swap back to the cloud group box
+          // resolves to undefined and records as before.
+          effectiveBackend,
+        })
+      ) {
+        try {
+          const begun = await beginRecording({
+            settings,
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turnId!,
+            recordingId: randomUUID(),
+            mode: "on-turn",
+            session: sandbox.established.session,
+            runAs: sandboxRunAs(settings),
+            reason: null,
+          });
+          activeRecording = begun.active;
+          await publish?.([{ type: "recording.started", payload: begun.started }]);
+        } catch (recordingError) {
+          activeRecording = null;
+          console.error("on-turn recording start failed (turn outcome unaffected)", recordingError);
+        }
+      }
+    };
     // Dual-write of conversation truth (issue #35): completed items are
     // reconciled into session_history_items after every model response and at
     // every turn-end path (idempotent on position), and the sandbox recovery
@@ -722,6 +1080,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      redispatchesAtDispatch = Number((turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0);
       turnLifecycleMetricsFor(observability).start(turnId);
       // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
       // workspace credential). Computed once and threaded through every billing
@@ -929,6 +1288,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // runtime falls back to runSettings.agentInstructionsTemplate (the
       // deployment default, byte-identical to the historical preamble).
       const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
+      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
       const baseRunSettings = {
         ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
         openaiModel: turn.model,
@@ -1000,8 +1360,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
-      // D1-lite) and reused for EVERY downstream decision: the env mint (skip the
-      // inert GitHub token for a machine turn), the establish path (no phantom Modal
+      // D1-lite) and reused for EVERY downstream decision: the env mint (skip
+      // inert platform git tokens for a machine turn), the establish path (no phantom Modal
       // home box for a machine-primary turn), buildAgent (skip the repository clone
       // hook so a private repo is never `git clone`d onto the user's real disk), and
       // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
@@ -1044,27 +1404,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ? groupBoxBackend
           : runSettings.sandboxBackend;
       await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
+      const establishPolicy: "eager" | "on-demand" =
+        lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
+          ? "on-demand"
+          : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
-      // run-scoped GitHub installation token on every call, so a second call would
-      // yield a DIFFERENT token value and re-introduce the manifest-env delta the
+      // run-scoped git provider tokens on every call, so a second call would
+      // yield DIFFERENT token values and re-introduce the manifest-env delta the
       // SDK's provided-session guard throws on — the box and the agent MUST share
       // this same object. A machine-primary turn skips the (inert) token mint entirely
       // (the machine uses its own git creds); the SAME base env still feeds the box +
       // the agent, so env-parity holds.
       // TOKEN-BROKER (B1): sandboxEnvironmentForRun now returns the STABLE manifest
       // env (no rotating GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_* extraheader) PLUS the
-      // run-scoped GitHub token minted ONCE per turn as `gitToken`. The env feeds BOTH
-      // the box manifest AND the agent (env-parity, as before); the token is threaded
-      // OFF-MANIFEST as the clone-seed `gitTokenSeed` to buildAgent (below) so the box
-      // never carries a rotating value on its manifest. When the platform token IS
-      // minted, the host `gitCredentials` provider may supply it; unset → self-mint
-      // from settings. gitToken is undefined on the selfhosted skip path (the machine
+      // run-scoped git tokens minted ONCE per turn as provider seeds, with `gitToken`
+      // retained as the GitHub alias. The env feeds BOTH the box manifest AND the
+      // agent (env-parity, as before); tokens are threaded OFF-MANIFEST as
+      // clone-seeds to buildAgent (below) so the box never carries rotating values
+      // on its manifest. When a platform token IS minted, the host `gitCredentials`
+      // provider may supply it; unset still self-mints GitHub from settings.
+      // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
+        gitTokens: sandboxGitTokens,
         toolspaceToken: sandboxToolspaceToken,
       } = await sandboxEnvironmentForRun(
         runSettings,
@@ -1072,6 +1438,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceEnvironment?.values ?? {},
         {
           skipGitHubToken: activeSandboxBackend === "selfhosted",
+          deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
           scope: connectionScope,
           gitCredentials: connectionCredentials?.gitCredentials,
           sessionId: input.sessionId,
@@ -1157,6 +1524,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leaseEpoch: lease.leaseEpoch,
             release: lease.release,
           };
+        } else if (establishPolicy === "on-demand") {
+          // Lazy sandbox provisioning: holder/group ids are fixed at turn start,
+          // but the lease acquire + box establish + setup move behind the routing
+          // proxy's first default-pointer op. A chat-only turn never calls it, so
+          // no lease row, no provider box, no warm-meter interval.
         } else {
           resolvedSandbox = await resumeBoxForTurn(
             { db, settings, sandboxMetrics: runtimeMetricsHooksForObservability(observability) },
@@ -1191,23 +1563,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // record every box transition in session_events so the NEXT box loss is
           // attributable from the DB alone — worker logs rotate within hours, which
           // left both 2026-07-06 incidents without a durable trace. Best-effort.
-          {
-            const established = resolvedSandbox.established;
-            if (publish && established.origin && established.origin !== "resumed") {
-              const lifecycleEvents: Array<{ type: "sandbox.box.lost" | "sandbox.box.created"; payload: unknown }> = [];
-              if (established.lostInstanceId) {
-                lifecycleEvents.push({ type: "sandbox.box.lost", payload: { sandboxId: established.lostInstanceId } });
-              }
-              lifecycleEvents.push({
-                type: "sandbox.box.created",
-                payload: {
-                  sandboxId: established.instanceId,
-                  hydrated: established.origin === "restored" ? "archive" : "none",
-                },
-              });
-              await publish(lifecycleEvents).catch(() => undefined);
-            }
-          }
+          await publishSandboxLifecycleEvents(resolvedSandbox);
           // M7 hot-swap: when the selfhosted feature is on, wrap the established
           // group box in the STABLE routing proxy before it is injected NON-OWNED
           // into the run. The SDK binds to this ONE object once and calls its
@@ -1232,120 +1588,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
           }
         }
-        // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
-        // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
-        // is rejected (returns false) and we stop refreshing — the box rides the
-        // provider idle-timeout and the next dispatch re-establishes it. Best-
-        // effort: a transient DB error must never fail the turn.
-        const heartbeatEpoch = resolvedSandbox.leaseEpoch;
-        const heartbeatHolderId = sandboxHolderId;
-        const heartbeatGroupId = sandboxGroupId;
-        // P2.1 warm-meter (tick A): while a turn runs, the heartbeat is also the
-        // warm-seconds tick. GROUP+epoch+tick keyed (one box = one stream, shared
-        // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
-        // metered when a per-backend rate is configured. Best-effort: a metering
-        // failure must never fail the turn.
-        //
-        // Keyed off the EFFECTIVE backend (Stage D): a machine-primary turn has NO
-        // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
-        // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
-        // cloud seconds for a box that does not exist (a real money bug). Non-machine
-        // turns fall back to groupBoxBackend (the REAL box that ran): for a machine-
-        // home turn that degraded to the cloud group box (swap-away / flag-off), that
-        // is the deployment default (modal), so the fallback box is warm-metered at
-        // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
-        const warmRate = sandboxWarmRateMicrosPerSecond(settings, activeSandboxBackend ?? groupBoxBackend);
-        leaseHeartbeatTimer = setInterval(() => {
-          void heartbeatLeaseHolder(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sandboxGroupId: heartbeatGroupId,
-            kind: "turn",
-            holderId: heartbeatHolderId,
-            leaseTtlMs: settings.sandboxLeaseTtlMs,
-            expectedEpoch: heartbeatEpoch,
-          }).catch(() => undefined);
-          void accrueWarmSeconds(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sandboxGroupId: heartbeatGroupId,
-            expectedEpoch: heartbeatEpoch,
-            warmRateMicrosPerSecond: warmRate,
-            subjectId: input.sessionId,
-          })
-            .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
-            .catch(() => undefined);
-          // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
-          // the box, fold a fresh /workspace snapshot onto the lease every
-          // sandboxSnapshotIntervalMs, so a box death the reaper never sees
-          // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
-          // of work — a legit multi-day turn is otherwise completely unprotected
-          // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
-          // session (setupBoxSession): the routing veneer could swap mid-op and a
-          // selfhosted target has no persistWorkspace anyway. Best-effort +
-          // single-flight; throttling lives in the helper.
-          const snapshotSession = setupBoxSession;
-          if (snapshotSession && !snapshotInFlight) {
-            snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
-              { db, settings },
-              { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId: heartbeatGroupId },
-              snapshotSession,
-              heartbeatEpoch,
-            )
-              .then(async (persisted) => {
-                if (persisted && publish) {
-                  await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "heartbeat" } }]);
-                }
-              })
-              .catch(() => undefined)
-              .finally(() => {
-                snapshotInFlight = null;
-              });
-          }
-        }, 10_000);
-        if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
-          leaseHeartbeatTimer.unref();
+        if (resolvedSandbox) {
+          startLeaseHeartbeat(resolvedSandbox, activeSandboxBackend ?? groupBoxBackend);
         }
       }
 
-      // P4.3 on-turn recording. The box's :0 display stack was brought up by
-      // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
-      // the duration of this turn so the human can watch the agent work and the
-      // agent's computer-use proofs are captured. Best-effort: a recording start
-      // failure NEVER fails the turn (the desktop is a value-add). Finalized in
-      // `finally` (read+PUT in this same activity — never a Temporal payload).
-      if (
-        resolvedSandbox
-        && shouldStartOnTurnRecording({
-          recordingEnabled: settings.recordingEnabled,
-          desktopEnabled: settings.sandboxDesktopEnabled,
-          establishedBackendId: resolvedSandbox.established.backendId,
-          // EFFECTIVE (active) backend, not the session home: a machine-primary turn
-          // resolves to "selfhosted" and skips; a swap back to the cloud group box
-          // resolves to undefined and records as before.
-          effectiveBackend: activeSandboxBackend,
-        })
-      ) {
-        try {
-          const begun = await beginRecording({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turnId!,
-            recordingId: randomUUID(),
-            mode: "on-turn",
-            session: resolvedSandbox.established.session,
-            runAs: sandboxRunAs(settings),
-            reason: null,
-          });
-          activeRecording = begun.active;
-          await publish([{ type: "recording.started", payload: begun.started }]);
-        } catch (recordingError) {
-          activeRecording = null;
-          console.error("on-turn recording start failed (turn outcome unaffected)", recordingError);
-        }
+      if (resolvedSandbox) {
+        await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
       }
 
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
@@ -1377,6 +1626,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // trigger is goal.continuation/turn.preempted).
       const isGenesisTurn = triggerType === "user.message"
         && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
       // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
       // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
       // may have been swapped to a connected machine (active_sandbox_id → a
@@ -1399,7 +1649,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // AND the mint actually produced a token (repo resources present). The runtime
         // seeds it to the box's token file before the repository-clone runs; it never
         // touches the box/agent manifest env.
-        ...(activeSandboxBackend !== "selfhosted" && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens ? { gitTokenSeeds: sandboxGitTokens } : {}),
+        ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
         // Toolspace is delivered on EVERY backend including selfhosted. The git-
         // token skip does NOT transfer: that token is inert on a connected
         // machine (it uses its own git creds), but the toolspace token is the
@@ -1449,14 +1700,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // responses → hosted) so the runtime never string-sniffs the model instance's
             // constructor name. See {@link computerToolModeForTurn}.
             computerToolMode: computerToolModeForTurn(resolvedModel),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }
           // LEGACY global-client fallback (resolveTurnModel returned null → the model
           // is not in the registry, served by the built-in OpenAI/Azure Responses
           // client). That backend has real hosted support, so pin computerToolMode to
           // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
-          : { computerToolMode: computerToolModeForTurn(null) }),
+          : {
+            computerToolMode: computerToolModeForTurn(null),
+            promptCacheKey: input.sessionId,
+          }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
+        ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
@@ -1471,6 +1727,91 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           : {}),
       });
+      if (establishPolicy === "on-demand" && sandboxHolderId && sandboxGroupId) {
+        const lazyHolderId = sandboxHolderId;
+        const lazyGroupId = sandboxGroupId;
+        const agentDefaultManifest = (agent as { defaultManifest?: unknown }).defaultManifest;
+        if (!agentDefaultManifest) {
+          throw new Error("Lazy sandbox provisioning requires a SandboxAgent defaultManifest");
+        }
+        const lazyClient = { backendId: sdkBackendIdForSandboxBackend(groupBoxBackend) } as EstablishedSandboxSession["client"];
+        turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(async () => {
+          throwIfWorkerShuttingDown();
+          const lazyGitTokens = activeSandboxBackend === "selfhosted"
+            ? undefined
+            : await mintRunGitTokens(runSettings, turnResources, {
+              scope: connectionScope,
+              gitCredentials: connectionCredentials?.gitCredentials,
+            });
+          const provisioned = await resumeBoxForTurn(
+            { db, settings, sandboxMetrics: runtimeMetricsHooksForObservability(observability) },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: lazyGroupId,
+              sessionId: input.sessionId,
+              backend: groupBoxBackend,
+              os: session.sandboxOs,
+              environment: sandboxEnvironment,
+              ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
+                : {}),
+            },
+            "turn",
+            lazyHolderId,
+          );
+          setupBoxSession = provisioned.established.session;
+          await publishSandboxLifecycleEvents(provisioned);
+          await runOwnedSandboxSetup(
+            agent,
+            provisioned.established.session as never,
+            provisioned.established.session as never,
+            {
+              settings: runSettings,
+              environment: sandboxEnvironment,
+              onRuntimeEvent: async (event) => {
+                await publish?.([{ type: event.type, payload: event.payload }], true);
+              },
+              ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+            },
+          );
+          // Return the REAL established box (NOT a copy whose session is the routing
+          // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
+          // if that were the proxy itself, proxy.exec -> dispatch -> resolve ->
+          // provisioner.get() -> proxy.exec -> ... loops forever (an async infinite
+          // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
+          // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
+          // gets per-op routing; the worker-side handle (resolvedSandbox: release,
+          // heartbeat, on-turn recording) wants the real box, unproxied.
+          resolvedSandbox = provisioned;
+          startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
+          await maybeStartOnTurnRecording(provisioned, activeSandboxBackend);
+          return provisioned;
+        }, {
+          onStarted: async () => {
+            await publish?.([{ type: "sandbox.operation.started", payload: { name: "sandbox.provision" } }], true);
+          },
+          onCompleted: async () => {
+            await publish?.([{ type: "sandbox.operation.completed", payload: { name: "sandbox.provision" } }], true);
+          },
+          onFailed: async (error) => {
+            await publish?.([{
+              type: "sandbox.operation.failed",
+              payload: { name: "sandbox.provision", error: error instanceof Error ? error.message : String(error) },
+            }], true);
+          },
+        });
+        lazyOwnedSandbox = wrapLazyTurnBoxWithRouting(
+          { db, settings, bus },
+          { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
+          {
+            client: lazyClient,
+            backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
+            agentDefaultManifest,
+            provisioner: turnSandboxProvisioner,
+          },
+        );
+      }
       const compactSummarizer = resolvedModel
         ? (s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) => withCodex(() => summarizeForCompaction(s, m, {
             client: resolvedModel.client,
@@ -1478,8 +1819,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: resolvedModel.configured.id,
             maxOutputTokens: SUMMARY_BUFFER_TOKENS,
             ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }))
-        : undefined;
+        : promptCacheKey
+          ? ((s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) => summarizeForCompaction(s, m, {
+              maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+              ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+              promptCacheKey,
+            }))
+          : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
@@ -1503,7 +1851,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Provider-aware summarizer: when the turn's model resolved to a
             // registry provider, summarize on THAT provider's client + wire API
             // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution keeps the default built-in Responses summarizer.
+            // resolution uses the built-in Responses summarizer with the same
+            // session prompt-cache key as the main model calls.
             compactSummarizer,
             forced ? { force: true } : {},
           );
@@ -1515,6 +1864,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);
         }
       }
+      let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
+      let fileDownloadsMaterializedForRun = false;
+      if (
+        resolvedSandbox
+        && setupBoxSession
+        && activeSandboxBackend !== "selfhosted"
+        && fileResourceDownloads.length > 0
+      ) {
+        const boxInstanceId = resolvedSandbox.established.instanceId;
+        const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          expectedEpoch: resolvedSandbox.leaseEpoch,
+          instanceId: boxInstanceId,
+        });
+        const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
+          fileResourceDownloads,
+          alreadyMaterialized,
+        );
+        const runAs = sandboxRunAs(runSettings);
+        if (downloadsToMaterialize.length > 0) {
+          const materialized = await materializeSandboxFileDownloads(setupBoxSession as any, downloadsToMaterialize, {
+            onRuntimeEvent: async (event) => {
+              await publish!([{ type: event.type, payload: event.payload }], true);
+            },
+            ...(runAs ? { runAs } : {}),
+          });
+          fileMaterializationFailures = materialized.failures;
+          const failedFileIds = new Set(materialized.failures.map((failure) => failure.fileId));
+          const succeededFileIds = downloadsToMaterialize
+            .map((download) => download.fileId)
+            .filter((fileId) => !failedFileIds.has(fileId));
+          if (succeededFileIds.length > 0) {
+            await markSandboxFileResourcesMaterialized(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              expectedEpoch: resolvedSandbox.leaseEpoch,
+              instanceId: boxInstanceId,
+              fileIds: succeededFileIds,
+            });
+          }
+        }
+        fileDownloadsMaterializedForRun = true;
+      }
+      const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(fileMaterializationFailures);
       // Cross-account reasoning strip: pass THIS turn's codex account so every
       // history read path (items + run-state replay) drops reasoning produced by
       // a DIFFERENT codex account. effectiveCodexCredentialId is the resolved
@@ -1536,6 +1932,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           trigger,
           runSettings,
           { currentCodexCredentialId: effectiveCodexCredentialId },
+          unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {},
         );
         runInput = prepared.input;
         // Slice index = the length of the model-facing (active) history this turn
@@ -1600,6 +1997,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         let lastInputTokensObserved: number | null = null;
         throwIfWorkerShuttingDown();
+        const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> => runtime.runStream(agent, runInput!, runSettings, {
           sandboxEnvironment,
           onRuntimeEvent: async (event) => {
@@ -1607,16 +2005,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           // P1.2: inject the resumed box NON-OWNED (the SDK never reaps it — the
           // keystone). Absent when the flag is off -> legacy build-and-discard.
-          ...(resolvedSandbox
+          ...(ownedEstablished
             ? {
               ownedSandbox: {
-                client: resolvedSandbox.established.client,
-                session: resolvedSandbox.established.session,
-                sessionState: resolvedSandbox.established.sessionState,
+                client: ownedEstablished.client,
+                session: ownedEstablished.session,
+                ...(resolvedSandbox?.established.sessionState ? { sessionState: resolvedSandbox.established.sessionState } : {}),
                 // Pin platform setup (hooks + file materialization) to the un-proxied
                 // established box — never through the routing proxy, which would
                 // re-route those execs onto a machine swapped in mid-turn.
                 ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
+                ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
+                ...(lazyOwnedSandbox ? { deferredSetup: true } : {}),
               },
             }
             : {}),
@@ -1636,9 +2036,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            let modelUsageEventContext: Record<string, unknown> | null = null;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               responseUsageCount += 1;
+              const responseSourceKey = modelUsageSourceKey({
+                responseId: responseUsage.responseId,
+                dispatchId,
+                positionalKey: `response-${responseUsageCount}`,
+              });
+              await emitModelCallUsage({
+                observability,
+                publish: null,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+                usage: responseUsage,
+              });
+              modelUsageEventContext = {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+              };
               const observed = responseUsage.usage?.inputTokens;
               if (typeof observed === "number" && observed > 0) {
                 lastInputTokensObserved = observed;
@@ -1653,11 +2082,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 isCodexTurn,
                 usage: responseUsage.usage,
-                sourceKey: modelUsageSourceKey({
-                  responseId: responseUsage.responseId,
-                  dispatchId,
-                  positionalKey: `response-${responseUsageCount}`,
-                }),
+                sourceKey: responseSourceKey,
                 observability,
               });
               await reconcileConversationTruth();
@@ -1689,6 +2114,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
+              if (event.type === "agent.model.usage" && modelUsageEventContext && event.payload && typeof event.payload === "object") {
+                event.payload = { ...modelUsageEventContext, ...event.payload };
+              }
               await batcher.push(event);
             }
           }
@@ -1704,6 +2132,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (typeof aggregateInput === "number" && aggregateInput > 0) {
             lastInputTokensObserved = aggregateInput;
           }
+          const aggregateSourceKey = modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" });
           await recordModelUsageAndDebitCredits(settings, db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1712,8 +2141,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: turn.model,
             isCodexTurn,
             usage: stream.state.usage,
-            sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
+            sourceKey: aggregateSourceKey,
             observability,
+          });
+          await emitModelCallUsage({
+            observability,
+            publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            sourceKey: aggregateSourceKey,
+            usage: { usage: stream.state.usage },
           });
         }
         if (lastInputTokensObserved !== null) {
@@ -2051,8 +2493,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityError = error;
         await flushRuntimeBatcher();
         if (preemptTurnId) {
-          await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
-          turnMetricOutcome = "cancelled";
+          // FENCED settle: a heartbeat-timeout death lands here too (it is a
+          // CancelledFailure that is not WORKER_SHUTDOWN), and its zombie must
+          // NOT overwrite a turn worker-death recovery already re-queued or
+          // re-dispatched — that reintroduces the exact orphan stall this
+          // change fixes, in the reverse event order. cancelTurnFromDyingDispatch
+          // only settles a still-live turn whose redispatch counter is unchanged
+          // since this dispatch claimed it; a deliberate user interrupt (turn
+          // still running, counter unchanged) still settles as before.
+          const settled = await cancelTurnFromDyingDispatch(db, input.workspaceId, preemptTurnId, redispatchesAtDispatch).catch(() => false);
+          if (settled) {
+            await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
+              turnId: preemptTurnId,
+              type: "turn.cancelled",
+              payload: {
+                triggerEventId: input.triggerEventId,
+                reason: error.message || "activity_cancelled",
+              },
+            }]).catch(() => undefined);
+            turnMetricOutcome = "cancelled";
+          }
         }
         throw error;
       }
@@ -2388,6 +2848,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }
+      if (turnSandboxProvisioner?.hasStarted()) {
+        await turnSandboxProvisioner.waitForSettled(30_000);
+      }
       // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
       // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
       // and DROP the in-memory handle. Release NEVER stops the box — the reaper
@@ -2403,7 +2866,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // deleted only after the PUT confirms (F9). Best-effort: a finalize failure
       // emits recording.failed and never masks the turn outcome (F10: the bytes
       // never become a Temporal payload — read+PUT happen here in-process).
-      if (activeRecording && resolvedSandbox) {
+      const recordingToFinalize = activeRecording as ActiveRecording | null;
+      if (recordingToFinalize && resolvedSandbox) {
         try {
           if (!didComputerUse) {
             // Recording gate (P4.3): the turn never drove the desktop (a plain text
@@ -2414,7 +2878,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               db,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
-              active: activeRecording,
+              active: recordingToFinalize,
               session: resolvedSandbox.established.session,
             });
           } else {
@@ -2425,14 +2889,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
-              active: activeRecording,
+              active: recordingToFinalize,
               session: resolvedSandbox.established.session,
               runAs: sandboxRunAs(settings),
             });
             if (publish) {
               await publish(outcome.ok
                 ? [{ type: "recording.available", payload: outcome.available }]
-                : [{ type: "recording.failed", payload: { recordingId: activeRecording.recordingId, turnId: activeRecording.turnId, reason: outcome.reason, detail: outcome.detail } }]);
+                : [{ type: "recording.failed", payload: { recordingId: recordingToFinalize.recordingId, turnId: recordingToFinalize.turnId, reason: outcome.reason, detail: outcome.detail } }]);
             }
           }
         } catch (finalizeError) {
@@ -2452,11 +2916,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (setupBoxSession && sandboxGroupId) {
           // Single-flight vs the heartbeat capture: the timer is already cleared
           // above, but a capture it launched may still be in flight — and that
-          // capture predates the turn's final writes. Await it (it never
-          // rejects; its own failure discipline caps its runtime), THEN
-          // attempt; the atomic throttle decides in capture order.
+          // capture predates the turn's final writes. Wait for it, but only up
+          // to the snapshot timeout: release must never depend on an unbounded
+          // provider capture.
           if (snapshotInFlight) {
-            await snapshotInFlight;
+            await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
           }
           const persisted = await maybePersistWarmWorkspaceSnapshot(
             { db, settings },

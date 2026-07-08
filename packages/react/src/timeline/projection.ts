@@ -3,7 +3,9 @@ import { CREDIT_EXHAUSTION_MESSAGE, humanizeFailureReason, isCreditExhaustion, t
 import type {
   AgentMessageItem,
   ActivityItem,
+  AuthNeededItem,
   GoalItem,
+  MemoryItem,
   SandboxItem,
   SessionStatusItem,
   TimelineGroup,
@@ -73,6 +75,23 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // A steering message must not mark in-flight tools complete; it only
         // ends whatever text was streaming. Turn lifecycle events finalize.
         closeStreamingTail();
+        const childCompletion = workerCompletionPayload(payload.childCompletion);
+        if (childCompletion) {
+          items.push({
+            kind: "worker-completion",
+            id: event.id,
+            turnId,
+            occurredAt: event.occurredAt,
+            childSessionId: childCompletion.childSessionId,
+            childStatus: childCompletion.childStatus,
+            goalStatus: childCompletion.goalStatus,
+            goalText: childCompletion.goalText,
+            evidence: childCompletion.evidence,
+            pausedReason: childCompletion.pausedReason,
+            text: typeof payload.text === "string" ? payload.text : "",
+          });
+          break;
+        }
         items.push({
           kind: "user-message",
           id: event.id,
@@ -236,12 +255,17 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.failed": {
         const name = typeof payload.name === "string" ? payload.name : "sandbox";
         const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
-        // Routine repository-clone operations are per-turn platform plumbing (an
-        // idempotent clone check + off-manifest token re-seed runs before EVERY
-        // turn on a repo-attached session) — rendering them reads as the agent
-        // redoing work each turn. Only failures surface, and they surface loudly:
-        // the failed event below creates its own item even without a started row.
-        if (name === "repository-clone" && status !== "failed") {
+        // Routine per-turn platform plumbing that runs before EVERY turn to
+        // guarantee box contents survive a re-warm — NOT the agent redoing work:
+        //   - repository-clone: idempotent clone check + off-manifest token re-seed;
+        //   - file-resource-download: idempotent `if [ ! -f ] then curl` (skips
+        //     when the attached file is already on the box — see
+        //     sandboxFileDownloadCommand), so an uploaded image is not re-fetched;
+        //     the operation still emits every turn even when it does nothing.
+        // Rendering either every turn reads as churn. Only FAILURES surface, and
+        // they surface loudly — the failed event below creates its own item even
+        // without a started row.
+        if ((name === "repository-clone" || name === "file-resource-download") && status !== "failed") {
           break;
         }
         const existing = findOpenSandbox(items, name);
@@ -322,14 +346,22 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "tool.auth_needed": {
+        // Keep the whole structured payload — the renderer turns it into a clean
+        // inline reconnect card, and the app starts the recovery flow off the
+        // connectionId/resource. Losing it to a plain-text notice was the ugly
+        // "linear.app needs to be reconnected." line users complained about.
         closeStreamingTail();
-        const authorizationUrl = typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null;
         items.push({
-          kind: "notice",
+          kind: "auth-needed",
           id: event.id,
-          tone: "waiting",
-          text: authNeededNoticeText(payload),
-          ...(authorizationUrl ? { action: { label: "Connect", url: authorizationUrl } } : {}),
+          turnId,
+          providerDomain: typeof payload.providerDomain === "string" ? payload.providerDomain : "",
+          connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
+          reason: authNeededReason(payload.reason),
+          scopes: stringList(payload.scopes),
+          resource: typeof payload.resource === "string" ? payload.resource : null,
+          toolName: typeof payload.toolName === "string" ? payload.toolName : null,
+          authorizationUrl: typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -405,11 +437,25 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "memory.saved":
+      case "memory.corrected": {
+        // A first-party memory write is a discrete step, not streamed text, so it
+        // ends whatever was streaming (mirrors tool/sandbox pushes). A payload
+        // missing the memory id is malformed and dropped rather than shown blank.
+        const memory = memoryItem(event.id, event.type, turnId, payload, event.occurredAt);
+        if (memory) {
+          closeStreamingTail();
+          items.push(memory);
+        }
+        break;
+      }
+
       case "goal.set":
       case "goal.updated":
       case "goal.completed":
       case "goal.paused":
       case "goal.resumed":
+      case "goal.cleared":
       case "goal.continuation": {
         items.push({
           kind: "goal",
@@ -488,6 +534,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "tool-call":
     case "worker":
     case "sandbox":
+    case "memory":
       return true;
     default:
       return false;
@@ -830,6 +877,40 @@ function toolRefs(value: unknown): import("@opengeni/sdk").ToolRef[] {
   });
 }
 
+function workerCompletionPayload(value: unknown): {
+  childSessionId: string;
+  childStatus: string;
+  goalStatus: string | null;
+  goalText: string | null;
+  evidence: string | null;
+  pausedReason: string | null;
+} | null {
+  const payload = asRecord(value);
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (
+    typeof payload.childSessionId !== "string"
+    || !uuidPattern.test(payload.childSessionId)
+    || typeof payload.status !== "string"
+    || payload.status.trim() === ""
+  ) {
+    return null;
+  }
+  const goal = asRecord(payload.goal);
+  return {
+    childSessionId: payload.childSessionId,
+    childStatus: payload.status,
+    goalStatus: typeof goal.status === "string" ? goal.status : null,
+    goalText: typeof goal.text === "string" ? goal.text : null,
+    evidence: typeof goal.evidence === "string" ? goal.evidence : null,
+    // Console pauses and several server paths put the human explanation on
+    // `rationale`, not `pausedReason` — same fallback the goal pill uses, so a
+    // paused worker card never shows "Worker paused" with the reason missing.
+    pausedReason: typeof goal.pausedReason === "string"
+      ? goal.pausedReason
+      : typeof goal.rationale === "string" ? goal.rationale : null,
+  };
+}
+
 function isSessionStatus(value: unknown): value is SessionStatus {
   return typeof value === "string" && (SESSION_STATUSES as readonly string[]).includes(value);
 }
@@ -885,20 +966,49 @@ function goalText(payload: Record<string, unknown>): string | null {
   return null;
 }
 
-function authNeededNoticeText(payload: Record<string, unknown>): string {
-  const provider =
-    typeof payload.providerDomain === "string" && payload.providerDomain.trim().length > 0 ? payload.providerDomain.trim() : "This service";
-  const scopes = Array.isArray(payload.scopes)
-    ? payload.scopes.filter((scope): scope is string => typeof scope === "string" && scope.trim().length > 0)
-    : [];
+/**
+ * Fold a `memory.saved` / `memory.corrected` event into a {@link MemoryItem}.
+ * Reads DEFENSIVELY (the payload is untyped `unknown`, no Zod schema): a missing
+ * memory id means a malformed event, so we return null and the case drops it.
+ */
+function memoryItem(
+  id: string,
+  type: string,
+  turnId: string | null,
+  payload: Record<string, unknown>,
+  occurredAt: string,
+): MemoryItem | null {
+  const memoryId = typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
+  if (!memoryId) {
+    return null;
+  }
+  const replacementPreview = typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
+  const replacementMemoryId = typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
+  const action = typeof payload.action === "string" ? payload.action : undefined;
+  return {
+    kind: "memory",
+    id,
+    turnId,
+    variant: type === "memory.corrected" ? "corrected" : "saved",
+    memoryKind: typeof payload.kind === "string" ? payload.kind : "",
+    preview: typeof payload.preview === "string" ? payload.preview : "",
+    ...(payload.deduped === true ? { deduped: true } : {}),
+    ...(replacementPreview ? { replacementPreview } : {}),
+    ...(action ? { action } : {}),
+    memoryId,
+    ...(replacementMemoryId ? { replacementMemoryId } : {}),
+    occurredAt,
+  };
+}
 
-  if (payload.reason === "insufficient_scope") {
-    return scopes.length > 0 ? `${provider} needs additional access (${scopes.join(", ")}).` : `${provider} needs additional access.`;
-  }
-  if (payload.reason === "expired" || payload.reason === "refresh_failed") {
-    return `${provider} needs to be reconnected.`;
-  }
-  return `${provider} needs a connection.`;
+const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]);
+
+function authNeededReason(value: unknown): AuthNeededItem["reason"] {
+  return typeof value === "string" && AUTH_NEEDED_REASONS.has(value) ? (value as AuthNeededItem["reason"]) : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0) : [];
 }
 
 function reasoningText(payload: unknown): string {

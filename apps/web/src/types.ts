@@ -36,6 +36,7 @@ export type {
   GitHubAppInfo,
   GitHubRepository,
   GoalSpec,
+  CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
@@ -55,12 +56,17 @@ export type {
   SessionStatus,
   SessionTurn,
   ToolRef,
+  UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceMemberRequest,
+  UpdateWorkspaceSettingsRequest,
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
+  WorkspaceMemorySearchMode,
+  WorkspaceMemorySearchResponse,
+  WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";

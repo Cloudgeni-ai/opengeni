@@ -4,6 +4,7 @@ import {
   ListWorkspaceMembersResponse,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
+  UpdateWorkspaceSettingsRequest,
   Workspace,
   WorkspaceMember,
   type AccessContext,
@@ -23,6 +24,7 @@ import {
   removeWorkspaceMember,
   requireWorkspace,
   updateWorkspace,
+  updateWorkspaceSettings,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -91,6 +93,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
       ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
     });
+    return c.json(Workspace.parse(workspace));
+  });
+
+  // Read is via GET /v1/workspaces/:workspaceId (Workspace.settings). This PATCH
+  // deep-merges (top-level) a settings patch, preserving unknown/future keys.
+  app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid workspace settings patch" });
+    }
+    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
     return c.json(Workspace.parse(workspace));
   });
 

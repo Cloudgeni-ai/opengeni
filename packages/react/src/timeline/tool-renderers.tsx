@@ -178,7 +178,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
       cancelled={item.status === "cancelled"}
       preview={truncated ? `⋯ truncated · ${preview}` : preview}
     >
-      <TermBlock command={null} workdir={workdir} output={body} />
+      <TermBlock command={null} workdir={workdir} output={body} failed={item.status === "failed" || (exitCode != null && exitCode !== 0)} />
       {bgSession != null ? (
         <BodyNote>↳ session {bgSession} — a later write_stdin can target this PTY.</BodyNote>
       ) : null}

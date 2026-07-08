@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, hashMemoryText, MEMORY_VISIBLE_RECORD_CAP, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -10,6 +10,7 @@ import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import {
+  createDocumentServices,
   DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
   searchDocuments,
@@ -3243,6 +3244,9 @@ describe("API component integration", () => {
     const proposedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
       method: "POST",
       body: JSON.stringify({
+        // Explicit `proposed` keeps this the legacy curated-review lane; the
+        // default status is now `active` (the memory write gate).
+        status: "proposed",
         text: "Use Azure Blob for production object storage.",
         kind: "decision",
         confidence: 0.92,
@@ -3293,6 +3297,222 @@ describe("API component integration", () => {
     expect(reproposed.status).toBe("proposed");
     expect(reproposed.reviewedBy).toBeNull();
     expect(reproposed.reviewedAt).toBeNull();
+  });
+
+  test("workspace memory REST lifecycle: create(active)/list/search/pin/archive/edit + settings", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    // Create defaults to active (memory write gate: sanitized + embedded).
+    const createResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Staging deploys from main only, via opengeni-ops.",
+        kind: "procedural",
+        metadata: { source: "rest-lifecycle" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json() as { id: string; status: string; pinned: boolean; usageCount: number; metadata: Record<string, unknown> };
+    expect(created.status).toBe("active");
+    expect(created.pinned).toBe(false);
+    expect(created.metadata).toMatchObject({ source: "rest-lifecycle", origin: "human" });
+
+    // List (active) shows it.
+    const listResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=active"));
+    expect(listResponse.status).toBe(200);
+    expect((await listResponse.json() as Array<{ id: string }>).some((m) => m.id === created.id)).toBe(true);
+
+    // Hybrid search finds it and bumps usage.
+    const searchResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "how do we deploy staging" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(searchResponse.status).toBe(200);
+    const search = await searchResponse.json() as { results: Array<{ memory: { id: string; usageCount: number }; score: number }> };
+    const found = search.results.find((r) => r.memory.id === created.id);
+    expect(found).toBeTruthy();
+    expect(found!.memory.usageCount).toBe(1);
+
+    // Pin.
+    const pinResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(pinResponse.status).toBe(200);
+    expect((await pinResponse.json() as { pinned: boolean }).pinned).toBe(true);
+
+    // Edit text: PATCH bypasses dedup only, not sanitization/redaction/hash/embed.
+    const editedSecret = "AKIAIOSFODNN7EXAMPLE";
+    const editResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ text: `Staging deploys from the release branch now with ${editedSecret}.` }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(editResponse.status).toBe(200);
+    const edited = await editResponse.json() as { text: string };
+    expect(edited.text).toContain("release branch");
+    expect(edited.text).toContain("[REDACTED]");
+    expect(edited.text).not.toContain(editedSecret);
+    const [editedRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${created.id}
+    `);
+    expect(editedRow?.textHash).toBe(hashMemoryText(edited.text));
+    expect(editedRow?.embeddingModel).toBeTruthy();
+    expect(editedRow?.hasEmbedding).toBe(true);
+
+    // Status transitions into visible memory gate existing text too.
+    const activateSecret = "AKIAIOSFODNN7EXAMPLE";
+    const proposedActiveResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: `Activate this note with ${activateSecret}.` }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedActiveResponse.status).toBe(201);
+    const proposedActive = await proposedActiveResponse.json() as { id: string };
+    const activatedResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposedActive.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(activatedResponse.status).toBe(200);
+    const activated = await activatedResponse.json() as { text: string; status: string };
+    expect(activated.status).toBe("active");
+    expect(activated.text).toContain("[REDACTED]");
+    expect(activated.text).not.toContain(activateSecret);
+    const [activatedRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${proposedActive.id}
+    `);
+    expect(activatedRow?.textHash).toBe(hashMemoryText(activated.text));
+    expect(activatedRow?.embeddingModel).toBeTruthy();
+    expect(activatedRow?.hasEmbedding).toBe(true);
+
+    const approveSecret = "AKIAIOSFODNN7EXAMPLE";
+    const proposedApprovedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: `Approve this note with ${approveSecret}.` }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedApprovedResponse.status).toBe(201);
+    const proposedApproved = await proposedApprovedResponse.json() as { id: string };
+    const approvedTransitionResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposedApproved.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "approved" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(approvedTransitionResponse.status).toBe(200);
+    const approvedTransition = await approvedTransitionResponse.json() as { text: string; status: string };
+    expect(approvedTransition.status).toBe("approved");
+    expect(approvedTransition.text).toContain("[REDACTED]");
+    expect(approvedTransition.text).not.toContain(approveSecret);
+    const [approvedTransitionRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${proposedApproved.id}
+    `);
+    expect(approvedTransitionRow?.textHash).toBe(hashMemoryText(approvedTransition.text));
+    expect(approvedTransitionRow?.embeddingModel).toBeTruthy();
+    expect(approvedTransitionRow?.hasEmbedding).toBe(true);
+    for (const id of [proposedActive.id, proposedApproved.id]) {
+      const cleanupVisible = await app.request(workspacePath(workspaceId, `/knowledge/memories/${id}`), {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(cleanupVisible.status).toBe(200);
+    }
+
+    // PATCH status into the agent-visible set enforces the workspace cap.
+    const cappedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: "A proposed row to activate at cap." }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(cappedResponse.status).toBe(201);
+    const capped = await cappedResponse.json() as { id: string };
+    try {
+      await dbClient.db.execute(dbSql`
+        insert into knowledge_memories (account_id, workspace_id, status, kind, scope, text, text_hash)
+        select (select account_id from workspaces where id = ${workspaceId}::uuid), ${workspaceId}::uuid,
+               'active', 'semantic', 'workspace', 'patch-capfill ' || g, 'patch-caphash-' || g
+        from generate_series(1, ${MEMORY_VISIBLE_RECORD_CAP}) as g
+      `);
+      const activateAtCap = await app.request(workspacePath(workspaceId, `/knowledge/memories/${capped.id}`), {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(activateAtCap.status).toBe(400);
+      expect(await activateAtCap.text()).toContain("visible memory is full");
+    } finally {
+      await dbClient.db.execute(dbSql`
+        delete from knowledge_memories
+        where workspace_id = ${workspaceId}::uuid
+          and (text like 'patch-capfill %' or id = ${capped.id})
+      `);
+    }
+
+    const archiveResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "archived" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(archiveResponse.status).toBe(200);
+    expect((await archiveResponse.json() as { status: string }).status).toBe("archived");
+    // Archived rows drop out of search.
+    const afterArchive = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "deploy staging" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect((await afterArchive.json() as { results: Array<{ memory: { id: string } }> }).results.some((r) => r.memory.id === created.id)).toBe(false);
+
+    // Invalid params → 400 not 500.
+    const overLong = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ text: "x".repeat(5000) }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(overLong.status).toBe(400);
+    const badSearch = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ notAQuery: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(badSearch.status).toBe(400);
+
+    // Settings default off, PATCH round-trips + preserves unknown keys.
+    const beforeSettings = await app.request(workspacePath(workspaceId, ""));
+    const workspaceBefore = await beforeSettings.json() as { settings: Record<string, unknown> };
+    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
+
+    const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ someFutureKey: "keep-me" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(seedUnknown.status).toBe(200);
+    const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ memoryEnabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enableResponse.status).toBe(200);
+    const enabled = await enableResponse.json() as { settings: Record<string, unknown> };
+    expect(enabled.settings.memoryEnabled).toBe(true);
+    expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
@@ -3556,6 +3776,155 @@ describe("API component integration", () => {
       const pendingUpload = await pendingUploadResponse.json() as { fileId: string };
       expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: pendingUpload.fileId }))).toContain("file is pending_upload");
       expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: crypto.randomUUID() }))).toContain("File not found");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
+  test("exposes workspace memory tools through first-party MCP only when enabled and session-bound", async () => {
+    const appSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      delegationSecret: "test-delegation-secret",
+    });
+    const documentServices = createDocumentServices(appSettings);
+    const mcpApp = createApp({
+      settings: {
+        ...appSettings,
+        productAccessMode: "configured",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices,
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
+    const settings = {
+      ...appSettings,
+      mcpServers: [{
+        id: "opengeni",
+        name: "OpenGeni",
+        url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+        allowedTools: ["memory_search", "memory_save", "memory_correct"],
+        timeoutMs: undefined,
+        cacheToolsList: false,
+      }],
+    };
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const workspaceId = grant.workspaceId;
+      const accountId = grant.accountId;
+      const session = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "workspace memory MCP session",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: "test:mcp-memory-disabled",
+      });
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
+      await prepared.close();
+      prepared = null;
+
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: true });
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        subjectId: "test:mcp-memory-sessionless",
+      });
+      expect((await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name)).toEqual([]);
+      await prepared.close();
+      prepared = null;
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        subjectId: "test:mcp-memory-enabled",
+      });
+      const memoryTools = (await prepared.mcpServers[0]!.listTools()).map((tool) => tool.name).sort();
+      expect(memoryTools).toEqual(["opengeni__memory_correct", "opengeni__memory_save", "opengeni__memory_search"]);
+
+      const saved = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_save", {
+        text: "Staging deploys from main only, via opengeni-ops.",
+        kind: "procedural",
+        confidence: 0.91,
+      }))) as { memory: { id: string; status: string; kind: string; createdBySessionId: string | null; metadata: Record<string, unknown> }; deduped: boolean };
+      expect(saved.deduped).toBe(false);
+      expect(saved.memory).toMatchObject({
+        status: "active",
+        kind: "procedural",
+        createdBySessionId: session.id,
+        metadata: { origin: "agent" },
+      });
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
+        id: saved.memory.id,
+        status: "active",
+        createdBySessionId: session.id,
+        metadata: { origin: "agent" },
+      });
+
+      const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter((event) => event.type === "memory.saved");
+      expect(saveEvents).toHaveLength(1);
+      expect(saveEvents[0]?.payload).toMatchObject({
+        memoryId: saved.memory.id,
+        kind: "procedural",
+        preview: "Staging deploys from main only, via opengeni-ops.",
+      });
+      expect(((saveEvents[0]?.payload as { preview?: string }).preview ?? "").length).toBeLessThanOrEqual(120);
+
+      const search = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_search", {
+        query: "how does staging deploy",
+        limit: 3,
+      }))) as { results: Array<{ memory: { id: string; usageCount: number }; score: number; matchType: string }> };
+      expect(search.results[0]?.memory.id).toBe(saved.memory.id);
+      expect(search.results[0]!.score).toBeGreaterThan(0);
+      expect(search.results[0]!.memory.usageCount).toBe(1);
+
+      const superseded = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
+        id: saved.memory.id.slice(0, 8),
+        reason: "Deployment branch changed",
+        replacement_text: "Staging deploys from release only, via opengeni-ops.",
+      }))) as { action: string; memory: { id: string; status: string }; replacement: { id: string; status: string } | null };
+      expect(superseded.action).toBe("superseded");
+      expect(superseded.memory.id).toBe(saved.memory.id);
+      expect(superseded.replacement?.status).toBe("active");
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
+        status: "superseded",
+        supersededById: superseded.replacement!.id,
+      });
+
+      const archived = JSON.parse(mcpText(await prepared.mcpServers[0]!.callTool("opengeni__memory_correct", {
+        id: superseded.replacement!.id,
+        reason: "Staging deploy process moved into a runbook.",
+      }))) as { action: string; memory: { id: string; status: string }; replacement: null };
+      expect(archived.action).toBe("archived");
+      expect(archived.memory.status).toBe("archived");
+      expect(await getKnowledgeMemory(dbClient.db, workspaceId, superseded.replacement!.id)).toMatchObject({ status: "archived" });
+
+      const correctionEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter((event) => event.type === "memory.corrected");
+      expect(correctionEvents).toHaveLength(2);
+      expect(correctionEvents[0]?.payload).toMatchObject({
+        memoryId: saved.memory.id,
+        action: "superseded",
+        reason: "Deployment branch changed",
+        replacementMemoryId: superseded.replacement!.id,
+      });
+      expect(correctionEvents[1]?.payload).toMatchObject({
+        memoryId: superseded.replacement!.id,
+        action: "archived",
+        reason: "Staging deploy process moved into a runbook.",
+      });
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);
@@ -4375,6 +4744,9 @@ describe("API component integration", () => {
         url: upstream.url,
         headers: { authorization: requiredAuthorization },
       });
+      await dbClient.db.execute(dbSql`
+        update workspaces set settings = '{"memoryEnabled":true}'::jsonb where id = ${grant.workspaceId}
+      `);
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const toolspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:run-proxy",
@@ -4386,6 +4758,14 @@ describe("API component integration", () => {
       const listed = await toolspaceClient.mcpServers[0]!.listTools();
       const toolNames = listed.map((tool) => tool.name);
       expect(toolNames).toContain("toolspace__crm__search_documents");
+      // Toolspace is a narrowed proxy surface: the bare toolspace:call bearer
+      // does not receive unpermissioned first-party session tools, including
+      // workspace memory even when the workspace setting is enabled.
+      expect(toolNames).not.toContain("set_session_title");
+      expect(toolNames).not.toContain("goal_set");
+      expect(toolNames).not.toContain("memory_search");
+      expect(toolNames).not.toContain("memory_save");
+      expect(toolNames).not.toContain("memory_correct");
       expect(toolNames).not.toContain("session_create");
       expect(toolNames).not.toContain("mcp_servers_attach");
       expect(toolNames).not.toContain("environment_set_variable");
