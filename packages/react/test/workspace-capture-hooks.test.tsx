@@ -146,7 +146,7 @@ describe("useWorkspaceCapture", () => {
       });
       const hook = await renderHook(() => useWorkspaceCapture(SESSION_ID, { ...ctx, client }), undefined);
       await flush();
-      expect(fetched).toBe("https://blob.example/manifest.json");
+      expect(fetched as string | null).toBe("https://blob.example/manifest.json");
       expect(hook.result.current.revision).toBe(5);
       expect(hook.result.current.capture?.files[0]?.path).toBe("src/app.py");
       await hook.unmount();
