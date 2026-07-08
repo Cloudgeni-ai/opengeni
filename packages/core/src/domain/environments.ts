@@ -47,7 +47,7 @@ const reservedPrefixes = [
 
 export function assertAllowedVariableSetVariableName(name: string): void {
   if (reservedExactNames.has(name) || reservedPrefixes.some((prefix) => name.startsWith(prefix))) {
-    throw new HTTPException(422, { message: `reserved variable set variable name: ${name}` });
+    throw new HTTPException(422, { message: `reserved variable set variable name / reserved environment variable name: ${name}` });
   }
 }
 

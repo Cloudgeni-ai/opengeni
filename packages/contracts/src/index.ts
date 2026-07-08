@@ -2148,7 +2148,37 @@ function isSafePackSkillRelativePath(path: string): boolean {
   return path.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
-export const CapabilityPack = z.object({
+const CapabilityPackVariableSet = z.object({
+  description: z.string().min(1),
+  requiredVariables: z.array(VariableSetVariableName).default([]),
+  required: z.boolean().default(false),
+});
+
+export const CapabilityPack = z.preprocess((input) => {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input;
+  }
+  const record = input as Record<string, unknown>;
+  if (record.variableSet !== undefined) {
+    return record;
+  }
+  if (record.environment !== undefined) {
+    const { environment: _environment, ...rest } = record;
+    return { ...rest, variableSet: record.environment };
+  }
+  if (record.requiredVariables !== undefined) {
+    const { requiredVariables: _requiredVariables, ...rest } = record;
+    return {
+      ...rest,
+      variableSet: {
+        description: "Required variables",
+        requiredVariables: record.requiredVariables,
+        required: Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
+      },
+    };
+  }
+  return record;
+}, z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   description: z.string().min(1),
@@ -2174,13 +2204,9 @@ export const CapabilityPack = z.object({
   connectors: z.array(CapabilityPackConnector).default([]),
   knowledge: z.array(CapabilityPackKnowledge).default([]),
   scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-  variableSet: z.object({
-    description: z.string().min(1),
-    requiredVariables: z.array(VariableSetVariableName).default([]),
-    required: z.boolean().default(false),
-  }).optional(),
+  variableSet: CapabilityPackVariableSet.optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
-});
+}));
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
 
 // Registering a pack stores the manifest itself; the request body is a full

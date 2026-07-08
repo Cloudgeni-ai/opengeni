@@ -47,6 +47,12 @@ export async function requireAccessGrant(c: Context, deps: AccessDeps, workspace
 
 export function requirePermission(grant: AccessGrant, permission: Permission): void {
   if (!hasPermission(grant.permissions, permission)) {
+    if (permission === "variable-sets:use") {
+      throw new HTTPException(403, { message: "missing permission: variable-sets:use (deprecated alias: environments:use)" });
+    }
+    if (permission === "variable-sets:manage") {
+      throw new HTTPException(403, { message: "missing permission: variable-sets:manage (deprecated alias: environments:manage)" });
+    }
     throw new HTTPException(403, { message: `missing permission: ${permission}` });
   }
 }

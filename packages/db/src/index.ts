@@ -3887,6 +3887,31 @@ export async function getVariableSetValuesForRun(db: Database, workspaceId: stri
   });
 }
 
+/** @deprecated use createVariableSet */
+export const createWorkspaceEnvironment = createVariableSet;
+/** @deprecated use listVariableSets */
+export const listWorkspaceEnvironments = listVariableSets;
+/** @deprecated use getVariableSet */
+export const getWorkspaceEnvironment = getVariableSet;
+/** @deprecated use getVariableSetByName */
+export const getWorkspaceEnvironmentByName = getVariableSetByName;
+/** @deprecated use updateVariableSet */
+export const updateWorkspaceEnvironment = updateVariableSet;
+/** @deprecated use deleteVariableSet */
+export const deleteWorkspaceEnvironment = deleteVariableSet;
+/** @deprecated use countVariableSets */
+export const countWorkspaceEnvironments = countVariableSets;
+/** @deprecated use countScheduledTasksUsingVariableSet */
+export const countScheduledTasksUsingEnvironment = countScheduledTasksUsingVariableSet;
+/** @deprecated use countActiveSessionsUsingVariableSet */
+export const countActiveSessionsUsingEnvironment = countActiveSessionsUsingVariableSet;
+/** @deprecated use setVariableSetVariable */
+export const setWorkspaceEnvironmentVariable = setVariableSetVariable;
+/** @deprecated use deleteVariableSetVariable */
+export const deleteWorkspaceEnvironmentVariable = deleteVariableSetVariable;
+/** @deprecated use getVariableSetValuesForRun */
+export const getWorkspaceEnvironmentValuesForRun = getVariableSetValuesForRun;
+
 export type VariableSetForRun = {
   id: string;
   name: string;

@@ -915,33 +915,40 @@ function registerVariableSetTools(
     server.registerTool(name, {
       description,
       inputSchema: {},
-    }, async () => json({ variableSets: await listVariableSets(deps.db, grant.workspaceId) }));
+    }, async () => {
+      const variableSets = await listVariableSets(deps.db, grant.workspaceId);
+      return json({ variableSets, environments: variableSets });
+    });
   };
-  const setVariableHandler = async ({ variableSetId, variableSetName, name, value }: {
+  const setVariableHandler = async ({ variableSetId, variableSetName, environmentId, environmentName, name, value }: {
     variableSetId?: string | undefined;
     variableSetName?: string | undefined;
+    environmentId?: string | undefined;
+    environmentName?: string | undefined;
     name: string;
     value: string;
   }) => {
     const key = requireVariableSetEncryption(deps.settings);
     const parsedName = VariableSetVariableName.safeParse(name);
     if (!parsedName.success) {
-      throw new Error("variable set variable names must match ^[A-Z][A-Z0-9_]*$");
+      throw new Error("variable set/environment variable names must match ^[A-Z][A-Z0-9_]*$");
     }
     assertAllowedVariableSetVariableName(parsedName.data);
-    if ((variableSetId === undefined) === (variableSetName === undefined)) {
-      throw new Error("provide exactly one of variableSetId or variableSetName");
+    const targetId = variableSetId ?? environmentId;
+    const targetName = variableSetName ?? environmentName;
+    if ((targetId === undefined) === (targetName === undefined)) {
+      throw new Error("provide exactly one of variableSetId or variableSetName; deprecated aliases must provide exactly one of environmentId or environmentName");
     }
-    const trimmedVariableSetName = variableSetName?.trim();
-    if (variableSetName !== undefined && !trimmedVariableSetName) {
+    const trimmedVariableSetName = targetName?.trim();
+    if (targetName !== undefined && !trimmedVariableSetName) {
       throw new Error("variable set name is required");
     }
     let created = false;
-    let variableSet = variableSetId !== undefined
-      ? await getVariableSet(deps.db, grant.workspaceId, variableSetId)
+    let variableSet = targetId !== undefined
+      ? await getVariableSet(deps.db, grant.workspaceId, targetId)
       : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
-    if (!variableSet && variableSetId !== undefined) {
-      throw new Error("variable set not found");
+    if (!variableSet && targetId !== undefined) {
+      throw new Error("variable set/environment not found");
     }
     if (!variableSet) {
       if (await countVariableSets(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
@@ -967,8 +974,10 @@ function registerVariableSetTools(
       valueEncrypted: encryptVariableSetValue(key, value),
     });
     await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.variable.set", variableSetId: variableSet.id, variableName: parsedName.data });
+    const responseVariableSet = { id: variableSet.id, name: variableSet.name, created };
     return json({
-      variableSet: { id: variableSet.id, name: variableSet.name, created },
+      variableSet: responseVariableSet,
+      environment: responseVariableSet,
       variable: metadata,
     });
   };
@@ -978,6 +987,8 @@ function registerVariableSetTools(
       inputSchema: {
         variableSetId: z4.string().uuid().optional(),
         variableSetName: z4.string().min(1).optional(),
+        environmentId: z4.string().uuid().optional(),
+        environmentName: z4.string().min(1).optional(),
         name: z4.string().min(1),
         value: z4.string().min(1).max(32768),
       },
