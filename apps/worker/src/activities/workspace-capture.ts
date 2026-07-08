@@ -62,9 +62,87 @@ export const WHOLE_CAPTURE_GUARD_BYTES = 200 * 1024 * 1024; // total → skip, f
 export const KEEP_LATEST_REVISIONS = 10;
 // Directories listed as collapsed nodes in the tree index but NEVER descended
 // (their contents live on the machine — the Files tab wakes to expand them).
+//
+// Two classes:
+//  • BUILD/DEP residue — huge, machine-resident, never review content.
+//  • DESKTOP/SYSTEM residue (the Modal desktop-box fix): on a desktop image the
+//    workspace root IS $HOME, and XFCE/dbus/etc. CONTINUOUSLY rewrite dotfiles
+//    under ~/.config/xfce4, ~/.cache, ~/.dbus, … A tree walk that descends into
+//    them (a) wastes the round-trip budget on churn no user is reviewing and
+//    (b) races files that VANISH mid-walk. These are never workspace content, so
+//    collapse them at the source. Legit hidden entries a user DOES author
+//    (.gitignore, .env, .github, .vscode, .devcontainer) are deliberately NOT
+//    here — they stay fully visible.
 export const RESIDUE_DIRS: readonly string[] = [
+  // build/dep residue
   "node_modules", ".git", "dist", "build", "target", ".venv", "__pycache__", ".next",
+  // desktop/system residue (never workspace content; churned by the desktop stack)
+  ".config", ".cache", ".local", ".dbus", ".gnupg", ".ssh", ".mozilla", ".xfce4",
+  ".pki", ".gvfs", ".dbus-keyrings", ".Xauthority", ".ICEauthority",
 ];
+const RESIDUE_DIR_SET: ReadonlySet<string> = new Set(RESIDUE_DIRS);
+
+/**
+ * True when a workspace-relative FILE path lives INSIDE a residue dir — i.e. a
+ * residue dir is one of its ANCESTOR segments (not the leaf), so the file is
+ * churn/machine content never worth an after-image. `.config/xfce4/xfconf/…` and
+ * `.config/mimeapps.list` → true; a root FILE literally named `.config` (a user
+ * config the seed edits) → false (single segment, no residue ancestor); and
+ * `.github/x.yml`, `.gitignore` → false (`.github`/`.gitignore` are not residue).
+ * Matches the tree-BFS collapse (which collapses residue DIR nodes) so the
+ * Changes tab and the tree agree on what is workspace content.
+ */
+export function isUnderResidueDir(wsPath: string): boolean {
+  const segments = wsPath.split("/");
+  // Check ancestors only (every segment except the leaf): the leaf is the file
+  // itself; a residue-named file at the root is still legitimate content.
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    if (seg && RESIDUE_DIR_SET.has(seg)) return true;
+  }
+  return false;
+}
+
+/**
+ * The box is being torn down under us (Modal reclaim / reaper drain / terminate)
+ * — NOT a single file vanishing. Every subsequent op will fail too, so the
+ * capture must ABORT (throw) rather than skip-and-continue, so it never commits a
+ * bogus empty/partial revision for a dead box. Matched loosely so a provider
+ * wording tweak still classifies. (The real fix for this is keeping the box
+ * pinned through the capture window — sandbox-resume / agent-turn lease
+ * heartbeat; this classifier only guarantees we fail HONESTLY if it still races.)
+ */
+export function isBoxExitingError(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+  return (
+    msg.includes("container exiting")
+    || msg.includes("container is exiting")
+    || msg.includes("container exited")
+    || msg.includes("sandbox has been terminated")
+    || msg.includes("sandbox is not running")
+    || msg.includes("sandbox has terminated")
+    || msg.includes("task has exited")
+  );
+}
+
+/** Marker thrown when the box died mid-capture — aborts cleanly (no partial row). */
+export class BoxExitingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BoxExitingError";
+  }
+}
+
+/** Re-throw as a BoxExitingError when the box is gone; otherwise return null so
+ *  the caller SKIPS this single entry (a vanished/unreadable file) and continues.
+ *  One churning file must never kill the capture; a dead box must never yield a
+ *  bogus revision. */
+function classifyCaptureEntryError(error: unknown): BoxExitingError | null {
+  if (isBoxExitingError(error)) {
+    return new BoxExitingError(error instanceof Error ? error.message : String(error));
+  }
+  return null;
+}
 const TREE_MAX_ENTRIES = 20_000; // whole-tree node cap (truncate beyond)
 const TREE_MAX_DIRS = 600; // BFS round-trip cap (bounds turn-end latency)
 
@@ -159,20 +237,38 @@ async function runCapture(
   let deletions = 0;
 
   for (const root of repoRoots) {
-    const status = await svc.gitStatus({ path: root });
+    // Per-repo resilience: a box death aborts the whole capture (BoxExitingError
+    // propagates); any other single-repo failure (a repo that vanished, a
+    // transient git error) SKIPS that repo and the capture continues with the
+    // rest. One flaky repo must never kill the capture.
+    let status: Awaited<ReturnType<typeof svc.gitStatus>>;
+    try {
+      status = await svc.gitStatus({ path: root });
+    } catch (error) {
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      continue;
+    }
     if (!status.isRepo) continue;
     // `git diff HEAD`: combined staged+unstaged tracked changes vs HEAD (the
     // review diff). Untracked files are absent here but present in status.files
     // and captured as after-images. A repo with no commits yields an empty diff
     // (git diff HEAD errors → empty numstat) and everything reads as untracked.
-    const diff = await svc.gitDiff({
-      path: root,
-      staged: false,
-      fromRef: "HEAD",
-      pathspec: [],
-      contextLines: 3,
-      maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
-    });
+    let diff: Awaited<ReturnType<typeof svc.gitDiff>>;
+    try {
+      diff = await svc.gitDiff({
+        path: root,
+        staged: false,
+        fromRef: "HEAD",
+        pathspec: [],
+        contextLines: 3,
+        maxBytesPerFile: PER_FILE_DIFF_GUARD_BYTES,
+      });
+    } catch (error) {
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      diff = { files: [], revision: 0 };
+    }
     repos.push({
       root,
       head: status.head,
@@ -189,6 +285,12 @@ async function runCapture(
     }
     for (const f of status.files) {
       const wsPath = joinRepoPath(root, f.path);
+      // Skip desktop/system residue churn (~/.config/xfce4/…): on a desktop box
+      // the workspace root is $HOME, so git reports the continuously-rewritten
+      // XFCE/cache dotfiles as untracked. They are never review content — dropping
+      // them here keeps the after-image loop off churn AND matches the tree BFS's
+      // residue collapse (Changes tab and tree agree on what is workspace content).
+      if (isUnderResidueDir(wsPath)) continue;
       touched.set(wsPath, {
         status: statusCodeOf(f),
         deleted: f.worktree === "deleted" || f.index === "deleted",
@@ -228,7 +330,21 @@ async function runCapture(
     // Always request base64 so we get raw bytes uniformly (text or binary) for
     // content-addressing. maxBytes caps the read at the 5MB guard; `truncated`
     // means the file is ≥5MB → we record a tooLarge marker (no content blob).
-    const read = await svc.fsRead({ path: wsPath, encoding: "base64", maxBytes: PER_FILE_CONTENT_GUARD_BYTES });
+    //
+    // Per-file resilience: a file the box reported as changed can VANISH or turn
+    // unreadable between git-status and this read (fs churn, a follow-up mutation,
+    // a race). That must NEVER abort the whole capture — skip the one entry and
+    // keep the rest. A box-death error is different: it aborts (BoxExitingError),
+    // because every remaining read would fail too and we must not commit a partial
+    // revision for a dead box.
+    let read: Awaited<ReturnType<typeof svc.fsRead>>;
+    try {
+      read = await svc.fsRead({ path: wsPath, encoding: "base64", maxBytes: PER_FILE_CONTENT_GUARD_BYTES });
+    } catch (error) {
+      const boxExiting = classifyCaptureEntryError(error);
+      if (boxExiting) throw boxExiting;
+      continue; // vanished/unreadable single file — omit it, capture continues
+    }
     if (read.truncated) {
       tooLargeCount += 1;
       files.push({
@@ -473,7 +589,20 @@ async function buildTreeIndex(
     if (Date.now() - startedAt > CAPTURE_TIMEOUT_MS - 5_000) { truncated = true; break; } // leave headroom for PUTs
     const dir = queue.shift()!;
     dirCalls += 1;
-    const listing = await svc.fsList({ path: dir, depth: 1, maxEntries: 2_000, includeHidden: true });
+    // Per-dir resilience: a directory can vanish or fail to list mid-walk (fs
+    // churn on a desktop box, a permission edge). Skip the one directory and keep
+    // walking the rest — a single unreadable dir must never abort the tree index.
+    // A box death still aborts the whole capture (BoxExitingError).
+    let listing: Awaited<ReturnType<typeof svc.fsList>>;
+    try {
+      listing = await svc.fsList({ path: dir, depth: 1, maxEntries: 2_000, includeHidden: true });
+    } catch (error) {
+      if (isBoxExitingError(error)) {
+        throw new BoxExitingError(error instanceof Error ? error.message : String(error));
+      }
+      truncated = true; // this subtree is incomplete; continue with the rest
+      continue;
+    }
     if (listing.truncated) truncated = true;
     const parent = byPath.get(dir) ?? root;
     const children = collectImmediateChildren(listing.root);
@@ -493,7 +622,7 @@ async function buildTreeIndex(
       byPath.set(node.path, node);
       entryCount += 1;
       if (node.type === "dir") {
-        if (RESIDUE_DIRS.includes(node.name)) {
+        if (RESIDUE_DIR_SET.has(node.name)) {
           node.truncated = true; // collapsed residue dir — contents on the machine
         } else {
           queue.push(node.path);

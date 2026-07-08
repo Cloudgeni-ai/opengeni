@@ -17,7 +17,10 @@ import type { ObjectStorage } from "@opengeni/storage";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import {
   blobKey,
+  BoxExitingError,
   captureWorkspaceRevision,
+  isBoxExitingError,
+  isUnderResidueDir,
   joinRepoPath,
   KEEP_LATEST_REVISIONS,
   PER_FILE_CONTENT_GUARD_BYTES,
@@ -69,6 +72,60 @@ describe("workspace-capture — guard constants", () => {
     expect(KEEP_LATEST_REVISIONS).toBe(10);
     expect(RESIDUE_DIRS).toContain("node_modules");
     expect(RESIDUE_DIRS).toContain(".git");
+  });
+
+  test("RESIDUE_DIRS excludes the desktop/system dotfile dirs the Modal desktop box churns", () => {
+    // The Modal desktop box's workspace root IS $HOME, and XFCE/dbus/etc.
+    // continuously rewrite these — capturing them raced files that vanished
+    // mid-walk and aborted the whole capture (0/3 on staging). They are never
+    // review content, so the tree walk collapses them and the after-image loop
+    // skips them. (Regression guard for the S2 fix.)
+    for (const dir of [".config", ".cache", ".local", ".dbus", ".gnupg", ".ssh", ".mozilla", ".xfce4"]) {
+      expect(RESIDUE_DIRS).toContain(dir);
+    }
+    // But legit hidden entries a user authors stay VISIBLE (never residue).
+    for (const keep of [".github", ".gitignore", ".env", ".vscode", ".devcontainer"]) {
+      expect(RESIDUE_DIRS).not.toContain(keep);
+    }
+  });
+});
+
+describe("workspace-capture — residue-path classification (S2 desktop-box fix)", () => {
+  test("paths inside a residue dir are excluded; authored hidden files are kept", () => {
+    // The exact staging churn path that aborted capture.
+    expect(isUnderResidueDir(".config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml")).toBe(true);
+    expect(isUnderResidueDir(".config/mimeapps.list")).toBe(true); // a file directly inside a residue dir
+    expect(isUnderResidueDir(".config")).toBe(false); // a root FILE named .config is legit user content
+    expect(isUnderResidueDir(".cache/pip/http/abc")).toBe(true);
+    expect(isUnderResidueDir("web/node_modules/react/index.js")).toBe(true); // residue at any depth
+    expect(isUnderResidueDir(".ssh/id_ed25519")).toBe(true);
+    // Kept — real workspace content with leading dots.
+    expect(isUnderResidueDir(".github/workflows/ci.yml")).toBe(false);
+    expect(isUnderResidueDir(".gitignore")).toBe(false);
+    expect(isUnderResidueDir("src/.env.local")).toBe(false);
+    expect(isUnderResidueDir("data.txt")).toBe(false);
+  });
+});
+
+describe("workspace-capture — box-exit vs vanished-file classification (S2)", () => {
+  test("box-death errors abort; a plain vanished-file error does not", () => {
+    // The exact production error: a fsRead whose inner cause is the box tearing
+    // down. MUST classify as box-exiting so the capture aborts (no bogus row)
+    // rather than skip-and-continue.
+    expect(isBoxExitingError(new Error("file not found: .config (request cancelled due to container exiting)"))).toBe(true);
+    expect(isBoxExitingError(new Error("request cancelled due to container exiting"))).toBe(true);
+    expect(isBoxExitingError(new Error("sandbox is not running"))).toBe(true);
+    expect(isBoxExitingError("the sandbox has been terminated")).toBe(true);
+    // A genuine single-file vanish (no box death) → NOT box-exiting → skip + continue.
+    expect(isBoxExitingError(new Error("file not found: notes.txt"))).toBe(false);
+    expect(isBoxExitingError(new Error("ENOENT: no such file or directory"))).toBe(false);
+    expect(isBoxExitingError(new Error("failed to write foo: exit 1"))).toBe(false);
+  });
+
+  test("BoxExitingError is a distinct, named error type", () => {
+    const e = new BoxExitingError("container exiting");
+    expect(e).toBeInstanceOf(Error);
+    expect(e.name).toBe("BoxExitingError");
   });
 });
 
