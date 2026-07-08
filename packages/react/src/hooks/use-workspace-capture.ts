@@ -28,6 +28,12 @@ export type UseWorkspaceCaptureResult = {
   capturedAt: string | null;
   /** Whether a capture is available at all (the `{available:false}` discriminator). */
   available: boolean;
+  /** The changed-file count from the capture's stats, resolved on the FIRST GET
+   *  (from the response's top-level `stats`, before any manifest-URL hop). null
+   *  until that first resolve; 0 when no capture exists. This is the pre-paint
+   *  "changes exist?" signal the dock uses to pick its default tab with no
+   *  embedder events-at-mount contract. */
+  fileCount: number | null;
   /** A newer revision has been ANNOUNCED than the one currently loaded (a refresh
    *  is in flight or pending). M5's source badge can show a subtle "updating…". */
   isStale: boolean;
@@ -57,6 +63,9 @@ export function useWorkspaceCapture(
 
   const [capture, setCapture] = useState<WorkspaceCaptureManifest | null>(null);
   const [available, setAvailable] = useState(false);
+  // Resolved from the FIRST GET's top-level stats (before any manifest-URL hop),
+  // so the dock can pick its default tab as early as possible. null until then.
+  const [fileCount, setFileCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   // The highest revision ANNOUNCED on the event log — compared against the loaded
@@ -78,8 +87,12 @@ export function useWorkspaceCapture(
       if (!res.available) {
         setCapture(null);
         setAvailable(false);
+        setFileCount(0);
         return;
       }
+      // Resolve the changed-file count immediately from the response's stats — the
+      // default-tab signal must not wait on a >2MB manifest-URL hop.
+      setFileCount(res.stats.fileCount);
       // Exactly one of manifest / manifestUrl is non-null (M2 contract). The inline
       // manifest is the <200ms common case; a >2MB manifest is a signed URL hop.
       let manifest = res.manifest;
@@ -114,6 +127,7 @@ export function useWorkspaceCapture(
     if (!enabled) {
       setCapture(null);
       setAvailable(false);
+      setFileCount(null);
       setAnnouncedRevision(null);
       return;
     }
@@ -160,6 +174,7 @@ export function useWorkspaceCapture(
     revision: loadedRevision,
     capturedAt: capture?.capturedAt ?? null,
     available,
+    fileCount,
     isStale,
     loading,
     error,

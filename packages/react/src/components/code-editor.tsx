@@ -106,6 +106,10 @@ export type CodeEditorProps = {
   initialContents: string;
   /** Persist the current buffer. Resolves when the write lands; rejects to surface an error. */
   onSave: (contents: string) => Promise<unknown>;
+  /** Fired once when the buffer FIRST diverges from its baseline (the first real
+   *  keystroke) — the wake-on-edit intent. The host warms the box on this so the
+   *  eventual save lands fast; merely opening the file for reading never fires it. */
+  onEditIntent?: (() => void) | undefined;
   /** Read-only mode (e.g. a truncated/too-large file shown for reference only). */
   readOnly?: boolean | undefined;
   themeType?: "dark" | "light" | undefined;
@@ -132,6 +136,7 @@ export function CodeEditor({
   path,
   initialContents,
   onSave,
+  onEditIntent,
   readOnly = false,
   themeType = "dark",
   loading,
@@ -155,17 +160,34 @@ export function CodeEditor({
   // Reload the buffer when the file identity changes. Guard on initialContents
   // too so an external refresh of the SAME path (e.g. fs.changed re-read) reseeds
   // a clean buffer — but only when the user hasn't got unsaved edits in flight.
+  // Fire the wake-on-edit intent at most once per opened file — reset on re-seed.
+  const editIntentFiredRef = useRef(false);
   const lastSeed = useRef<{ path: string; contents: string }>({ path, contents: initialContents });
   useEffect(() => {
     const seedChanged =
       lastSeed.current.path !== path || lastSeed.current.contents !== initialContents;
     if (!seedChanged) return;
     lastSeed.current = { path, contents: initialContents };
+    editIntentFiredRef.current = false;
     setValue(initialContents);
     setBaseline(initialContents);
     setSaveError(null);
     setSavedTick(false);
   }, [path, initialContents]);
+
+  // Record a buffer change: the FIRST divergence from the baseline is the edit
+  // intent that warms the box (idempotent — latched per opened file).
+  const noteEdit = useCallback(
+    (next: string) => {
+      setValue(next);
+      setSavedTick(false);
+      if (!editIntentFiredRef.current && next !== baseline) {
+        editIntentFiredRef.current = true;
+        onEditIntent?.();
+      }
+    },
+    [baseline, onEditIntent],
+  );
 
   // Resolve the lazy bundle (editor + keymap/Prec helpers + language grammar)
   // once, re-resolving the grammar when the file's language class changes.
@@ -261,10 +283,7 @@ export function CodeEditor({
           <PlainTextarea
             value={value}
             readOnly={readOnly}
-            onChange={(next) => {
-              setValue(next);
-              setSavedTick(false);
-            }}
+            onChange={noteEdit}
           />
         )}
       </div>
@@ -348,14 +367,7 @@ export function CodeEditor({
             extensions={cmExtensions}
             height="100%"
             className="og-cm-editor min-h-full text-og-sm"
-            onChange={
-              readOnly
-                ? undefined
-                : (next: string) => {
-                    setValue(next);
-                    setSavedTick(false);
-                  }
-            }
+            onChange={readOnly ? undefined : noteEdit}
           />
         </Suspense>
       </div>

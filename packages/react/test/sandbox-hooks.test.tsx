@@ -231,6 +231,56 @@ describe("useSessionCapabilities", () => {
     await hook.unmount();
   });
 
+  test("attachFiles warms even a COLD box — wake-on-edit cold-creates (Refinement 1)", async () => {
+    // Edit intent legitimately spins a cold box up (that IS the wake). The old
+    // "keep-warm-only-if-already-warm" guard is gone: attachFiles now attaches on a
+    // cold lease, minting a holder with desktop:false (no un-redacted consent gate).
+    let attachCalls = 0;
+    let attachOpts: { desktop?: boolean } | null = null;
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeColdCapabilities(),
+      attachViewer: async (_w: string, _s: string, opts: { desktop?: boolean }) => {
+        attachCalls += 1;
+        attachOpts = opts;
+        return fakeAttachResponse();
+      },
+      heartbeatViewer: async () => ({ alive: true }),
+      detachViewer: async () => {},
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachFiles: true }),
+      undefined,
+    );
+    await flush();
+    expect(attachCalls).toBe(1);
+    expect(attachOpts).not.toBeNull();
+    expect((attachOpts as { desktop?: boolean }).desktop).toBe(false);
+    // A holder was minted → the box is live, not resting on the benign on-demand state.
+    expect(hook.result.current.state).toBe("ready");
+    await hook.unmount();
+  });
+
+  test("no attach intent: a cold session NEVER calls attachViewer — browsing is free (Refinement 1)", async () => {
+    // With no desktop/terminal/edit intent, a cold lease must warm nothing: reviewing
+    // capture-served Changes/Files costs zero Modal box-hours.
+    let attachCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeColdCapabilities(),
+      attachViewer: async () => {
+        attachCalls += 1;
+        return fakeAttachResponse();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 20 }),
+      undefined,
+    );
+    await flush(80);
+    expect(attachCalls).toBe(0);
+    expect(hook.result.current.state).toBe("on-demand");
+    await hook.unmount();
+  });
+
   test("disabled hook stays idle (panel collapsed)", async () => {
     const client = fakeClient({ getStreamCapabilities: async () => fakeCapabilities() });
     const hook = await renderHook(

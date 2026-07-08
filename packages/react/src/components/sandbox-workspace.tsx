@@ -52,11 +52,16 @@ export const WORKBENCH_TAB_CHANGES = "changes";
 export const WORKBENCH_TAB_FILES = "files";
 
 /**
- * Decide the initial workspace tab BEFORE first paint from already-local data:
- * the newest `workspace.revision.captured` announce in the event log carries the
- * change surface stats, so "changes exist → Changes, else Files" is decided with
- * zero machine round-trips and no post-render tab switch (dossier §3 #6 / §12-D1).
- * A host `override` (e.g. a landing "run" tab) wins when supplied.
+ * Decide a workspace tab from an already-local event log: the newest
+ * `workspace.revision.captured` announce carries the change surface stats, so
+ * "changes exist → Changes, else Files" needs zero machine round-trips. A host
+ * `override` (e.g. a landing "run" tab) wins when supplied.
+ *
+ * NOTE: the dock no longer uses this for its default tab — `<SandboxWorkspace>`
+ * now derives the default from its OWN capture fetch (`useWorkspaceCapture`'s
+ * `fileCount`), so a pure embedder needs no events-at-mount contract (Refinement
+ * 2). This remains exported as a standalone helper for hosts that already hold
+ * the event log and want the same decision without the capture fetch.
  */
 export function initialWorkspaceTab(events: SessionEvent[] | undefined, override?: string | null): string {
   if (override) return override;
@@ -118,9 +123,9 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   sessionId: string;
   /** Live event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];
-  /** Whether the Files tab is the one on screen. Drives the warm-box viewer
-   *  holder so Channel-A fs ops are ~100ms (warm) instead of ~5s (cold resume). */
-  filesActive?: boolean | undefined;
+  /** Override the capture-driven default tab (e.g. a host landing tab id). When
+   *  omitted the workbench picks Changes-vs-Files from its own capture fetch. */
+  initialTab?: string | null | undefined;
   /** Host-routed notifications (mutation errors, desktop-consent failures). The
    *  package never imports a toast library — the host decides how to surface. */
   onNotify?: ((notification: WorkspaceNotification) => void) | undefined;
@@ -129,9 +134,12 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
 export type UseSandboxWorkspaceTabsResult = {
   /** Changes | Files | Terminal | Desktop (capability-gated where noted). */
   tabs: WorkspaceTab[];
-  /** The pre-paint default tab (Changes when the session has changes, else Files).
-   *  Frozen at mount so it never causes a post-render switch. */
-  defaultTab: string;
+  /** The capture-driven default tab: Changes when the session has changes, else
+   *  Files (a host `initialTab` overrides). null during the brief window before the
+   *  capture GET first resolves (and no host override was given) — consumers render
+   *  their dock's own first-tab fallback until it latches, which it does ONCE, so it
+   *  never causes a post-render switch. */
+  defaultTab: string | null;
   /** The machine-state model for the dock-header chip. */
   machine: WorkspaceMachine;
 };
@@ -143,12 +151,17 @@ export type UseSandboxWorkspaceTabsResult = {
  */
 export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions): UseSandboxWorkspaceTabsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const { sessionId, events, filesActive = false, onNotify } = options;
+  const { sessionId, events, onNotify } = options;
+  const initialTab = options.initialTab ?? null;
 
-  // Desktop watch consent (off by default) and terminal engagement (flips true on
-  // interact, never on mount) — the two interactions that warm the box.
+  // The three — and only three — box-warming INTENTS, each off by default and each
+  // flipped true by a genuine user action (never on mount, never on a passive
+  // capture glance): desktop watch consent, terminal engagement (`onActivate`), and
+  // the first wake-on-edit keystroke in the Files editor. Browsing capture-served
+  // Changes/Files warms nothing — that is the whole point of Refinement 1.
   const [watchDesktop, setWatchDesktop] = useState(false);
   const [warmTerminal, setWarmTerminal] = useState(false);
+  const [warmEdit, setWarmEdit] = useState(false);
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Polls slowly — ambient context.
@@ -162,7 +175,9 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
     events,
     attachDesktop: watchDesktop,
     attachTerminal: warmTerminal,
-    attachFiles: filesActive,
+    // Edit intent only — NOT "the Files tab is open". A cold edit warms the box
+    // (that is the wake); a cold glance at the tree/diff does not.
+    attachFiles: warmEdit,
   });
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
@@ -277,13 +292,27 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm: warmTerminal || watchDesktop,
+    wantsWarm: warmTerminal || watchDesktop || warmEdit,
     capturedAt: captureState.capturedAt,
   });
 
-  // Freeze the pre-paint default tab at mount so live data can never switch it.
+  // The pre-paint default tab, decided from the workbench's OWN capture fetch — no
+  // embedder events-at-mount contract (Refinement 2). A host `initialTab` wins
+  // immediately; otherwise the default stays null until the capture GET first
+  // resolves, then latches Changes (changes exist) or Files, ONCE — live data can
+  // never switch it afterward. Committing at first-resolve — before the tab body's
+  // first CONTENT paint (both bodies show a connecting/loading state until the
+  // capture lands) — means the first real content is the correct tab, no switch. A
+  // pure embedder that never preloads events now gets the right default for free.
   const defaultTabRef = useRef<string | null>(null);
-  if (defaultTabRef.current === null) defaultTabRef.current = initialWorkspaceTab(events);
+  if (defaultTabRef.current === null) {
+    if (initialTab) {
+      defaultTabRef.current = initialTab;
+    } else if (captureState.fileCount !== null) {
+      defaultTabRef.current = captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+    }
+  }
+  // null only during the brief pre-first-resolve window (no host override yet).
   const defaultTab = defaultTabRef.current;
 
   const tabs = useMemo(() => {
@@ -319,6 +348,9 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
           editable={filesEditable}
+          // The first keystroke in the editor is the wake-on-edit INTENT: warm the
+          // box (even cold) so the write lands fast. Opening/reading files does not.
+          onEditIntent={() => setWarmEdit(true)}
           className="h-full"
         />
       ),
@@ -450,22 +482,22 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     className,
   } = props;
 
-  // The active tab is owned here (controlled on the dock) and seeded pre-paint so
-  // there is no post-render switch and no layout shift (D1). Frozen once.
-  const [activeTab, setActiveTab] = useState<string>(() => initialWorkspaceTab(events, initialTab));
-
-  // The Files surface holds the box warm only while it is actually on screen.
-  const isCollapsed = collapsed ?? false;
-  const filesActive = !isCollapsed && activeTab === WORKBENCH_TAB_FILES;
-
-  const { tabs: workbenchTabs, machine } = useSandboxWorkspaceTabs({
+  const { tabs: workbenchTabs, machine, defaultTab } = useSandboxWorkspaceTabs({
     ...(props.client ? { client: props.client } : {}),
     ...(props.workspaceId ? { workspaceId: props.workspaceId } : {}),
     sessionId,
     events,
-    filesActive,
+    ...(initialTab ? { initialTab } : {}),
     ...(onNotify ? { onNotify } : {}),
   });
+
+  // A user's tab click wins forever; before that we follow the capture-driven
+  // default. While it is still resolving (null, pure-embedder pre-first-resolve)
+  // we pass no controlled tab, so the dock renders its own first-tab fallback
+  // (Changes) — whose body is a connecting/loading state until the capture lands,
+  // so committing the real default at first-resolve produces no CONTENT switch.
+  const [selectedTab, setSelectedTab] = useState<string | null>(null);
+  const activeTab = selectedTab ?? defaultTab ?? undefined;
 
   const tabs: WorkspaceTab[] = [...(leadingTabs ?? []), ...workbenchTabs, ...(trailingTabs ?? [])];
 
@@ -473,8 +505,8 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     <WorkspaceDock
       primary={primary}
       tabs={tabs}
-      activeTab={activeTab}
-      onActiveTabChange={setActiveTab}
+      {...(activeTab !== undefined ? { activeTab } : {})}
+      onActiveTabChange={setSelectedTab}
       headerAccessory={
         <MachineStateChip
           chip={machine.chip}

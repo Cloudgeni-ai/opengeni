@@ -23,6 +23,10 @@ export type SandboxFilesProps = {
   /** Allow in-place editing of tree files (CodeMirror). Default true. When false
    *  the surface is review-only: every text file opens in the read-only viewer. */
   editable?: boolean | undefined;
+  /** Fired once when the user first edits an open file (wake-on-edit intent). The
+   *  dock warms the box on this so the save lands fast; opening/reading never fires
+   *  it. Browsing the tree/diff must not warm a box. */
+  onEditIntent?: (() => void) | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -40,6 +44,7 @@ export function SandboxFiles({
   fileSystemAvailable = true,
   usePierre = true,
   editable = true,
+  onEditIntent,
   themeType,
   className,
 }: SandboxFilesProps) {
@@ -159,6 +164,7 @@ export function SandboxFiles({
                   initialContents={fileView.content}
                   themeType={resolvedTheme}
                   onSave={(contents) => files.writeFile(viewPath, contents)}
+                  {...(onEditIntent ? { onEditIntent } : {})}
                   className="h-full"
                 />
               ) : fileView.error ? (

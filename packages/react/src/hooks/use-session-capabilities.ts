@@ -49,15 +49,18 @@ export type UseSessionCapabilitiesOptions = ClientOverride & {
    */
   attachTerminal?: boolean | undefined;
   /**
-   * Whether to acquire a viewer holder purely to KEEP THE BOX WARM while the
-   * structured Files surface is open. Shares the SAME viewer attach as the
-   * desktop/terminal (one warm box, one holder) and — like the terminal — needs
-   * NO un-redacted acknowledgment: listing/reading/writing files is the ordinary
-   * Channel-A control plane, not the pixel plane. Default false: the Files tab
-   * negotiates read-only and each op pays the cold-box resume (~5s). When true,
-   * the holder warms the box once and heartbeats it, so subsequent fs ops are
-   * ~100ms instead of re-resuming the box on every list/write. It folds NO live
-   * URL (files ride the stateless HTTP plane) — it only refcounts liveness.
+   * Whether to acquire a viewer holder to warm the box for a FILE WRITE — the
+   * wake-on-edit INTENT (a first keystroke in the editor), NOT passive browsing.
+   * Shares the SAME viewer attach as the desktop/terminal (one warm box, one
+   * holder) and — like the terminal — needs NO un-redacted acknowledgment:
+   * reading/writing files is the ordinary Channel-A control plane, not the pixel
+   * plane. It folds NO live URL (files ride the stateless HTTP plane) — it only
+   * refcounts liveness. Unlike desktop/terminal it warms even a COLD box: an edit
+   * legitimately cold-creates (that IS the wake), so the write lands ~100ms warm
+   * instead of paying the ~5s cold resume. Default false. IMPORTANT: merely
+   * opening/reading the Files tab must NOT set this — browsing capture-served
+   * trees/diffs needs no box, and warming one on a cold glance burns box-hours to
+   * serve reads the capture already answers for free.
    */
   attachFiles?: boolean | undefined;
   /** Hold off negotiating (e.g. the workbench panel is collapsed). Default true. */
@@ -281,16 +284,15 @@ export function useSessionCapabilities(
         // mint the URLs. Only a genuinely-unsupported reason suppresses the attach.
         const wantDesktopAttach = attachDesktop && desktopAttachable(caps.DesktopStream);
         const wantTerminalAttach = attachTerminal && terminalAttachable(caps.Terminal);
-        // The Files surface warms the box for fast Channel-A ops. It folds no live
-        // URL (files are stateless HTTP) — the attach is purely a liveness refcount.
-        // Under lazy provisioning it must only KEEP AN EXISTING box warm, never
-        // cold-CREATE one: merely opening the Files tab on a boxless session must
-        // not force a box (that would defeat lazy provisioning). So it's wanted only
-        // when the FileSystem cap is advertised AND a box already exists (liveness
-        // is anything but cold). A genuine warm action (desktop consent / terminal
-        // engage) still spins a cold box up — those are user-initiated, files-open
-        // is not.
-        const wantFilesAttach = attachFiles && caps.FileSystem.available && caps.liveness !== "cold";
+        // The Files attach warms the box for a file WRITE (wake-on-edit intent). It
+        // folds no live URL (files are stateless HTTP) — the attach is purely a
+        // liveness refcount. Unlike the previous "keep the box warm while the Files
+        // tab is on screen" wiring, this fires on genuine EDIT intent only, so it
+        // legitimately cold-CREATES: an edit is the wake, and the caller (the dock)
+        // never sets it for passive browsing. Gate solely on the FileSystem cap
+        // being advertised; liveness (cold included) does not suppress it — POST
+        // /viewers warms a cold box exactly as it does for a desktop/terminal engage.
+        const wantFilesAttach = attachFiles && caps.FileSystem.available;
         if (wantDesktopAttach || wantTerminalAttach || wantFilesAttach) {
           try {
             // Declare WHICH plane we're attaching for. `desktop:true` opts into the
