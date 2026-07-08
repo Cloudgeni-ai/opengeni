@@ -25,7 +25,10 @@ import {
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
+  getRig,
+  getWorkspaceDefaultRigId,
   listDistinctVariableSetIdsInGroup,
+  listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
@@ -234,6 +237,11 @@ export async function createAndStartSession(input: {
   metadata: Record<string, unknown>;
   // Names/ids only; the session.created payload never carries variable values.
   variableSet?: { id: string; name: string } | null;
+  // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
+  // rig-less session (byte-for-byte today's behavior). Frozen here so a later
+  // rig promote never moves an existing session's version.
+  rigId?: string | null;
+  rigVersionId?: string | null;
   goal?: GoalSpec | null;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Persisted on the session row and composed system-level AFTER the
@@ -300,6 +308,8 @@ export async function createAndStartSession(input: {
       model: input.model,
       sandboxBackend: input.sandboxBackend,
       variableSetId: input.variableSet?.id ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -323,6 +333,8 @@ export async function createAndStartSession(input: {
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     variableSetId: input.variableSet?.id ?? null,
+    rigId: input.rigId ?? null,
+    rigVersionId: input.rigVersionId ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     instructions: input.instructions ?? null,
     parentSessionId: input.parentSessionId ?? null,
@@ -664,6 +676,35 @@ export async function createSessionForRequest(
   const variableSet = payload.variableSetId
     ? await validateVariableSetAttachment({ settings, db }, grant, workspaceId, payload.variableSetId)
     : null;
+  // RIG BINDING (M3). Resolve the rig this session rides — the EXPLICIT payload
+  // rigId when given, else the workspace default rig (workspaces.default_rig_id)
+  // — and FREEZE both the rig id and its currently-ACTIVE version onto the row.
+  // The session then rides that exact version for its whole life; a later
+  // promote never moves it. Rig-less (both null) when neither resolves, which is
+  // byte-for-byte today's behavior (zero extra work, zero row change).
+  //   - An EXPLICIT unknown/inactive rigId is a caller error → 422.
+  //   - A stale workspace-default rig (deleted → FK-nulled, or somehow with no
+  //     active version) degrades SILENTLY to rig-less: an operator-side default
+  //     must never brick every create in the workspace.
+  const requestedRigId = payload.rigId ?? (await getWorkspaceDefaultRigId(db, workspaceId));
+  let frozenRigId: string | null = null;
+  let frozenRigVersionId: string | null = null;
+  if (requestedRigId) {
+    const rig = await getRig(db, workspaceId, requestedRigId);
+    if (!rig || !rig.activeVersion) {
+      if (payload.rigId) {
+        throw new HTTPException(422, {
+          message: rig
+            ? `rig ${payload.rigId} has no active version to bind`
+            : `unknown rigId: ${payload.rigId}`,
+        });
+      }
+      // else: workspace-default fallback that no longer resolves → rig-less.
+    } else {
+      frozenRigId = rig.id;
+      frozenRigVersionId = rig.activeVersion.id;
+    }
+  }
   assertConfiguredModel(settings, payload.model);
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
@@ -745,6 +786,17 @@ export async function createSessionForRequest(
   const requestedVariableSetId = payload.variableSetId ?? null;
   const variableSetMatchesGroup = (memberVariableSetId: string | null): boolean =>
     memberVariableSetId === requestedVariableSetId;
+  // RIG-AWARE GROUPING (M3), the exact sibling of the env-aware gate above: the
+  // box's rig-baked setup/tooling is fixed at cold-create, so a session joining a
+  // shared box must ride the SAME frozen rig_version_id. A mismatch is a genuine
+  // shared-state conflict (the box was set up for a different rig) — the INHERITED
+  // default falls back to an own box, an EXPLICIT shared/{groupId} request 422s at
+  // create rather than poisoning the first turn on the lease's rig-conflict guard.
+  // null on either side = compatible (a rig-less session shares with a rig-less
+  // box exactly as today); the boxless backend:'none' exemption is shared with the
+  // env gate (no box state to conflict).
+  const rigVersionMatchesGroup = (memberRigVersionId: string | null): boolean =>
+    memberRigVersionId === frozenRigVersionId;
   if (sandboxChoice === "shared") {
     if (!parentSessionId) {
       throw new HTTPException(422, { message: "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create." });
@@ -753,11 +805,20 @@ export async function createSessionForRequest(
     if (!parent) {
       throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
     }
-    if (parent.sandboxBackend !== "none" && !variableSetMatchesGroup(parent.variableSetId ?? null)) {
+    const parentBoxed = parent.sandboxBackend !== "none";
+    const variableSetMismatch = parentBoxed && !variableSetMatchesGroup(parent.variableSetId ?? null);
+    const rigMismatch = parentBoxed && !rigVersionMatchesGroup(parent.rigVersionId ?? null);
+    if (variableSetMismatch || rigMismatch) {
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
-        // VariableSet — surface the conflict at create time, not turn time.
-        throw new HTTPException(422, { message: "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment." });
+        // VariableSet / rig — surface the conflict at create time, not turn time.
+        // VariableSet is checked first so its (pre-rig) message is unchanged for
+        // the env-only mismatch the existing gate already covered.
+        throw new HTTPException(422, {
+          message: variableSetMismatch
+            ? "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment."
+            : "sandbox:'shared' requires the same rig as the creator's box (the box's rig setup is fixed at creation); omit sandbox or pass 'new' when binding a different rig.",
+        });
       }
       // Inherited default: deterministic separation on the genuine shared-state
       // conflict — the worker gets its own box (resolved like a top-level
@@ -781,6 +842,13 @@ export async function createSessionForRequest(
       const memberVariableSetIds = await listDistinctVariableSetIdsInGroup(db, workspaceId, sandboxChoice.groupId);
       if (!memberVariableSetIds.every((memberVariableSetId) => variableSetMatchesGroup(memberVariableSetId))) {
         throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet / different environment (the box variable set/environment is fixed at creation); create with the group's variableSet/environment or omit sandbox for an own box.` });
+      }
+      // Same deterministic all-members check for the frozen rig version (M3): the
+      // box's rig setup is fixed at creation, so every member must ride the rig
+      // this create resolved (or the group is rig-less and so is this create).
+      const memberRigVersionIds = await listDistinctRigVersionIdsInGroup(db, workspaceId, sandboxChoice.groupId);
+      if (!memberRigVersionIds.every((memberRigVersionId) => rigVersionMatchesGroup(memberRigVersionId))) {
+        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different rig (the box's rig setup is fixed at creation); create with the group's rig or omit sandbox for an own box.` });
       }
     }
     sandboxGroupId = sandboxChoice.groupId;
@@ -864,6 +932,9 @@ export async function createSessionForRequest(
     sandboxGroupId,
     metadata: payload.metadata,
     variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
+    // Frozen rig binding (M3): both null for a rig-less session (today's path).
+    rigId: frozenRigId,
+    rigVersionId: frozenRigVersionId,
     goal: payload.goal ?? null,
     // Per-session persona instructions (already trimmed/validated by the
     // contracts schema). Persisted on the row; composed system-level at turn

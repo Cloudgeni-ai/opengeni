@@ -729,6 +729,14 @@ export const sandboxLeases = pgTable("sandbox_leases", {
   // the new image, N-holders are rejected (SandboxImageConflictError). Nullable — a
   // legacy/cold row reads NULL = "image unknown", which never conflicts.
   image: text("image"),
+  // The frozen rig version the live box was created under (M3). Like `image`,
+  // this is SHARED STATE: all the box's sessions run the same rig-baked setup,
+  // so a resume resolving a DIFFERENT rig_version_id conflicts (solo holder
+  // recreates cold on the new rig; N-holders throw SandboxRigConflictError).
+  // Nullable — a legacy/cold row or a rig-less session reads NULL = "rig
+  // unknown", which never conflicts. No FK (symmetric with sandbox_group_id's
+  // bare-uuid rationale: this lease outlives no single rig_versions row's RLS).
+  rigVersionId: uuid("rig_version_id"),
   dataPlaneUrl: text("data_plane_url"),
   // The REAL PTY terminal (ttyd pty-ws) rides a SEPARATE provider tunnel (7681)
   // from the desktop noVNC (6080), so its resolved URL is cached independently.

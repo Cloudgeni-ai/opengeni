@@ -5,6 +5,7 @@ import {
   createSessionGoal,
   enqueueSessionTurn,
   getBillingBalance,
+  getRig,
   getVariableSet,
   isCodexBilledTurn,
   recordUsageEvent,
@@ -77,6 +78,21 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           if (task.variableSetId && !variableSet) {
             throw new Error(`variable set not found: ${task.variableSetId}`);
           }
+          // RIG BINDING (M3): resolve the task's rig to its CURRENTLY-ACTIVE
+          // version at FIRE time (not task-create time) and freeze that version
+          // onto the new session — a task always runs the rig's latest active
+          // version. A deleted rig FK-nulls task.rigId (rig-less run); a rig that
+          // somehow has no active version fails the fire closed.
+          let frozenRigId: string | null = null;
+          let frozenRigVersionId: string | null = null;
+          if (task.rigId) {
+            const rig = await getRig(db, task.workspaceId, task.rigId);
+            if (!rig || !rig.activeVersion) {
+              throw new Error(`rig has no active version to bind: ${task.rigId}`);
+            }
+            frozenRigId = rig.id;
+            frozenRigVersionId = rig.activeVersion.id;
+          }
           const session = await createSession(db, {
             accountId: task.accountId,
             workspaceId: task.workspaceId,
@@ -93,6 +109,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             model,
             sandboxBackend,
             variableSetId: task.variableSetId ?? null,
+            rigId: frozenRigId,
+            rigVersionId: frozenRigVersionId,
           });
           const goal = goalSpec
             ? await createSessionGoal(db, {

@@ -563,6 +563,11 @@ const SettingsSchema = z.object({
   // (a liveness/reaper cadence), this bounds how long one turn waits for capacity
   // or provider creation before surfacing a clear turn.failed error.
   sandboxWarmingTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Rig setup-script budget (M3): the wall-clock timeout the rig-setup lifecycle
+  // hook runs its script under, distinct from the 120s per-command lifecycle
+  // default (a rig may compile/install heavy tooling on first cold create).
+  // Env: OPENGENI_RIG_SETUP_TIMEOUT_MS. Default 10min.
+  rigSetupTimeoutMs: z.coerce.number().int().positive().default(600_000),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
   // means warm-cost is not debited (warm-seconds are still metered for audit).
@@ -1061,6 +1066,7 @@ export function getSettings(): Settings {
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
+    rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),

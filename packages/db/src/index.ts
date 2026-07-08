@@ -1157,6 +1157,8 @@ export type CreateScheduledTaskInput = {
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   variableSetId?: string | null;
+  // The rig each run binds to (M3); active version resolved per fire at dispatch.
+  rigId?: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -1169,6 +1171,7 @@ export type UpdateScheduledTaskInput = Partial<{
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
   variableSetId: string | null;
+  rigId: string | null;
   metadata: Record<string, unknown>;
 }>;
 
@@ -3550,6 +3553,7 @@ export async function updateScheduledTask(db: Database, workspaceId: string, tas
       ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
       ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
       ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
+      ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       updatedAt: new Date(),
     }).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).returning();
@@ -5449,6 +5453,10 @@ export async function createSession(db: Database, input: {
   model: string;
   sandboxBackend: SandboxBackend;
   variableSetId?: string | null;
+  // The rig + frozen active rig version resolved at create (M3). Both omitted/null
+  // ⇒ a rig-less session (byte-for-byte today's behavior).
+  rigId?: string | null;
+  rigVersionId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   // Per-session agent persona/system instructions (org-visible, not a secret).
   // Null/omitted ⇒ the session carries none (composed instructions unchanged).
@@ -5479,6 +5487,8 @@ export async function createSession(db: Database, input: {
       sandboxOs: input.sandboxOs ?? "linux",
       sandboxGroupId: input.sandboxGroupId ?? id,
       variableSetId: input.variableSetId ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -5518,6 +5528,10 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
   model: string;
   sandboxBackend: SandboxBackend;
   variableSetId?: string | null;
+  // The rig + frozen active rig version resolved at create (M3). Both omitted/null
+  // ⇒ a rig-less session (byte-for-byte today's behavior).
+  rigId?: string | null;
+  rigVersionId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   // Per-session agent persona/system instructions (org-visible, not a secret).
   instructions?: string | null;
@@ -5546,6 +5560,8 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       sandboxOs: input.sandboxOs ?? "linux",
       sandboxGroupId: input.sandboxGroupId ?? id,
       variableSetId: input.variableSetId ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -5634,6 +5650,32 @@ export async function listDistinctVariableSetIdsInGroup(db: Database, workspaceI
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
     return rows.map((r) => r.variableSetId ?? null);
   });
+}
+
+// M3 rig sharing gate: the distinct frozen rig_version_ids across a group's
+// sessions. Mirrors listDistinctVariableSetIdsInGroup — the box's rig-baked
+// setup is fixed at cold-create, so a session joining a group must carry the
+// SAME rig_version_id (or the join is a genuine shared-state conflict). A null
+// entry means a rig-less member (compatible only with another rig-less join).
+export async function listDistinctRigVersionIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.selectDistinct({ rigVersionId: schema.sessions.rigVersionId }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return rows.map((r) => r.rigVersionId ?? null);
+  });
+}
+
+// M3 default-rig fallback: the workspace's default rig id (workspaces.default_rig_id),
+// read WITHOUT surfacing it through the Workspace contract (a workspace-settings
+// UI concern deferred to M5). A create with no explicit rigId falls back to this.
+// Not RLS-scoped for the same reason getWorkspace is not: the workspace row is
+// addressed by its primary key and the caller already holds the workspace grant.
+export async function getWorkspaceDefaultRigId(db: Database, workspaceId: string): Promise<string | null> {
+  const [row] = await db.select({ defaultRigId: schema.workspaces.defaultRigId })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return row?.defaultRigId ?? null;
 }
 
 export type ListSessionsOptions = {
@@ -10340,6 +10382,10 @@ function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: Sessio
     activeEpoch: Number(row.activeEpoch),
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
+    // The rig + frozen rig version the session rides (M3). Both null for a
+    // rig-less session; frozen at create so a later promote never moves them.
+    rigId: row.rigId ?? null,
+    rigVersionId: row.rigVersionId ?? null,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -10474,6 +10520,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     reusableSessionId: row.reusableSessionId,
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
+    rigId: row.rigId ?? null,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

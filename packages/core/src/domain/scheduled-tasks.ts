@@ -9,6 +9,7 @@ import type {
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getRig,
   getScheduledTask,
   updateScheduledTask,
   type Database,
@@ -75,6 +76,13 @@ export async function createValidatedScheduledTask(input: {
       { preauthorized: input.variableSetPreauthorized ?? false },
     );
   }
+  // The rig is stored on the task and resolved to its ACTIVE version per fire
+  // (at dispatch), so validate only that the id names a rig in the workspace —
+  // NOT that it has an active version now (that is a fire-time concern). RLS
+  // makes a cross-workspace id indistinguishable from missing → both 422.
+  if (input.payload.rigId) {
+    await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
+  }
   return await createScheduledTask(input.db, {
     id,
     accountId: input.grant.accountId,
@@ -87,8 +95,18 @@ export async function createValidatedScheduledTask(input: {
     overlapPolicy: input.payload.overlapPolicy,
     agentConfig,
     variableSetId: input.payload.variableSetId ?? null,
+    rigId: input.payload.rigId ?? null,
     metadata: input.payload.metadata,
   });
+}
+
+// Validate a scheduled task's rig reference: it must name a rig in the
+// workspace. A missing/cross-workspace id is a 422 (RLS-invisible == missing).
+async function requireScheduledTaskRig(db: Database, workspaceId: string, rigId: string): Promise<void> {
+  const rig = await getRig(db, workspaceId, rigId);
+  if (!rig) {
+    throw new HTTPException(422, { message: `unknown rigId: ${rigId}` });
+  }
 }
 
 export async function validatedScheduledTaskUpdate(input: {
@@ -144,6 +162,15 @@ export async function validatedScheduledTaskUpdate(input: {
       );
       update.variableSetId = nextVariableSetId;
     }
+  }
+  if (input.payload.rigId !== undefined) {
+    // The rig binds fresh per fire, so changing it on a reusable-session task is
+    // harmless for the LIVE session (which keeps its own frozen version) and
+    // only affects subsequent new-session fires — no live-session guard needed.
+    if (input.payload.rigId !== null) {
+      await requireScheduledTaskRig(input.db, input.existing.workspaceId, input.payload.rigId);
+    }
+    update.rigId = input.payload.rigId;
   }
   if (input.payload.agentConfig !== undefined) {
     // Editing the instructions of a task that injects workspace secrets is

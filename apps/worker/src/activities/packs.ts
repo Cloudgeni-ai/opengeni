@@ -114,3 +114,24 @@ export function settingsWithPackSandboxImage(settings: Settings, sandboxImage: s
     modalImageRef: sandboxImage,
   };
 }
+
+/**
+ * Applies the session's frozen rig-version image to run settings. Rig image is
+ * the TOP of the image precedence chain (rig > pack > deployment default): when
+ * the rig version pins an image it OVERRIDES both the deployment
+ * dockerImage/modalImageRef AND any pack-declared sandboxImage. When the rig
+ * pins no image (`null`), the settings pass through untouched so the pack /
+ * deployment chain below still resolves exactly as today. Applied AFTER
+ * settingsWithPackSandboxImage so it wins the collision; identical mechanics to
+ * the pack equivalent (write both image fields so docker and modal agree).
+ */
+export function settingsWithRigImage(settings: Settings, rigImage: string | null): Settings {
+  if (!rigImage) {
+    return settings;
+  }
+  return {
+    ...settings,
+    dockerImage: rigImage,
+    modalImageRef: rigImage,
+  };
+}

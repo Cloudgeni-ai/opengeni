@@ -371,6 +371,10 @@ export type Session = {
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;
+  // The rig + frozen rig version this session rides (M3). Both null for a
+  // rig-less session. Frozen at create; a later rig promote never moves them.
+  rigId: string | null;
+  rigVersionId: string | null;
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
@@ -737,6 +741,8 @@ export type ScheduledTask = {
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;
+  // The rig each run binds to (M3); active version resolved per fire. Null ⇒ rig-less.
+  rigId: string | null;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -764,6 +770,9 @@ export type CreateSessionRequest = {
   variableSetId?: string | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
+  // The rig to bind this session to (M3). Its active version is frozen onto the
+  // session at create. Omitted ⇒ the workspace default rig when set, else rig-less.
+  rigId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
   // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
@@ -1216,6 +1225,8 @@ export type CreateScheduledTaskRequest = {
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
+  // The rig each run binds to (M3); active version resolved per fire.
+  rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1229,6 +1240,8 @@ export type UpdateScheduledTaskRequest = {
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
+  // The rig each run binds to (M3); active version resolved per fire.
+  rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 

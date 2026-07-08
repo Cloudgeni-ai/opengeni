@@ -2139,6 +2139,10 @@ export const ScheduledTask = z.object({
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
+  // The rig each run binds to (M3). Stored on the task; the ACTIVE version is
+  // resolved PER FIRE (at dispatch), so a task always runs the rig's current
+  // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
+  rigId: z.string().uuid().nullable().default(null),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -2171,6 +2175,8 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
+  // The rig each run binds to (M3); its active version is resolved per fire.
+  rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
@@ -2184,6 +2190,9 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   status: ScheduledTaskStatus.optional(),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
+  // The rig each run binds to (M3); null clears it. Its active version is
+  // resolved per fire, so an update takes effect on the next dispatch.
+  rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
@@ -2738,6 +2747,13 @@ export const Session = z.object({
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
+  // The rig this session rides (M3 runtime binding). Both are resolved and
+  // FROZEN at session create: rigId names the rig, rigVersionId pins the exact
+  // active version the session's box/env/setup/doctrine are built from for the
+  // session's whole life (a later promote does NOT move an existing session).
+  // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
+  rigId: z.string().uuid().nullable().default(null),
+  rigVersionId: z.string().uuid().nullable().default(null),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
@@ -3393,6 +3409,11 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // user.message events cannot switch or add one.
   variableSetId: z.string().uuid().optional(),
   environmentId: z.string().uuid().optional(),
+  // The rig to bind this session to (M3). Its ACTIVE version is resolved and
+  // FROZEN onto the session at create. Omitted ⇒ the workspace's default rig
+  // (workspaces.default_rig_id) when set, else a rig-less session (today's
+  // behavior). An id that does not name a rig in the workspace is a 422.
+  rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   clientEventId: z.string().min(1).optional(),
   // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
