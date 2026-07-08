@@ -106,6 +106,11 @@ export function RailShell({ children }: { children: ReactNode }) {
   // width is committed once on pointer-up. `null` means "not resizing".
   const [liveWidth, setLiveWidth] = useState<number | null>(null);
   const resizing = liveWidth !== null;
+  // Teardown for an in-progress drag (remove window listeners + reset body
+  // styles). Held in a ref so an unmount / route change MID-DRAG can run it —
+  // otherwise the listeners and the col-resize cursor / no-select body styles
+  // linger until an unrelated pointer release elsewhere.
+  const endResizeRef = useRef<(() => void) | null>(null);
   const startResize = useCallback((event: ReactPointerEvent) => {
     // Ignore anything but a primary-button / touch drag.
     if (event.button !== 0) {
@@ -119,17 +124,25 @@ export function RailShell({ children }: { children: ReactNode }) {
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     const onMove = (moveEvent: PointerEvent) => setLiveWidth(clamp(startWidth + (moveEvent.clientX - startX)));
+    const teardown = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      endResizeRef.current = null;
+    };
     const onUp = (upEvent: PointerEvent) => {
       rail.setWidth(clamp(startWidth + (upEvent.clientX - startX)));
       setLiveWidth(null);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      teardown();
     };
+    endResizeRef.current = teardown;
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   }, [rail]);
+  // Unmount / route-change mid-drag: run the drag teardown so listeners and
+  // body styles never leak.
+  useEffect(() => () => endResizeRef.current?.(), []);
 
   // Close the mobile drawer on route change.
   useEffect(() => {
