@@ -38,7 +38,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "build": "tsup",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo",

@@ -31,7 +31,7 @@
     "provenance": true
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "build": "tsup",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
