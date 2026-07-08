@@ -43,7 +43,7 @@ function app() {
     settings,
     db: client.db,
     bus: {} as never,
-    workflowClient: {} as never,
+    workflowClient: { startRigVerification: async () => {} } as never,
     managedAuth: null,
   } as never);
 }
