@@ -1,6 +1,18 @@
 import type { SessionBusMessage, SessionEvent } from "@opengeni/contracts";
-import { appendSessionEvents, sessionSubject, type AppendEventInput, type Database } from "@opengeni/db";
-import { connect, JSONCodec, type ConnectionOptions, type Msg, type NatsConnection, type Subscription } from "nats";
+import {
+  appendSessionEvents,
+  sessionSubject,
+  type AppendEventInput,
+  type Database,
+} from "@opengeni/db";
+import {
+  connect,
+  JSONCodec,
+  type ConnectionOptions,
+  type Msg,
+  type NatsConnection,
+  type Subscription,
+} from "nats";
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
 
@@ -170,11 +182,18 @@ export interface RequestConnection {
  * leaves the request unanswered (the caller's request times out / sees no
  * responder), which the control plane maps to `agent_offline` / reconnecting.
  */
-export type RequestHandler = (request: Uint8Array, subject: string) => Promise<Uint8Array> | Uint8Array;
+export type RequestHandler = (
+  request: Uint8Array,
+  subject: string,
+) => Promise<Uint8Array> | Uint8Array;
 
 export type EventBus = {
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
-  subscribe: (workspaceId: string, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>) => Promise<() => void>;
+  subscribe: (
+    workspaceId: string,
+    sessionId: string,
+    onEvents: (events: SessionEvent[]) => void | Promise<void>,
+  ) => Promise<() => void>;
   /**
    * Issue a binary request/reply on a subject over the bus's NATS connection
    * (the selfhosted control plane: `agent.<ws>.<id>.rpc`). A new usage of what was
@@ -182,7 +201,11 @@ export type EventBus = {
    * no-responder (NATS 503) or a request timeout; the caller (`NatsControlRpc`)
    * maps those to `agent_offline` / `agent_reconnecting`, never a NotFound.
    */
-  request: (subject: string, payload: Uint8Array, opts: { timeoutMs: number }) => Promise<RequestReply>;
+  request: (
+    subject: string,
+    payload: Uint8Array,
+    opts: { timeoutMs: number },
+  ) => Promise<RequestReply>;
   /**
    * Subscribe-and-reply on a subject (the responder side — the enrolled agent, or
    * a test stand-in for it): for every request on `subject`, call `handler` and
@@ -234,7 +257,12 @@ export async function createNatsEventBus(
   const nc = await connect(withReconnectDefaults(connectOptions));
   let connected = true;
   logConnectionStatus(nc, "event-bus", options.logger, (type) => {
-    if (type === "disconnect" || type === "reconnecting" || type === "staleConnection" || type === "error") {
+    if (
+      type === "disconnect" ||
+      type === "reconnecting" ||
+      type === "staleConnection" ||
+      type === "error"
+    ) {
       connected = false;
     } else if (type === "connect" || type === "reconnect") {
       connected = true;
@@ -257,20 +285,27 @@ export async function createNatsEventBus(
       // next successful publish's gap-backfill, or a stream reconnect); it must
       // never throw the in-flight turn to death.
       try {
-        nc.publish(sessionSubject(workspaceId, sessionId), codec.encode({ workspaceId, sessionId, events }));
+        nc.publish(
+          sessionSubject(workspaceId, sessionId),
+          codec.encode({ workspaceId, sessionId, events }),
+        );
       } catch (error) {
         // `publish()` throws synchronously only when the connection is fully
         // CLOSED (with infinite reconnect, effectively never outside shutdown).
-        (options.logger?.warn ?? silentLogger.warn)("NATS live publish dropped; events are durable in the DB and reconcile on stream replay", {
-          workspaceId,
-          sessionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        (options.logger?.warn ?? silentLogger.warn)(
+          "NATS live publish dropped; events are durable in the DB and reconcile on stream replay",
+          {
+            workspaceId,
+            sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
         return;
       }
       await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
-    subscribe: async (workspaceId, sessionId, onEvents) => subscribeSession(nc, workspaceId, sessionId, onEvents),
+    subscribe: async (workspaceId, sessionId, onEvents) =>
+      subscribeSession(nc, workspaceId, sessionId, onEvents),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler),
     subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
@@ -333,7 +368,11 @@ export async function createResponderConnection(
     connectOptions.token = auth.token;
   }
   const nc = await connect(withReconnectDefaults(connectOptions));
-  logConnectionStatus(nc, options.name ? `auth-callout:${options.name}` : "auth-callout", options.logger);
+  logConnectionStatus(
+    nc,
+    options.name ? `auth-callout:${options.name}` : "auth-callout",
+    options.logger,
+  );
   const sub: Subscription = nc.subscribe(subject);
   void (async () => {
     for await (const msg of sub) {
@@ -357,7 +396,13 @@ export async function createResponderConnection(
   };
 }
 
-export async function appendAndPublishEvents(db: Database, bus: EventBus, workspaceId: string, sessionId: string, events: AppendEventInput[]): Promise<SessionEvent[]> {
+export async function appendAndPublishEvents(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  events: AppendEventInput[],
+): Promise<SessionEvent[]> {
   const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
   // The DB append above is the durable system of record; the publish is only a
   // best-effort LIVE fan-out. Guard it so NO EventBus implementation can throw an
@@ -377,7 +422,12 @@ export async function appendAndPublishEvents(db: Database, bus: EventBus, worksp
   return appended;
 }
 
-function subscribeSession(nc: NatsConnection, workspaceId: string, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>): () => void {
+function subscribeSession(
+  nc: NatsConnection,
+  workspaceId: string,
+  sessionId: string,
+  onEvents: (events: SessionEvent[]) => void | Promise<void>,
+): () => void {
   const sub: Subscription = nc.subscribe(sessionSubject(workspaceId, sessionId));
   void (async () => {
     for await (const msg of sub) {
@@ -398,7 +448,12 @@ function subscribeSession(nc: NatsConnection, workspaceId: string, sessionId: st
  * the caller owns the mapping. The reply is delivered via the connection's
  * built-in mux inbox; no extra subscription is created here.
  */
-async function requestReply(nc: NatsConnection, subject: string, payload: Uint8Array, timeout: number): Promise<RequestReply> {
+async function requestReply(
+  nc: NatsConnection,
+  subject: string,
+  payload: Uint8Array,
+  timeout: number,
+): Promise<RequestReply> {
   const msg: Msg = await nc.request(subject, payload, { timeout });
   return { data: msg.data };
 }
@@ -410,7 +465,11 @@ async function requestReply(nc: NatsConnection, subject: string, payload: Uint8A
  * A handler that throws (or a message with no `reply` subject) is left unanswered
  * — the requester then sees a timeout, never a malformed reply.
  */
-function subscribeRequests(nc: NatsConnection, subject: string, handler: RequestHandler): () => void {
+function subscribeRequests(
+  nc: NatsConnection,
+  subject: string,
+  handler: RequestHandler,
+): () => void {
   const sub: Subscription = nc.subscribe(subject);
   void (async () => {
     for await (const msg of sub) {

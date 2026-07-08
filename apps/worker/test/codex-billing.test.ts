@@ -15,7 +15,10 @@ function billedSettings() {
 
 function mockZeroBalance(): () => void {
   const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
-    accountId: ACCOUNT, balanceMicros: 0, currency: "usd", updatedAt: new Date().toISOString(),
+    accountId: ACCOUNT,
+    balanceMicros: 0,
+    currency: "usd",
+    updatedAt: new Date().toISOString(),
   });
   return () => spy.mockRestore();
 }
@@ -25,32 +28,46 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     let balanceRead = false;
     const spy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
       balanceRead = true;
-      return { accountId: ACCOUNT, balanceMicros: 0, currency: "usd", updatedAt: new Date().toISOString() };
+      return {
+        accountId: ACCOUNT,
+        balanceMicros: 0,
+        currency: "usd",
+        updatedAt: new Date().toISOString(),
+      };
     });
     try {
       await ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ true);
       expect(balanceRead).toBe(false); // short-circuited before any balance read
-    } finally { spy.mockRestore(); }
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test("(c) a normal turn with 0 credits still throws insufficient OpenGeni credits", async () => {
     const restore = mockZeroBalance();
     try {
-      await expect(ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false))
-        .rejects.toThrow("insufficient OpenGeni credits");
-    } finally { restore(); }
+      await expect(
+        ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
+      ).rejects.toThrow("insufficient OpenGeni credits");
+    } finally {
+      restore();
+    }
   });
 });
 
 describe("worker recordModelUsageAndDebitCredits — codex usage recording", () => {
   test("(d) codex turn records model.cost=0, does NOT throw 'Missing model pricing', and never debits", async () => {
     const recorded: Array<{ eventType: string; quantity: number; unit: string }> = [];
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(async (_db, input) => {
-      recorded.push({ eventType: input.eventType, quantity: input.quantity, unit: input.unit });
-    });
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async () => {
-      throw new Error("credits must NOT be debited for a codex turn");
-    });
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity, unit: input.unit });
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("credits must NOT be debited for a codex turn");
+      },
+    );
     try {
       await recordModelUsageAndDebitCredits(billedSettings(), db, {
         accountId: ACCOUNT,
@@ -66,15 +83,22 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
       // feed the OpenGeni token cap a codex turn is exempt from).
       expect(recorded).toEqual([{ eventType: "model.cost", quantity: 0, unit: "usd_micros" }]);
       expect(debitSpy).not.toHaveBeenCalled();
-    } finally { recordSpy.mockRestore(); debitSpy.mockRestore(); }
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
   });
 
   test("(control) a normal turn still records model.tokens and a non-zero model.cost", async () => {
     const recorded: Array<{ eventType: string; quantity: number }> = [];
-    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(async (_db, input) => {
-      recorded.push({ eventType: input.eventType, quantity: input.quantity });
-    });
-    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(undefined as never);
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        recorded.push({ eventType: input.eventType, quantity: input.quantity });
+      },
+    );
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockResolvedValue(
+      undefined as never,
+    );
     try {
       // A model the test settings price (the default openaiModel). testSettings
       // ships pricing for "scripted-model"; if cost is 0 the debit is skipped, but
@@ -89,8 +113,13 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
-      expect(recorded.some((r) => r.eventType === "model.tokens" && r.quantity === 1500)).toBe(true);
+      expect(recorded.some((r) => r.eventType === "model.tokens" && r.quantity === 1500)).toBe(
+        true,
+      );
       expect(recorded.some((r) => r.eventType === "model.cost")).toBe(true);
-    } finally { recordSpy.mockRestore(); debitSpy.mockRestore(); }
+    } finally {
+      recordSpy.mockRestore();
+      debitSpy.mockRestore();
+    }
   });
 });

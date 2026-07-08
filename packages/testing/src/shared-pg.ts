@@ -124,8 +124,17 @@ async function writeRefcount(n: number): Promise<void> {
 }
 
 async function containerRunning(): Promise<boolean> {
-  const { stdout } = await docker(["ps", "--filter", `name=^${CONTAINER}$`, "--format", "{{.Names}}"]).catch(() => ({ stdout: "" }));
-  return stdout.split("\n").map((l) => l.trim()).includes(CONTAINER);
+  const { stdout } = await docker([
+    "ps",
+    "--filter",
+    `name=^${CONTAINER}$`,
+    "--format",
+    "{{.Names}}",
+  ]).catch(() => ({ stdout: "" }));
+  return stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .includes(CONTAINER);
 }
 
 async function waitForReady(url: string): Promise<void> {
@@ -141,7 +150,9 @@ async function waitForReady(url: string): Promise<void> {
       }
     } catch (err) {
       if (Date.now() > deadline) {
-        throw new Error(`shared-pg: postgres did not become ready in time: ${String(err)}`, { cause: err });
+        throw new Error(`shared-pg: postgres did not become ready in time: ${String(err)}`, {
+          cause: err,
+        });
       }
       await Bun.sleep(500);
     }
@@ -174,13 +185,19 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
       const started = await dockerOk([
-        "run", "-d",
-        "-e", `POSTGRES_PASSWORD=${PASSWORD}`,
-        "-p", `${PORT}:5432`,
-        "--name", CONTAINER,
+        "run",
+        "-d",
+        "-e",
+        `POSTGRES_PASSWORD=${PASSWORD}`,
+        "-p",
+        `${PORT}:5432`,
+        "--name",
+        CONTAINER,
         IMAGE,
-        "-c", "max_connections=1000",
-        "-c", "shared_buffers=256MB",
+        "-c",
+        "max_connections=1000",
+        "-c",
+        "shared_buffers=256MB",
       ]);
       if (!started) {
         return false; // docker unavailable
@@ -244,7 +261,10 @@ async function dropDatabaseAndRelease(dbName: string): Promise<void> {
 }
 
 function uniqueDbName(label: string): string {
-  return `og_${label.replace(/[^a-z0-9]/gi, "_").toLowerCase().slice(0, 24)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  return `og_${label
+    .replace(/[^a-z0-9]/gi, "_")
+    .toLowerCase()
+    .slice(0, 24)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
 /**
@@ -256,7 +276,9 @@ function uniqueDbName(label: string): string {
  * `opengeni_app` role GRANTed on its public/opengeni_private schemas, and a
  * superuser `admin` handle scoped to it. Call `release()` in afterAll.
  */
-export async function acquireSharedTestDatabase(label = "test"): Promise<SharedTestDatabase | null> {
+export async function acquireSharedTestDatabase(
+  label = "test",
+): Promise<SharedTestDatabase | null> {
   const acquired = await ensureContainerAndAcquire();
   if (!acquired) {
     return null;

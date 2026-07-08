@@ -16,7 +16,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const distDir = join(__dirname, "../demo/dist");
 const CHROMIUM = "/nix/store/7xr3qnq93srn4dgak7qw74dw836wpp1y-chromium-138.0.7204.49/bin/chromium";
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" };
+const MIME = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+};
 
 const args = process.argv.slice(2);
 const pass = args.find((a) => /^[1-5]$/.test(a)) ?? "1";
@@ -118,11 +124,29 @@ async function shotChip(state, theme) {
 // clip; FIX 2 (Files declutter — the replicated CHANGES list removed) reads
 // clearest on the Files tab at `wide` where the left column is fully shown.
 const PASS5 = [
-  { state: "warm-live", shots: [["changes", "medium"], ["files", "wide"]] },
-  { state: "dense", shots: [["changes", "medium"], ["files", "wide"]] },
+  {
+    state: "warm-live",
+    shots: [
+      ["changes", "medium"],
+      ["files", "wide"],
+    ],
+  },
+  {
+    state: "dense",
+    shots: [
+      ["changes", "medium"],
+      ["files", "wide"],
+    ],
+  },
   { state: "cold-instant", shots: [["files", "wide"]] },
   { state: "selfhosted-offline", shots: [["files", "wide"]] },
-  { state: "empty", shots: [["changes", "medium"], ["files", "wide"]] },
+  {
+    state: "empty",
+    shots: [
+      ["changes", "medium"],
+      ["files", "wide"],
+    ],
+  },
   { state: "guard", shots: [["changes", "medium"]] },
 ];
 

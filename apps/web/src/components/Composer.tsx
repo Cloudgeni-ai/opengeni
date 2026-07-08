@@ -63,14 +63,14 @@ export function ConsoleComposer(props: {
         {...(props.fileUploadsEnabled ? { attachments } : {})}
         {...(props.commandContext ? { commandContext: props.commandContext } : {})}
         {...(props.onClearView ? { onClearView: props.onClearView } : {})}
-        controlsStart={(
+        controlsStart={
           <>
             {props.showDeliveryMode ? (
               <DeliveryModeToggle composer={composer} disabled={props.disabled} />
             ) : null}
             {props.controls}
           </>
-        )}
+        }
       />
       {props.showDeliveryMode && !props.disabled ? (
         <p
@@ -91,7 +91,13 @@ export function ConsoleComposer(props: {
  * The compose-time queue-vs-steer choice. Queue is the calm default; steer
  * uses the running status tone because it interrupts the current turn.
  */
-function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; disabled?: boolean }) {
+function DeliveryModeToggle({
+  composer,
+  disabled,
+}: {
+  composer: ComposerState;
+  disabled?: boolean;
+}) {
   return (
     <div
       role="radiogroup"
@@ -107,9 +113,7 @@ function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; d
         title="Queue (default): runs after the current turn finishes"
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
-          composer.mode === "queue"
-            ? "bg-surface-2 text-fg"
-            : "text-fg-muted hover:text-fg",
+          composer.mode === "queue" ? "bg-surface-2 text-fg" : "text-fg-muted hover:text-fg",
         )}
       >
         <ListPlusIcon className="size-3.5" />

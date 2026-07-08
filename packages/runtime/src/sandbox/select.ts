@@ -165,7 +165,14 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
 
   const fileSystem = (() => {
     if (osReason) {
-      return { available: false, readOnly: true, root: descriptor.workspaceRoot, pathSep: "/" as const, treeMode: "lazy" as const, reason: osReason };
+      return {
+        available: false,
+        readOnly: true,
+        root: descriptor.workspaceRoot,
+        pathSep: "/" as const,
+        treeMode: "lazy" as const,
+        reason: osReason,
+      };
     }
     const cap = descriptor.capabilities.FileSystem;
     return {
@@ -181,10 +188,26 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
   const terminal = (() => {
     const cap = descriptor.capabilities.Terminal;
     if (osReason) {
-      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, expiresAt: null, reason: osReason };
+      return {
+        transport: null,
+        ptyCapable: false,
+        shell: "/bin/bash",
+        url: null,
+        token: null,
+        expiresAt: null,
+        reason: osReason,
+      };
     }
     if (!cap.available) {
-      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, expiresAt: null, reason: "backend_unsupported" as const };
+      return {
+        transport: null,
+        ptyCapable: false,
+        shell: "/bin/bash",
+        url: null,
+        token: null,
+        expiresAt: null,
+        reason: "backend_unsupported" as const,
+      };
     }
     // The REAL PTY (ttyd pty-ws) rides the SAME tunnel as the desktop, so it is
     // gated identically: a real-PTY backend (cap.pty), the terminal policy toggle
@@ -231,7 +254,11 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     if (osReason) {
       return { available: false, repos: [], reason: osReason };
     }
-    return { available: cap.available, repos: [], reason: cap.available ? null : ("backend_unsupported" as const) };
+    return {
+      available: cap.available,
+      repos: [],
+      reason: cap.available ? null : ("backend_unsupported" as const),
+    };
   })();
 
   const desktop = (() => {
@@ -317,14 +344,32 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
   const recording = (() => {
     const cap = descriptor.capabilities.Recording;
     if (osReason) {
-      return { available: false, modes: [] as ("manual" | "on-turn" | "on-verify")[], codecs: [] as ("h264-mp4" | "vp9-webm")[], reason: osReason };
+      return {
+        available: false,
+        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        codecs: [] as ("h264-mp4" | "vp9-webm")[],
+        reason: osReason,
+      };
     }
     if (!cap.available) {
-      return { available: false, modes: [] as ("manual" | "on-turn" | "on-verify")[], codecs: [] as ("h264-mp4" | "vp9-webm")[], reason: descriptor.tier === "headless" ? ("tier_headless" as const) : ("backend_unsupported" as const) };
+      return {
+        available: false,
+        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        codecs: [] as ("h264-mp4" | "vp9-webm")[],
+        reason:
+          descriptor.tier === "headless"
+            ? ("tier_headless" as const)
+            : ("backend_unsupported" as const),
+      };
     }
     // Recording feasibility tracks desktop; policy-gate it the same way.
     if (!ctx.desktopEnabled) {
-      return { available: false, modes: [] as ("manual" | "on-turn" | "on-verify")[], codecs: [] as ("h264-mp4" | "vp9-webm")[], reason: "disabled_by_policy" as const };
+      return {
+        available: false,
+        modes: [] as ("manual" | "on-turn" | "on-verify")[],
+        codecs: [] as ("h264-mp4" | "vp9-webm")[],
+        reason: "disabled_by_policy" as const,
+      };
     }
     return {
       available: true,
@@ -345,7 +390,14 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       return { available: false, readOnly, reason: osReason };
     }
     if (!desktopCapable) {
-      return { available: false, readOnly, reason: descriptor.tier === "headless" ? ("tier_headless" as const) : ("backend_unsupported" as const) };
+      return {
+        available: false,
+        readOnly,
+        reason:
+          descriptor.tier === "headless"
+            ? ("tier_headless" as const)
+            : ("backend_unsupported" as const),
+      };
     }
     if (!ctx.desktopEnabled || ctx.computerUseEnabled === false) {
       return { available: false, readOnly, reason: "disabled_by_policy" as const };

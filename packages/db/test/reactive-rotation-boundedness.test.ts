@@ -33,8 +33,12 @@ let client: DbClient;
 let db: Database;
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -98,7 +102,11 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
+  try {
+    await client?.close();
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -114,9 +122,18 @@ describe("Finding 1b — countConsecutiveReactiveRotations", () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const sessionId = await seedSession(ws);
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true, recovery: "goal_continuation" });
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true, recovery: "goal_continuation" });
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true, recovery: "goal_continuation" });
+    await appendEvent(ws, sessionId, "turn.failed", {
+      rotated: true,
+      recovery: "goal_continuation",
+    });
+    await appendEvent(ws, sessionId, "turn.failed", {
+      rotated: true,
+      recovery: "goal_continuation",
+    });
+    await appendEvent(ws, sessionId, "turn.failed", {
+      rotated: true,
+      recovery: "goal_continuation",
+    });
     expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(3);
   });
 
@@ -184,8 +201,18 @@ describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BO
     const sessionId = await seedSession(ws);
     const turnId = await seedGoalOnFinishedTurn(ws, sessionId);
     // The turn.failed shape BOTH all-capped paths now emit: recovery=goal_continuation + rotated:true.
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true, recovery: "goal_continuation", code: "codex_usage_limit_reached" }, turnId);
-    const decision = await evaluateGoalContinuation(db, { workspaceId: ws.workspaceId, sessionId, ...CONFIG });
+    await appendEvent(
+      ws,
+      sessionId,
+      "turn.failed",
+      { rotated: true, recovery: "goal_continuation", code: "codex_usage_limit_reached" },
+      turnId,
+    );
+    const decision = await evaluateGoalContinuation(db, {
+      workspaceId: ws.workspaceId,
+      sessionId,
+      ...CONFIG,
+    });
     expect(decision.decision).toBe("continue");
     // FROZEN: the rotation-wait did not consume the goal's continuation budget.
     expect(decision.decision === "continue" ? decision.autoContinuation : -1).toBe(0);
@@ -198,8 +225,18 @@ describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BO
     const turnId = await seedGoalOnFinishedTurn(ws, sessionId);
     // recovery=goal_continuation but NO rotated marker — exactly the proactive all-capped
     // payload BEFORE Finding 2, and a normal (non-rotation) continuation in general.
-    await appendEvent(ws, sessionId, "turn.failed", { recovery: "goal_continuation", code: "codex_usage_limit_reached" }, turnId);
-    const decision = await evaluateGoalContinuation(db, { workspaceId: ws.workspaceId, sessionId, ...CONFIG });
+    await appendEvent(
+      ws,
+      sessionId,
+      "turn.failed",
+      { recovery: "goal_continuation", code: "codex_usage_limit_reached" },
+      turnId,
+    );
+    const decision = await evaluateGoalContinuation(db, {
+      workspaceId: ws.workspaceId,
+      sessionId,
+      ...CONFIG,
+    });
     expect(decision.decision).toBe("continue");
     // Not a rotation wait → the budget advances as before (proves the freeze is scoped to rotation).
     expect(decision.decision === "continue" ? decision.autoContinuation : -1).toBe(1);

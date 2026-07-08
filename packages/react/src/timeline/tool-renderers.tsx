@@ -33,7 +33,12 @@ import {
   screenshotDataUrl,
   type ApplyPatchOperation,
 } from "./parsers";
-import { createToolRegistry, type ToolRegistry, type ToolRegistryEntry, type ToolRendererProps } from "./registry";
+import {
+  createToolRegistry,
+  type ToolRegistry,
+  type ToolRegistryEntry,
+  type ToolRendererProps,
+} from "./registry";
 import {
   BodyNote,
   MediaEmpty,
@@ -101,8 +106,8 @@ function ExecRenderer({ item }: ToolRendererProps) {
         preview="output lost — NUL byte could not be stored"
       >
         <BodyNote tone="error">
-          output contained a NUL byte and could not be stored; the turn failed on this tool&apos;s output insert — no output
-          event ever arrived.
+          output contained a NUL byte and could not be stored; the turn failed on this tool&apos;s
+          output insert — no output event ever arrived.
         </BodyNote>
       </ActivityDisclosure>
     );
@@ -135,7 +140,11 @@ function ExecRenderer({ item }: ToolRendererProps) {
         title={title}
         titleMono
         running
-        preview={<RunningPreview>{streamed ? `${streamed.split("\n").length} lines` : "running…"}</RunningPreview>}
+        preview={
+          <RunningPreview>
+            {streamed ? `${streamed.split("\n").length} lines` : "running…"}
+          </RunningPreview>
+        }
       >
         {/* The row title is already `$ ${cmd}`; the TermBlock header drops the
             command (command={null}) so it never repeats above the output. */}
@@ -178,7 +187,12 @@ function ExecRenderer({ item }: ToolRendererProps) {
       cancelled={item.status === "cancelled"}
       preview={truncated ? `⋯ truncated · ${preview}` : preview}
     >
-      <TermBlock command={null} workdir={workdir} output={body} failed={item.status === "failed" || (exitCode != null && exitCode !== 0)} />
+      <TermBlock
+        command={null}
+        workdir={workdir}
+        output={body}
+        failed={item.status === "failed" || (exitCode != null && exitCode !== 0)}
+      />
       {bgSession != null ? (
         <BodyNote>↳ session {bgSession} — a later write_stdin can target this PTY.</BodyNote>
       ) : null}
@@ -190,7 +204,10 @@ function ExecRenderer({ item }: ToolRendererProps) {
 
 function WriteStdinRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
-  const sessionId = typeof args.session_id === "string" || typeof args.session_id === "number" ? args.session_id : undefined;
+  const sessionId =
+    typeof args.session_id === "string" || typeof args.session_id === "number"
+      ? args.session_id
+      : undefined;
   const running = item.status === "running";
   const text = typeof item.output === "string" ? item.output : stringifyPayload(item.output);
   const lost = isExecSessionLostBanner(text);
@@ -248,7 +265,13 @@ function verbForOp(op: ApplyPatchOperation | undefined): string {
   if (!op) {
     return "Edited";
   }
-  return op.type === "create_file" ? "Created" : op.type === "delete_file" ? "Deleted" : op.moveTo ? "Renamed" : "Edited";
+  return op.type === "create_file"
+    ? "Created"
+    : op.type === "delete_file"
+      ? "Deleted"
+      : op.moveTo
+        ? "Renamed"
+        : "Edited";
 }
 
 function basename(path: string): string {
@@ -267,7 +290,15 @@ function dirname(path: string): string {
  * for the expanded DiffView gutter, so the one-line rail stays a calm, single
  * hue (the file path) with no competing colored numerics.
  */
-function PathPreview({ path, add, del }: { path: string; add?: number | undefined; del?: number | undefined }) {
+function PathPreview({
+  path,
+  add,
+  del,
+}: {
+  path: string;
+  add?: number | undefined;
+  del?: number | undefined;
+}) {
   return (
     <span className="inline-flex items-center gap-2 truncate font-og-mono">
       <span className="truncate">
@@ -303,7 +334,11 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
         iconTone="running"
         title={fileCount > 1 ? `Applying ${fileCount} files` : titleVerb}
         running
-        preview={<RunningPreview>{fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…"}</RunningPreview>}
+        preview={
+          <RunningPreview>
+            {fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…"}
+          </RunningPreview>
+        }
       >
         {ops.map((op) => {
           const file = safeParseOp(op);
@@ -478,7 +513,6 @@ function computerVerb(action: ComputerAction | undefined): string {
   }
 }
 
-
 /** Coerce a function-tool arguments payload into the ComputerAction fields. */
 function asComputerArgs(args: unknown): Partial<ComputerAction> {
   if (!args) {
@@ -511,7 +545,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   // every transport.
   const functionAction: ComputerAction | undefined =
     !raw.action && item.name.startsWith("computer_") && item.name !== "computer_call"
-      ? { type: item.name.slice("computer_".length), ...(asComputerArgs(item.arguments)) }
+      ? { type: item.name.slice("computer_".length), ...asComputerArgs(item.arguments) }
       : undefined;
   const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
@@ -531,7 +565,13 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   if (running) {
     return (
       <ActivityDisclosure
-        icon={isShot ? <CameraIcon className={ICON_SIZE} /> : <MousePointer2Icon className={ICON_SIZE} />}
+        icon={
+          isShot ? (
+            <CameraIcon className={ICON_SIZE} />
+          ) : (
+            <MousePointer2Icon className={ICON_SIZE} />
+          )
+        }
         iconTone="running"
         title={verb}
         running
@@ -576,7 +616,13 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
     const caption = `${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
     return (
       <ActivityDisclosure
-        icon={isShot ? <CameraIcon className={ICON_SIZE} /> : <MousePointer2Icon className={ICON_SIZE} />}
+        icon={
+          isShot ? (
+            <CameraIcon className={ICON_SIZE} />
+          ) : (
+            <MousePointer2Icon className={ICON_SIZE} />
+          )
+        }
         iconTone={isFailed ? "failed" : "accent"}
         title={`${verb}${countSuffix}`}
         failed={isFailed}
@@ -599,7 +645,13 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
         cancelled={isCancelled}
         media={<MediaEmpty />}
       >
-        <BodyNote>{isFailed ? "computer_call failed — no image returned." : isCancelled ? "computer_call interrupted — no image returned." : "(no image) — the session returned an empty screenshot."}</BodyNote>
+        <BodyNote>
+          {isFailed
+            ? "computer_call failed — no image returned."
+            : isCancelled
+              ? "computer_call interrupted — no image returned."
+              : "(no image) — the session returned an empty screenshot."}
+        </BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -625,7 +677,9 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
 type WebSearchResult = { title: string; domain: string; snippet: string };
 
 function WebSearchRenderer({ item }: ToolRendererProps) {
-  const raw = (item.raw ?? {}) as { providerData?: { action?: { query?: string; queries?: string[] } } };
+  const raw = (item.raw ?? {}) as {
+    providerData?: { action?: { query?: string; queries?: string[] } };
+  };
   const action = raw.providerData?.action ?? {};
   const query = action.query ?? "(query unavailable)";
   const queries = action.queries ?? [];
@@ -685,7 +739,13 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
 
 /* ---- view_image ------------------------------------------------------------ */
 
-const VIEW_IMAGE_ERRORS = ["was not found", "is not a file", "exceeded the allowed size", "is not a supported image", "unable to read image"];
+const VIEW_IMAGE_ERRORS = [
+  "was not found",
+  "is not a file",
+  "exceeded the allowed size",
+  "is not a supported image",
+  "unable to read image",
+];
 
 function ViewImageRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
@@ -750,7 +810,13 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
         cancelled={viewCancelled}
         preview="(no image)"
       >
-        <BodyNote>{viewFailed ? "view_image failed — no image data returned." : viewCancelled ? "view_image interrupted." : "(no image) — the sandbox session returned no image data."}</BodyNote>
+        <BodyNote>
+          {viewFailed
+            ? "view_image failed — no image data returned."
+            : viewCancelled
+              ? "view_image interrupted."
+              : "(no image) — the sandbox session returned no image data."}
+        </BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -802,7 +868,11 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
         preview={errorText ?? "variable write failed"}
       >
         <PayloadBlock label="Arguments" value={redactSecrets(args)} />
-        {errorText ? <PayloadBlock label="Error" value={errorText} failed /> : <BodyNote tone="error">the tool call failed with no output.</BodyNote>}
+        {errorText ? (
+          <PayloadBlock label="Error" value={errorText} failed />
+        ) : (
+          <BodyNote tone="error">the tool call failed with no output.</BodyNote>
+        )}
       </ActivityDisclosure>
     );
   }

@@ -144,12 +144,11 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
     // Lazy cloud defer skips the network mint but still declares stable git-auth
     // pointers eagerly; selfhosted machine skip is a separate mode and keeps the
     // stable base env byte-for-byte.
-    const { environment: turnEnv, gitToken, gitTokens } = await sandboxEnvironmentForRun(
-      settings,
-      [repoResource],
-      {},
-      { deferGitHubToken: true },
-    );
+    const {
+      environment: turnEnv,
+      gitToken,
+      gitTokens,
+    } = await sandboxEnvironmentForRun(settings, [repoResource], {}, { deferGitHubToken: true });
 
     // The rotating token keys are ABSENT from the manifest env.
     expect(turnEnv.GH_TOKEN).toBeUndefined();
@@ -243,7 +242,11 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       throw new Error(`unexpected fetch in parity test: ${target}`);
     }) as typeof fetch;
     try {
-      const { environment: turnEnv, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource], {});
+      const { environment: turnEnv, gitToken } = await sandboxEnvironmentForRun(
+        settings,
+        [repoResource],
+        {},
+      );
       const deferredToken = await mintRunGitToken(settings, [repoResource], {});
       // The mint really ran (through the JWT + stubbed GitHub API)…
       expect(gitToken).toBe("ghs_stub_mint");
@@ -311,7 +314,9 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       githubRepositoryId: 456,
     };
     const calls: Array<{ purpose?: string }> = [];
-    const gitCredentials: NonNullable<ConnectionCredentialsPort["gitCredentials"]> = async (input) => {
+    const gitCredentials: NonNullable<ConnectionCredentialsPort["gitCredentials"]> = async (
+      input,
+    ) => {
       calls.push({ purpose: input.purpose });
       if (input.purpose === "identity") {
         return {
@@ -327,11 +332,16 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     };
     const scope = { accountId: "acct-1", workspaceId: "ws-1" };
 
-    const { environment: lazyEnv, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource], {}, {
-      deferGitHubToken: true,
-      scope,
-      gitCredentials,
-    });
+    const { environment: lazyEnv, gitToken } = await sandboxEnvironmentForRun(
+      settings,
+      [repoResource],
+      {},
+      {
+        deferGitHubToken: true,
+        scope,
+        gitCredentials,
+      },
+    );
 
     expect(gitToken).toBeUndefined();
     expect(lazyEnv.GIT_AUTHOR_NAME).toBe("Host Git Bot");

@@ -138,8 +138,12 @@ describe("SDK / contracts parity", () => {
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
     const acceptEvent = (value: z.infer<typeof ContractSessionEventSchema>): SessionEvent => value;
     const acceptTurn = (value: z.infer<typeof ContractSessionTurn>): SessionTurn => value;
-    const acceptTurnStatus = (value: z.infer<typeof ContractSessionTurn>["status"]): SessionTurnStatus => value;
-    const acceptTurnSource = (value: z.infer<typeof ContractSessionTurn>["source"]): SessionTurnSource => value;
+    const acceptTurnStatus = (
+      value: z.infer<typeof ContractSessionTurn>["status"],
+    ): SessionTurnStatus => value;
+    const acceptTurnSource = (
+      value: z.infer<typeof ContractSessionTurn>["source"],
+    ): SessionTurnSource => value;
     // Client -> server shapes: anything the SDK sends, the contracts accept.
     // firstPartyMcpPermissions is deliberately `string[]` in the SDK (forward
     // compatible with new server-side permissions), so it is checked at
@@ -147,20 +151,32 @@ describe("SDK / contracts parity", () => {
     const acceptCreateRequest = (
       value: Omit<CreateSessionRequest, "firstPartyMcpPermissions">,
     ): z.input<typeof ContractCreateSessionRequest> => value;
-    const acceptClientEvent = (value: ClientSessionEventInput): z.input<typeof ClientSessionEvent> => value;
-    const checks = [acceptSession, acceptEvent, acceptTurn, acceptTurnStatus, acceptTurnSource, acceptCreateRequest, acceptClientEvent];
+    const acceptClientEvent = (
+      value: ClientSessionEventInput,
+    ): z.input<typeof ClientSessionEvent> => value;
+    const checks = [
+      acceptSession,
+      acceptEvent,
+      acceptTurn,
+      acceptTurnStatus,
+      acceptTurnSource,
+      acceptCreateRequest,
+      acceptClientEvent,
+    ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
     const statuses: readonly ScheduledTaskStatus[] = ContractScheduledTaskStatus.options;
     const runModes: readonly ScheduledTaskRunMode[] = ContractScheduledTaskRunMode.options;
-    const overlapPolicies: readonly ScheduledTaskOverlapPolicy[] = ContractScheduledTaskOverlapPolicy.options;
+    const overlapPolicies: readonly ScheduledTaskOverlapPolicy[] =
+      ContractScheduledTaskOverlapPolicy.options;
     expect(statuses).toEqual(ContractScheduledTaskStatus.options);
     expect(runModes).toEqual(ContractScheduledTaskRunMode.options);
     expect(overlapPolicies).toEqual(ContractScheduledTaskOverlapPolicy.options);
     // Server -> client: anything the contract produces, the SDK type accepts.
-    const acceptScheduledTask = (value: z.infer<typeof ContractScheduledTask>): ScheduledTask => value;
+    const acceptScheduledTask = (value: z.infer<typeof ContractScheduledTask>): ScheduledTask =>
+      value;
     expect(typeof acceptScheduledTask).toBe("function");
   });
 
@@ -170,7 +186,10 @@ describe("SDK / contracts parity", () => {
       clientEventId: "ce-1",
       payload: { text: "hello", tools: [{ kind: "mcp", id: "documents" }] },
     };
-    const interrupt: ClientSessionEventInput = { type: "user.interrupt", payload: { reason: "stop" } };
+    const interrupt: ClientSessionEventInput = {
+      type: "user.interrupt",
+      payload: { reason: "stop" },
+    };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
@@ -183,26 +202,42 @@ describe("SDK / contracts parity", () => {
   test("workspace member shapes match the contracts (compile-time + runtime)", () => {
     // Server -> client: anything the contract produces, the SDK type accepts.
     const acceptMember = (value: z.infer<typeof ContractWorkspaceMember>): WorkspaceMember => value;
-    const acceptList = (value: z.infer<typeof ContractListWorkspaceMembersResponse>): ListWorkspaceMembersResponse => value;
+    const acceptList = (
+      value: z.infer<typeof ContractListWorkspaceMembersResponse>,
+    ): ListWorkspaceMembersResponse => value;
     // Client -> server: anything the SDK sends, the contracts accept. `permissions`
     // is deliberately the open `Permission[]` in the SDK (forward compatible with
     // new server-side permissions), so like firstPartyMcpPermissions it is checked
     // at runtime by the server (the safeParse calls below) rather than here.
-    const acceptAdd = (value: Omit<AddWorkspaceMemberRequest, "permissions">): Omit<z.input<typeof ContractAddWorkspaceMemberRequest>, "permissions"> => value;
-    const acceptUpdate = (value: Omit<UpdateWorkspaceMemberRequest, "permissions">): Omit<z.input<typeof ContractUpdateWorkspaceMemberRequest>, "permissions"> => value;
-    expect([acceptMember, acceptList, acceptAdd, acceptUpdate].every((fn) => typeof fn === "function")).toBe(true);
+    const acceptAdd = (
+      value: Omit<AddWorkspaceMemberRequest, "permissions">,
+    ): Omit<z.input<typeof ContractAddWorkspaceMemberRequest>, "permissions"> => value;
+    const acceptUpdate = (
+      value: Omit<UpdateWorkspaceMemberRequest, "permissions">,
+    ): Omit<z.input<typeof ContractUpdateWorkspaceMemberRequest>, "permissions"> => value;
+    expect(
+      [acceptMember, acceptList, acceptAdd, acceptUpdate].every((fn) => typeof fn === "function"),
+    ).toBe(true);
 
-    const add: AddWorkspaceMemberRequest = { email: "teammate@example.com", role: "member", permissions: ["sessions:read"] };
-    const update: UpdateWorkspaceMemberRequest = { permissions: ["sessions:read", "members:manage"] };
-    expect(ContractAddWorkspaceMemberRequest.safeParse(add).success).toBe(true);
-    expect(ContractUpdateWorkspaceMemberRequest.safeParse(update).success).toBe(true);
-    expect(ContractWorkspaceMember.safeParse({
-      subjectId: "user:u1",
-      subjectLabel: "teammate@example.com",
+    const add: AddWorkspaceMemberRequest = {
+      email: "teammate@example.com",
       role: "member",
       permissions: ["sessions:read"],
-      createdAt: "2026-01-01T00:00:00.000Z",
-    }).success).toBe(true);
+    };
+    const update: UpdateWorkspaceMemberRequest = {
+      permissions: ["sessions:read", "members:manage"],
+    };
+    expect(ContractAddWorkspaceMemberRequest.safeParse(add).success).toBe(true);
+    expect(ContractUpdateWorkspaceMemberRequest.safeParse(update).success).toBe(true);
+    expect(
+      ContractWorkspaceMember.safeParse({
+        subjectId: "user:u1",
+        subjectLabel: "teammate@example.com",
+        role: "member",
+        permissions: ["sessions:read"],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }).success,
+    ).toBe(true);
   });
 
   test("workspace memory shapes match the contracts (compile-time + runtime)", () => {
@@ -214,11 +249,19 @@ describe("SDK / contracts parity", () => {
     // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
     const acceptMemory = (value: z.infer<typeof ContractKnowledgeMemory>): KnowledgeMemory => value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
-    const acceptSearchResponse = (value: z.infer<typeof ContractWorkspaceMemorySearchResponse>): WorkspaceMemorySearchResponse => value;
-    expect([acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function")).toBe(true);
+    const acceptSearchResponse = (
+      value: z.infer<typeof ContractWorkspaceMemorySearchResponse>,
+    ): WorkspaceMemorySearchResponse => value;
+    expect(
+      [acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function"),
+    ).toBe(true);
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
-    const create: CreateKnowledgeMemoryRequest = { text: "Prefer Terraform.", kind: "preference", pinned: true };
+    const create: CreateKnowledgeMemoryRequest = {
+      text: "Prefer Terraform.",
+      kind: "preference",
+      pinned: true,
+    };
     const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
     const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
@@ -227,10 +270,17 @@ describe("SDK / contracts parity", () => {
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.
-    expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "how do we deploy" }).success).toBe(true);
-    expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "x", limit: 999 }).success).toBe(false);
+    expect(
+      ContractWorkspaceMemorySearchRequest.safeParse({ query: "how do we deploy" }).success,
+    ).toBe(true);
+    expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "x", limit: 999 }).success).toBe(
+      false,
+    );
     // Unknown settings keys survive validation (passthrough / forward-compat).
-    expect(ContractUpdateWorkspaceSettingsRequest.parse({ futureFlag: 1 })).toHaveProperty("futureFlag", 1);
+    expect(ContractUpdateWorkspaceSettingsRequest.parse({ futureFlag: 1 })).toHaveProperty(
+      "futureFlag",
+      1,
+    );
   });
 
   test("machines + metrics shapes match the contracts (compile-time + runtime, M10)", () => {
@@ -241,29 +291,56 @@ describe("SDK / contracts parity", () => {
     const acceptSample = (value: z.infer<typeof ContractMetricSample>): MetricSample => value;
     const acceptMachine = (value: z.infer<typeof ContractMachineView>): MachineView => value;
     const acceptList = (value: z.infer<typeof ContractMachinesResponse>): MachinesResponse => value;
-    const acceptSeries = (value: z.infer<typeof ContractMachineMetricsSeriesResponse>): MachineMetricsSeriesResponse => value;
-    expect([acceptSample, acceptMachine, acceptList, acceptSeries].every((fn) => typeof fn === "function")).toBe(true);
+    const acceptSeries = (
+      value: z.infer<typeof ContractMachineMetricsSeriesResponse>,
+    ): MachineMetricsSeriesResponse => value;
+    expect(
+      [acceptSample, acceptMachine, acceptList, acceptSeries].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
 
     // A representative MachinesResponse round-trips through the contract schema.
     const sample = {
-      cpuPct: 12.5, load1: 0.4, load5: 0.3, load15: 0.2,
-      memUsedBytes: 1_000, memTotalBytes: 2_000, diskUsedBytes: 3_000, diskTotalBytes: 4_000,
-      gpuUtilPct: null, gpuMemBytes: null, runQueue: 1, sampledAt: "2026-06-26T00:00:00.000Z",
+      cpuPct: 12.5,
+      load1: 0.4,
+      load5: 0.3,
+      load15: 0.2,
+      memUsedBytes: 1_000,
+      memTotalBytes: 2_000,
+      diskUsedBytes: 3_000,
+      diskTotalBytes: 4_000,
+      gpuUtilPct: null,
+      gpuMemBytes: null,
+      runQueue: 1,
+      sampledAt: "2026-06-26T00:00:00.000Z",
     };
     const response = {
       activeSandboxId: null,
       activeEpoch: 0,
       machines: [
         {
-          sandboxId: "sb-1", enrollmentId: "en-1", name: "build-box", kind: "selfhosted",
-          state: "consent_required", active: false, isSessionGroup: false,
-          os: "linux", arch: "x86_64", hasDisplay: true, allowScreenControl: false,
-          sharedSessionCount: 2, lastSeenAt: "2026-06-26T00:00:00.000Z", metrics: sample,
+          sandboxId: "sb-1",
+          enrollmentId: "en-1",
+          name: "build-box",
+          kind: "selfhosted",
+          state: "consent_required",
+          active: false,
+          isSessionGroup: false,
+          os: "linux",
+          arch: "x86_64",
+          hasDisplay: true,
+          allowScreenControl: false,
+          sharedSessionCount: 2,
+          lastSeenAt: "2026-06-26T00:00:00.000Z",
+          metrics: sample,
         },
       ],
     };
     expect(ContractMachinesResponse.safeParse(response).success).toBe(true);
-    expect(ContractMachineMetricsSeriesResponse.safeParse({ samples: [sample] }).success).toBe(true);
+    expect(ContractMachineMetricsSeriesResponse.safeParse({ samples: [sample] }).success).toBe(
+      true,
+    );
     // The SDK view-model accepts the parsed value (server -> client direction).
     const parsed = ContractMachinesResponse.parse(response);
     const asSdk: MachinesResponse = parsed;
@@ -303,7 +380,8 @@ describe("SDK / contracts parity", () => {
     for (const backend of ContractSandboxBackend.options) {
       const descriptor = CAPABILITY_DESCRIPTORS[backend];
       const desktopCapable = descriptor.capabilities.DesktopStream.available;
-      const isLinux = descriptor.os.default === "linux" && descriptor.os.supported.includes("linux");
+      const isLinux =
+        descriptor.os.default === "linux" && descriptor.os.supported.includes("linux");
 
       // Recording feasibility == DesktopStream.available && os==linux (x11grab
       // is X11-only). In v1 every reachable cell is Linux, so this reduces to
@@ -331,19 +409,32 @@ describe("SDK / contracts parity", () => {
   test("stream-surfacing shapes are parity-pinned (Phase 5)", () => {
     // Server -> client: contract-produced shapes are assignable to the SDK
     // mirrors the capability-gated client consumes.
-    const acceptCapabilities = (v: z.infer<typeof ContractSessionCapabilities>): SessionCapabilities => v;
+    const acceptCapabilities = (
+      v: z.infer<typeof ContractSessionCapabilities>,
+    ): SessionCapabilities => v;
     const acceptClientConfig = (v: z.infer<typeof ContractClientConfig>): ClientConfig => v;
     const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
-    const acceptHeartbeatResponse = (v: z.infer<typeof ContractViewerHeartbeatResponse>): ViewerHeartbeatResponse => v;
-    const acceptAckResponse = (v: z.infer<typeof ContractAcknowledgeStreamResponse>): AcknowledgeStreamResponse => v;
-    const acceptRotated = (v: z.infer<typeof ContractStreamUrlRotatedPayload>): StreamUrlRotatedPayload => v;
+    const acceptHeartbeatResponse = (
+      v: z.infer<typeof ContractViewerHeartbeatResponse>,
+    ): ViewerHeartbeatResponse => v;
+    const acceptAckResponse = (
+      v: z.infer<typeof ContractAcknowledgeStreamResponse>,
+    ): AcknowledgeStreamResponse => v;
+    const acceptRotated = (
+      v: z.infer<typeof ContractStreamUrlRotatedPayload>,
+    ): StreamUrlRotatedPayload => v;
     // The desktop-cell alias is an exact view of the doc's DesktopStream cell.
     const acceptDesktopCell = (
       v: z.infer<typeof ContractSessionCapabilities>["DesktopStream"],
     ): SessionCapabilities["DesktopStream"] => v;
     const serverToClient = [
-      acceptCapabilities, acceptClientConfig, acceptViewerHolder,
-      acceptHeartbeatResponse, acceptAckResponse, acceptRotated, acceptDesktopCell,
+      acceptCapabilities,
+      acceptClientConfig,
+      acceptViewerHolder,
+      acceptHeartbeatResponse,
+      acceptAckResponse,
+      acceptRotated,
+      acceptDesktopCell,
     ];
     expect(serverToClient.every((fn) => typeof fn === "function")).toBe(true);
 

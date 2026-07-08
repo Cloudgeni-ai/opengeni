@@ -181,7 +181,10 @@ async function probeEnrollment(
  * workspace's first-class selfhosted sandboxes (each probed for liveness), each
  * with an `active` marker derived from the session's active pointer.
  */
-export async function listFleet(services: FleetServices, ctx: FleetContext): Promise<FleetListResult> {
+export async function listFleet(
+  services: FleetServices,
+  ctx: FleetContext,
+): Promise<FleetListResult> {
   const { db } = services;
   const pointer = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)) ?? {
     activeSandboxId: null,
@@ -230,7 +233,11 @@ export async function listFleet(services: FleetServices, ctx: FleetContext): Pro
     });
   }
 
-  return { activeSandboxId: pointer.activeSandboxId, activeEpoch: pointer.activeEpoch, sandboxes: entries };
+  return {
+    activeSandboxId: pointer.activeSandboxId,
+    activeEpoch: pointer.activeEpoch,
+    sandboxes: entries,
+  };
 }
 
 /** Resolve a swap target id → the value `setActiveSandbox` writes. The session's
@@ -259,7 +266,10 @@ async function resolveTarget(
     }
     const probe = await probeEnrollment(services, ctx.workspaceId, enrollment);
     if (probe.liveness !== "online") {
-      return { ok: false, reason: `sandbox ${target} is ${probe.liveness}; cannot attach to a non-online machine` };
+      return {
+        ok: false,
+        reason: `sandbox ${target} is ${probe.liveness}; cannot attach to a non-online machine`,
+      };
     }
   }
   return { ok: true, targetSandboxId: sandbox.id };
@@ -288,7 +298,12 @@ export async function swapActiveSandbox(
       activeSandboxId: null,
       activeEpoch: 0,
     };
-    return { swapped: false, activeSandboxId: pointer.activeSandboxId, activeEpoch: pointer.activeEpoch, reason: resolved.reason };
+    return {
+      swapped: false,
+      activeSandboxId: pointer.activeSandboxId,
+      activeEpoch: pointer.activeEpoch,
+      reason: resolved.reason,
+    };
   }
 
   // Read the current epoch, then CAS on it (the fence). One retry on a lost race
@@ -300,7 +315,11 @@ export async function swapActiveSandbox(
     };
     // No-op swap (already pointed there) is a success without an epoch bump churn.
     if (pointer.activeSandboxId === resolved.targetSandboxId) {
-      return { swapped: true, activeSandboxId: pointer.activeSandboxId, activeEpoch: pointer.activeEpoch };
+      return {
+        swapped: true,
+        activeSandboxId: pointer.activeSandboxId,
+        activeEpoch: pointer.activeEpoch,
+      };
     }
     const result = await setActiveSandbox(services.db, {
       accountId: ctx.accountId,
@@ -311,7 +330,11 @@ export async function swapActiveSandbox(
       ...(workingDir !== undefined ? { workingDir } : {}),
     });
     if (result.swapped && result.pointer) {
-      return { swapped: true, activeSandboxId: result.pointer.activeSandboxId, activeEpoch: result.pointer.activeEpoch };
+      return {
+        swapped: true,
+        activeSandboxId: result.pointer.activeSandboxId,
+        activeEpoch: result.pointer.activeEpoch,
+      };
     }
     // CAS lost (a concurrent swap won) — re-read + retry once.
   }
@@ -361,7 +384,12 @@ export async function runOnSandbox(
 ): Promise<RunOnResult> {
   const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
   if (!sandbox) {
-    return { target, kind: op.kind, ok: false, reason: `sandbox ${target} not found in this workspace` };
+    return {
+      target,
+      kind: op.kind,
+      ok: false,
+      reason: `sandbox ${target} not found in this workspace`,
+    };
   }
   if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
     return {
@@ -385,8 +413,18 @@ export async function runOnSandbox(
 
   try {
     if (op.kind === "exec") {
-      const res = await session.exec({ cmd: op.cmd, ...(op.workdir ? { workdir: op.workdir } : {}) });
-      return { target, kind: "exec", ok: true, stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode };
+      const res = await session.exec({
+        cmd: op.cmd,
+        ...(op.workdir ? { workdir: op.workdir } : {}),
+      });
+      return {
+        target,
+        kind: "exec",
+        ok: true,
+        stdout: res.stdout,
+        stderr: res.stderr,
+        exitCode: res.exitCode,
+      };
     }
     if (op.kind === "read") {
       const bytes = await session.readFile({ path: op.path });

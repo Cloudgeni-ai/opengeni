@@ -3,20 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "description": "Self-hostable managed agent service for long-running infrastructure work.",
+  "homepage": "https://github.com/Cloudgeni-ai/opengeni#readme",
+  "bugs": {
+    "url": "https://github.com/Cloudgeni-ai/opengeni/issues"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git"
   },
-  "bugs": {
-    "url": "https://github.com/Cloudgeni-ai/opengeni/issues"
-  },
-  "homepage": "https://github.com/Cloudgeni-ai/opengeni#readme",
-  "type": "module",
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
     "dev": "bash scripts/dev-stack.sh",
     "dev:stack": "bash scripts/dev-stack.sh",
@@ -59,6 +59,17 @@
     "check:workspace-billing": "bun run typecheck && bun test && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
     "prep": "bun run check:full"
   },
+  "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/view": "^6.43.1",
+    "@pierre/trees": "1.0.0-beta.4",
+    "@uiw/react-codemirror": "^4.25.10"
+  },
   "devDependencies": {
     "@changesets/cli": "^2.27.11",
     "@opengeni/agent-proto": "workspace:*",
@@ -84,16 +95,5 @@
     "oxlint": "1.73.0",
     "playwright": "^1.57.0",
     "typescript": "^6.0.3"
-  },
-  "dependencies": {
-    "@codemirror/lang-css": "^6.3.1",
-    "@codemirror/lang-html": "^6.4.11",
-    "@codemirror/lang-javascript": "^6.2.5",
-    "@codemirror/lang-json": "^6.0.2",
-    "@codemirror/lang-markdown": "^6.5.0",
-    "@codemirror/lang-python": "^6.2.1",
-    "@codemirror/view": "^6.43.1",
-    "@pierre/trees": "1.0.0-beta.4",
-    "@uiw/react-codemirror": "^4.25.10"
   }
 }

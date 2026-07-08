@@ -82,7 +82,10 @@ afterEach(() => {
 describe("useFileAttachments", () => {
   test("an image/* file mints exactly one object-URL preview", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     expect(created.length).toBe(1);
@@ -93,7 +96,10 @@ describe("useFileAttachments", () => {
 
   test("a non-image file mints NO object-URL (previewUrl undefined)", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset({ contentType: "text/plain" }) });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([textFile()]));
     expect(created.length).toBe(0);
@@ -103,7 +109,10 @@ describe("useFileAttachments", () => {
 
   test("remove(id) revokes the attachment's object-URL", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     const id = hook.result.current.attachments[0]!.id;
@@ -117,7 +126,10 @@ describe("useFileAttachments", () => {
 
   test("clear() revokes every outstanding object-URL", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile("a.png"), imageFile("b.png")]));
     expect(created.length).toBe(2);
@@ -130,9 +142,14 @@ describe("useFileAttachments", () => {
 
   test("addFromPaste applies the default image/* filter — only the image is enqueued", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
-    const clipboardData = { files: [imageFile("pasted.png"), textFile("pasted.txt")] } as unknown as DataTransfer;
+    const clipboardData = {
+      files: [imageFile("pasted.png"), textFile("pasted.txt")],
+    } as unknown as DataTransfer;
     await flushing(() => hook.result.current.addFromPaste({ clipboardData }));
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]?.contentType).toBe("image/png");
@@ -142,11 +159,18 @@ describe("useFileAttachments", () => {
   test("a custom pasteFilter governs instead of the image/* default", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset({ contentType: "text/plain" }) });
     const hook = await renderHook(
-      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID, pasteFilter: (f) => f.type === "text/plain" }),
+      () =>
+        useFileAttachments({
+          client,
+          workspaceId: WORKSPACE_ID,
+          pasteFilter: (f) => f.type === "text/plain",
+        }),
       undefined,
     );
 
-    const clipboardData = { files: [imageFile("pasted.png"), textFile("pasted.txt")] } as unknown as DataTransfer;
+    const clipboardData = {
+      files: [imageFile("pasted.png"), textFile("pasted.txt")],
+    } as unknown as DataTransfer;
     await flushing(() => hook.result.current.addFromPaste({ clipboardData }));
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]?.contentType).toBe("text/plain");
@@ -156,7 +180,10 @@ describe("useFileAttachments", () => {
   test("a ready upload flips status->ready and projects into readyResources", async () => {
     const asset = fakeAsset({ filename: "uploaded.png", sizeBytes: 9999 });
     const client = fakeClient({ uploadFile: async () => asset });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     // Let the upload promise settle.
@@ -171,8 +198,15 @@ describe("useFileAttachments", () => {
   });
 
   test("a rejected upload flips status->failed, sets error, and is excluded from readyResources", async () => {
-    const client = fakeClient({ uploadFile: async () => { throw new Error("blob storage exploded"); } });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const client = fakeClient({
+      uploadFile: async () => {
+        throw new Error("blob storage exploded");
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     await flush();
@@ -196,7 +230,10 @@ describe("useFileAttachments", () => {
         return asset;
       },
     });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     await flush();
@@ -216,7 +253,10 @@ describe("useFileAttachments", () => {
 
   test("retry(id) is a no-op for an unknown / already-removed id", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.retry("nope"));
     await flush();
@@ -226,9 +266,14 @@ describe("useFileAttachments", () => {
 
   test("uploading is true while an upload is pending and flips false once it resolves", async () => {
     let resolveUpload!: (asset: FileAsset) => void;
-    const pending = new Promise<FileAsset>((resolve) => { resolveUpload = resolve; });
+    const pending = new Promise<FileAsset>((resolve) => {
+      resolveUpload = resolve;
+    });
     const client = fakeClient({ uploadFile: () => pending });
-    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
 
     await flushing(() => hook.result.current.addFiles([imageFile()]));
     expect(hook.result.current.uploading).toBe(true);

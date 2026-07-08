@@ -35,29 +35,83 @@ const CAPTURED_AT = new Date(Date.now() - 6 * 60_000).toISOString();
 
 function hunk(startAt: number, addLines: number, ctx = 2): GitDiffHunk {
   const lines: GitDiffLine[] = [];
-  for (let i = 0; i < ctx; i++) lines.push({ type: "context", oldNo: startAt + i, newNo: startAt + i, text: `  const keep_${i} = ${i};` });
+  for (let i = 0; i < ctx; i++)
+    lines.push({
+      type: "context",
+      oldNo: startAt + i,
+      newNo: startAt + i,
+      text: `  const keep_${i} = ${i};`,
+    });
   for (let i = 0; i < addLines; i++) {
-    lines.push({ type: "del", oldNo: startAt + ctx + i, newNo: null, text: `  const removed_${i} = "old value ${i}";` });
-    lines.push({ type: "add", oldNo: null, newNo: startAt + ctx + i, text: `  const added_${i} = "new value ${i}";` });
+    lines.push({
+      type: "del",
+      oldNo: startAt + ctx + i,
+      newNo: null,
+      text: `  const removed_${i} = "old value ${i}";`,
+    });
+    lines.push({
+      type: "add",
+      oldNo: null,
+      newNo: startAt + ctx + i,
+      text: `  const added_${i} = "new value ${i}";`,
+    });
   }
-  for (let i = 0; i < ctx; i++) lines.push({ type: "context", oldNo: startAt + ctx + addLines + i, newNo: startAt + ctx + addLines + i, text: `  return added_${i};` });
-  return { oldStart: startAt, oldLines: ctx + addLines, newStart: startAt, newLines: ctx + addLines * 2, header: `@@ -${startAt},${ctx + addLines} +${startAt},${ctx + addLines * 2} @@`, lines };
+  for (let i = 0; i < ctx; i++)
+    lines.push({
+      type: "context",
+      oldNo: startAt + ctx + addLines + i,
+      newNo: startAt + ctx + addLines + i,
+      text: `  return added_${i};`,
+    });
+  return {
+    oldStart: startAt,
+    oldLines: ctx + addLines,
+    newStart: startAt,
+    newLines: ctx + addLines * 2,
+    header: `@@ -${startAt},${ctx + addLines} +${startAt},${ctx + addLines * 2} @@`,
+    lines,
+  };
 }
 
-function file(path: string, add: number, del: number, hunks: GitDiffHunk[], overrides: Partial<GitFileDiff> = {}): GitFileDiff {
-  return { path, oldPath: null, status: "modified", isBinary: false, isImage: false, additions: add, deletions: del, truncated: false, hunks, ...overrides };
+function file(
+  path: string,
+  add: number,
+  del: number,
+  hunks: GitDiffHunk[],
+  overrides: Partial<GitFileDiff> = {},
+): GitFileDiff {
+  return {
+    path,
+    oldPath: null,
+    status: "modified",
+    isBinary: false,
+    isImage: false,
+    additions: add,
+    deletions: del,
+    truncated: false,
+    hunks,
+    ...overrides,
+  };
 }
 
 /** The canonical small review: a security hardening across api + infra. */
 const diffReview: GitFileDiff[] = [
   file("apps/api/src/server.ts", 6, 2, [
     {
-      oldStart: 12, oldLines: 4, newStart: 12, newLines: 6,
+      oldStart: 12,
+      oldLines: 4,
+      newStart: 12,
+      newLines: 6,
       header: "@@ -12,4 +12,6 @@ export function createServer() {",
       lines: [
         { type: "context", oldNo: 12, newNo: 12, text: "  const app = express();" },
         { type: "del", oldNo: 13, newNo: null, text: "  app.use(cors());" },
-        { type: "add", oldNo: null, newNo: 13, text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));" },
+        {
+          type: "add",
+          oldNo: null,
+          newNo: 13,
+          text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));",
+        },
         { type: "add", oldNo: null, newNo: 14, text: "  app.use(helmet());" },
         { type: "add", oldNo: null, newNo: 15, text: "  app.use(rateLimit());" },
         { type: "context", oldNo: 14, newNo: 16, text: "  return app;" },
@@ -66,7 +120,10 @@ const diffReview: GitFileDiff[] = [
   ]),
   file("infra/main.tf", 2, 0, [
     {
-      oldStart: 4, oldLines: 2, newStart: 4, newLines: 4,
+      oldStart: 4,
+      oldLines: 2,
+      newStart: 4,
+      newLines: 4,
       header: '@@ -4,2 +4,4 @@ resource "aws_instance" "api" {',
       lines: [
         { type: "context", oldNo: 4, newNo: 4, text: '  instance_type = "t3.small"' },
@@ -76,22 +133,37 @@ const diffReview: GitFileDiff[] = [
       ],
     },
   ]),
-  file("apps/api/src/config.ts", 3, 0, [
-    {
-      oldStart: 0, oldLines: 0, newStart: 1, newLines: 3,
-      header: "@@ -0,0 +1,3 @@",
-      lines: [
-        { type: "add", oldNo: null, newNo: 1, text: "export const ALLOWED_ORIGINS = [" },
-        { type: "add", oldNo: null, newNo: 2, text: '  "https://app.acme.dev",' },
-        { type: "add", oldNo: null, newNo: 3, text: "];" },
-      ],
-    },
-  ], { status: "added" }),
+  file(
+    "apps/api/src/config.ts",
+    3,
+    0,
+    [
+      {
+        oldStart: 0,
+        oldLines: 0,
+        newStart: 1,
+        newLines: 3,
+        header: "@@ -0,0 +1,3 @@",
+        lines: [
+          { type: "add", oldNo: null, newNo: 1, text: "export const ALLOWED_ORIGINS = [" },
+          { type: "add", oldNo: null, newNo: 2, text: '  "https://app.acme.dev",' },
+          { type: "add", oldNo: null, newNo: 3, text: "];" },
+        ],
+      },
+    ],
+    { status: "added" },
+  ),
 ];
 
 /** A 40-file changeset for the dense / windowing review state. */
 function diffDense(count: number): GitFileDiff[] {
-  const dirs = ["apps/api/src", "apps/web/src/components", "packages/core/lib", "packages/db/migrations", "docs"];
+  const dirs = [
+    "apps/api/src",
+    "apps/web/src/components",
+    "packages/core/lib",
+    "packages/db/migrations",
+    "docs",
+  ];
   return Array.from({ length: count }, (_, i) => {
     const dir = dirs[i % dirs.length];
     const size = 1 + (i % 5);
@@ -109,10 +181,27 @@ const diffGuard: GitFileDiff[] = [
 // ── tree builders ────────────────────────────────────────────────────────────
 
 function dir(name: string, path: string, children?: FsTreeNode[]): FsTreeNode {
-  return { name, path, type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, ...(children ? { children } : {}) };
+  return {
+    name,
+    path,
+    type: "dir",
+    sizeBytes: null,
+    mtimeMs: null,
+    mode: null,
+    truncated: false,
+    ...(children ? { children } : {}),
+  };
 }
 function fsfile(name: string, path: string, sizeBytes = 512): FsTreeNode {
-  return { name, path, type: "file", sizeBytes, mtimeMs: Date.now(), mode: 0o644, truncated: false };
+  return {
+    name,
+    path,
+    type: "file",
+    sizeBytes,
+    mtimeMs: Date.now(),
+    mode: 0o644,
+    truncated: false,
+  };
 }
 
 /** A realistic project tree for the capture index (cold Files tab). */
@@ -128,9 +217,14 @@ const treeReview: FsTreeNode = dir("", "", [
       ]),
       fsfile("package.json", "apps/api/package.json", 842),
     ]),
-    dir("web", "apps/web", [dir("src", "apps/web/src", [fsfile("main.tsx", "apps/web/src/main.tsx", 1280)])]),
+    dir("web", "apps/web", [
+      dir("src", "apps/web/src", [fsfile("main.tsx", "apps/web/src/main.tsx", 1280)]),
+    ]),
   ]),
-  dir("infra", "infra", [fsfile("main.tf", "infra/main.tf", 1860), fsfile("variables.tf", "infra/variables.tf", 420)]),
+  dir("infra", "infra", [
+    fsfile("main.tf", "infra/main.tf", 1860),
+    fsfile("variables.tf", "infra/variables.tf", 420),
+  ]),
   fsfile("package.json", "package.json", 842),
   fsfile("README.md", "README.md", 1280),
 ]);
@@ -147,7 +241,10 @@ function treeDense(dirs: number, filesPer: number): FsTreeNode {
   for (let d = 0; d < dirs; d++) {
     const base = `src/module-${String(d).padStart(2, "0")}`;
     const children = Array.from({ length: filesPer }, (_, f) =>
-      fsfile(`file-${String(f).padStart(3, "0")}.ts`, `${base}/file-${String(f).padStart(3, "0")}.ts`),
+      fsfile(
+        `file-${String(f).padStart(3, "0")}.ts`,
+        `${base}/file-${String(f).padStart(3, "0")}.ts`,
+      ),
     );
     roots.push(dir(`module-${String(d).padStart(2, "0")}`, base, children));
   }
@@ -157,7 +254,10 @@ function treeDense(dirs: number, filesPer: number): FsTreeNode {
 // ── capability + machine + capture builders ──────────────────────────────────
 
 /** A full warm-box capability advertisement; overrides narrow specific cells. */
-function caps(liveness: SessionCapabilities["liveness"], overrides: Partial<SessionCapabilities> = {}): SessionCapabilities {
+function caps(
+  liveness: SessionCapabilities["liveness"],
+  overrides: Partial<SessionCapabilities> = {},
+): SessionCapabilities {
   return {
     sessionId: DOCK_SESSION_ID,
     backend: "modal",
@@ -165,14 +265,37 @@ function caps(liveness: SessionCapabilities["liveness"], overrides: Partial<Sess
     liveness,
     leaseEpoch: 1,
     viewerHeartbeatIntervalMs: 30_000,
-    FileSystem: { available: true, readOnly: false, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: null },
-    Terminal: { transport: "pty-ws", ptyCapable: true, shell: "/bin/bash", url: null, token: null, reason: null },
+    FileSystem: {
+      available: true,
+      readOnly: false,
+      root: "/workspace",
+      pathSep: "/",
+      treeMode: "lazy",
+      reason: null,
+    },
+    Terminal: {
+      transport: "pty-ws",
+      ptyCapable: true,
+      shell: "/bin/bash",
+      url: null,
+      token: null,
+      reason: null,
+    },
     Git: { available: true, repos: ["."], reason: null },
     DesktopStream: {
-      transport: "vnc-ws", client: "novnc", mode: "interactive",
-      url: "https://desktop.invalid/vnc", token: null, expiresAt: null,
-      resolution: [1024, 768], unredacted: true, requiresAcknowledgment: false, acknowledged: true,
-      shared: false, sharedSessionIds: [], reason: null,
+      transport: "vnc-ws",
+      client: "novnc",
+      mode: "interactive",
+      url: "https://desktop.invalid/vnc",
+      token: null,
+      expiresAt: null,
+      resolution: [1024, 768],
+      unredacted: true,
+      requiresAcknowledgment: false,
+      acknowledged: true,
+      shared: false,
+      sharedSessionIds: [],
+      reason: null,
     },
     Recording: { available: false, modes: [], codecs: [], reason: "tier_headless" },
     ComputerUse: { available: false, readOnly: true, reason: "tier_headless" },
@@ -184,11 +307,28 @@ function caps(liveness: SessionCapabilities["liveness"], overrides: Partial<Sess
 /** A cold lease: FS/Git/Terminal feasible-but-cold, no live desktop. */
 function capsCold(overrides: Partial<SessionCapabilities> = {}): SessionCapabilities {
   return caps("cold", {
-    Terminal: { transport: "sse-events", ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: "lease_cold" },
+    Terminal: {
+      transport: "sse-events",
+      ptyCapable: false,
+      shell: "/bin/bash",
+      url: null,
+      token: null,
+      reason: "lease_cold",
+    },
     DesktopStream: {
-      transport: null, client: null, mode: "read-only", url: null, token: null, expiresAt: null,
-      resolution: [1024, 768], unredacted: false, requiresAcknowledgment: true, acknowledged: false,
-      shared: false, sharedSessionIds: [], reason: "lease_cold",
+      transport: null,
+      client: null,
+      mode: "read-only",
+      url: null,
+      token: null,
+      expiresAt: null,
+      resolution: [1024, 768],
+      unredacted: false,
+      requiresAcknowledgment: true,
+      acknowledged: false,
+      shared: false,
+      sharedSessionIds: [],
+      reason: "lease_cold",
     },
     ...overrides,
   });
@@ -235,7 +375,11 @@ function statsFor(diff: GitFileDiff[], revision: number): WorkspaceCaptureManife
   };
 }
 
-function manifest(diff: GitFileDiff[], tree: FsTreeNode, revision: number): WorkspaceCaptureManifest {
+function manifest(
+  diff: GitFileDiff[],
+  tree: FsTreeNode,
+  revision: number,
+): WorkspaceCaptureManifest {
   return {
     version: 1,
     revision,
@@ -244,23 +388,75 @@ function manifest(diff: GitFileDiff[], tree: FsTreeNode, revision: number): Work
     leaseEpoch: 1,
     treeIndex: tree,
     treeTruncated: false,
-    repos: [{ root: "", head: "feat/security-hardening", detached: false, upstream: "origin/feat/security-hardening", ahead: 2, behind: 1, status: [], diff }],
-    files: diff.map((f) => ({ path: f.path, status: f.status, hash: null, baseHash: null, contentRef: null, sizeBytes: 512, isBinary: f.isBinary, tooLarge: f.truncated, deleted: false })),
+    repos: [
+      {
+        root: "",
+        head: "feat/security-hardening",
+        detached: false,
+        upstream: "origin/feat/security-hardening",
+        ahead: 2,
+        behind: 1,
+        status: [],
+        diff,
+      },
+    ],
+    files: diff.map((f) => ({
+      path: f.path,
+      status: f.status,
+      hash: null,
+      baseHash: null,
+      contentRef: null,
+      sizeBytes: 512,
+      isBinary: f.isBinary,
+      tooLarge: f.truncated,
+      deleted: false,
+    })),
     stats: statsFor(diff, revision),
   };
 }
 function captureAvailable(m: WorkspaceCaptureManifest): GetWorkspaceCaptureResponse {
-  return { available: true, revision: m.revision, capturedAt: m.capturedAt, turnId: m.turnId, leaseEpoch: m.leaseEpoch, sizeBytes: 4096, stats: m.stats, manifest: m, manifestUrl: null };
+  return {
+    available: true,
+    revision: m.revision,
+    capturedAt: m.capturedAt,
+    turnId: m.turnId,
+    leaseEpoch: m.leaseEpoch,
+    sizeBytes: 4096,
+    stats: m.stats,
+    manifest: m,
+    manifestUrl: null,
+  };
 }
 const captureNone: GetWorkspaceCaptureResponse = { available: false };
 
 function status(files: GitStatusResponse["files"], isRepo = true): GitStatusResponse {
-  return { isRepo, head: "feat/security-hardening", detached: false, upstream: "origin/feat/security-hardening", ahead: 2, behind: 1, files, revision: 1 };
+  return {
+    isRepo,
+    head: "feat/security-hardening",
+    detached: false,
+    upstream: "origin/feat/security-hardening",
+    ahead: 2,
+    behind: 1,
+    files,
+    revision: 1,
+  };
 }
 const statusReview = status([
-  { path: "apps/api/src/server.ts", oldPath: null, index: null, worktree: "modified", isConflicted: false },
+  {
+    path: "apps/api/src/server.ts",
+    oldPath: null,
+    index: null,
+    worktree: "modified",
+    isConflicted: false,
+  },
   { path: "infra/main.tf", oldPath: null, index: null, worktree: "modified", isConflicted: false },
-  { path: "apps/api/src/config.ts", oldPath: null, index: null, worktree: "added", isConflicted: false },
+  {
+    path: "apps/api/src/config.ts",
+    oldPath: null,
+    index: null,
+    worktree: "added",
+    isConflicted: false,
+  },
 ]);
 const statusClean = status([]);
 
@@ -318,16 +514,48 @@ export const DOCK_STATES: Record<string, DockState> = {
   "selfhosted-offline": {
     label: "Self-hosted · offline",
     capabilities: capsCold({
-      FileSystem: { available: true, readOnly: true, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: "agent_offline" },
-      Terminal: { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: "agent_offline" },
+      FileSystem: {
+        available: true,
+        readOnly: true,
+        root: "/workspace",
+        pathSep: "/",
+        treeMode: "lazy",
+        reason: "agent_offline",
+      },
+      Terminal: {
+        transport: null,
+        ptyCapable: false,
+        shell: "/bin/bash",
+        url: null,
+        token: null,
+        reason: "agent_offline",
+      },
       DesktopStream: {
-        transport: null, client: null, mode: "read-only", url: null, token: null, expiresAt: null,
-        resolution: [1024, 768], unredacted: false, requiresAcknowledgment: true, acknowledged: false,
-        shared: false, sharedSessionIds: [], reason: "agent_offline",
+        transport: null,
+        client: null,
+        mode: "read-only",
+        url: null,
+        token: null,
+        expiresAt: null,
+        resolution: [1024, 768],
+        unredacted: false,
+        requiresAcknowledgment: true,
+        acknowledged: false,
+        shared: false,
+        sharedSessionIds: [],
+        reason: "agent_offline",
       },
     }),
     capture: captureAvailable(manifest(diffReview, treeReview, 4)),
-    machines: fleet(machine({ kind: "selfhosted", name: "jorgen-mbp", state: "offline", active: true, isSessionGroup: false })),
+    machines: fleet(
+      machine({
+        kind: "selfhosted",
+        name: "jorgen-mbp",
+        state: "offline",
+        active: true,
+        isSessionGroup: false,
+      }),
+    ),
     gitStatus: statusReview,
     gitDiff: diffReview,
     announceFileCount: 3,
@@ -359,9 +587,27 @@ export const DOCK_STATES: Record<string, DockState> = {
     capture: captureNone,
     machines: fleet(machine({ state: "online" })),
     gitStatus: status([
-      { path: "src/index.ts", oldPath: null, index: null, worktree: "modified", isConflicted: false },
-      { path: "assets/logo.png", oldPath: null, index: null, worktree: "modified", isConflicted: false },
-      { path: "data/fixtures.json", oldPath: null, index: null, worktree: "modified", isConflicted: false },
+      {
+        path: "src/index.ts",
+        oldPath: null,
+        index: null,
+        worktree: "modified",
+        isConflicted: false,
+      },
+      {
+        path: "assets/logo.png",
+        oldPath: null,
+        index: null,
+        worktree: "modified",
+        isConflicted: false,
+      },
+      {
+        path: "data/fixtures.json",
+        oldPath: null,
+        index: null,
+        worktree: "modified",
+        isConflicted: false,
+      },
     ]),
     gitDiff: diffGuard,
     tree: treeReview,
@@ -380,11 +626,28 @@ export const DOCK_STATES: Record<string, DockState> = {
   "permission-gated": {
     label: "Permission-limited",
     capabilities: caps("warm", {
-      Terminal: { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: "disabled_by_policy" },
+      Terminal: {
+        transport: null,
+        ptyCapable: false,
+        shell: "/bin/bash",
+        url: null,
+        token: null,
+        reason: "disabled_by_policy",
+      },
       DesktopStream: {
-        transport: null, client: null, mode: "read-only", url: null, token: null, expiresAt: null,
-        resolution: [1024, 768], unredacted: false, requiresAcknowledgment: true, acknowledged: false,
-        shared: false, sharedSessionIds: [], reason: "disabled_by_policy",
+        transport: null,
+        client: null,
+        mode: "read-only",
+        url: null,
+        token: null,
+        expiresAt: null,
+        resolution: [1024, 768],
+        unredacted: false,
+        requiresAcknowledgment: true,
+        acknowledged: false,
+        shared: false,
+        sharedSessionIds: [],
+        reason: "disabled_by_policy",
       },
     }),
     capture: captureNone,
@@ -419,17 +682,30 @@ export class DockStateMockClient extends MockOpenGeniClient {
     // the session has changes, Files otherwise) exactly as production does.
     if (state.announceFileCount && state.announceFileCount > 0) {
       this.bus(DOCK_SESSION_ID).append("workspace.revision.captured", {
-        revision: 1, turnId: "turn-1", capturedAt: CAPTURED_AT, leaseEpoch: 1,
+        revision: 1,
+        turnId: "turn-1",
+        capturedAt: CAPTURED_AT,
+        leaseEpoch: 1,
         stats: {
-          repoCount: 1, fileCount: state.announceFileCount, additions: 0, deletions: 0,
-          totalBytes: 0, tooLargeCount: 0, binaryCount: 0, treeEntryCount: 24, treeTruncated: false, durationMs: 120, fingerprint: "fp-1",
+          repoCount: 1,
+          fileCount: state.announceFileCount,
+          additions: 0,
+          deletions: 0,
+          totalBytes: 0,
+          tooLargeCount: 0,
+          binaryCount: 0,
+          treeEntryCount: 24,
+          treeTruncated: false,
+          durationMs: 120,
+          fingerprint: "fp-1",
         },
       });
     }
   }
 
   override async getStreamCapabilities(): Promise<SessionCapabilities> {
-    if (this.state.capabilities === "error") throw new Error("sandbox unreachable — the box could not be resumed");
+    if (this.state.capabilities === "error")
+      throw new Error("sandbox unreachable — the box could not be resumed");
     return this.state.capabilities;
   }
 
@@ -438,7 +714,8 @@ export class DockStateMockClient extends MockOpenGeniClient {
   // make the header chip lie about a live box once the Files tab warms it).
   override async attachViewer(): Promise<Awaited<ReturnType<MockOpenGeniClient["attachViewer"]>>> {
     const base = await super.attachViewer();
-    const liveness = this.state.capabilities === "error" ? "cold" : this.state.capabilities.liveness;
+    const liveness =
+      this.state.capabilities === "error" ? "cold" : this.state.capabilities.liveness;
     return { ...base, liveness };
   }
 
@@ -454,12 +731,20 @@ export class DockStateMockClient extends MockOpenGeniClient {
     return this.state.gitStatus;
   }
 
-  override async gitDiff(_workspaceId: string, _sessionId: string, request?: { staged?: boolean }): Promise<{ files: GitFileDiff[]; revision: number }> {
+  override async gitDiff(
+    _workspaceId: string,
+    _sessionId: string,
+    request?: { staged?: boolean },
+  ): Promise<{ files: GitFileDiff[]; revision: number }> {
     if (request?.staged) return { files: [], revision: 1 };
     return { files: this.state.gitDiff, revision: 1 };
   }
 
-  override async fsList(workspaceId: string, sessionId: string, request?: { path?: string }): Promise<Awaited<ReturnType<MockOpenGeniClient["fsList"]>>> {
+  override async fsList(
+    workspaceId: string,
+    sessionId: string,
+    request?: { path?: string },
+  ): Promise<Awaited<ReturnType<MockOpenGeniClient["fsList"]>>> {
     const root = this.state.tree;
     if (!root) return super.fsList(workspaceId, sessionId, request);
     const path = request?.path ?? "";

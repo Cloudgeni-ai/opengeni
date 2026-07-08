@@ -1,6 +1,34 @@
-import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextInputBudgetTokens, contextServerCompactThreshold, firstPartyMcpBaseUrl, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
-import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, prefixedMcpToolName as sharedPrefixedMcpToolName, signDelegatedAccessToken, type GitCredentialProvider, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
+import type {
+  ConfiguredModel,
+  ContextCompactionMode,
+  ModelProviderApi,
+  ResolvedModelProvider,
+  Settings,
+} from "@opengeni/config";
+import {
+  AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  collectSandboxEnvironment,
+  contextInputBudgetTokens,
+  contextServerCompactThreshold,
+  firstPartyMcpBaseUrl,
+  resolveContextCompactionMode,
+  resolveModelProvider,
+  sandboxLifecycleHookIds,
+} from "@opengeni/config";
+import {
+  CAPABILITY_DESCRIPTORS,
+  isClearedRunStateBlob,
+  prefixedMcpToolName as sharedPrefixedMcpToolName,
+  signDelegatedAccessToken,
+  type GitCredentialProvider,
+  type McpServerConnectionRef,
+  type Permission,
+  type ReasoningEffort,
+  type ResourceRef,
+  type SessionEventType,
+  type ToolAuthNeededPayload,
+  type ToolRef,
+} from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -49,9 +77,7 @@ import {
   type RunStreamEvent,
   type Tool,
 } from "@openai/agents";
-import {
-  localDirLazySkillSource,
-} from "@openai/agents/sandbox/local";
+import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
 import {
   Capabilities,
   Manifest,
@@ -79,12 +105,23 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
-import { CODEX_APPS_MCP_SERVER_ID, CODEX_MODEL_ID_PREFIX, CODEX_ORIGINATOR, codexAppsSanitizingFetch, codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
+import {
+  CODEX_APPS_MCP_SERVER_ID,
+  CODEX_MODEL_ID_PREFIX,
+  CODEX_ORIGINATOR,
+  codexAppsSanitizingFetch,
+  codexRequestStorage,
+  codexSubscriptionFetch,
+} from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import {
+  computerCallNormalizingFetch,
+  normalizeComputerCallActions,
+  sanitizeHistoryItemsForModel,
+} from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
 import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
@@ -136,9 +173,16 @@ export * from "./sandbox";
 // active backend can now apply file edits over its NATS fs ops with the SDK's exact
 // diff semantics; without this, `createEditor()` throws a clear "not injected" error
 // rather than mis-editing. Runs at import time, before any turn binds a capability.
-setSelfhostedApplyDiff(applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string);
+setSelfhostedApplyDiff(
+  applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string,
+);
 
-export { sanitizeHistoryItemsForModel, stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState, neutralizeToolSearchItemsInSerializedRunState } from "./history-sanitizer";
+export {
+  sanitizeHistoryItemsForModel,
+  stripReasoningEncryptedContent,
+  stripReasoningIdentityFromSerializedRunState,
+  neutralizeToolSearchItemsInSerializedRunState,
+} from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
 
 // The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
@@ -176,9 +220,7 @@ export {
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
 export type { ClientCompactionDecision, CompactionItem } from "./context-compaction";
-export {
-  modelCallUsageTelemetry,
-} from "./usage-telemetry";
+export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
 ensureReadableStreamFrom();
@@ -217,19 +259,21 @@ export type ResolveConnectionCredentialInput = {
 export type ResolveConnectionCredentialResult =
   | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
   | {
-    status: "auth_needed";
-    reason: ToolAuthNeededPayload["reason"];
-    providerDomain: string;
-    connectionId?: string;
-    scopes?: string[];
-    resource?: string;
-    authorizationUrl?: string;
-  };
+      status: "auth_needed";
+      reason: ToolAuthNeededPayload["reason"];
+      providerDomain: string;
+      connectionId?: string;
+      scopes?: string[];
+      resource?: string;
+      authorizationUrl?: string;
+    };
 
 export function ensureReadableStreamFrom(): void {
-  const ctor = globalThis.ReadableStream as (typeof ReadableStream & {
-    from?: <T>(source: Iterable<T> | AsyncIterable<T>) => ReadableStream<T>;
-  }) | undefined;
+  const ctor = globalThis.ReadableStream as
+    | (typeof ReadableStream & {
+        from?: <T>(source: Iterable<T> | AsyncIterable<T>) => ReadableStream<T>;
+      })
+    | undefined;
   if (!ctor || typeof ctor.from === "function") {
     return;
   }
@@ -259,16 +303,22 @@ export function ensureReadableStreamFrom(): void {
 
 export type AgentSegmentInput =
   | {
-    kind: "message";
-    text: string;
-    serializedRunState?: string | null;
-    // Items-mode conversation truth (issue #35): when provided, turn input is
-    // built from these verbatim AgentInputItems and the stored sandbox
-    // envelope — no RunState deserialization, no SDK-version coupling.
-    historyItems?: AgentInputItem[] | null;
-    sandboxEnvelope?: Record<string, unknown> | null;
-  }
-  | { kind: "approval"; serializedRunState: string; approvalId: string; decision: "approve" | "reject"; message?: string };
+      kind: "message";
+      text: string;
+      serializedRunState?: string | null;
+      // Items-mode conversation truth (issue #35): when provided, turn input is
+      // built from these verbatim AgentInputItems and the stored sandbox
+      // envelope — no RunState deserialization, no SDK-version coupling.
+      historyItems?: AgentInputItem[] | null;
+      sandboxEnvelope?: Record<string, unknown> | null;
+    }
+  | {
+      kind: "approval";
+      serializedRunState: string;
+      approvalId: string;
+      decision: "approve" | "reject";
+      message?: string;
+    };
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
@@ -312,10 +362,27 @@ export type OpenGeniRuntime = {
   // shape; null when the turn's model is not in the registry, so the caller
   // falls back to the legacy global-client path (settings.openaiModel).
   resolveTurnModel: (settings: Settings, modelId: string) => ReturnType<typeof resolveTurnModel>;
-  buildAgent: (settings: Settings, resources: ResourceRef[], options?: BuildAgentOptions) => Agent<any, any>;
-  prepareTools: (settings: Settings, tools: ToolRef[], options?: PrepareToolsOptions) => Promise<PreparedAgentTools>;
-  prepareInput: (agent: Agent<any, any>, input: AgentSegmentInput, options?: PrepareInputOptions) => Promise<PreparedAgentInput>;
-  runStream: (agent: Agent<any, any>, input: PreparedAgentInput, settings: Settings, options?: RunAgentStreamOptions) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
+  buildAgent: (
+    settings: Settings,
+    resources: ResourceRef[],
+    options?: BuildAgentOptions,
+  ) => Agent<any, any>;
+  prepareTools: (
+    settings: Settings,
+    tools: ToolRef[],
+    options?: PrepareToolsOptions,
+  ) => Promise<PreparedAgentTools>;
+  prepareInput: (
+    agent: Agent<any, any>,
+    input: AgentSegmentInput,
+    options?: PrepareInputOptions,
+  ) => Promise<PreparedAgentInput>;
+  runStream: (
+    agent: Agent<any, any>,
+    input: PreparedAgentInput,
+    settings: Settings,
+    options?: RunAgentStreamOptions,
+  ) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
 };
 
@@ -325,7 +392,9 @@ export type ProductionRuntimeOverrides = {
   metrics?: RuntimeMetricsHooks;
 };
 
-export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrides = {}): OpenGeniRuntime {
+export function createProductionAgentRuntime(
+  overrides: ProductionRuntimeOverrides = {},
+): OpenGeniRuntime {
   return {
     configure: (settings) => {
       configureRuntimeMetricsHooks(overrides.metrics);
@@ -335,17 +404,20 @@ export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrid
     // model used in worker tests is not in any provider's allow-list), so when
     // one is supplied resolveTurnModel reports "no resolution" and the caller
     // keeps the legacy global-client path with the override model.
-    resolveTurnModel: (settings, modelId) => (overrides.model ? null : resolveTurnModel(settings, modelId)),
-    buildAgent: (settings, resources, options) => buildOpenGeniAgent(settings, resources, {
-      ...options,
-      ...(overrides.model ? { model: overrides.model } : {}),
-    }),
+    resolveTurnModel: (settings, modelId) =>
+      overrides.model ? null : resolveTurnModel(settings, modelId),
+    buildAgent: (settings, resources, options) =>
+      buildOpenGeniAgent(settings, resources, {
+        ...options,
+        ...(overrides.model ? { model: overrides.model } : {}),
+      }),
     prepareTools: prepareAgentTools,
     prepareInput: prepareRunInput,
-    runStream: async (agent, input, settings, options) => await runAgentStream(agent, input, settings, {
-      ...options,
-      sandboxClient: overrides.sandboxClient,
-    }),
+    runStream: async (agent, input, settings, options) =>
+      await runAgentStream(agent, input, settings, {
+        ...options,
+        sandboxClient: overrides.sandboxClient,
+      }),
     serializeApprovals,
   };
 }
@@ -357,7 +429,10 @@ export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrid
  * the OpenAI-platform path has only a key (the SDK default client is used via
  * setDefaultOpenAIKey there); the caller then constructs a key-only client.
  */
-export function buildOpenAIClientFromSettings(settings: Settings, providerId: string = settings.openaiProvider): OpenAI {
+export function buildOpenAIClientFromSettings(
+  settings: Settings,
+  providerId: string = settings.openaiProvider,
+): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
@@ -366,9 +441,10 @@ export function buildOpenAIClientFromSettings(settings: Settings, providerId: st
       baseURL,
       maxRetries: settings.openaiMaxRetries,
       defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-      defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
-        ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
-        : undefined,
+      defaultHeaders:
+        settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+          ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
+          : undefined,
       // Rewrite every outbound /responses computer_call to the ACTIONS-ONLY shape
       // the GA Azure computer tool (gpt-5.5) accepts. This is the lowest reachable
       // seam — below the SDK responses converter, which always re-synthesizes BOTH
@@ -405,29 +481,29 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
-      // Codex subscription: the static apiKey is a placeholder — the real per-request
-      // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
-      // body normalization are all injected by codexSubscriptionFetch, which reads the
-      // per-workspace token from codexRequestStorage (AsyncLocalStorage) at call time.
-      // The provider id is constant ("codex-subscription"), so one cached client serves
-      // every workspace without baking a token into it.
-      ? new OpenAI({
-        apiKey: provider.apiKey ?? "codex-subscription",
-        ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-        maxRetries: settings.openaiMaxRetries,
-        fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
-      })
-    // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
-    // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
-    // is passed straight through here rather than re-resolved.
-    : new OpenAI({
-      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
-      ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
-      maxRetries: settings.openaiMaxRetries,
-      ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-      ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
-      fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
-    });
+      ? // Codex subscription: the static apiKey is a placeholder — the real per-request
+        // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
+        // body normalization are all injected by codexSubscriptionFetch, which reads the
+        // per-workspace token from codexRequestStorage (AsyncLocalStorage) at call time.
+        // The provider id is constant ("codex-subscription"), so one cached client serves
+        // every workspace without baking a token into it.
+        new OpenAI({
+          apiKey: provider.apiKey ?? "codex-subscription",
+          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+          maxRetries: settings.openaiMaxRetries,
+          fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+        })
+      : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
+        // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
+        // is passed straight through here rather than re-resolved.
+        new OpenAI({
+          ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+          ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+          maxRetries: settings.openaiMaxRetries,
+          ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+          ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+          fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
+        });
   providerClientCache.set(provider.id, client);
   return client;
 }
@@ -441,7 +517,11 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
  * the agent is what routes a turn to its provider without mutating the global
  * default client.
  */
-export function buildModelInstance(provider: ResolvedModelProvider, client: OpenAI, modelId: string): Model {
+export function buildModelInstance(
+  provider: ResolvedModelProvider,
+  client: OpenAI,
+  modelId: string,
+): Model {
   return provider.api === "chat"
     ? new OpenAIChatCompletionsModel(client, modelId)
     : new OpenAIResponsesModel(client, modelId);
@@ -458,7 +538,12 @@ export function buildModelInstance(provider: ResolvedModelProvider, client: Open
 export function resolveTurnModel(
   settings: Settings,
   modelId: string,
-): { provider: ResolvedModelProvider; client: OpenAI; model: Model; configured: ConfiguredModel } | null {
+): {
+  provider: ResolvedModelProvider;
+  client: OpenAI;
+  model: Model;
+  configured: ConfiguredModel;
+} | null {
   const resolved = resolveModelProvider(settings, modelId);
   if (!resolved) {
     return null;
@@ -499,7 +584,10 @@ export class MultiProviderModelProvider implements ModelProvider {
 
   async getModel(modelName?: string): Promise<Model> {
     if (modelName) {
-      const resolved = resolveTurnModel(settingsForRunScopedModelResolution(this.settings, modelName), modelName);
+      const resolved = resolveTurnModel(
+        settingsForRunScopedModelResolution(this.settings, modelName),
+        modelName,
+      );
       if (resolved) {
         // Fail-loud floor (defense in depth): a `codex/<slug>` id must only ever
         // resolve through the synthetic codex-subscription provider (which installs
@@ -509,7 +597,10 @@ export class MultiProviderModelProvider implements ModelProvider {
         // to Azure/OpenAI as a deployment name (DeploymentNotFound 404). Refuse it
         // here so codex can never reach a non-codex client on ANY backend; the
         // primary fix (config configuredModels) keeps this a no-op in practice.
-        if (modelName.startsWith(CODEX_MODEL_ID_PREFIX) && resolved.provider.kind !== "codex-subscription") {
+        if (
+          modelName.startsWith(CODEX_MODEL_ID_PREFIX) &&
+          resolved.provider.kind !== "codex-subscription"
+        ) {
           throw new CodexSubscriptionUnavailableError(modelName);
         }
         return resolved.model;
@@ -551,11 +642,16 @@ function settingsForRunScopedModelResolution(settings: Settings, modelName: stri
   // bare registry id would otherwise be claimed by the built-in only because of
   // that per-turn override. Resolve the run-scoped router against the deployment
   // allow-list head instead; real built-in models stay in the allow-list.
-  return builtinAllowed.includes(modelName) ? settings : { ...settings, openaiModel: fallbackBuiltin };
+  return builtinAllowed.includes(modelName)
+    ? settings
+    : { ...settings, openaiModel: fallbackBuiltin };
 }
 
 function splitOpenaiAllowedModels(value: string): string[] {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -570,8 +666,8 @@ function splitOpenaiAllowedModels(value: string): string[] {
 export class CodexSubscriptionUnavailableError extends Error {
   constructor(modelName: string) {
     super(
-      `Codex subscription model "${modelName}" is unavailable: no active Codex subscription is connected for this workspace. `
-      + `Connect (or reconnect) your ChatGPT/Codex subscription in Settings, then retry.`,
+      `Codex subscription model "${modelName}" is unavailable: no active Codex subscription is connected for this workspace. ` +
+        `Connect (or reconnect) your ChatGPT/Codex subscription in Settings, then retry.`,
     );
     this.name = "CodexSubscriptionUnavailableError";
   }
@@ -617,25 +713,32 @@ function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof f
 }
 
 function isModelCallFetch(input: Parameters<typeof fetch>[0]): boolean {
-  const rawUrl = typeof input === "string"
-    ? input
-    : input instanceof URL
-      ? input.toString()
-      : (input as { url?: unknown }).url;
+  const rawUrl =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : (input as { url?: unknown }).url;
   if (typeof rawUrl !== "string" || rawUrl.length === 0) {
     return false;
   }
   try {
     const pathname = new URL(rawUrl, "http://opengeni.local").pathname;
-    return pathname.endsWith("/responses")
-      || pathname.endsWith("/chat/completions")
-      || pathname.endsWith("/codex/responses");
+    return (
+      pathname.endsWith("/responses") ||
+      pathname.endsWith("/chat/completions") ||
+      pathname.endsWith("/codex/responses")
+    );
   } catch {
     return /\/(?:codex\/)?responses(?:\?|$)|\/chat\/completions(?:\?|$)/.test(rawUrl);
   }
 }
 
-function recordModelCallMetric(provider: string, outcome: "completed" | "failed", started: number): void {
+function recordModelCallMetric(
+  provider: string,
+  outcome: "completed" | "failed",
+  started: number,
+): void {
   const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
   try {
     runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
@@ -665,7 +768,14 @@ function recordModelCallMetric(provider: string, outcome: "completed" | "failed"
 export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
-  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number; promptCacheKey?: string } = {},
+  options: {
+    client?: OpenAI;
+    api?: ModelProviderApi;
+    maxOutputTokens?: number;
+    model?: string;
+    maxTranscriptTokens?: number;
+    promptCacheKey?: string;
+  } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
@@ -685,7 +795,8 @@ export async function summarizeForCompaction(
         messages: [{ role: "user", content: transcript }],
         ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
       } as any);
-      const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
+      const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
+        .choices?.[0]?.message?.content;
       const trimmed = typeof text === "string" ? text.trim() : "";
       return trimmed.length > 0 ? trimmed : null;
     }
@@ -745,7 +856,11 @@ export function extractResponseOutputText(response: unknown): string {
       continue;
     }
     for (const part of content) {
-      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+      if (
+        part &&
+        typeof part === "object" &&
+        typeof (part as { text?: unknown }).text === "string"
+      ) {
         parts.push((part as { text: string }).text);
       }
     }
@@ -904,7 +1019,9 @@ export type WorkspaceEnvironmentContext = {
   variableNames?: string[];
 };
 
-export function workspaceEnvironmentInstructions(environment: WorkspaceEnvironmentContext): string[] {
+export function workspaceEnvironmentInstructions(
+  environment: WorkspaceEnvironmentContext,
+): string[] {
   const lines = [
     `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
   ];
@@ -945,7 +1062,10 @@ export function coreInstructions(workspaceEnvironment?: WorkspaceEnvironmentCont
  * and the append both join by " ", so the DEFAULT_AGENT_INSTRUCTIONS template
  * with an empty environment reproduces the historical preamble byte-for-byte.
  */
-export function composeAgentInstructions(template: string, workspaceEnvironment?: WorkspaceEnvironmentContext): string {
+export function composeAgentInstructions(
+  template: string,
+  workspaceEnvironment?: WorkspaceEnvironmentContext,
+): string {
   const core = coreInstructions(workspaceEnvironment).join(" ");
   if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
     return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
@@ -1001,7 +1121,10 @@ export function appendToolspaceInstructions(composed: string, toolspaceAvailable
  * " " and always LAST so a white-label persona template or a per-session
  * instruction can't drop it. A no-op when the hint is absent.
  */
-export function appendGenesisTitleDirective(instructions: string, genesisTitleHint?: boolean): string {
+export function appendGenesisTitleDirective(
+  instructions: string,
+  genesisTitleHint?: boolean,
+): string {
   return genesisTitleHint ? `${instructions} ${GENESIS_TITLE_DIRECTIVE}` : instructions;
 }
 
@@ -1043,9 +1166,20 @@ const agentActiveSandboxBackend = new WeakMap<object, Settings["sandboxBackend"]
  * requires an SDK-level change (preserve `isError`) or reading the raw
  * CallToolResult — tracked separately.
  */
-export function mcpToolErrorOutput(error: unknown): { isError: true; content: [{ type: "text"; text: string }] } {
+export function mcpToolErrorOutput(error: unknown): {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+} {
   const details = error instanceof Error ? error.message : String(error);
-  return { isError: true, content: [{ type: "text", text: `An error occurred while running the tool. Please try again. Error: ${details}` }] };
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: `An error occurred while running the tool. Please try again. Error: ${details}`,
+      },
+    ],
+  };
 }
 
 // Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`
@@ -1053,9 +1187,14 @@ export function mcpToolErrorOutput(error: unknown): { isError: true; content: [{
 // SDK types the return as `string`; the runtime actually stores the raw return
 // as the tool output, so we return the MCP-shaped error object and cast — this
 // is the only way to attach an `isError` flag to a failed MCP tool call's output.
-const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) => mcpToolErrorOutput(error) as unknown as string;
+const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
+  mcpToolErrorOutput(error) as unknown as string;
 
-export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
+export function buildOpenGeniAgent(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: BuildAgentOptions = {},
+): Agent<any, any> {
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -1108,7 +1247,10 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       appendSessionInstructions(
         appendWorkspaceMemory(
           appendToolspaceInstructions(
-            composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+            composeAgentInstructions(
+              options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+              options.workspaceEnvironment,
+            ),
             settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
           ),
           options.workspaceMemory,
@@ -1118,7 +1260,10 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       options.genesisTitleHint,
     ),
     modelSettings: {
-      reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
+      reasoning: {
+        effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
+        summary: "detailed",
+      },
       // Server-side compaction (OpenAI platform) requires store=false: the
       // server emits an opaque ENCRYPTED 'compaction' item that round-trips in
       // the request rather than being anchored to a stored response. OpenGeni
@@ -1163,17 +1308,34 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
-    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
+    defaultManifest: buildManifest(
+      settings,
+      resources,
+      options.sandboxEnvironment,
+      options.fileResourceDownloads,
+    ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
       compactionMode,
       contextWindowTokens,
-      ...(options.structuredToolTransport !== undefined ? { structuredToolTransport: options.structuredToolTransport } : {}),
-      ...(options.computerToolMode !== undefined ? { computerToolMode: options.computerToolMode } : {}),
+      ...(options.structuredToolTransport !== undefined
+        ? { structuredToolTransport: options.structuredToolTransport }
+        : {}),
+      ...(options.computerToolMode !== undefined
+        ? { computerToolMode: options.computerToolMode }
+        : {}),
     }),
   });
-  agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
-  agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend));
+  agentFileDownloads.set(
+    agent,
+    normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter(
+      (download) => !download.content,
+    ),
+  );
+  agentRepositoryCloneHooks.set(
+    agent,
+    sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
+  );
   // Stash the EFFECTIVE backend so runStream's owned branch can skip the direct
   // beforeAgentStart hook run on a connected machine: the box there is the user's
   // REAL computer — the platform must not run setup (az login) against it. The
@@ -1209,7 +1371,11 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
  * codex_apps schemas + add the client tool_search tool, whose description renders
  * the live connector namespaces threaded from prepareAgentTools.
  */
-function maybeInstallCodexToolSearch(agent: Agent<any, any>, settings: Settings, options: BuildAgentOptions): void {
+function maybeInstallCodexToolSearch(
+  agent: Agent<any, any>,
+  settings: Settings,
+  options: BuildAgentOptions,
+): void {
   if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
@@ -1249,7 +1415,10 @@ type ApprovalCapableAgent = {
  * paths. The base (non-sandbox) `Agent.clone` spreads `...this` and would carry
  * the override, but re-installing is idempotent there and keeps one code path.
  */
-function installMcpApprovalPolicy(agent: ApprovalCapableAgent, policies: McpApprovalPolicy[]): void {
+function installMcpApprovalPolicy(
+  agent: ApprovalCapableAgent,
+  policies: McpApprovalPolicy[],
+): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (runContext: unknown) => {
     const tools = await listMcpTools(runContext);
@@ -1304,8 +1473,15 @@ function installMcpApprovalPolicy(agent: ApprovalCapableAgent, policies: McpAppr
  */
 function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
-    .filter((server) => server.requireApproval === true || (Array.isArray(server.requireApproval) && server.requireApproval.length > 0))
-    .map((server) => ({ prefix: prefixedMcpToolName(server.id, ""), requireApproval: server.requireApproval as boolean | string[] }))
+    .filter(
+      (server) =>
+        server.requireApproval === true ||
+        (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
+    )
+    .map((server) => ({
+      prefix: prefixedMcpToolName(server.id, ""),
+      requireApproval: server.requireApproval as boolean | string[],
+    }))
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {
     return;
@@ -1327,7 +1503,9 @@ function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): voi
  * `computer_screenshot` for computer-use. `bindModel` still returns the capability
  * so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is preserved.
  */
-function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem> | ReturnType<typeof computerUse>): void {
+function neutralizeStructuredToolTransport(
+  capability: ReturnType<typeof filesystem> | ReturnType<typeof computerUse>,
+): void {
   // Use `this` (NOT a captured reference to `capability`): the SandboxAgent binds
   // via `cap.clone().bind(session).bindRunAs(runAs).bindModel(model, instance)` and
   // runs tools() on the object the CHAIN returns. Capability.clone() copies this
@@ -1341,7 +1519,8 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
     this._modelInstance = undefined;
     return this;
   };
-  (capability as unknown as { bindModel: typeof forceFunctionTransport }).bindModel = forceFunctionTransport;
+  (capability as unknown as { bindModel: typeof forceFunctionTransport }).bindModel =
+    forceFunctionTransport;
 }
 
 /**
@@ -1399,7 +1578,13 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [filesystemCapability, shell()];
   if (mode === "server") {
-    caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold({ ...settings, contextWindowTokens })) }));
+    caps.push(
+      compaction({
+        policy: new StaticCompactionPolicy(
+          contextServerCompactThreshold({ ...settings, contextWindowTokens }),
+        ),
+      }),
+    );
   }
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
@@ -1411,9 +1596,9 @@ export function buildAgentCapabilities(
   // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
   // viewer is attached, so no pixel-tunnel dependency.
   if (
-    settings.computerUseEnabled
-    && settings.sandboxDesktopEnabled
-    && desktopCapableBackend(settings.sandboxBackend)
+    settings.computerUseEnabled &&
+    settings.sandboxDesktopEnabled &&
+    desktopCapableBackend(settings.sandboxBackend)
   ) {
     // computer-use is transport-aware, exactly like filesystem: `tools()` emits the
     // HOSTED `computer_use_preview` tool on the structured transport and a set of
@@ -1435,13 +1620,15 @@ export function buildAgentCapabilities(
       readOnly: settings.computerUseReadOnly,
       ...(explicitMode
         ? { toolMode: explicitMode }
-        // Legacy (no explicit mode): on the codex path the function tools deliver
-        // screenshots as a real image the model can see. The ChatGPT/Codex backend
-        // rejects HOSTED tool types but DOES accept `input_image` content items inside a
-        // `function_call_output` (proven by openai/codex codex-rs, whose view_image tool
-        // ships exactly that shape) — so a structured image tool result is seen, where a
-        // text data-URL would be unreadable.
-        : options.structuredToolTransport === false ? { imageFunctionResults: true } : {}),
+        : // Legacy (no explicit mode): on the codex path the function tools deliver
+          // screenshots as a real image the model can see. The ChatGPT/Codex backend
+          // rejects HOSTED tool types but DOES accept `input_image` content items inside a
+          // `function_call_output` (proven by openai/codex codex-rs, whose view_image tool
+          // ships exactly that shape) — so a structured image tool result is seen, where a
+          // text data-URL would be unreadable.
+          options.structuredToolTransport === false
+          ? { imageFunctionResults: true }
+          : {}),
     });
     // Neutralize ONLY on the legacy sniff path. With an explicit toolMode the mode
     // already forces the function tools, so the constructor-name override is moot.
@@ -1481,11 +1668,17 @@ export type PrepareToolsOptions = {
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
   firstPartyPermissions?: Permission[];
-  resolveCredential?: (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult>;
+  resolveCredential?: (
+    input: ResolveConnectionCredentialInput,
+  ) => Promise<ResolveConnectionCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
 };
 
-export async function prepareAgentTools(settings: Settings, tools: ToolRef[], options: PrepareToolsOptions = {}): Promise<PreparedAgentTools> {
+export async function prepareAgentTools(
+  settings: Settings,
+  tools: ToolRef[],
+  options: PrepareToolsOptions = {},
+): Promise<PreparedAgentTools> {
   // P4 (Part B.1): one Set per prepareTools call, shared by reference into the
   // codex_apps sanitizing fetch so every tools/list this turn accumulates the
   // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
@@ -1494,49 +1687,63 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
-  const servers = await Promise.all(tools.map(async (tool) => {
-    const config = registry.get(tool.id);
-    if (!config) {
-      throw new Error(`Unknown MCP server id: ${tool.id}`);
-    }
-    const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
-    const baseFetch = isCodexAppsMcpServer(config)
-      ? codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces)
-      : globalThis.fetch;
-    const fetchImpl = config.connectionRef
-      ? connectionBrokerFetch(baseFetch, config, options)
-      : baseFetch;
-    const server = new PrefixedMcpServer(new MCPServerStreamableHttp({
-      url,
-      name: config.name ?? config.id,
-      cacheToolsList: config.cacheToolsList,
-      // codex_apps returns connector tools with empty `outputSchema: {}` that the
-      // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-      // sanitize the response on the wire before validation. The namespace Set
-      // also captures each tool's original connector namespace (P4 Part B.1).
-      ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
-      ...await mcpServerRequestInit(settings, config, options),
-      ...(config.timeoutMs ? {
-        timeout: config.timeoutMs,
-        clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-      } : {}),
-    }), config.id, config.allowedTools);
-    // A server is connected BEST-EFFORT (a connect / tools-list failure drops
-    // it instead of failing the turn) in two cases:
-    //  - codex_apps: connector availability is RUNTIME-DISCOVERED — the
-    //    device-code login may lack the connector scopes, and the backend can
-    //    reject the bearer at the initialize/tools-list handshake, so a 401/403
-    //    (or a missing/failed token) drops the server.
-    //  - an optional ToolRef: either an auto-attached workspace-default
-    //    capability MCP or a client/pack-selected portable ref. A
-    //    broken/expired credential or unavailable endpoint skips the server
-    //    with a warning, never killing the turn before the model runs. Bare
-    //    refs stay strict (below), preserving the fail-loud default.
-    const optional = tool.optional === true;
-    return { server, bestEffort: isCodexAppsMcpServer(config) || optional || !!config.connectionRef, optional };
-  }));
+  const servers = await Promise.all(
+    tools.map(async (tool) => {
+      const config = registry.get(tool.id);
+      if (!config) {
+        throw new Error(`Unknown MCP server id: ${tool.id}`);
+      }
+      const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
+      const baseFetch = isCodexAppsMcpServer(config)
+        ? codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces)
+        : globalThis.fetch;
+      const fetchImpl = config.connectionRef
+        ? connectionBrokerFetch(baseFetch, config, options)
+        : baseFetch;
+      const server = new PrefixedMcpServer(
+        new MCPServerStreamableHttp({
+          url,
+          name: config.name ?? config.id,
+          cacheToolsList: config.cacheToolsList,
+          // codex_apps returns connector tools with empty `outputSchema: {}` that the
+          // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+          // sanitize the response on the wire before validation. The namespace Set
+          // also captures each tool's original connector namespace (P4 Part B.1).
+          ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
+          ...(await mcpServerRequestInit(settings, config, options)),
+          ...(config.timeoutMs
+            ? {
+                timeout: config.timeoutMs,
+                clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+              }
+            : {}),
+        }),
+        config.id,
+        config.allowedTools,
+      );
+      // A server is connected BEST-EFFORT (a connect / tools-list failure drops
+      // it instead of failing the turn) in two cases:
+      //  - codex_apps: connector availability is RUNTIME-DISCOVERED — the
+      //    device-code login may lack the connector scopes, and the backend can
+      //    reject the bearer at the initialize/tools-list handshake, so a 401/403
+      //    (or a missing/failed token) drops the server.
+      //  - an optional ToolRef: either an auto-attached workspace-default
+      //    capability MCP or a client/pack-selected portable ref. A
+      //    broken/expired credential or unavailable endpoint skips the server
+      //    with a warning, never killing the turn before the model runs. Bare
+      //    refs stay strict (below), preserving the fail-loud default.
+      const optional = tool.optional === true;
+      return {
+        server,
+        bestEffort: isCodexAppsMcpServer(config) || optional || !!config.connectionRef,
+        optional,
+      };
+    }),
+  );
   const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
-  const bestEffortServers = servers.filter((entry) => entry.bestEffort).map((entry) => entry.server);
+  const bestEffortServers = servers
+    .filter((entry) => entry.bestEffort)
+    .map((entry) => entry.server);
   // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
   // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
   // ChatGPT plan is a normal, non-noteworthy state).
@@ -1588,36 +1795,64 @@ function connectionBrokerFetch(
   }
   return async (input, init) => {
     const request = await mcpRequestInfo(input, init);
-    const first = await resolveConnectionForRequest(options, config.id, connectionRef, request.toolName, false);
+    const first = await resolveConnectionForRequest(
+      options,
+      config.id,
+      connectionRef,
+      request.toolName,
+      false,
+    );
     if (first.status === "auth_needed") {
       return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
     }
-    const response = await baseFetch(fetchInputForAttempt(input), withConnectionHeaders(input, init, first.headers));
+    const response = await baseFetch(
+      fetchInputForAttempt(input),
+      withConnectionHeaders(input, init, first.headers),
+    );
     if (response.status === 401) {
-      const refreshed = await resolveConnectionForRequest(options, config.id, connectionRef, request.toolName, true);
+      const refreshed = await resolveConnectionForRequest(
+        options,
+        config.id,
+        connectionRef,
+        request.toolName,
+        true,
+      );
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
       }
-      const retry = await baseFetch(fetchInputForAttempt(input), withConnectionHeaders(input, init, refreshed.headers));
+      const retry = await baseFetch(
+        fetchInputForAttempt(input),
+        withConnectionHeaders(input, init, refreshed.headers),
+      );
       if (retry.status === 403) {
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
-        return auth ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef) : retry;
+        return auth
+          ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
+          : retry;
       }
       if (retry.status === 401) {
-        return await authNeededFetchResponse(options, config.id, request, {
-          status: "auth_needed",
-          reason: "expired",
-          providerDomain: connectionRef.providerDomain,
-          connectionId: refreshed.connectionId,
-          ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-          ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-        }, connectionRef);
+        return await authNeededFetchResponse(
+          options,
+          config.id,
+          request,
+          {
+            status: "auth_needed",
+            reason: "expired",
+            providerDomain: connectionRef.providerDomain,
+            connectionId: refreshed.connectionId,
+            ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+            ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+          },
+          connectionRef,
+        );
       }
       return retry;
     }
     if (response.status === 403) {
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
-      return auth ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef) : response;
+      return auth
+        ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
+        : response;
     }
     return response;
   };
@@ -1676,8 +1911,16 @@ function insufficientScopeAuth(
     reason: "insufficient_scope",
     providerDomain: connectionRef.providerDomain,
     connectionId,
-    ...(challenge.scope?.length ? { scopes: challenge.scope } : connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-    ...(challenge.resource ? { resource: challenge.resource } : connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(challenge.scope?.length
+      ? { scopes: challenge.scope }
+      : connectionRef.scopes
+        ? { scopes: connectionRef.scopes }
+        : {}),
+    ...(challenge.resource
+      ? { resource: challenge.resource }
+      : connectionRef.resource
+        ? { resource: connectionRef.resource }
+        : {}),
   };
 }
 
@@ -1695,8 +1938,16 @@ async function authNeededFetchResponse(
     providerDomain: auth.providerDomain,
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
-    ...(auth.scopes ? { scopes: auth.scopes } : connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-    ...(auth.resource ? { resource: auth.resource } : connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(auth.scopes
+      ? { scopes: auth.scopes }
+      : connectionRef.scopes
+        ? { scopes: connectionRef.scopes }
+        : {}),
+    ...(auth.resource
+      ? { resource: auth.resource }
+      : connectionRef.resource
+        ? { resource: connectionRef.resource }
+        : {}),
     ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),
   });
@@ -1706,7 +1957,10 @@ async function authNeededFetchResponse(
   return new Response("Authentication required for MCP server connection", { status: 401 });
 }
 
-async function publishAuthNeeded(options: PrepareToolsOptions, payload: ToolAuthNeededPayload): Promise<void> {
+async function publishAuthNeeded(
+  options: PrepareToolsOptions,
+  payload: ToolAuthNeededPayload,
+): Promise<void> {
   try {
     await options.onAuthNeeded?.(payload);
   } catch {
@@ -1721,20 +1975,37 @@ type McpRequestInfo = {
   toolName?: string;
 };
 
-async function mcpRequestInfo(input: string | URL | Request, init?: RequestInit): Promise<McpRequestInfo> {
-  const body = typeof init?.body === "string"
-    ? init.body
-    : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
-      ? await input.clone().text().catch(() => "")
-      : "";
+async function mcpRequestInfo(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<McpRequestInfo> {
+  const body =
+    typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
+        ? await input
+            .clone()
+            .text()
+            .catch(() => "")
+        : "";
   if (!body) {
     return {};
   }
   try {
-    const parsed = JSON.parse(body) as { id?: unknown; method?: unknown; params?: { name?: unknown } };
+    const parsed = JSON.parse(body) as {
+      id?: unknown;
+      method?: unknown;
+      params?: { name?: unknown };
+    };
     const method = typeof parsed.method === "string" ? parsed.method : undefined;
-    const id = typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null ? parsed.id : undefined;
-    const toolName = method === "tools/call" && typeof parsed.params?.name === "string" ? parsed.params.name : undefined;
+    const id =
+      typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null
+        ? parsed.id
+        : undefined;
+    const toolName =
+      method === "tools/call" && typeof parsed.params?.name === "string"
+        ? parsed.params.name
+        : undefined;
     return {
       ...(method ? { method } : {}),
       ...(id !== undefined ? { id } : {}),
@@ -1745,8 +2016,14 @@ async function mcpRequestInfo(input: string | URL | Request, init?: RequestInit)
   }
 }
 
-function withConnectionHeaders(input: string | URL | Request, init: RequestInit | undefined, authHeaders: Record<string, string>): RequestInit {
-  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+function withConnectionHeaders(
+  input: string | URL | Request,
+  init: RequestInit | undefined,
+  authHeaders: Record<string, string>,
+): RequestInit {
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
   for (const [name, value] of Object.entries(authHeaders)) {
     headers.set(name, value);
   }
@@ -1757,7 +2034,11 @@ function fetchInputForAttempt(input: string | URL | Request): string | URL | Req
   return input instanceof Request ? input.clone() : input;
 }
 
-function parseWwwAuthenticate(header: string | null): { error?: string; scope?: string[]; resource?: string } {
+function parseWwwAuthenticate(header: string | null): {
+  error?: string;
+  scope?: string[];
+  resource?: string;
+} {
   if (!header) {
     return {};
   }
@@ -1771,7 +2052,9 @@ function parseWwwAuthenticate(header: string | null): { error?: string; scope?: 
   let match: RegExpExecArray | null;
   while ((match = re.exec(paramsText)) !== null) {
     const raw = match[2]!;
-    params[match[1]!.toLowerCase()] = raw.startsWith("\"") ? raw.slice(1, -1).replace(/\\"/g, "\"") : raw;
+    params[match[1]!.toLowerCase()] = raw.startsWith('"')
+      ? raw.slice(1, -1).replace(/\\"/g, '"')
+      : raw;
   }
   return {
     ...(params.error ? { error: params.error } : {}),
@@ -1787,20 +2070,24 @@ function parseWwwAuthenticate(header: string | null): { error?: string; scope?: 
 // McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
 // `{ isError: true }` output for the model.
 const MCP_AUTH_NEEDED_ERROR_CODE = -32001;
-const MCP_AUTH_NEEDED_MESSAGE = "Authentication required - a connection link was posted to the session.";
+const MCP_AUTH_NEEDED_MESSAGE =
+  "Authentication required - a connection link was posted to the session.";
 
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
-  return new Response(JSON.stringify({
-    jsonrpc: "2.0",
-    id: id ?? null,
-    error: {
-      code: MCP_AUTH_NEEDED_ERROR_CODE,
-      message: MCP_AUTH_NEEDED_MESSAGE,
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: id ?? null,
+      error: {
+        code: MCP_AUTH_NEEDED_ERROR_CODE,
+        message: MCP_AUTH_NEEDED_MESSAGE,
+      },
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" },
     },
-  }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+  );
 }
 
 function isAuthNeededMcpError(error: unknown): boolean {
@@ -1811,7 +2098,11 @@ function isAuthNeededMcpError(error: unknown): boolean {
   return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
 }
 
-async function mcpServerRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
+async function mcpServerRequestInit(
+  settings: Settings,
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
   // codex_apps is checked FIRST so the static-headers path can never apply to
   // it: its refreshing ChatGPT/Codex bearer is resolved per-connect from the
   // codex ALS, never from a baked `config.headers` value.
@@ -1830,7 +2121,11 @@ async function mcpServerRequestInit(settings: Settings, config: Settings["mcpSer
   return {};
 }
 
-async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
+async function firstPartyMcpRequestInit(
+  settings: Settings,
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
   if (!isFirstPartyMcpServer(settings, config)) {
     return {};
   }
@@ -1867,7 +2162,9 @@ async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mc
  * ran outside the ALS) or a token failure (needs_relogin) returns {} so the
  * best-effort connect drops the server rather than crashing the turn.
  */
-async function codexAppsMcpRequestInit(settings: Settings): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
+async function codexAppsMcpRequestInit(
+  settings: Settings,
+): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
   const ctx = codexRequestStorage.getStore();
   if (!ctx) {
     return {};
@@ -1930,7 +2227,10 @@ function isCodexAppsMcpServer(config: Settings["mcpServers"][number]): boolean {
   return config.id === CODEX_APPS_MCP_SERVER_ID;
 }
 
-function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"][number]): boolean {
+function isFirstPartyMcpServer(
+  settings: Settings,
+  config: Settings["mcpServers"][number],
+): boolean {
   if (!["opengeni", "files", "docs"].includes(config.id)) {
     return false;
   }
@@ -1944,7 +2244,11 @@ function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"
   return firstPartyMcpUrls(settings).some((candidate) => candidate === url);
 }
 
-function firstPartyMcpServerUrlForRun(settings: Settings, config: Settings["mcpServers"][number], workspaceId: string | undefined): string | null {
+function firstPartyMcpServerUrlForRun(
+  settings: Settings,
+  config: Settings["mcpServers"][number],
+  workspaceId: string | undefined,
+): string | null {
   if (!workspaceId || !["opengeni", "files", "docs"].includes(config.id)) {
     return null;
   }
@@ -1958,9 +2262,9 @@ function firstPartyMcpServerUrlForRun(settings: Settings, config: Settings["mcpS
     ? settings.opengeniMcpUrl.replaceAll("{workspaceId}", workspaceId)
     : settings.opengeniMcpUrl
       ? scopedMcpUrlFromConfiguredBase(settings.opengeniMcpUrl, workspaceId)
-      // unset → the shared loopback default (a `{workspaceId}` template owned by
-      // @opengeni/config's firstPartyMcpBaseUrl), scoped to this run's workspace.
-      : firstPartyMcpBaseUrl(settings).replaceAll("{workspaceId}", workspaceId);
+      : // unset → the shared loopback default (a `{workspaceId}` template owned by
+        // @opengeni/config's firstPartyMcpBaseUrl), scoped to this run's workspace.
+        firstPartyMcpBaseUrl(settings).replaceAll("{workspaceId}", workspaceId);
   const url = new URL(rawBase);
   if (config.id === "docs") {
     url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
@@ -2009,7 +2313,11 @@ class PrefixedMcpServer implements MCPServer {
   readonly prefix: string;
   private readonly allowedTools: Set<string> | undefined;
 
-  constructor(private readonly inner: MCPServer, registryId: string, allowedTools?: string[]) {
+  constructor(
+    private readonly inner: MCPServer,
+    registryId: string,
+    allowedTools?: string[],
+  ) {
     this.name = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
     this.cacheToolsList = inner.cacheToolsList;
@@ -2031,7 +2339,11 @@ class PrefixedMcpServer implements MCPServer {
       .map((tool) => ({ ...tool, name: prefixedMcpToolName(this.name, tool.name) }));
   }
 
-  async callTool(toolName: string, args: Record<string, unknown> | null, meta?: Record<string, unknown> | null): Promise<any> {
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+  ): Promise<any> {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
@@ -2055,7 +2367,9 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   async listResources(params?: Record<string, unknown>): Promise<any> {
-    const resourcesServer = this.inner as MCPServer & { listResources?: (params?: Record<string, unknown>) => Promise<any> };
+    const resourcesServer = this.inner as MCPServer & {
+      listResources?: (params?: Record<string, unknown>) => Promise<any>;
+    };
     if (!resourcesServer.listResources) {
       throw new Error(`MCP server ${this.name} does not support resources`);
     }
@@ -2063,7 +2377,9 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   async listResourceTemplates(params?: Record<string, unknown>): Promise<any> {
-    const resourcesServer = this.inner as MCPServer & { listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any> };
+    const resourcesServer = this.inner as MCPServer & {
+      listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any>;
+    };
     if (!resourcesServer.listResourceTemplates) {
       throw new Error(`MCP server ${this.name} does not support resource templates`);
     }
@@ -2071,7 +2387,9 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   async readResource(uri: string): Promise<any> {
-    const resourcesServer = this.inner as MCPServer & { readResource?: (uri: string) => Promise<any> };
+    const resourcesServer = this.inner as MCPServer & {
+      readResource?: (uri: string) => Promise<any>;
+    };
     if (!resourcesServer.readResource) {
       throw new Error(`MCP server ${this.name} does not support resource reads`);
     }
@@ -2133,7 +2451,11 @@ function guardAssembledInput(
   return [...(guarded.items as unknown as AgentInputItem[]), trailing];
 }
 
-export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmentInput, options: PrepareInputOptions = {}): Promise<PreparedAgentInput> {
+export async function prepareRunInput(
+  agent: Agent<any, any>,
+  input: AgentSegmentInput,
+  options: PrepareInputOptions = {},
+): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
     if (input.historyItems && input.historyItems.length > 0) {
       // Items mode: conversation truth comes from the database, the sandbox
@@ -2208,7 +2530,9 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
   // refuses clear in requires_action, so this is a defensive guard) — fail with
   // an honest message instead of the cryptic SDK "missing schema version".
   if (isClearedRunStateBlob(input.serializedRunState)) {
-    throw new Error("Cannot resume an approval: the session context was cleared, so the awaiting run state no longer exists.");
+    throw new Error(
+      "Cannot resume an approval: the session context was cleared, so the awaiting run state no longer exists.",
+    );
   }
   const state = await RunState.fromString(agent, input.serializedRunState);
   const interruptions = state.getInterruptions();
@@ -2241,9 +2565,9 @@ export type RunAgentStreamOptions = {
   // re-applied around the resumed client here; the live `session`/`sessionState`
   // carry the box, so no create()/resume() is re-invoked inside run().
   ownedSandbox?: {
-    client: unknown;          // built by the per-turn resume path (the raw provider client)
-    session: unknown;         // SandboxSessionLike — the live, NON-OWNED handle (never reaped)
-    sessionState?: unknown;   // SandboxSessionState the box was resumed from
+    client: unknown; // built by the per-turn resume path (the raw provider client)
+    session: unknown; // SandboxSessionLike — the live, NON-OWNED handle (never reaped)
+    sessionState?: unknown; // SandboxSessionState the box was resumed from
     // The UN-PROXIED established box for platform setup (lifecycle hooks + file
     // resource materialization). `session` may be the mid-turn routing proxy whose
     // every exec re-reads the active pointer — platform-initiated setup must NOT
@@ -2412,8 +2736,14 @@ export function callModelInputFilterForSettings(
   return composeCallModelInputFilters(filters);
 }
 
-export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgentInput | string | RunState<any, any>, settings: Settings, overrides: RunAgentStreamOptions = {}) {
-  const prepared: PreparedAgentInput = typeof input === "string" || input instanceof RunState ? { input } : input;
+export async function runAgentStream(
+  agent: Agent<any, any>,
+  input: PreparedAgentInput | string | RunState<any, any>,
+  settings: Settings,
+  overrides: RunAgentStreamOptions = {},
+) {
+  const prepared: PreparedAgentInput =
+    typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
@@ -2441,18 +2771,21 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
         settings,
         environment,
         preparedInput: prepared,
-        ...(overrides.ownedSandbox.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
+        ...(overrides.ownedSandbox.fileDownloadsMaterialized
+          ? { fileDownloadsMaterialized: true }
+          : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       });
     }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
-    const resourceClient = fileDownloads.length > 0
-      ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
-        ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-        ...(runAs ? { runAs } : {}),
-      })
-      : (ownedClient as SandboxClient);
+    const resourceClient =
+      fileDownloads.length > 0
+        ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
+            ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+            ...(runAs ? { runAs } : {}),
+          })
+        : (ownedClient as SandboxClient);
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
@@ -2481,9 +2814,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
             : {}),
         }),
         overrides.callModelInputFilter,
-      ].filter(
-        (f): f is CallModelInputFilter => Boolean(f),
-      ),
+      ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
       stream: true,
@@ -2500,38 +2831,51 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
   const refreshedClient = rawClient
-    ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest, {
-      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-    })
+    ? withManifestRefreshOnResume(
+        rawClient as SandboxClient,
+        (agent as { defaultManifest?: Manifest }).defaultManifest,
+        {
+          ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        },
+      )
     : undefined;
   const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
-  const resourceClient = refreshedClient && fileDownloads.length > 0
-    ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
-      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
-    })
-    : refreshedClient;
+  const resourceClient =
+    refreshedClient && fileDownloads.length > 0
+      ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
+          ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+          ...(runAs ? { runAs } : {}),
+        })
+      : refreshedClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const client = resourceClient
-    ? withSandboxLifecycleHooks(resourceClient, [
-      ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
-      ...sandboxToolspaceTokenHooksForAgent(agent),
-      ...sandboxRepositoryCloneHooksForAgent(agent),
-    ], {
-      environment,
-      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
-      ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
-      ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
-    })
+    ? withSandboxLifecycleHooks(
+        resourceClient,
+        [
+          ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+          ...sandboxToolspaceTokenHooksForAgent(agent),
+          ...sandboxRepositoryCloneHooksForAgent(agent),
+        ],
+        {
+          environment,
+          ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+          ...(runAs ? { runAs } : {}),
+          ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
+          ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
+        },
+      )
     : undefined;
-  const sandboxSessionState = prepared.sandboxSessionState
-    ?? (prepared.serializedRunStateForSandbox && client
-      ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
+  const sandboxSessionState =
+    prepared.sandboxSessionState ??
+    (prepared.serializedRunStateForSandbox && client
+      ? await restoredSandboxSessionState(
+          await RunState.fromString(agent, prepared.serializedRunStateForSandbox),
+          client,
+        )
       : undefined);
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, image/budget guard), then any per-turn filter
@@ -2547,9 +2891,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
           : {}),
       }),
       overrides.callModelInputFilter,
-    ].filter(
-      (f): f is CallModelInputFilter => Boolean(f),
-    ),
+    ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
@@ -2569,7 +2911,10 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
 }
 
-function appendSandboxFileDownloadFailureNote(input: PreparedAgentInput, failures: SandboxFileDownloadFailure[]): void {
+function appendSandboxFileDownloadFailureNote(
+  input: PreparedAgentInput,
+  failures: SandboxFileDownloadFailure[],
+): void {
   const note = sandboxFileDownloadFailureNote(failures);
   if (!note) {
     return;
@@ -2617,7 +2962,9 @@ export { MaxTurnsExceededError } from "@openai/agents";
  * the work. When the SDK attached the run state at the moment the cap hit,
  * the serialized form is returned so the resumed turn keeps full context.
  */
-export function maxTurnsExceededRunState(error: unknown): { serializedRunState: string | null } | null {
+export function maxTurnsExceededRunState(
+  error: unknown,
+): { serializedRunState: string | null } | null {
   if (!(error instanceof MaxTurnsExceededError)) {
     return null;
   }
@@ -2655,18 +3002,44 @@ export function withManifestRefreshOnResume(
   }
   return {
     backendId: client.backendId,
-    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
-    ...(client.create ? { create: async (...args: any[]) => await (client.create as any)(...args) } : {}),
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? { create: async (...args: any[]) => await (client.create as any)(...args) }
+      : {}),
     resume: async (state: SandboxSessionState) => {
       const session = await client.resume!(state);
       await applyMissingManifestEntries(session, targetManifest, context);
       return session;
     },
-    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
-    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
-    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
-    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
-    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+    ...(client.delete
+      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
   };
 }
 
@@ -2685,14 +3058,24 @@ export async function applyMissingManifestEntries(
   targetManifest: Manifest,
   context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent"> = {},
 ): Promise<void> {
-  const currentManifestValue = (session as { state?: { manifest?: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> } } }).state?.manifest;
+  const currentManifestValue = (
+    session as {
+      state?: {
+        manifest?:
+          | Manifest
+          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+      };
+    }
+  ).state?.manifest;
   const currentManifest = currentManifestValue ? ensureManifest(currentManifestValue) : undefined;
   const target = ensureManifest(targetManifest);
   if (!currentManifest) {
     if (Object.keys(target.entries).length === 0) {
       return;
     }
-    throw new Error("Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable");
+    throw new Error(
+      "Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable",
+    );
   }
   // Drift detection runs on EVERY resume (even no-op ones): the durable trace
   // that makes an env-recompute regression attributable from the DB instead of
@@ -2702,7 +3085,9 @@ export async function applyMissingManifestEntries(
     if (Object.keys(target.entries).length === 0) {
       return;
     }
-    throw new Error("Resumed sandbox session cannot apply new manifest entries because it does not support applyManifest() or materializeEntry()");
+    throw new Error(
+      "Resumed sandbox session cannot apply new manifest entries because it does not support applyManifest() or materializeEntry()",
+    );
   }
   if (Object.keys(target.entries).length === 0) {
     return;
@@ -2721,9 +3106,12 @@ export async function applyMissingManifestEntries(
       throw new Error(`Cannot replace existing sandbox manifest entry: ${path}`);
     }
   }
-  const environmentChanged = stableJson(currentManifest.environment) !== stableJson(target.environment);
+  const environmentChanged =
+    stableJson(currentManifest.environment) !== stableJson(target.environment);
   if (environmentChanged && !session.applyManifest) {
-    throw new Error("Resumed sandbox session cannot refresh manifest environment because it does not support applyManifest()");
+    throw new Error(
+      "Resumed sandbox session cannot refresh manifest environment because it does not support applyManifest()",
+    );
   }
   if (Object.keys(entries).length === 0 && !environmentChanged) {
     return;
@@ -2824,7 +3212,15 @@ export async function pinProvidedSessionManifestEnvironment(
   context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent"> = {},
 ): Promise<void> {
   const holder = agent as { defaultManifest?: Manifest };
-  const currentManifestValue = (session as { state?: { manifest?: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> } } }).state?.manifest;
+  const currentManifestValue = (
+    session as {
+      state?: {
+        manifest?:
+          | Manifest
+          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+      };
+    }
+  ).state?.manifest;
   if (!holder.defaultManifest || !currentManifestValue) {
     return;
   }
@@ -2976,14 +3372,48 @@ export function withSandboxFileDownloads(
   };
   return {
     backendId: client.backendId,
-    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
-    ...(client.create ? { create: async (...args: any[]) => await wrapSession(await (client.create as any)(...args)) } : {}),
-    ...(client.resume ? { resume: async (state: SandboxSessionState) => await wrapSession(await client.resume!(state)) } : {}),
-    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
-    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
-    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
-    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
-    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) =>
+            await wrapSession(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) =>
+            await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
   };
 }
 
@@ -3005,9 +3435,16 @@ export async function materializeSandboxFileDownloads(
       sizeBytes: download.sizeBytes ?? null,
       expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
     };
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload: { name: "file-resource-download", ...payload } });
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.started",
+      payload: { name: "file-resource-download", ...payload },
+    });
     if (!session.exec && !session.execCommand) {
-      const failure = sandboxFileDownloadFailure(download, targetPath, "Sandbox file download materialization requires command execution support");
+      const failure = sandboxFileDownloadFailure(
+        download,
+        targetPath,
+        "Sandbox file download materialization requires command execution support",
+      );
       failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
@@ -3023,21 +3460,24 @@ export async function materializeSandboxFileDownloads(
     try {
       result = session.exec
         ? await session.exec({
-          cmd: sandboxFileDownloadCommand(download, targetPath),
-          workdir: "/workspace",
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 20_000,
-        })
+            cmd: sandboxFileDownloadCommand(download, targetPath),
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 20_000,
+          })
         : await session.execCommand!({
-          cmd: sandboxFileDownloadCommand(download, targetPath),
-          workdir: "/workspace",
-          ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-          maxOutputTokens: 20_000,
-        });
+            cmd: sandboxFileDownloadCommand(download, targetPath),
+            workdir: "/workspace",
+            ...(context.runAs ? { runAs: context.runAs } : {}),
+            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+            maxOutputTokens: 20_000,
+          });
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
-      await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { name: "file-resource-download", ...payload } });
+      await context.onRuntimeEvent?.({
+        type: "sandbox.operation.completed",
+        payload: { name: "file-resource-download", ...payload },
+      });
     } catch (error) {
       const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
       failures.push(failure);
@@ -3091,8 +3531,20 @@ export function sandboxFileDownloadsForAgent(agent: unknown): SandboxFileDownloa
     : [];
 }
 
-function ensureManifest(manifest: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any>; extraPathGrants?: any[] }): Manifest {
-  if (manifest instanceof Manifest && typeof manifest.mountTargetsForMaterialization === "function") {
+function ensureManifest(
+  manifest:
+    | Manifest
+    | {
+        root?: string;
+        entries?: Record<string, any>;
+        environment?: Record<string, any>;
+        extraPathGrants?: any[];
+      },
+): Manifest {
+  if (
+    manifest instanceof Manifest &&
+    typeof manifest.mountTargetsForMaterialization === "function"
+  ) {
     return manifest;
   }
   return new Manifest({
@@ -3143,7 +3595,10 @@ function structuredImageToDataUrl(value: unknown): string | null {
   if (typeof image.url === "string" && image.url.length > 0) {
     return image.url;
   }
-  const mediaType = typeof image.mediaType === "string" && image.mediaType.length > 0 ? image.mediaType : "image/png";
+  const mediaType =
+    typeof image.mediaType === "string" && image.mediaType.length > 0
+      ? image.mediaType
+      : "image/png";
   if (typeof image.data === "string") {
     return image.data.startsWith("data:") ? image.data : `data:${mediaType};base64,${image.data}`;
   }
@@ -3274,13 +3729,21 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
   } else if (item.type === "tool_search_output_item") {
     const raw = item.rawItem ?? {};
     const disclosed = Array.isArray(raw.tools)
-      ? raw.tools.map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : "")).filter(Boolean)
+      ? raw.tools
+          .map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : ""))
+          .filter(Boolean)
       : [];
     out.push({
       type: "agent.toolCall.output",
       payload: {
         id: raw.call_id ?? raw.callId ?? item.id ?? null,
-        output: { type: "text", text: disclosed.length > 0 ? `Disclosed tools: ${disclosed.join(", ")}` : "No matching tools found." },
+        output: {
+          type: "text",
+          text:
+            disclosed.length > 0
+              ? `Disclosed tools: ${disclosed.join(", ")}`
+              : "No matching tools found.",
+        },
       },
     });
   } else if (item.type === "message_output_item") {
@@ -3298,11 +3761,12 @@ export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResp
   if (!usage) {
     return null;
   }
-  const responseId = typeof response?.id === "string"
-    ? response.id
-    : typeof response?.responseId === "string"
-      ? response.responseId
-      : undefined;
+  const responseId =
+    typeof response?.id === "string"
+      ? response.id
+      : typeof response?.responseId === "string"
+        ? response.responseId
+        : undefined;
   return {
     ...(responseId ? { responseId } : {}),
     usage,
@@ -3340,7 +3804,12 @@ function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
   return Object.keys(usage).length > 0 ? usage : null;
 }
 
-function numberProp(raw: Record<string, unknown>, outputKey: "inputTokens" | "outputTokens" | "totalTokens", camel: string, snake: string): Partial<ModelResponseUsage["usage"]> {
+function numberProp(
+  raw: Record<string, unknown>,
+  outputKey: "inputTokens" | "outputTokens" | "totalTokens",
+  camel: string,
+  snake: string,
+): Partial<ModelResponseUsage["usage"]> {
   const value = raw[camel] ?? raw[snake];
   return typeof value === "number" && Number.isFinite(value) ? { [outputKey]: value } : {};
 }
@@ -3353,7 +3822,9 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
   return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
 }
 
-function outputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
+function outputTokenDetailsProp(
+  raw: Record<string, unknown>,
+): Partial<ModelResponseUsage["usage"]> {
   const details = raw.outputTokensDetails ?? raw.output_tokens_details;
   if (!details || typeof details !== "object") {
     return {};
@@ -3382,7 +3853,12 @@ export function buildManifest(
   fileResourceDownloads: SandboxFileDownload[] = [],
 ): Manifest {
   const entries: Record<string, any> = {};
-  const downloadsByFileId = new Map(normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [download.fileId, download]));
+  const downloadsByFileId = new Map(
+    normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [
+      download.fileId,
+      download,
+    ]),
+  );
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
@@ -3423,7 +3899,9 @@ export function buildManifest(
 
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
   if (download.mountPath !== mountPath) {
-    throw new Error(`File download materialization path mismatch for ${download.fileId}: expected ${mountPath}, got ${download.mountPath}`);
+    throw new Error(
+      `File download materialization path mismatch for ${download.fileId}: expected ${mountPath}, got ${download.mountPath}`,
+    );
   }
   assertSafeSandboxFilename(download.filename, download.fileId);
   if (download.content) {
@@ -3444,7 +3922,9 @@ function objectStorageFileMount(settings: Settings, prefix: string): any {
   const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
   if (settings.objectStorageBackend === "azure-blob") {
     if (nativeBucketMount) {
-      throw new Error("Modal sandbox Azure Blob file resources require pre-signed download materialization because the current OpenAI Agents SDK Modal client does not support Azure Blob mount entries.");
+      throw new Error(
+        "Modal sandbox Azure Blob file resources require pre-signed download materialization because the current OpenAI Agents SDK Modal client does not support Azure Blob mount entries.",
+      );
     }
     const config = azureBlobMountConfig(settings);
     return azureBlobMount({
@@ -3458,7 +3938,9 @@ function objectStorageFileMount(settings: Settings, prefix: string): any {
     });
   }
   if (settings.objectStorageBackend === "aws-s3" || settings.objectStorageBackend === "gcs") {
-    throw new Error(`${settings.objectStorageBackend} file resources require pre-signed download materialization`);
+    throw new Error(
+      `${settings.objectStorageBackend} file resources require pre-signed download materialization`,
+    );
   }
   const config = s3CompatibleMountConfig(settings);
   return s3Mount({
@@ -3485,7 +3967,11 @@ function s3CompatibleMountConfig(settings: Settings): {
   secretAccessKey: string;
 } {
   const endpointUrl = settings.objectStorageSandboxEndpoint ?? settings.objectStorageEndpoint;
-  if (!endpointUrl || !settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey) {
+  if (
+    !endpointUrl ||
+    !settings.objectStorageAccessKeyId ||
+    !settings.objectStorageSecretAccessKey
+  ) {
     throw new Error("File resources require configured S3-compatible object storage");
   }
   return {
@@ -3512,7 +3998,10 @@ function azureBlobMountConfig(settings: Settings): {
   if (!accountName || !accountKey) {
     throw new Error("File resources require Azure Blob account name and account key");
   }
-  const endpointUrl = azureBlobManifestEndpoint(settings.objectStorageAzureEndpoint ?? parsed.BlobEndpoint, accountName);
+  const endpointUrl = azureBlobManifestEndpoint(
+    settings.objectStorageAzureEndpoint ?? parsed.BlobEndpoint,
+    accountName,
+  );
   return {
     container: settings.objectStorageBucket,
     accountName,
@@ -3521,7 +4010,10 @@ function azureBlobMountConfig(settings: Settings): {
   };
 }
 
-function azureBlobManifestEndpoint(endpoint: string | undefined, accountName: string): string | undefined {
+function azureBlobManifestEndpoint(
+  endpoint: string | undefined,
+  accountName: string,
+): string | undefined {
   if (!endpoint) {
     return undefined;
   }
@@ -3531,13 +4023,16 @@ function azureBlobManifestEndpoint(endpoint: string | undefined, accountName: st
 }
 
 function parseAzureConnectionString(value: string): Record<string, string> {
-  return Object.fromEntries(value.split(";")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const index = part.indexOf("=");
-      return index === -1 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
-    }));
+  return Object.fromEntries(
+    value
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        return index === -1 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
+      }),
+  );
 }
 
 function normalizeManifestPath(path: string): string {
@@ -3553,7 +4048,9 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
     const mountPath = normalizeManifestPath(download.mountPath);
     assertSafeSandboxFilename(download.filename, download.fileId);
     if (!download.content && !download.url?.trim()) {
-      throw new Error(`File download materialization requires content or a URL for ${download.fileId}`);
+      throw new Error(
+        `File download materialization requires content or a URL for ${download.fileId}`,
+      );
     }
     return {
       ...download,
@@ -3563,7 +4060,14 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
 }
 
 function assertSafeSandboxFilename(filename: string, fileId: string): void {
-  if (!filename || filename.includes("/") || filename.includes("\\") || filename === "." || filename === ".." || filename.includes("..")) {
+  if (
+    !filename ||
+    filename.includes("/") ||
+    filename.includes("\\") ||
+    filename === "." ||
+    filename === ".." ||
+    filename.includes("..")
+  ) {
     throw new Error(`Invalid sandbox file name for ${fileId}: ${filename}`);
   }
 }
@@ -3583,7 +4087,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
     `mkdir -p -- ${shellQuote(targetDir)}`,
     `if [ ! -f ${shellQuote(targetPath)} ]; then`,
     `  tmp=${shellQuote(tmpPath)}`,
-    "  cleanup() { rm -f -- \"$tmp\"; }",
+    '  cleanup() { rm -f -- "$tmp"; }',
     "  trap cleanup EXIT",
     `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
     `  mv -- "$tmp" ${shellQuote(targetPath)}`,
@@ -3597,19 +4101,23 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-async function restoredSandboxSessionState(state: RunState<any, any>, client: unknown): Promise<SandboxSessionState | undefined> {
+async function restoredSandboxSessionState(
+  state: RunState<any, any>,
+  client: unknown,
+): Promise<SandboxSessionState | undefined> {
   if (!client) {
     return undefined;
   }
   const sandboxState = (state as any)._sandbox;
-  const entry = sandboxState?.sessionsByAgent?.[sandboxState.currentAgentKey]
-    ?? (sandboxState?.currentAgentKey && sandboxState?.sessionState
+  const entry =
+    sandboxState?.sessionsByAgent?.[sandboxState.currentAgentKey] ??
+    (sandboxState?.currentAgentKey && sandboxState?.sessionState
       ? {
-        backendId: sandboxState.backendId,
-        currentAgentKey: sandboxState.currentAgentKey,
-        currentAgentName: sandboxState.currentAgentName,
-        sessionState: sandboxState.sessionState,
-      }
+          backendId: sandboxState.backendId,
+          currentAgentKey: sandboxState.currentAgentKey,
+          currentAgentName: sandboxState.currentAgentName,
+          sessionState: sandboxState.sessionState,
+        }
       : undefined);
   if (!entry) {
     return undefined;
@@ -3672,7 +4180,9 @@ function applicableBeforeAgentStartHooks(
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): SandboxLifecycleHook[] {
-  return hooks.filter((hook) => hook.phase === "beforeAgentStart" && (hook.shouldRun?.(context) ?? true));
+  return hooks.filter(
+    (hook) => hook.phase === "beforeAgentStart" && (hook.shouldRun?.(context) ?? true),
+  );
 }
 
 /**
@@ -3717,14 +4227,48 @@ export function withSandboxLifecycleHooks(
   };
   const wrapped: SandboxClient = {
     backendId: client.backendId,
-    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
-    ...(client.create ? { create: async (...args: any[]) => await wrapSession(await (client.create as any)(...args)) } : {}),
-    ...(client.resume ? { resume: async (state: SandboxSessionState) => await wrapSession(await client.resume!(state)) } : {}),
-    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
-    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
-    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
-    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
-    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) =>
+            await wrapSession(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) =>
+            await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
   };
   return wrapped;
 }
@@ -3746,11 +4290,13 @@ function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined 
 
 function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
   return toolspaceTokenSeedForAgent(agent)
-    ? [{
-        id: "toolspace-token",
-        phase: "beforeAgentStart",
-        run: runToolspaceTokenSeedHook,
-      }]
+    ? [
+        {
+          id: "toolspace-token",
+          phase: "beforeAgentStart",
+          run: runToolspaceTokenSeedHook,
+        },
+      ]
     : [];
 }
 
@@ -3759,19 +4305,23 @@ function sandboxRepositoryCloneHooks(
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
 ): SandboxLifecycleHook[] {
-  const repositories = resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => (
-    resource.kind === "repository" && repositoryUsesSandboxClone(settings, resource, activeSandboxBackend)
-  ));
+  const repositories = resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository" &&
+      repositoryUsesSandboxClone(settings, resource, activeSandboxBackend),
+  );
   if (repositories.length === 0) {
     return [];
   }
-  return [{
-    id: "repository-clone",
-    phase: "beforeAgentStart",
-    run: async (session, context) => {
-      await runRepositoryCloneHook(session, repositories, context);
+  return [
+    {
+      id: "repository-clone",
+      phase: "beforeAgentStart",
+      run: async (session, context) => {
+        await runRepositoryCloneHook(session, repositories, context);
+      },
     },
-  }];
+  ];
 }
 
 /**
@@ -3800,12 +4350,18 @@ export function repositoryUsesSandboxClone(
   if (activeSandboxBackend === "selfhosted") {
     return false;
   }
-  return settings.sandboxBackend === "modal"
-    || Boolean(resource.githubInstallationId && resource.githubRepositoryId)
-    || Boolean(resource.provider);
+  return (
+    settings.sandboxBackend === "modal" ||
+    Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
+    Boolean(resource.provider)
+  );
 }
 
-const GIT_CREDENTIAL_PROVIDERS = ["github", "gitlab", "azure_devops"] as const satisfies readonly GitCredentialProvider[];
+const GIT_CREDENTIAL_PROVIDERS = [
+  "github",
+  "gitlab",
+  "azure_devops",
+] as const satisfies readonly GitCredentialProvider[];
 
 function gitProviderSeedEnv(provider: GitCredentialProvider): string {
   return `OPENGENI_GIT_${provider.toUpperCase()}_TOKEN_SEED`;
@@ -3826,11 +4382,15 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function repositoryCredentialProvider(resource: Extract<ResourceRef, { kind: "repository" }>): GitCredentialProvider {
+function repositoryCredentialProvider(
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+): GitCredentialProvider {
   return resource.provider ?? "github";
 }
 
-function gitAskpassHostProviderCaseLines(resources: Extract<ResourceRef, { kind: "repository" }>[]): string[] {
+function gitAskpassHostProviderCaseLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): string[] {
   const hosts = new Map<string, GitCredentialProvider>();
   for (const resource of resources) {
     try {
@@ -3846,10 +4406,15 @@ function gitAskpassHostProviderCaseLines(resources: Extract<ResourceRef, { kind:
   }
   return [...hosts.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hostname, provider]) => `    ${shellQuote(hostname)}) printf '%s\\n' ${provider}; return 0 ;;`);
+    .map(
+      ([hostname, provider]) =>
+        `    ${shellQuote(hostname)}) printf '%s\\n' ${provider}; return 0 ;;`,
+    );
 }
 
-function gitCredentialHelperCommandLines(resources: Extract<ResourceRef, { kind: "repository" }>[] = []): string[] {
+function gitCredentialHelperCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+): string[] {
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
@@ -3858,54 +4423,54 @@ function gitCredentialHelperCommandLines(resources: Extract<ResourceRef, { kind:
     // (OPENGENI_GIT_*_TOKEN_SEED), never by the box/agent manifest. Helper paths
     // are stable manifest values from @opengeni/config.
     "git_provider_token_file() {",
-    "  provider=\"$1\"",
-    "  case \"$provider\" in",
+    '  provider="$1"',
+    '  case "$provider" in',
     "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
     "  esac",
     "}",
     "write_git_provider_token() {",
-    "  provider=\"$1\"",
-    "  token=\"$2\"",
-    "  [ -n \"$token\" ] || return 0",
-    "  token_file=\"$(git_provider_token_file \"$provider\")\"",
-    "  mkdir -p \"$(dirname \"$token_file\")\"",
-    "  printf '%s' \"$token\" > \"$token_file.tmp.$$\"",
-    "  mv -f \"$token_file.tmp.$$\" \"$token_file\"",
-    "  if [ \"$provider\" = github ]; then",
-    "    credential_dir=\"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}\"",
-    "    mkdir -p \"$credential_dir\"",
-    "    printf '%s' \"$token\" > \"$credential_dir/github-token.tmp.$$\"",
-    "    mv -f \"$credential_dir/github-token.tmp.$$\" \"$credential_dir/github-token\"",
+    '  provider="$1"',
+    '  token="$2"',
+    '  [ -n "$token" ] || return 0',
+    '  token_file="$(git_provider_token_file "$provider")"',
+    '  mkdir -p "$(dirname "$token_file")"',
+    '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    '  if [ "$provider" = github ]; then',
+    '    credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '    mkdir -p "$credential_dir"',
+    '    printf \'%s\' "$token" > "$credential_dir/github-token.tmp.$$"',
+    '    mv -f "$credential_dir/github-token.tmp.$$" "$credential_dir/github-token"',
     "  fi",
     "}",
-    "seed_umask=\"$(umask)\"",
+    'seed_umask="$(umask)"',
     "umask 077",
-    "write_git_provider_token github \"${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}\"",
-    "write_git_provider_token gitlab \"${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}\"",
-    "write_git_provider_token azure_devops \"${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}\"",
-    "umask \"$seed_umask\"",
-    "git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"",
-    "mkdir -p \"$(dirname \"$git_askpass\")\"",
+    'write_git_provider_token github "${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}"',
+    'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
+    'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
+    'umask "$seed_umask"',
+    'git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
+    'mkdir -p "$(dirname "$git_askpass")"',
     "cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
     "#!/usr/bin/env sh",
     "prompt_host() {",
     "  prompt_lower=\"$(printf '%s\\n' \"$1\" | tr '[:upper:]' '[:lower:]')\"",
-    "  case \"$prompt_lower\" in",
+    '  case "$prompt_lower" in',
     "    *://*) ;;",
     "    *) printf '\\n'; return 0 ;;",
     "  esac",
-    "  rest=\"${prompt_lower#*://}\"",
-    "  rest=\"${rest#*@}\"",
-    "  host=\"${rest%%/*}\"",
-    "  host=\"${host%%:*}\"",
-    "  host=\"$(printf '%s\\n' \"$host\" | tr -d \"'\")\"",
+    '  rest="${prompt_lower#*://}"',
+    '  rest="${rest#*@}"',
+    '  host="${rest%%/*}"',
+    '  host="${host%%:*}"',
+    '  host="$(printf \'%s\\n\' "$host" | tr -d "\'")"',
     "  printf '%s\\n' \"$host\"",
     "}",
     "provider_for_prompt() {",
-    "  host=\"$(prompt_host \"$1\")\"",
-    "  case \"$host\" in",
-    ...(hostProviderCases.length > 0 ? hostProviderCases : ["    \"\") : ;;"]),
+    '  host="$(prompt_host "$1")"',
+    '  case "$host" in',
+    ...(hostProviderCases.length > 0 ? hostProviderCases : ['    "") : ;;']),
     "  esac",
     "  case \"$(printf '%s\\n' \"$1\" | tr '[:upper:]' '[:lower:]')\" in",
     "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
@@ -3915,85 +4480,87 @@ function gitCredentialHelperCommandLines(resources: Extract<ResourceRef, { kind:
     "  esac",
     "}",
     "token_file_for_provider() {",
-    "  case \"$1\" in",
+    '  case "$1" in',
     "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$1-token\" ;;",
     "  esac",
     "}",
     "username_for_provider() {",
-    "  case \"$1\" in",
+    '  case "$1" in',
     "    github) printf '%s\\n' \"x-access-token\" ;;",
     "    gitlab) printf '%s\\n' \"oauth2\" ;;",
     "    azure_devops) printf '%s\\n' \"opengeni\" ;;",
     "    *) printf '\\n' ;;",
     "  esac",
     "}",
-    "provider=\"$(provider_for_prompt \"$1\")\"",
-    "case \"$1\" in",
-    "  *Username*) username_for_provider \"$provider\" ;;",
-    "  *Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;",
+    'provider="$(provider_for_prompt "$1")"',
+    'case "$1" in',
+    '  *Username*) username_for_provider "$provider" ;;',
+    '  *Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
     "  *) printf '\\n' ;;",
     "esac",
     "ASKPASS_EOF",
-    "chmod 0755 \"$git_askpass.tmp.$$\"",
-    "mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"",
-    "wrapper_dir=\"${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}\"",
-    "mkdir -p \"$wrapper_dir\"",
+    'chmod 0755 "$git_askpass.tmp.$$"',
+    'mv -f "$git_askpass.tmp.$$" "$git_askpass"',
+    'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
+    'mkdir -p "$wrapper_dir"',
     "for opengeni_git_cli_tool in gh glab az; do",
-    "  wrapper=\"$wrapper_dir/$opengeni_git_cli_tool\"",
+    '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
     "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
     "#!/usr/bin/env sh",
     "set -eu",
-    "tool=\"${0##*/}\"",
-    "case \"$tool\" in",
+    'tool="${0##*/}"',
+    'case "$tool" in',
     "  gh) provider=github; token_env=GH_TOKEN ;;",
     "  glab) provider=gitlab; token_env=GITLAB_TOKEN ;;",
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
-    "if [ -n \"$provider\" ]; then",
-    "  case \"$provider\" in",
-    "    github) token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
-    "    *) token_file=\"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
+    'if [ -n "$provider" ]; then',
+    '  case "$provider" in',
+    '    github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
+    '    *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
     "  esac",
-    "  if [ -f \"$token_file\" ]; then",
-    "    token=\"$(cat \"$token_file\" 2>/dev/null || true)\"",
-    "    if [ -n \"$token\" ]; then",
-    "      case \"$token_env\" in",
-    "        GH_TOKEN) export GH_TOKEN=\"$token\" ;;",
-    "        GITLAB_TOKEN) export GITLAB_TOKEN=\"$token\" ;;",
-    "        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT=\"$token\" ;;",
+    '  if [ -f "$token_file" ]; then',
+    '    token="$(cat "$token_file" 2>/dev/null || true)"',
+    '    if [ -n "$token" ]; then',
+    '      case "$token_env" in',
+    '        GH_TOKEN) export GH_TOKEN="$token" ;;',
+    '        GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;',
+    '        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;',
     "      esac",
     "    fi",
     "  fi",
     "fi",
-    "self_real=\"$(readlink -f \"$0\" 2>/dev/null || printf '%s\\n' \"$0\")\"",
-    "old_ifs=\"$IFS\"",
+    'self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
+    'old_ifs="$IFS"',
     "IFS=:",
     "for dir in $PATH; do",
-    "  [ -n \"$dir\" ] || dir=.",
-    "  candidate=\"$dir/$tool\"",
-    "  [ -x \"$candidate\" ] || continue",
-    "  candidate_real=\"$(readlink -f \"$candidate\" 2>/dev/null || printf '%s\\n' \"$candidate\")\"",
-    "  [ \"$candidate_real\" = \"$self_real\" ] && continue",
-    "  IFS=\"$old_ifs\"",
-    "  exec \"$candidate\" \"$@\"",
+    '  [ -n "$dir" ] || dir=.',
+    '  candidate="$dir/$tool"',
+    '  [ -x "$candidate" ] || continue',
+    '  candidate_real="$(readlink -f "$candidate" 2>/dev/null || printf \'%s\\n\' "$candidate")"',
+    '  [ "$candidate_real" = "$self_real" ] && continue',
+    '  IFS="$old_ifs"',
+    '  exec "$candidate" "$@"',
     "done",
-    "IFS=\"$old_ifs\"",
+    'IFS="$old_ifs"',
     "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
     "exit 127",
     "CLI_WRAPPER_EOF",
-    "  chmod 0755 \"$wrapper.tmp.$$\"",
-    "  mv -f \"$wrapper.tmp.$$\" \"$wrapper\"",
+    '  chmod 0755 "$wrapper.tmp.$$"',
+    '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
   ];
 }
 
-export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "repository" }>[]): string {
+export function repositoryCloneCommand(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): string {
   const commands = [
     "set -eu",
-    "export HOME=\"${HOME:-/workspace}\"",
-    "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
+    'export HOME="${HOME:-/workspace}"',
+    'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
     ...gitCredentialHelperCommandLines(resources),
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
@@ -4006,16 +4573,16 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "    rm -rf /var/lib/apt/lists/*",
     "    command -v git >/dev/null 2>&1 && return 0",
     "  fi",
-    "  echo \"git is not installed in the sandbox and could not be bootstrapped\" >&2",
+    '  echo "git is not installed in the sandbox and could not be bootstrapped" >&2',
     "  exit 127",
     "}",
     "ensure_git",
     "clone_repository() {",
-    "  target=\"$1\"",
-    "  uri=\"$2\"",
-    "  ref=\"$3\"",
-    "  subpath=\"$4\"",
-    "  if [ -e \"$target\" ] && { [ -f \"$target\" ] || [ -n \"$(find \"$target\" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)\" ]; }; then",
+    '  target="$1"',
+    '  uri="$2"',
+    '  ref="$3"',
+    '  subpath="$4"',
+    '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
     // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
     // proof of a completed materialization: an interrupted clone (worker crash /
     // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
@@ -4023,75 +4590,77 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
     // the mount path before the repo exists). Subpath extracts are not git repos —
     // for those the plain non-empty check stands (no stronger signal available).
-    "    if [ -n \"$subpath\" ] || git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-    "      echo \"Repository resource already present at $target\"",
+    '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+    '      echo "Repository resource already present at $target"',
     "      return 0",
     "    fi",
-    "    echo \"Re-materializing partial repository resource at $target\" >&2",
-    "    find \"$target\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +",
+    '    echo "Re-materializing partial repository resource at $target" >&2',
+    '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
     "  fi",
-    "  mkdir -p \"$(dirname \"$target\")\"",
-    "  tmp=\"${target}.tmp.$$\"",
-    "  rm -rf \"$tmp\"",
+    '  mkdir -p "$(dirname "$target")"',
+    '  tmp="${target}.tmp.$$"',
+    '  rm -rf "$tmp"',
     // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
     // (set -eu would exit before any cleanup).
-    "  if ! { git init \"$tmp\" >/dev/null && git -C \"$tmp\" remote add origin \"$uri\" && git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\" && git -C \"$tmp\" checkout --detach FETCH_HEAD >/dev/null; }; then",
-    "    rm -rf \"$tmp\"",
-    "    echo \"Repository resource fetch failed for $target\" >&2",
+    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
+    '    rm -rf "$tmp"',
+    '    echo "Repository resource fetch failed for $target" >&2',
     "    exit 1",
     "  fi",
-    "  if [ -n \"$subpath\" ]; then",
-    "    if [ ! -e \"$tmp/$subpath\" ]; then",
-    "      echo \"Repository subpath not found: $subpath\" >&2",
-    "      rm -rf \"$tmp\"",
+    '  if [ -n "$subpath" ]; then',
+    '    if [ ! -e "$tmp/$subpath" ]; then',
+    '      echo "Repository subpath not found: $subpath" >&2',
+    '      rm -rf "$tmp"',
     "      exit 1",
     "    fi",
-    "    if [ -d \"$tmp/$subpath\" ]; then",
-    "      mkdir -p \"$target\"",
-    "      cp -a \"$tmp/$subpath/.\" \"$target/\"",
+    '    if [ -d "$tmp/$subpath" ]; then',
+    '      mkdir -p "$target"',
+    '      cp -a "$tmp/$subpath/." "$target/"',
     "    else",
-    "      rmdir \"$target\" 2>/dev/null || true",
-    "      cp -a \"$tmp/$subpath\" \"$target\"",
+    '      rmdir "$target" 2>/dev/null || true',
+    '      cp -a "$tmp/$subpath" "$target"',
     "    fi",
-    "    rm -rf \"$tmp\"",
+    '    rm -rf "$tmp"',
     "  else",
-    "    rmdir \"$target\" 2>/dev/null || true",
+    '    rmdir "$target" 2>/dev/null || true',
     // Two concurrent turn holders can race this install: without the existence
     // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
     // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
     // accept it; a non-empty non-repo survivor here is a mount point the manifest
     // re-filled — install into it by content copy instead of rename.
-    "    if [ -e \"$target\" ]; then",
-    "      if git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
-    "        rm -rf \"$tmp\"",
-    "        echo \"Repository resource already present at $target\"",
+    '    if [ -e "$target" ]; then',
+    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+    '        rm -rf "$tmp"',
+    '        echo "Repository resource already present at $target"',
     "        return 0",
     "      fi",
-    "      cp -a \"$tmp/.\" \"$target/\"",
-    "      rm -rf \"$tmp\"",
+    '      cp -a "$tmp/." "$target/"',
+    '      rm -rf "$tmp"',
     "    else",
-    "      mv \"$tmp\" \"$target\"",
+    '      mv "$tmp" "$target"',
     "    fi",
-    "    git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null",
+    '    git -C "$target" rev-parse --is-inside-work-tree >/dev/null',
     "  fi",
-    "  if [ ! -e \"$target\" ]; then",
-    "    echo \"Repository resource was not materialized at $target\" >&2",
+    '  if [ ! -e "$target" ]; then',
+    '    echo "Repository resource was not materialized at $target" >&2',
     "    exit 1",
     "  fi",
-    "  echo \"Repository resource ready at $target\"",
+    '  echo "Repository resource ready at $target"',
     "}",
   ];
   for (const resource of resources) {
     const url = new URL(resource.uri);
     const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
     const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
-    commands.push([
-      "clone_repository",
-      shellQuote(posixPath.join("/workspace", mountPath)),
-      shellQuote(resource.uri),
-      shellQuote(resource.ref),
-      shellQuote(resource.subpath ? normalizeManifestPath(resource.subpath) : ""),
-    ].join(" "));
+    commands.push(
+      [
+        "clone_repository",
+        shellQuote(posixPath.join("/workspace", mountPath)),
+        shellQuote(resource.uri),
+        shellQuote(resource.ref),
+        shellQuote(resource.subpath ? normalizeManifestPath(resource.subpath) : ""),
+      ].join(" "),
+    );
   }
   return commands.join("\n");
 }
@@ -4099,15 +4668,15 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
 export function toolspaceTokenSeedCommand(): string {
   return [
     "set -eu",
-    "export HOME=\"${HOME:-/workspace}\"",
-    "if [ -n \"${OPENGENI_TOOLSPACE_TOKEN_SEED:-}\" ]; then",
-    "  seed_umask=\"$(umask)\"",
+    'export HOME="${HOME:-/workspace}"',
+    'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
+    '  seed_umask="$(umask)"',
     "  umask 077",
-    "  token_file=\"${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}\"",
-    "  mkdir -p \"$(dirname \"$token_file\")\"",
-    "  printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\" > \"$token_file.tmp.$$\"",
-    "  mv -f \"$token_file.tmp.$$\" \"$token_file\"",
-    "  umask \"$seed_umask\"",
+    '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    '  mkdir -p "$(dirname "$token_file")"',
+    '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    '  umask "$seed_umask"',
     "fi",
   ].join("\n");
 }
@@ -4203,20 +4772,20 @@ export async function runRepositoryCloneHook(
 
 export function azureCliLoginCommand(): string {
   return [
-    "export HOME=\"${HOME:-/workspace}\"",
-    "mkdir -p \"$HOME/.azure\"",
-    "CLIENT_ID=\"${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}\"",
-    "CLIENT_SECRET=\"${AZURE_CLIENT_SECRET:-${ARM_CLIENT_SECRET:-}}\"",
-    "TENANT_ID=\"${AZURE_TENANT_ID:-${ARM_TENANT_ID:-}}\"",
-    "SUBSCRIPTION_ID=\"${AZURE_SUBSCRIPTION_ID:-${ARM_SUBSCRIPTION_ID:-}}\"",
-    "if [ -n \"$CLIENT_ID\" ] && [ -n \"$CLIENT_SECRET\" ] && [ -n \"$TENANT_ID\" ]; then",
-    "  command -v az >/dev/null 2>&1 || { echo \"Azure CLI is not installed in the sandbox\" >&2; exit 127; }",
-    "  az account show --only-show-errors >/dev/null 2>&1 || az login --service-principal --username \"$CLIENT_ID\" --password \"$CLIENT_SECRET\" --tenant \"$TENANT_ID\" --allow-no-subscriptions --only-show-errors --output none",
+    'export HOME="${HOME:-/workspace}"',
+    'mkdir -p "$HOME/.azure"',
+    'CLIENT_ID="${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}"',
+    'CLIENT_SECRET="${AZURE_CLIENT_SECRET:-${ARM_CLIENT_SECRET:-}}"',
+    'TENANT_ID="${AZURE_TENANT_ID:-${ARM_TENANT_ID:-}}"',
+    'SUBSCRIPTION_ID="${AZURE_SUBSCRIPTION_ID:-${ARM_SUBSCRIPTION_ID:-}}"',
+    'if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_SECRET" ] && [ -n "$TENANT_ID" ]; then',
+    '  command -v az >/dev/null 2>&1 || { echo "Azure CLI is not installed in the sandbox" >&2; exit 127; }',
+    '  az account show --only-show-errors >/dev/null 2>&1 || az login --service-principal --username "$CLIENT_ID" --password "$CLIENT_SECRET" --tenant "$TENANT_ID" --allow-no-subscriptions --only-show-errors --output none',
     // if/fi, NOT `[ -n ] && az`: this line ends the credentialed if-body, so with a
     // no-subscription SP (an explicitly supported config — the login above passes
     // --allow-no-subscriptions) the bare `[ -n ]` would exit the whole script 1 and
     // fail the turn.
-    "  if [ -n \"$SUBSCRIPTION_ID\" ]; then az account set --subscription \"$SUBSCRIPTION_ID\" --only-show-errors; fi",
+    '  if [ -n "$SUBSCRIPTION_ID" ]; then az account set --subscription "$SUBSCRIPTION_ID" --only-show-errors; fi',
     "fi",
   ].join("\n");
 }
@@ -4264,11 +4833,15 @@ export function sandboxCommandOutput(result: unknown): string {
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
   const output = sandboxCommandOutput(result);
   if (sandboxCommandStillRunning(result)) {
-    throw new Error(`${operation} did not finish before the lifecycle command timeout${output ? `:\n${output}` : ""}`);
+    throw new Error(
+      `${operation} did not finish before the lifecycle command timeout${output ? `:\n${output}` : ""}`,
+    );
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(`${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`);
+    throw new Error(
+      `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+    );
   }
   if (exitCode === null) {
     throw new Error(output || `${operation} did not return a command exit code`);
@@ -4365,15 +4938,20 @@ let stagedBundledSkillsDir: string | null = null;
 
 function bundledSkillsDir(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const packaged = [
-    join(moduleDir, "bundled_hashicorp_terraform_skills"),
-    join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
-  ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_hashicorp_terraform_skills");
+  const packaged =
+    [
+      join(moduleDir, "bundled_hashicorp_terraform_skills"),
+      join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
+    ].find((candidate) => existsSync(candidate)) ??
+    join(moduleDir, "bundled_hashicorp_terraform_skills");
   if (isPathWithin(process.cwd(), packaged)) {
     return packaged;
   }
   if (!stagedBundledSkillsDir) {
-    stagedBundledSkillsDir = stageBundledSkills(packaged, join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"));
+    stagedBundledSkillsDir = stageBundledSkills(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"),
+    );
   }
   return stagedBundledSkillsDir;
 }
@@ -4431,12 +5009,18 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
     packNameKeys.add(skill.name.toLowerCase());
     packNames.add(skill.name);
     children[skill.name] = packSkillDirEntry(skill);
-    packIndex.push({ name: skill.name, description: packSkillDescription(skill), path: skill.name });
+    packIndex.push({
+      name: skill.name,
+      description: packSkillDescription(skill),
+      path: skill.name,
+    });
   }
   return {
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
-      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter((entry) => !packNames.has(entry.path ?? entry.name)),
+      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
+        (entry) => !packNames.has(entry.path ?? entry.name),
+      ),
       ...packIndex,
     ],
   };
@@ -4501,7 +5085,11 @@ function assertSafePackSkillName(name: string): void {
 
 function packSkillPathSegments(skillName: string, path: string): string[] {
   const segments = path.split("/");
-  if (path.startsWith("/") || path.includes("\\") || segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+  if (
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
     throw new Error(`Invalid pack skill file path for ${skillName}: ${path}`);
   }
   return segments;
@@ -4550,7 +5138,11 @@ function skillFrontmatterDescription(markdown: string): string | null {
 }
 
 function unquoteFrontmatterValue(value: string): string {
-  if (value.length >= 2 && value[0] === value[value.length - 1] && (value[0] === '"' || value[0] === "'")) {
+  if (
+    value.length >= 2 &&
+    value[0] === value[value.length - 1] &&
+    (value[0] === '"' || value[0] === "'")
+  ) {
     return value.slice(1, -1);
   }
   return value;
@@ -4569,7 +5161,11 @@ function sortJson(value: unknown): unknown {
     return value.map(sortJson);
   }
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, nested]) => [key, sortJson(nested)]),
+    );
   }
   return value;
 }

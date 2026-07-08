@@ -38,11 +38,15 @@ await runCheck("access-boundary", async () => {
   const authMode = config?.auth?.mode ?? "unknown";
   if (authMode === "deploymentKey") {
     if (!args.deploymentAccessKey) {
-      throw new Error("client config requires x-opengeni-access-key; set OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or --deployment-access-key");
+      throw new Error(
+        "client config requires x-opengeni-access-key; set OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or --deployment-access-key",
+      );
     }
     const response = await fetch(new URL("/v1/access/me", args.baseUrl));
     if (response.status !== 401) {
-      throw new Error(`/v1/access/me without deployment access key returned HTTP ${response.status}, expected 401`);
+      throw new Error(
+        `/v1/access/me without deployment access key returned HTTP ${response.status}, expected 401`,
+      );
     }
     return "client config is secret-free and protected API routes reject missing deployment access keys";
   }
@@ -60,11 +64,15 @@ await runCheck("workspace-discovery", async () => {
   workspaceId = typeof context?.defaultWorkspaceId === "string" ? context.defaultWorkspaceId : null;
   if (!workspaceId) {
     const workspaces = await getJson(new URL("/v1/workspaces", args.baseUrl));
-    const first = Array.isArray(workspaces) ? workspaces.find((workspace) => typeof workspace?.id === "string") : null;
+    const first = Array.isArray(workspaces)
+      ? workspaces.find((workspace) => typeof workspace?.id === "string")
+      : null;
     workspaceId = first?.id ?? null;
   }
   if (!workspaceId) {
-    throw new Error("/v1/access/me and /v1/workspaces did not expose a workspace id for conformance");
+    throw new Error(
+      "/v1/access/me and /v1/workspaces did not expose a workspace id for conformance",
+    );
   }
   return `workspace=${workspaceId}`;
 });
@@ -74,7 +82,10 @@ if (args.skipObservability) {
 } else {
   await runCheck("observability", async () => {
     const metrics = await getText(new URL("/metrics", args.baseUrl));
-    for (const required of ["opengeni_http_requests_total", "opengeni_http_request_duration_seconds_bucket"]) {
+    for (const required of [
+      "opengeni_http_requests_total",
+      "opengeni_http_request_duration_seconds_bucket",
+    ]) {
       if (!metrics.includes(required)) {
         throw new Error(`/metrics did not include ${required}`);
       }
@@ -123,7 +134,12 @@ if (args.skipAgent) {
       throw new Error("events response was not an array");
     }
     const types = events.map((event) => event?.type);
-    for (const required of ["session.created", "turn.started", "agent.message.completed", "turn.completed"]) {
+    for (const required of [
+      "session.created",
+      "turn.started",
+      "agent.message.completed",
+      "turn.completed",
+    ]) {
       if (!types.includes(required)) {
         throw new Error(`missing event type ${required}`);
       }
@@ -159,8 +175,12 @@ if (args.skipAgent) {
     const toolSessionId = stringField(session, "id");
     const status = await waitForTerminalSessionStatus(toolSessionId, args.timeoutSeconds);
     if (status !== "idle") {
-      const events = await getJson(workspaceUrl(`/sessions/${toolSessionId}/events?limit=200`)).catch(() => []);
-      throw new Error(`session ${toolSessionId} with selected MCP tool ended with status ${status}${turnFailureSuffix(events)}`);
+      const events = await getJson(
+        workspaceUrl(`/sessions/${toolSessionId}/events?limit=200`),
+      ).catch(() => []);
+      throw new Error(
+        `session ${toolSessionId} with selected MCP tool ended with status ${status}${turnFailureSuffix(events)}`,
+      );
     }
     return `session ${toolSessionId} reached idle with OpenGeni MCP selected`;
   });
@@ -198,7 +218,9 @@ if (args.skipAgent) {
           if (!Array.isArray(runs)) {
             throw new Error("scheduled task runs response was not an array");
           }
-          const run = runs.find((item) => item?.status === "dispatched" && typeof item?.sessionId === "string");
+          const run = runs.find(
+            (item) => item?.status === "dispatched" && typeof item?.sessionId === "string",
+          );
           if (run) {
             runSessionId = run.sessionId;
             break;
@@ -242,7 +264,12 @@ if (args.skipStorage) {
     const uploadId = stringField(upload, "uploadId");
     const fileId = stringField(upload, "fileId");
     const headers = recordField(upload, "requiredHeaders");
-    await preflightObjectPut(putUrl, new URL(args.baseUrl).origin, Object.keys(headers), args.objectConnectTo);
+    await preflightObjectPut(
+      putUrl,
+      new URL(args.baseUrl).origin,
+      Object.keys(headers),
+      args.objectConnectTo,
+    );
     await putObject(putUrl, content, headers, args.objectConnectTo);
     await postJson(workspaceUrl(`/files/uploads/${uploadId}/complete`), {});
     const download = await postJson(workspaceUrl(`/files/${fileId}/download-url`), {});
@@ -313,7 +340,10 @@ async function deleteJson(url: URL): Promise<any> {
   return await response.json();
 }
 
-async function waitForTerminalSessionStatus(sessionId: string, timeoutSeconds: number): Promise<string> {
+async function waitForTerminalSessionStatus(
+  sessionId: string,
+  timeoutSeconds: number,
+): Promise<string> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let status = "unknown";
   while (Date.now() < deadline) {
@@ -327,9 +357,27 @@ async function waitForTerminalSessionStatus(sessionId: string, timeoutSeconds: n
   return status;
 }
 
-async function putObject(url: string, content: string, headers: Record<string, string>, connectTo: string | null): Promise<void> {
+async function putObject(
+  url: string,
+  content: string,
+  headers: Record<string, string>,
+  connectTo: string | null,
+): Promise<void> {
   if (connectTo) {
-    runCurl(["-fsS", "-X", "PUT", url, "--connect-to", connectTo, ...headerArgs(headers), "--data-binary", "@-"], content);
+    runCurl(
+      [
+        "-fsS",
+        "-X",
+        "PUT",
+        url,
+        "--connect-to",
+        connectTo,
+        ...headerArgs(headers),
+        "--data-binary",
+        "@-",
+      ],
+      content,
+    );
     return;
   }
   const response = await fetch(url, {
@@ -342,8 +390,17 @@ async function putObject(url: string, content: string, headers: Record<string, s
   }
 }
 
-async function preflightObjectPut(url: string, origin: string, requiredHeaderNames: string[], connectTo: string | null): Promise<void> {
-  const accessControlHeaders = [...new Set(requiredHeaderNames.map((header) => header.toLowerCase()))].sort().join(", ");
+async function preflightObjectPut(
+  url: string,
+  origin: string,
+  requiredHeaderNames: string[],
+  connectTo: string | null,
+): Promise<void> {
+  const accessControlHeaders = [
+    ...new Set(requiredHeaderNames.map((header) => header.toLowerCase())),
+  ]
+    .sort()
+    .join(", ");
   const requestHeaders = {
     origin,
     "access-control-request-method": "PUT",
@@ -353,28 +410,56 @@ async function preflightObjectPut(url: string, origin: string, requiredHeaderNam
     ? curlPreflight(url, requestHeaders, connectTo)
     : await fetchPreflight(url, requestHeaders);
   if (response.status < 200 || response.status >= 300) {
-    throw new Error(`browser upload CORS preflight returned HTTP ${response.status}: ${response.body.trim()}`);
+    throw new Error(
+      `browser upload CORS preflight returned HTTP ${response.status}: ${response.body.trim()}`,
+    );
   }
   const allowedOrigin = response.headers.get("access-control-allow-origin");
   if (allowedOrigin !== "*" && allowedOrigin !== origin) {
-    throw new Error(`browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or *`);
+    throw new Error(
+      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or *`,
+    );
   }
-  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "").toLowerCase().split(/\s*,\s*/);
+  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")
+    .toLowerCase()
+    .split(/\s*,\s*/);
   if (!allowedMethods.includes("put")) {
-    throw new Error(`browser upload CORS preflight did not allow PUT: ${allowedMethods.join(",") || "<missing>"}`);
+    throw new Error(
+      `browser upload CORS preflight did not allow PUT: ${allowedMethods.join(",") || "<missing>"}`,
+    );
   }
 }
 
-async function fetchPreflight(url: string, headers: Record<string, string>): Promise<{ status: number; headers: Headers; body: string }> {
+async function fetchPreflight(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; headers: Headers; body: string }> {
   const response = await fetch(url, {
     method: "OPTIONS",
     headers,
   });
-  return { status: response.status, headers: response.headers, body: await response.text().catch(() => "") };
+  return {
+    status: response.status,
+    headers: response.headers,
+    body: await response.text().catch(() => ""),
+  };
 }
 
-function curlPreflight(url: string, headers: Record<string, string>, connectTo: string): { status: number; headers: Headers; body: string } {
-  const output = runCurl(["-sS", "-i", "-X", "OPTIONS", url, "--connect-to", connectTo, ...headerArgs(headers)]);
+function curlPreflight(
+  url: string,
+  headers: Record<string, string>,
+  connectTo: string,
+): { status: number; headers: Headers; body: string } {
+  const output = runCurl([
+    "-sS",
+    "-i",
+    "-X",
+    "OPTIONS",
+    url,
+    "--connect-to",
+    connectTo,
+    ...headerArgs(headers),
+  ]);
   const blocks = output.split(/\r?\n\r?\n/);
   const headerBlock = blocks.find((block) => /^HTTP\//i.test(block)) ?? "";
   const status = Number(headerBlock.match(/^HTTP\/\S+\s+(\d+)/i)?.[1] ?? 0);
@@ -447,7 +532,10 @@ function turnFailureSuffix(events: unknown): string {
     return "";
   }
   const failed = [...events].reverse().find((event) => event?.type === "turn.failed");
-  const error = failed?.payload && typeof failed.payload === "object" && "error" in failed.payload ? failed.payload.error : null;
+  const error =
+    failed?.payload && typeof failed.payload === "object" && "error" in failed.payload
+      ? failed.payload.error
+      : null;
   return typeof error === "string" && error.length > 0 ? `: ${error}` : "";
 }
 
@@ -459,11 +547,19 @@ function parseArgs(values: string[]): Args {
   const out: Args = {
     baseUrl: process.env.OPENGENI_CONFORMANCE_BASE_URL ?? "",
     timeoutSeconds: Number(process.env.OPENGENI_CONFORMANCE_TIMEOUT_SECONDS ?? 180),
-    agentMessage: process.env.OPENGENI_CONFORMANCE_AGENT_MESSAGE ?? "Reply with exactly: opengeni conformance ok",
+    agentMessage:
+      process.env.OPENGENI_CONFORMANCE_AGENT_MESSAGE ??
+      "Reply with exactly: opengeni conformance ok",
     sandboxBackend: process.env.OPENGENI_CONFORMANCE_SANDBOX_BACKEND ?? "none",
     objectConnectTo: process.env.OPENGENI_CONFORMANCE_OBJECT_CONNECT_TO ?? null,
-    deploymentAccessKey: process.env.OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY ?? process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ?? null,
-    productToken: process.env.OPENGENI_CONFORMANCE_PRODUCT_TOKEN ?? process.env.OPENGENI_CONFORMANCE_ACCESS_TOKEN ?? null,
+    deploymentAccessKey:
+      process.env.OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY ??
+      process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ??
+      null,
+    productToken:
+      process.env.OPENGENI_CONFORMANCE_PRODUCT_TOKEN ??
+      process.env.OPENGENI_CONFORMANCE_ACCESS_TOKEN ??
+      null,
     skipAgent: false,
     skipStorage: false,
     skipObservability: false,
@@ -560,7 +656,9 @@ function parseArgs(values: string[]): Args {
 
 function requestHeaders(auth: boolean, extra: Record<string, string> = {}): Record<string, string> {
   return {
-    ...(auth && args.deploymentAccessKey ? { "x-opengeni-access-key": args.deploymentAccessKey } : {}),
+    ...(auth && args.deploymentAccessKey
+      ? { "x-opengeni-access-key": args.deploymentAccessKey }
+      : {}),
     ...(auth && args.productToken ? { authorization: `Bearer ${args.productToken}` } : {}),
     ...extra,
   };
@@ -595,7 +693,9 @@ function recordField(value: any, key: string): Record<string, string> {
   if (!field || typeof field !== "object" || Array.isArray(field)) {
     throw new Error(`response missing object field ${key}`);
   }
-  return Object.fromEntries(Object.entries(field).map(([entryKey, entryValue]) => [entryKey, String(entryValue)]));
+  return Object.fromEntries(
+    Object.entries(field).map(([entryKey, entryValue]) => [entryKey, String(entryValue)]),
+  );
 }
 
 function skipped(id: string, detail: string): CheckResult {

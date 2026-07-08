@@ -199,7 +199,11 @@ export async function approveDeviceEnrollment(
   },
 ): Promise<{ enrollmentId: string; sandboxId: string; allowScreenControl: boolean } | null> {
   const { db } = services;
-  const pending = await getPendingDeviceEnrollmentRequestByUserCode(db, input.workspaceId, input.userCode);
+  const pending = await getPendingDeviceEnrollmentRequestByUserCode(
+    db,
+    input.workspaceId,
+    input.userCode,
+  );
   if (!pending) {
     return null;
   }
@@ -240,7 +244,9 @@ export async function lookupDeviceEnrollment(
 
 /** Project a resolved pending record to the presentational lookup response (no
  *  secrets, no device_code) the approve screen (EnrollmentConsent) renders. */
-export function toLookupResponse(record: DeviceEnrollmentRequestRecord): DeviceEnrollmentLookupResponse {
+export function toLookupResponse(
+  record: DeviceEnrollmentRequestRecord,
+): DeviceEnrollmentLookupResponse {
   return {
     workspaceId: record.workspaceId,
     userCode: record.userCode,
@@ -263,7 +269,11 @@ export async function denyDeviceEnrollment(
   input: { accountId: string; workspaceId: string; userCode: string },
 ): Promise<{ denied: boolean }> {
   const { db } = services;
-  const pending = await getPendingDeviceEnrollmentRequestByUserCode(db, input.workspaceId, input.userCode);
+  const pending = await getPendingDeviceEnrollmentRequestByUserCode(
+    db,
+    input.workspaceId,
+    input.userCode,
+  );
   if (!pending) {
     return { denied: false };
   }

@@ -44,7 +44,9 @@ export function normalizeCodexRequestBody(
   body.stream = true; // ChatGPT backend REQUIRES stream=true (confirmed live: 400 "Stream must be set to true").
 
   // include MUST contain reasoning.encrypted_content (stateless continuity, spec §1.6)
-  const include = Array.isArray(body.include) ? (body.include as unknown[]).filter((v): v is string => typeof v === "string") : [];
+  const include = Array.isArray(body.include)
+    ? (body.include as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
   if (!include.includes("reasoning.encrypted_content")) {
     include.push("reasoning.encrypted_content");
   }
@@ -120,7 +122,9 @@ export function buildModelResolver(
   fallbackSlug: string,
 ): (slug: string) => string {
   return (requested: string): string => {
-    const stripped = requested.includes("/") ? requested.slice(requested.indexOf("/") + 1) : requested;
+    const stripped = requested.includes("/")
+      ? requested.slice(requested.indexOf("/") + 1)
+      : requested;
     let best = "";
     for (const slug of liveSlugs) {
       if (stripped.startsWith(slug) && slug.length > best.length) {

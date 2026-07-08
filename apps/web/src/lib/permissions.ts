@@ -82,7 +82,9 @@ export function delegableApiKeyPermissions(grantPermissions: readonly string[]):
   if (grantPermissions.includes("workspace:admin")) {
     return new Set<string>(Permission.options);
   }
-  return new Set<string>(Permission.options.filter((permission) => grantPermissions.includes(permission)));
+  return new Set<string>(
+    Permission.options.filter((permission) => grantPermissions.includes(permission)),
+  );
 }
 
 export const defaultApiKeyPermissions = new Set<string>([
@@ -103,12 +105,21 @@ export const defaultApiKeyPermissions = new Set<string>([
  * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
  */
 export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
-  const accountOnly = new Set<string>(["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create"]);
+  const accountOnly = new Set<string>([
+    "account:read",
+    "account:admin",
+    "members:manage",
+    "billing:read",
+    "billing:manage",
+    "workspace:create",
+  ]);
   const notFirstPartyMcp = new Set<string>(["toolspace:call"]);
   return buildApiKeyPermissionGroups()
     .map((group) => ({
       label: group.label,
-      permissions: group.permissions.filter((permission) => !accountOnly.has(permission) && !notFirstPartyMcp.has(permission)),
+      permissions: group.permissions.filter(
+        (permission) => !accountOnly.has(permission) && !notFirstPartyMcp.has(permission),
+      ),
     }))
     .filter((group) => group.permissions.length > 0);
 }
@@ -123,7 +134,13 @@ export const sessionMcpPermissionGroups = buildSessionMcpPermissionGroups();
  * and `workspace:admin` stay (they are workspace-scoped membership powers).
  */
 export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
-  const accountOnly = new Set<string>(["account:read", "account:admin", "billing:read", "billing:manage", "workspace:create"]);
+  const accountOnly = new Set<string>([
+    "account:read",
+    "account:admin",
+    "billing:read",
+    "billing:manage",
+    "workspace:create",
+  ]);
   return buildApiKeyPermissionGroups()
     .map((group) => ({
       label: group.label,
@@ -155,12 +172,26 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "goals:manage",
 ]);
 
-export function hasWorkspacePermission(context: AccessContext | null, workspaceId: string, permission: string): boolean {
+export function hasWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
   const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  return Boolean(grant && (grant.permissions.includes(permission) || grant.permissions.includes("workspace:admin")));
+  return Boolean(
+    grant &&
+    (grant.permissions.includes(permission) || grant.permissions.includes("workspace:admin")),
+  );
 }
 
-export function hasAccountPermission(context: AccessContext | null, accountId: string, permission: string): boolean {
+export function hasAccountPermission(
+  context: AccessContext | null,
+  accountId: string,
+  permission: string,
+): boolean {
   const grant = context?.accountGrants.find((candidate) => candidate.accountId === accountId);
-  return Boolean(grant && (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")));
+  return Boolean(
+    grant &&
+    (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")),
+  );
 }

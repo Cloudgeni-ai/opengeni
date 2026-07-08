@@ -66,16 +66,22 @@ export function assertProviderRegistryInvariants(): void {
   for (const backend of SandboxBackend.options) {
     const registration = PROVIDER_REGISTRY[backend];
     if (registration.backend !== backend) {
-      throw new Error(`PROVIDER_REGISTRY["${backend}"].backend mismatch (got "${registration.backend}")`);
+      throw new Error(
+        `PROVIDER_REGISTRY["${backend}"].backend mismatch (got "${registration.backend}")`,
+      );
     }
     if (registration.descriptor.backend !== backend) {
-      throw new Error(`PROVIDER_REGISTRY["${backend}"].descriptor.backend mismatch (got "${registration.descriptor.backend}")`);
+      throw new Error(
+        `PROVIDER_REGISTRY["${backend}"].descriptor.backend mismatch (got "${registration.descriptor.backend}")`,
+      );
     }
     if (backend === "none") {
       // "none" has no SDK client (build returns undefined); the descriptor
       // backendId "none" is self-consistent.
       if (registration.descriptor.backendId !== "none") {
-        throw new Error(`"none" descriptor.backendId must be "none" (got "${registration.descriptor.backendId}")`);
+        throw new Error(
+          `"none" descriptor.backendId must be "none" (got "${registration.descriptor.backendId}")`,
+        );
       }
       continue;
     }

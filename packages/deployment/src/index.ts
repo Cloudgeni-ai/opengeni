@@ -67,16 +67,30 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   local: { required: [], optional: [] },
   none: { required: [], optional: [] },
   modal: {
-    required: ["OPENGENI_MODAL_APP_NAME", "OPENGENI_MODAL_TOKEN_ID", "OPENGENI_MODAL_TOKEN_SECRET", "OPENGENI_MODAL_TIMEOUT_SECONDS"],
+    required: [
+      "OPENGENI_MODAL_APP_NAME",
+      "OPENGENI_MODAL_TOKEN_ID",
+      "OPENGENI_MODAL_TOKEN_SECRET",
+      "OPENGENI_MODAL_TIMEOUT_SECONDS",
+    ],
     optional: ["OPENGENI_MODAL_ENVIRONMENT", "OPENGENI_MODAL_IMAGE_REF"],
   },
   daytona: {
     required: ["OPENGENI_DAYTONA_API_KEY"],
-    optional: ["OPENGENI_DAYTONA_API_URL", "OPENGENI_DAYTONA_TARGET", "OPENGENI_DAYTONA_IMAGE", "OPENGENI_DAYTONA_SNAPSHOT_NAME"],
+    optional: [
+      "OPENGENI_DAYTONA_API_URL",
+      "OPENGENI_DAYTONA_TARGET",
+      "OPENGENI_DAYTONA_IMAGE",
+      "OPENGENI_DAYTONA_SNAPSHOT_NAME",
+    ],
   },
   runloop: {
     required: ["OPENGENI_RUNLOOP_API_KEY"],
-    optional: ["OPENGENI_RUNLOOP_BASE_URL", "OPENGENI_RUNLOOP_BLUEPRINT_NAME", "OPENGENI_RUNLOOP_BLUEPRINT_ID"],
+    optional: [
+      "OPENGENI_RUNLOOP_BASE_URL",
+      "OPENGENI_RUNLOOP_BLUEPRINT_NAME",
+      "OPENGENI_RUNLOOP_BLUEPRINT_ID",
+    ],
   },
   e2b: {
     required: ["OPENGENI_E2B_API_KEY"],
@@ -278,120 +292,150 @@ export const BackupSpec = z.object({
 });
 export type BackupSpec = z.infer<typeof BackupSpec>;
 
-export const DeploymentContract = z.object({
-  profile: DeploymentProfileId,
-  runtime: RuntimeSpec,
-  database: DatabaseSpec,
-  temporal: TemporalSpec,
-  nats: NatsSpec,
-  objectStorage: ObjectStorageSpec,
-  secrets: SecretsSpec,
-  ingress: IngressSpec,
-  access: AccessSpec,
-  product: ProductPostureSpec,
-  observability: ObservabilitySpec,
-  sandbox: SandboxSpec,
-  backups: BackupSpec.default({
-    postgresRequired: true,
-    objectStorageRequired: true,
-    restoreDrillRequired: true,
-  }),
-}).superRefine((contract, ctx) => {
-  if (contract.runtime.platform === "kubernetes" && !contract.runtime.namespace) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "namespace"],
-      message: "Kubernetes deployments require runtime.namespace",
-    });
-  }
-  if (contract.runtime.platform === "docker-compose" && contract.runtime.cloud !== "local") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "cloud"],
-      message: "docker-compose deployments must use the local cloud target",
-    });
-  }
-  if (contract.profile.startsWith("azure") && contract.runtime.cloud !== "azure") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "cloud"],
-      message: "Azure profiles require runtime.cloud=azure",
-    });
-  }
-  if (contract.profile.startsWith("aws") && contract.runtime.cloud !== "aws") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "cloud"],
-      message: "AWS profiles require runtime.cloud=aws",
-    });
-  }
-  if (contract.profile.startsWith("gcp") && contract.runtime.cloud !== "gcp") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "cloud"],
-      message: "GCP profiles require runtime.cloud=gcp",
-    });
-  }
-  if (contract.profile.startsWith("preview") && contract.runtime.platform !== "kubernetes") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["runtime", "platform"],
-      message: "Preview profiles require Kubernetes runtime",
-    });
-  }
-  if (contract.ingress.enabled && contract.access.mode === "disabled") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["access", "mode"],
-      message: "ingress-enabled deployments require shared-key auth or an external gateway",
-    });
-  }
-  if (contract.product.billingMode === "stripe" && contract.product.accessMode !== "managed") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["product", "billingMode"],
-      message: "Stripe billing requires product.accessMode=managed",
-    });
-  }
-  if (contract.product.accessMode === "managed" && !contract.product.publicBaseUrl) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["product", "publicBaseUrl"],
-      message: "managed product access requires product.publicBaseUrl",
-    });
-  }
-  requireModeReference(ctx, ["database"], contract.database.mode, contract.database.external, contract.database.managed);
-  requireModeReference(ctx, ["temporal"], contract.temporal.mode, contract.temporal.external, contract.temporal.managed);
-  requireModeReference(ctx, ["objectStorage"], contract.objectStorage.mode, contract.objectStorage.external, contract.objectStorage.managed);
-  if (contract.nats.mode === "external" && !contract.nats.external) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["nats", "external"],
-      message: "external NATS requires an external service reference",
-    });
-  }
-  if (contract.objectStorage.api === "azure-blob" && contract.objectStorage.mode !== "managed" && contract.runtime.cloud !== "azure") {
-    ctx.addIssue({
-      code: "custom",
-      path: ["objectStorage", "api"],
-      message: "azure-blob storage is only valid for Azure managed/reference deployments",
-    });
-  }
-  if (contract.objectStorage.api === "aws-s3" && !["aws", "generic"].includes(contract.runtime.cloud)) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["objectStorage", "api"],
-      message: "aws-s3 storage is only valid for AWS or generic Kubernetes deployments",
-    });
-  }
-  if (contract.objectStorage.api === "gcs" && !["gcp", "generic"].includes(contract.runtime.cloud)) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["objectStorage", "api"],
-      message: "gcs storage is only valid for GCP or generic Kubernetes deployments",
-    });
-  }
-});
+export const DeploymentContract = z
+  .object({
+    profile: DeploymentProfileId,
+    runtime: RuntimeSpec,
+    database: DatabaseSpec,
+    temporal: TemporalSpec,
+    nats: NatsSpec,
+    objectStorage: ObjectStorageSpec,
+    secrets: SecretsSpec,
+    ingress: IngressSpec,
+    access: AccessSpec,
+    product: ProductPostureSpec,
+    observability: ObservabilitySpec,
+    sandbox: SandboxSpec,
+    backups: BackupSpec.default({
+      postgresRequired: true,
+      objectStorageRequired: true,
+      restoreDrillRequired: true,
+    }),
+  })
+  .superRefine((contract, ctx) => {
+    if (contract.runtime.platform === "kubernetes" && !contract.runtime.namespace) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "namespace"],
+        message: "Kubernetes deployments require runtime.namespace",
+      });
+    }
+    if (contract.runtime.platform === "docker-compose" && contract.runtime.cloud !== "local") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "cloud"],
+        message: "docker-compose deployments must use the local cloud target",
+      });
+    }
+    if (contract.profile.startsWith("azure") && contract.runtime.cloud !== "azure") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "cloud"],
+        message: "Azure profiles require runtime.cloud=azure",
+      });
+    }
+    if (contract.profile.startsWith("aws") && contract.runtime.cloud !== "aws") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "cloud"],
+        message: "AWS profiles require runtime.cloud=aws",
+      });
+    }
+    if (contract.profile.startsWith("gcp") && contract.runtime.cloud !== "gcp") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "cloud"],
+        message: "GCP profiles require runtime.cloud=gcp",
+      });
+    }
+    if (contract.profile.startsWith("preview") && contract.runtime.platform !== "kubernetes") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "platform"],
+        message: "Preview profiles require Kubernetes runtime",
+      });
+    }
+    if (contract.ingress.enabled && contract.access.mode === "disabled") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["access", "mode"],
+        message: "ingress-enabled deployments require shared-key auth or an external gateway",
+      });
+    }
+    if (contract.product.billingMode === "stripe" && contract.product.accessMode !== "managed") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["product", "billingMode"],
+        message: "Stripe billing requires product.accessMode=managed",
+      });
+    }
+    if (contract.product.accessMode === "managed" && !contract.product.publicBaseUrl) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["product", "publicBaseUrl"],
+        message: "managed product access requires product.publicBaseUrl",
+      });
+    }
+    requireModeReference(
+      ctx,
+      ["database"],
+      contract.database.mode,
+      contract.database.external,
+      contract.database.managed,
+    );
+    requireModeReference(
+      ctx,
+      ["temporal"],
+      contract.temporal.mode,
+      contract.temporal.external,
+      contract.temporal.managed,
+    );
+    requireModeReference(
+      ctx,
+      ["objectStorage"],
+      contract.objectStorage.mode,
+      contract.objectStorage.external,
+      contract.objectStorage.managed,
+    );
+    if (contract.nats.mode === "external" && !contract.nats.external) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["nats", "external"],
+        message: "external NATS requires an external service reference",
+      });
+    }
+    if (
+      contract.objectStorage.api === "azure-blob" &&
+      contract.objectStorage.mode !== "managed" &&
+      contract.runtime.cloud !== "azure"
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["objectStorage", "api"],
+        message: "azure-blob storage is only valid for Azure managed/reference deployments",
+      });
+    }
+    if (
+      contract.objectStorage.api === "aws-s3" &&
+      !["aws", "generic"].includes(contract.runtime.cloud)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["objectStorage", "api"],
+        message: "aws-s3 storage is only valid for AWS or generic Kubernetes deployments",
+      });
+    }
+    if (
+      contract.objectStorage.api === "gcs" &&
+      !["gcp", "generic"].includes(contract.runtime.cloud)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["objectStorage", "api"],
+        message: "gcs storage is only valid for GCP or generic Kubernetes deployments",
+      });
+    }
+  });
 export type DeploymentContract = z.infer<typeof DeploymentContract>;
 
 export function contractForProfile(
@@ -410,12 +454,22 @@ export function applyProductOverlay(
   if (overlay === "none") {
     return parseDeploymentContract(contract);
   }
-  const publicBaseUrl = overlay === "managed-saas-staging"
-    ? firstNonEmpty(env.OPENGENI_STAGING_PUBLIC_BASE_URL, env.OPENGENI_STAGING_FINAL_BASE_URL, env.OPENGENI_PUBLIC_BASE_URL) ?? "https://staging.app.opengeni.ai"
-    : firstNonEmpty(env.OPENGENI_PRODUCTION_FINAL_BASE_URL, env.OPENGENI_PUBLIC_BASE_URL) ?? "https://app.opengeni.ai";
+  const publicBaseUrl =
+    overlay === "managed-saas-staging"
+      ? (firstNonEmpty(
+          env.OPENGENI_STAGING_PUBLIC_BASE_URL,
+          env.OPENGENI_STAGING_FINAL_BASE_URL,
+          env.OPENGENI_PUBLIC_BASE_URL,
+        ) ?? "https://staging.app.opengeni.ai")
+      : (firstNonEmpty(env.OPENGENI_PRODUCTION_FINAL_BASE_URL, env.OPENGENI_PUBLIC_BASE_URL) ??
+        "https://app.opengeni.ai");
   return parseDeploymentContract({
     ...contract,
-    access: { mode: "externalGateway", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
+    access: {
+      mode: "externalGateway",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
     product: {
       accessMode: "managed",
       billingMode: "stripe",
@@ -519,28 +573,66 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
     secrets: { mode: "envFile" },
     ingress: { enabled: false, tls: false, sseTimeoutSeconds: 3600 },
-    access: { mode: "disabled", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: true },
-    product: { accessMode: "local", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "none", requireTraces: false, requireMetrics: false, requireStructuredLogs: true },
+    access: {
+      mode: "disabled",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: true,
+    },
+    product: {
+      accessMode: "local",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "none",
+      requireTraces: false,
+      requireMetrics: false,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "docker", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "local-kubernetes": parseDeploymentContract({
     profile: "local-kubernetes",
-    runtime: { platform: "kubernetes", cloud: "local", namespace: "opengeni-local", releaseName: "opengeni-local" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "local",
+      namespace: "opengeni-local",
+      releaseName: "opengeni-local",
+    },
     database: { mode: "inCluster", engine: "postgres", pgvectorRequired: true },
     temporal: { mode: "inCluster", namespace: "default", taskQueue: "opengeni-runs-ts" },
     nats: { mode: "inCluster" },
     objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
     secrets: { mode: "kubernetesSecret" },
     ingress: { enabled: false, tls: false, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "local", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "none", requireTraces: false, requireMetrics: false, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "local",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "none",
+      requireTraces: false,
+      requireMetrics: false,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "kubernetes-external": parseDeploymentContract({
     profile: "kubernetes-external",
-    runtime: { platform: "kubernetes", cloud: "generic", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "generic",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "external",
       engine: "postgres",
@@ -553,7 +645,10 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: { secretRef: { name: "opengeni-temporal" } },
     },
-    nats: { mode: "external", external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } } },
+    nats: {
+      mode: "external",
+      external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } },
+    },
     objectStorage: {
       mode: "external",
       api: "s3-compatible",
@@ -562,19 +657,41 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     },
     secrets: { mode: "externalSecrets" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "otel", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "otel",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "azure-managed": parseDeploymentContract({
     profile: "azure-managed",
-    runtime: { platform: "kubernetes", cloud: "azure", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "azure",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "managed",
       engine: "postgres",
       pgvectorRequired: true,
-      managed: { provider: "azure", notes: "Azure Database for PostgreSQL Flexible Server with pgvector enabled." },
+      managed: {
+        provider: "azure",
+        notes: "Azure Database for PostgreSQL Flexible Server with pgvector enabled.",
+      },
     },
     temporal: {
       mode: "external",
@@ -582,32 +699,56 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
-        notes: "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+        notes:
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
       },
     },
     nats: {
       mode: "external",
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
-        notes: "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+        notes:
+          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
       },
     },
     objectStorage: {
       mode: "managed",
       api: "azure-blob",
       bucket: "opengeni-files",
-      managed: { provider: "azure", notes: "Azure Storage account Blob container for production file storage." },
+      managed: {
+        provider: "azure",
+        notes: "Azure Storage account Blob container for production file storage.",
+      },
     },
     secrets: { mode: "azureKeyVault" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "azureMonitor", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "azureMonitor",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "azure-existing-services": parseDeploymentContract({
     profile: "azure-existing-services",
-    runtime: { platform: "kubernetes", cloud: "azure", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "azure",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "external",
       engine: "postgres",
@@ -620,7 +761,10 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: { secretRef: { name: "opengeni-temporal" } },
     },
-    nats: { mode: "external", external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } } },
+    nats: {
+      mode: "external",
+      external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } },
+    },
     objectStorage: {
       mode: "external",
       api: "azure-blob",
@@ -629,19 +773,41 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     },
     secrets: { mode: "azureKeyVault" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "azureMonitor", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "azureMonitor",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "aws-managed": parseDeploymentContract({
     profile: "aws-managed",
-    runtime: { platform: "kubernetes", cloud: "aws", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "aws",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "managed",
       engine: "postgres",
       pgvectorRequired: true,
-      managed: { provider: "aws", notes: "Amazon RDS PostgreSQL with pgvector compatibility verified." },
+      managed: {
+        provider: "aws",
+        notes: "Amazon RDS PostgreSQL with pgvector compatibility verified.",
+      },
     },
     temporal: {
       mode: "external",
@@ -649,14 +815,16 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
-        notes: "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+        notes:
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
       },
     },
     nats: {
       mode: "external",
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
-        notes: "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+        notes:
+          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
       },
     },
     objectStorage: {
@@ -667,14 +835,33 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     },
     secrets: { mode: "awsSecretsManager" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "awsManaged", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "awsManaged",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "aws-existing-services": parseDeploymentContract({
     profile: "aws-existing-services",
-    runtime: { platform: "kubernetes", cloud: "aws", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "aws",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "external",
       engine: "postgres",
@@ -687,7 +874,10 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: { secretRef: { name: "opengeni-temporal" } },
     },
-    nats: { mode: "external", external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } } },
+    nats: {
+      mode: "external",
+      external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } },
+    },
     objectStorage: {
       mode: "external",
       api: "aws-s3",
@@ -696,19 +886,41 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     },
     secrets: { mode: "awsSecretsManager" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "awsManaged", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "awsManaged",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "gcp-managed": parseDeploymentContract({
     profile: "gcp-managed",
-    runtime: { platform: "kubernetes", cloud: "gcp", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "gcp",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "managed",
       engine: "postgres",
       pgvectorRequired: true,
-      managed: { provider: "gcp", notes: "Cloud SQL for PostgreSQL with pgvector compatibility verified." },
+      managed: {
+        provider: "gcp",
+        notes: "Cloud SQL for PostgreSQL with pgvector compatibility verified.",
+      },
     },
     temporal: {
       mode: "external",
@@ -716,32 +928,56 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: {
         secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
-        notes: "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
+        notes:
+          "Temporal Cloud, customer-provided Temporal, or the official Temporal chart managed outside the OpenGeni chart.",
       },
     },
     nats: {
       mode: "external",
       external: {
         secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
-        notes: "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
+        notes:
+          "Customer-provided NATS or the official NATS chart managed outside the OpenGeni chart.",
       },
     },
     objectStorage: {
       mode: "managed",
       api: "gcs",
       bucket: "opengeni-files",
-      managed: { provider: "gcp", notes: "Google Cloud Storage bucket for production file storage." },
+      managed: {
+        provider: "gcp",
+        notes: "Google Cloud Storage bucket for production file storage.",
+      },
     },
     secrets: { mode: "gcpSecretManager" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "gcpManaged", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "gcpManaged",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "gcp-existing-services": parseDeploymentContract({
     profile: "gcp-existing-services",
-    runtime: { platform: "kubernetes", cloud: "gcp", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "gcp",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: {
       mode: "external",
       engine: "postgres",
@@ -754,7 +990,10 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       taskQueue: "opengeni-runs-ts",
       external: { secretRef: { name: "opengeni-temporal" } },
     },
-    nats: { mode: "external", external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } } },
+    nats: {
+      mode: "external",
+      external: { secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" } },
+    },
     objectStorage: {
       mode: "external",
       api: "gcs",
@@ -763,51 +1002,124 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
     },
     secrets: { mode: "gcpSecretManager" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "gcpManaged", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "gcpManaged",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "preview-pr": parseDeploymentContract({
     profile: "preview-pr",
-    runtime: { platform: "kubernetes", cloud: "generic", namespace: "opengeni-preview-pr", releaseName: "opengeni-preview" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "generic",
+      namespace: "opengeni-preview-pr",
+      releaseName: "opengeni-preview",
+    },
     database: { mode: "inCluster", engine: "postgres", pgvectorRequired: true },
     temporal: { mode: "inCluster", namespace: "default", taskQueue: "opengeni-runs-ts" },
     nats: { mode: "inCluster" },
     objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
     secrets: { mode: "externalSecrets" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "externalGateway", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "managed", billingMode: "stripe", entitlementsMode: "managed", usageLimitsMode: "managed", publicBaseUrl: "https://preview.opengeni.example.com" },
-    observability: { backend: "otel", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "externalGateway",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "managed",
+      billingMode: "stripe",
+      entitlementsMode: "managed",
+      usageLimitsMode: "managed",
+      publicBaseUrl: "https://preview.opengeni.example.com",
+    },
+    observability: {
+      backend: "otel",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "modal", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "preview-branch": parseDeploymentContract({
     profile: "preview-branch",
-    runtime: { platform: "kubernetes", cloud: "generic", namespace: "opengeni-preview-branch", releaseName: "opengeni-preview" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "generic",
+      namespace: "opengeni-preview-branch",
+      releaseName: "opengeni-preview",
+    },
     database: { mode: "inCluster", engine: "postgres", pgvectorRequired: true },
     temporal: { mode: "inCluster", namespace: "default", taskQueue: "opengeni-runs-ts" },
     nats: { mode: "inCluster" },
     objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
     secrets: { mode: "externalSecrets" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "externalGateway", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "managed", billingMode: "stripe", entitlementsMode: "managed", usageLimitsMode: "managed", publicBaseUrl: "https://preview.opengeni.example.com" },
-    observability: { backend: "otel", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "externalGateway",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "managed",
+      billingMode: "stripe",
+      entitlementsMode: "managed",
+      usageLimitsMode: "managed",
+      publicBaseUrl: "https://preview.opengeni.example.com",
+    },
+    observability: {
+      backend: "otel",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "modal", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "self-contained-kubernetes": parseDeploymentContract({
     profile: "self-contained-kubernetes",
-    runtime: { platform: "kubernetes", cloud: "generic", namespace: "opengeni", releaseName: "opengeni" },
+    runtime: {
+      platform: "kubernetes",
+      cloud: "generic",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
     database: { mode: "inCluster", engine: "postgres", pgvectorRequired: true },
     temporal: { mode: "inCluster", namespace: "default", taskQueue: "opengeni-runs-ts" },
     nats: { mode: "inCluster" },
     objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
     secrets: { mode: "kubernetesSecret" },
     ingress: { enabled: true, tls: true, sseTimeoutSeconds: 3600 },
-    access: { mode: "sharedKey", allowUnauthenticatedHealth: true, allowUnauthenticatedMetrics: false },
-    product: { accessMode: "configured", billingMode: "disabled", entitlementsMode: "none", usageLimitsMode: "none" },
-    observability: { backend: "otel", requireTraces: true, requireMetrics: true, requireStructuredLogs: true },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "otel",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
   }),
 };
@@ -819,39 +1131,147 @@ export function parseDeploymentContract(input: unknown): DeploymentContract {
 export function preflightChecksFor(contract: DeploymentContract): PreflightCheck[] {
   const checks: PreflightCheck[] = [];
   if (contract.runtime.platform === "kubernetes") {
-    checks.push(check("kubernetes-context", true, "Verify Kubernetes context, namespace, service accounts, and API access."));
-    checks.push(check("container-registry", true, "Verify immutable OpenGeni images can be pulled by the workload plane."));
+    checks.push(
+      check(
+        "kubernetes-context",
+        true,
+        "Verify Kubernetes context, namespace, service accounts, and API access.",
+      ),
+    );
+    checks.push(
+      check(
+        "container-registry",
+        true,
+        "Verify immutable OpenGeni images can be pulled by the workload plane.",
+      ),
+    );
   }
-  checks.push(check("postgres-connectivity", true, "Verify API and migration jobs can connect to Postgres."));
+  checks.push(
+    check("postgres-connectivity", true, "Verify API and migration jobs can connect to Postgres."),
+  );
   if (contract.database.pgvectorRequired) {
-    checks.push(check("postgres-pgvector", true, "Verify the pgvector extension is installed or can be enabled."));
+    checks.push(
+      check(
+        "postgres-pgvector",
+        true,
+        "Verify the pgvector extension is installed or can be enabled.",
+      ),
+    );
   }
-  checks.push(check("postgres-migrations", true, "Verify migrations can run safely and idempotently."));
-  checks.push(check("temporal-connectivity", true, "Verify API and workers can reach the configured Temporal endpoint."));
-  checks.push(check("temporal-worker-task-queue", true, "Verify workers can poll the configured namespace and task queue."));
-  checks.push(check("nats-pubsub", true, "Verify API and workers can publish and subscribe through NATS."));
-  checks.push(check("object-storage-read-write", true, "Verify object storage write, read, and URL or mount behavior."));
-  checks.push(check("secret-delivery", true, "Verify required runtime secrets are delivered without leaking unintended values."));
-  checks.push(check("access-boundary", contract.access.mode !== "disabled", "Verify user-facing API, MCP, files, sessions, schedules, and SSE are behind the configured access boundary."));
-  checks.push(check("product-access-resolver", true, `Verify product access mode ${contract.product.accessMode} resolves account/workspace grants.`));
+  checks.push(
+    check("postgres-migrations", true, "Verify migrations can run safely and idempotently."),
+  );
+  checks.push(
+    check(
+      "temporal-connectivity",
+      true,
+      "Verify API and workers can reach the configured Temporal endpoint.",
+    ),
+  );
+  checks.push(
+    check(
+      "temporal-worker-task-queue",
+      true,
+      "Verify workers can poll the configured namespace and task queue.",
+    ),
+  );
+  checks.push(
+    check("nats-pubsub", true, "Verify API and workers can publish and subscribe through NATS."),
+  );
+  checks.push(
+    check(
+      "object-storage-read-write",
+      true,
+      "Verify object storage write, read, and URL or mount behavior.",
+    ),
+  );
+  checks.push(
+    check(
+      "secret-delivery",
+      true,
+      "Verify required runtime secrets are delivered without leaking unintended values.",
+    ),
+  );
+  checks.push(
+    check(
+      "access-boundary",
+      contract.access.mode !== "disabled",
+      "Verify user-facing API, MCP, files, sessions, schedules, and SSE are behind the configured access boundary.",
+    ),
+  );
+  checks.push(
+    check(
+      "product-access-resolver",
+      true,
+      `Verify product access mode ${contract.product.accessMode} resolves account/workspace grants.`,
+    ),
+  );
   if (contract.product.accessMode === "managed") {
-    checks.push(check("managed-auth-email", true, "Verify Better Auth email/password signup, email delivery, verification, session cookies, and API-key creation."));
+    checks.push(
+      check(
+        "managed-auth-email",
+        true,
+        "Verify Better Auth email/password signup, email delivery, verification, session cookies, and API-key creation.",
+      ),
+    );
   }
   if (contract.product.billingMode === "stripe") {
-    checks.push(check("billing-stripe-webhook", true, "Verify Stripe Checkout test-mode top-up, webhook signature handling, duplicate handling, local credit grant, refund/dispute adjustment, and low-balance blocking."));
+    checks.push(
+      check(
+        "billing-stripe-webhook",
+        true,
+        "Verify Stripe Checkout test-mode top-up, webhook signature handling, duplicate handling, local credit grant, refund/dispute adjustment, and low-balance blocking.",
+      ),
+    );
   }
   if (contract.product.usageLimitsMode !== "none") {
-    checks.push(check("usage-limits", true, "Verify the selected usage limit provider blocks capped costly writes and records usage."));
+    checks.push(
+      check(
+        "usage-limits",
+        true,
+        "Verify the selected usage limit provider blocks capped costly writes and records usage.",
+      ),
+    );
   }
   if (contract.ingress.enabled) {
-    checks.push(check("ingress-sse", true, "Verify ingress supports long-lived SSE streams and reconnect replay."));
+    checks.push(
+      check(
+        "ingress-sse",
+        true,
+        "Verify ingress supports long-lived SSE streams and reconnect replay.",
+      ),
+    );
   }
   if (contract.observability.backend !== "none") {
-    checks.push(check("otel-export", true, "Verify logs, metrics, and traces reach the configured observability path."));
+    checks.push(
+      check(
+        "otel-export",
+        true,
+        "Verify logs, metrics, and traces reach the configured observability path.",
+      ),
+    );
   }
-  checks.push(check("sandbox-readiness", contract.sandbox.backend !== "none", "Verify the selected sandbox backend can start and run a command."));
-  checks.push(check("backup-policy", true, "Verify backup, retention, and restore drill expectations for durable data."));
-  checks.push(check("conformance-session", true, "Verify a scripted OpenGeni session can create, stream, replay, run, and complete."));
+  checks.push(
+    check(
+      "sandbox-readiness",
+      contract.sandbox.backend !== "none",
+      "Verify the selected sandbox backend can start and run a command.",
+    ),
+  );
+  checks.push(
+    check(
+      "backup-policy",
+      true,
+      "Verify backup, retention, and restore drill expectations for durable data.",
+    ),
+  );
+  checks.push(
+    check(
+      "conformance-session",
+      true,
+      "Verify a scripted OpenGeni session can create, stream, replay, run, and complete.",
+    ),
+  );
   return checks;
 }
 
@@ -873,7 +1293,9 @@ export function requiredRuntimeEnvVars(
   ];
   if (inferredOpenAiProvider(env) === "azure") {
     vars.push(
-      env.OPENGENI_AZURE_OPENAI_BASE_URL ? "OPENGENI_AZURE_OPENAI_BASE_URL" : "OPENGENI_AZURE_OPENAI_ENDPOINT",
+      env.OPENGENI_AZURE_OPENAI_BASE_URL
+        ? "OPENGENI_AZURE_OPENAI_BASE_URL"
+        : "OPENGENI_AZURE_OPENAI_ENDPOINT",
       "OPENGENI_AZURE_OPENAI_DEPLOYMENT",
       "OPENGENI_AZURE_OPENAI_API_KEY",
     );
@@ -936,7 +1358,13 @@ export function requiredRuntimeEnvVars(
     vars.push("OPENGENI_DELEGATION_SECRET");
   }
   if (contract.product.billingMode === "stripe") {
-    vars.push("OPENGENI_STRIPE_SECRET_KEY", "OPENGENI_STRIPE_PUBLISHABLE_KEY", "OPENGENI_STRIPE_WEBHOOK_SECRET", "OPENGENI_STRIPE_CREDITS_PRODUCT_ID", "OPENGENI_MODEL_PRICING_JSON");
+    vars.push(
+      "OPENGENI_STRIPE_SECRET_KEY",
+      "OPENGENI_STRIPE_PUBLISHABLE_KEY",
+      "OPENGENI_STRIPE_WEBHOOK_SECRET",
+      "OPENGENI_STRIPE_CREDITS_PRODUCT_ID",
+      "OPENGENI_MODEL_PRICING_JSON",
+    );
   }
   if (contract.product.entitlementsMode === "static") {
     vars.push("OPENGENI_STATIC_ENTITLEMENTS_JSON");
@@ -978,7 +1406,13 @@ export function stackPlanFor(
     creates: createdResourceClasses(contract),
     externalDependencies: externalDependencies(contract),
     requiredSecretKeys,
-    deployCommands: deployCommands(contract, terraformRoot, helmValuesFile, platformDependencies, productOverlay),
+    deployCommands: deployCommands(
+      contract,
+      terraformRoot,
+      helmValuesFile,
+      platformDependencies,
+      productOverlay,
+    ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
     notes: planNotes(contract),
@@ -998,11 +1432,13 @@ export function generateRuntimeArtifacts(
   const missingEnvVars = runtimeValues
     .filter((entry) => entry.required && !entry.value)
     .map((entry) => entry.key);
-  const requiredEnvVars = runtimeValues
-    .filter((entry) => entry.required)
-    .map((entry) => entry.key);
-  const emittedRuntimeValues = runtimeValues.filter((entry) => entry.required || entry.value !== undefined);
-  const envLines = emittedRuntimeValues.map((entry) => `${entry.key}=${runtimeEnvFileValue(entry.value)}`);
+  const requiredEnvVars = runtimeValues.filter((entry) => entry.required).map((entry) => entry.key);
+  const emittedRuntimeValues = runtimeValues.filter(
+    (entry) => entry.required || entry.value !== undefined,
+  );
+  const envLines = emittedRuntimeValues.map(
+    (entry) => `${entry.key}=${runtimeEnvFileValue(entry.value)}`,
+  );
   const sensitiveTerraformOutputsUsed = runtimeValues
     .filter((entry) => entry.fromSensitiveTerraformOutput)
     .map((entry) => entry.fromSensitiveTerraformOutput as string);
@@ -1032,31 +1468,70 @@ export function generateRuntimeArtifacts(
 }
 
 function terraformRootFor(contract: DeploymentContract): string | null {
-  if (contract.profile.endsWith("existing-services") || !["azure", "aws", "gcp"].includes(contract.runtime.cloud)) {
+  if (
+    contract.profile.endsWith("existing-services") ||
+    !["azure", "aws", "gcp"].includes(contract.runtime.cloud)
+  ) {
     return null;
   }
   return `deploy/terraform/${contract.runtime.cloud}`;
 }
 
 function helmValuesFileFor(contract: DeploymentContract): string | null {
-  if (contract.profile === "local-kubernetes") return "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
-  if (contract.profile === "preview-pr" || contract.profile === "preview-branch") return "deploy/helm/opengeni/values.preview-managed.example.yaml";
-  if (contract.profile === "azure-managed") return "deploy/helm/opengeni/values.azure-managed.example.yaml";
-  if (contract.profile === "azure-existing-services") return "deploy/helm/opengeni/values.azure-existing-services.example.yaml";
-  if (contract.profile === "aws-managed") return "deploy/helm/opengeni/values.aws-managed.example.yaml";
-  if (contract.profile === "gcp-managed") return "deploy/helm/opengeni/values.gcp-managed.example.yaml";
+  if (contract.profile === "local-kubernetes")
+    return "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
+  if (contract.profile === "preview-pr" || contract.profile === "preview-branch")
+    return "deploy/helm/opengeni/values.preview-managed.example.yaml";
+  if (contract.profile === "azure-managed")
+    return "deploy/helm/opengeni/values.azure-managed.example.yaml";
+  if (contract.profile === "azure-existing-services")
+    return "deploy/helm/opengeni/values.azure-existing-services.example.yaml";
+  if (contract.profile === "aws-managed")
+    return "deploy/helm/opengeni/values.aws-managed.example.yaml";
+  if (contract.profile === "gcp-managed")
+    return "deploy/helm/opengeni/values.gcp-managed.example.yaml";
   return null;
 }
 
 function createdResourceClasses(contract: DeploymentContract): string[] {
-  const out = ["OpenGeni Kubernetes namespace", "OpenGeni Helm release", "runtime secret or external secret reference"];
+  const out = [
+    "OpenGeni Kubernetes namespace",
+    "OpenGeni Helm release",
+    "runtime secret or external secret reference",
+  ];
   if (contract.runtime.cloud === "azure" && contract.profile === "azure-managed") {
-    out.unshift("Azure resource group", "AKS cluster", "Azure Container Registry", "Azure Key Vault", "Azure Blob container", "optional Azure Database for PostgreSQL");
+    out.unshift(
+      "Azure resource group",
+      "AKS cluster",
+      "Azure Container Registry",
+      "Azure Key Vault",
+      "Azure Blob container",
+      "optional Azure Database for PostgreSQL",
+    );
   } else if (contract.runtime.cloud === "aws" && contract.profile === "aws-managed") {
-    out.unshift("EKS cluster", "ECR repositories", "S3 bucket", "AWS Secrets Manager secret", "IAM roles and policies", "optional RDS PostgreSQL");
+    out.unshift(
+      "EKS cluster",
+      "ECR repositories",
+      "S3 bucket",
+      "AWS Secrets Manager secret",
+      "IAM roles and policies",
+      "optional RDS PostgreSQL",
+    );
   } else if (contract.runtime.cloud === "gcp" && contract.profile === "gcp-managed") {
-    out.unshift("GKE cluster", "Artifact Registry repository", "GCS bucket", "Secret Manager secret", "IAM service accounts and bindings", "optional Cloud SQL PostgreSQL");
-  } else if (contract.database.mode === "inCluster" || contract.temporal.mode === "inCluster" || contract.nats.mode === "inCluster" || contract.objectStorage.mode === "inCluster") {
+    out.unshift(
+      "GKE cluster",
+      "Artifact Registry repository",
+      "GCS bucket",
+      "Secret Manager secret",
+      "IAM service accounts and bindings",
+      "optional Cloud SQL PostgreSQL",
+    );
+  } else if (
+    contract.database.mode === "inCluster" ||
+    contract.temporal.mode === "inCluster" ||
+    contract.nats.mode === "inCluster" ||
+    contract.objectStorage.mode === "inCluster"
+  ) {
     out.push("disposable in-cluster Postgres/Temporal/NATS/MinIO fixtures");
   }
   if (usesOfficialPlatformChart(contract, "nats")) {
@@ -1070,16 +1545,20 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
 
 function externalDependencies(contract: DeploymentContract): string[] {
   const out: string[] = [];
-  if (contract.database.mode === "external") out.push("Postgres with pgvector reachable through OPENGENI_DATABASE_URL");
+  if (contract.database.mode === "external")
+    out.push("Postgres with pgvector reachable through OPENGENI_DATABASE_URL");
   if (contract.temporal.mode === "external" && !usesOfficialPlatformChart(contract, "temporal")) {
     out.push("Temporal Cloud, existing Temporal, or official Temporal Helm chart endpoint");
   }
   if (contract.nats.mode === "external" && !usesOfficialPlatformChart(contract, "nats")) {
     out.push("Existing NATS endpoint or official NATS Helm chart endpoint");
   }
-  if (contract.objectStorage.mode === "external") out.push(`${contract.objectStorage.api} object storage credentials and bucket/container`);
-  if (contract.ingress.enabled) out.push("Ingress/TLS stack with SSE buffering disabled and 3600s timeouts");
-  if (contract.access.mode === "externalGateway") out.push("Gateway-managed authentication and authorization");
+  if (contract.objectStorage.mode === "external")
+    out.push(`${contract.objectStorage.api} object storage credentials and bucket/container`);
+  if (contract.ingress.enabled)
+    out.push("Ingress/TLS stack with SSE buffering disabled and 3600s timeouts");
+  if (contract.access.mode === "externalGateway")
+    out.push("Gateway-managed authentication and authorization");
   return out;
 }
 
@@ -1109,7 +1588,11 @@ function deployCommands(
   ];
   if (terraformRoot) {
     const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
-    commands.unshift(`terraform -chdir=${terraformRoot} init -backend=false`, `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`, `terraform -chdir=${terraformRoot} apply -var-file=terraform.tfvars`);
+    commands.unshift(
+      `terraform -chdir=${terraformRoot} init -backend=false`,
+      `terraform -chdir=${terraformRoot} plan -var-file=terraform.tfvars`,
+      `terraform -chdir=${terraformRoot} apply -var-file=terraform.tfvars`,
+    );
     commands.push(
       `mkdir -p .agent/generated/${contract.profile}`,
       `terraform -chdir=${terraformRoot} output -json > .agent/generated/${contract.profile}/terraform-output.json`,
@@ -1121,14 +1604,24 @@ function deployCommands(
   for (const dependency of platformDependencies) {
     commands.push(...dependency.installCommands);
   }
-  const generatedValuesArg = terraformRoot ? ` --values .agent/generated/${contract.profile}/helm-values.generated.yaml` : "";
+  const generatedValuesArg = terraformRoot
+    ? ` --values .agent/generated/${contract.profile}/helm-values.generated.yaml`
+    : "";
   const valuesArg = `${helmValuesFile ? ` --values ${helmValuesFile}` : ""}${generatedValuesArg}`;
-  commands.push(`helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni"}${valuesArg}`);
+  commands.push(
+    `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni"}${valuesArg}`,
+  );
   return commands;
 }
 
-function verifyCommands(contract: DeploymentContract, platformDependencies: PlatformDependencyPlan[], productOverlay: ProductOverlayId): string[] {
-  const baseUrl = contract.ingress.enabled ? contract.product.publicBaseUrl ?? "https://opengeni.example.com" : "http://127.0.0.1:18080";
+function verifyCommands(
+  contract: DeploymentContract,
+  platformDependencies: PlatformDependencyPlan[],
+  productOverlay: ProductOverlayId,
+): string[] {
+  const baseUrl = contract.ingress.enabled
+    ? (contract.product.publicBaseUrl ?? "https://opengeni.example.com")
+    : "http://127.0.0.1:18080";
   const conformance = `bun run deployment:conformance -- --base-url ${baseUrl}`;
   const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
   return [
@@ -1195,7 +1688,11 @@ function destroyCommands(
 }
 
 function platformDependencyPlans(contract: DeploymentContract): PlatformDependencyPlan[] {
-  if (!["azure-managed", "aws-managed", "gcp-managed", "self-contained-kubernetes"].includes(contract.profile)) {
+  if (
+    !["azure-managed", "aws-managed", "gcp-managed", "self-contained-kubernetes"].includes(
+      contract.profile,
+    )
+  ) {
     return [];
   }
   if (contract.runtime.platform !== "kubernetes") {
@@ -1240,18 +1737,20 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
     });
   }
   if (contract.temporal.mode === "external") {
-    const temporalTlsEnv = contract.runtime.cloud === "aws"
-      ? `TEMPORAL_POSTGRES_TLS_ENABLED="\${TEMPORAL_POSTGRES_TLS_ENABLED:-true}" TEMPORAL_POSTGRES_TLS_CA_FILE="\${TEMPORAL_POSTGRES_TLS_CA_FILE:-/etc/opengeni/postgres-ca/ca.pem}" TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME="\${TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME:-opengeni-postgres-ca}"`
-      : ["azure", "gcp"].includes(contract.runtime.cloud)
-        ? `TEMPORAL_POSTGRES_TLS_ENABLED="\${TEMPORAL_POSTGRES_TLS_ENABLED:-true}"`
-        : "";
+    const temporalTlsEnv =
+      contract.runtime.cloud === "aws"
+        ? `TEMPORAL_POSTGRES_TLS_ENABLED="\${TEMPORAL_POSTGRES_TLS_ENABLED:-true}" TEMPORAL_POSTGRES_TLS_CA_FILE="\${TEMPORAL_POSTGRES_TLS_CA_FILE:-/etc/opengeni/postgres-ca/ca.pem}" TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME="\${TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME:-opengeni-postgres-ca}"`
+        : ["azure", "gcp"].includes(contract.runtime.cloud)
+          ? `TEMPORAL_POSTGRES_TLS_ENABLED="\${TEMPORAL_POSTGRES_TLS_ENABLED:-true}"`
+          : "";
     const temporalValuesCommand = `${temporalTlsEnv ? `${temporalTlsEnv} ` : ""}bun run deployment:temporal-values -- --out .agent/generated/${contract.profile}/official-temporal-postgres.values.yaml`;
-    const temporalTlsPrepCommands = contract.runtime.cloud === "aws"
-      ? [
-        `curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o .agent/generated/${contract.profile}/rds-global-bundle.pem`,
-        `kubectl -n opengeni-platform create configmap opengeni-postgres-ca --from-file=ca.pem=.agent/generated/${contract.profile}/rds-global-bundle.pem --dry-run=client -o yaml | kubectl apply -f -`,
-      ]
-      : [];
+    const temporalTlsPrepCommands =
+      contract.runtime.cloud === "aws"
+        ? [
+            `curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o .agent/generated/${contract.profile}/rds-global-bundle.pem`,
+            `kubectl -n opengeni-platform create configmap opengeni-postgres-ca --from-file=ca.pem=.agent/generated/${contract.profile}/rds-global-bundle.pem --dry-run=client -o yaml | kubectl apply -f -`,
+          ]
+        : [];
     out.push({
       id: "temporal",
       lifecycle: "officialChart",
@@ -1262,7 +1761,8 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
       chartName: "temporal/temporal",
       valuesFile: "deploy/stacks/official-temporal-postgres.values.example.yaml",
       runtimeEnv: {
-        OPENGENI_TEMPORAL_HOST: "opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233",
+        OPENGENI_TEMPORAL_HOST:
+          "opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233",
       },
       requiredEnvVars: ["TEMPORAL_POSTGRES_HOST", "TEMPORAL_POSTGRES_PASSWORD"],
       requiredSecretKeys: ["opengeni-temporal-postgres/password"],
@@ -1273,7 +1773,7 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
         `mkdir -p .agent/generated/${contract.profile}`,
         ...temporalTlsPrepCommands,
         temporalValuesCommand,
-        "kubectl -n opengeni-platform create secret generic opengeni-temporal-postgres --from-literal=password=\"$TEMPORAL_POSTGRES_PASSWORD\" --dry-run=client -o yaml | kubectl apply -f -",
+        'kubectl -n opengeni-platform create secret generic opengeni-temporal-postgres --from-literal=password="$TEMPORAL_POSTGRES_PASSWORD" --dry-run=client -o yaml | kubectl apply -f -',
         `helm upgrade --install opengeni-temporal temporal/temporal --version 1.2.0 --namespace opengeni-platform --values .agent/generated/${contract.profile}/official-temporal-postgres.values.yaml`,
         "kubectl -n opengeni-platform delete job opengeni-temporal-register-default-namespace --ignore-not-found",
         "kubectl apply -f deploy/stacks/official-temporal-namespace-job.yaml",
@@ -1298,8 +1798,13 @@ function platformDependencyPlans(contract: DeploymentContract): PlatformDependen
   return out;
 }
 
-function usesOfficialPlatformChart(contract: DeploymentContract, id: PlatformDependencyPlan["id"]): boolean {
-  return platformDependencyPlans(contract).some((dependency) => dependency.id === id && dependency.lifecycle === "officialChart");
+function usesOfficialPlatformChart(
+  contract: DeploymentContract,
+  id: PlatformDependencyPlan["id"],
+): boolean {
+  return platformDependencyPlans(contract).some(
+    (dependency) => dependency.id === id && dependency.lifecycle === "officialChart",
+  );
 }
 
 function planNotes(contract: DeploymentContract): string[] {
@@ -1308,19 +1813,32 @@ function planNotes(contract: DeploymentContract): string[] {
     "Use the generated destroy commands as the baseline cleanup path for environments created from this plan.",
   ];
   if (contract.access.mode === "sharedKey") {
-    notes.push("Generate OPENGENI_ACCESS_KEY outside source control and provide it through the runtime secret path.");
+    notes.push(
+      "Generate OPENGENI_ACCESS_KEY outside source control and provide it through the runtime secret path.",
+    );
   }
   if (contract.nats.mode === "external") {
-    notes.push("NATS is intentionally outside the OpenGeni app chart; use an existing endpoint or the official NATS Helm chart.");
+    notes.push(
+      "NATS is intentionally outside the OpenGeni app chart; use an existing endpoint or the official NATS Helm chart.",
+    );
   }
   if (contract.temporal.mode === "external") {
-    notes.push("Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.");
+    notes.push(
+      "Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
+    );
   }
   return notes;
 }
 
 function secretLikeRuntimeEnv(name: string): boolean {
-  return name.includes("KEY") || name.includes("SECRET") || name.includes("TOKEN") || name.includes("PASSWORD") || name.includes("CONNECTION_STRING") || name === "OPENGENI_DATABASE_URL";
+  return (
+    name.includes("KEY") ||
+    name.includes("SECRET") ||
+    name.includes("TOKEN") ||
+    name.includes("PASSWORD") ||
+    name.includes("CONNECTION_STRING") ||
+    name === "OPENGENI_DATABASE_URL"
+  );
 }
 
 function runtimeEnvFileValue(value: string | undefined): string {
@@ -1368,12 +1886,21 @@ function runtimeEnvValues(
 ): RuntimeEnvEntry[] {
   const publicBaseUrl = env.OPENGENI_PUBLIC_BASE_URL ?? contract.product.publicBaseUrl;
   const entries: RuntimeEnvEntry[] = [
-    envOrRequiredRuntime("OPENGENI_DATABASE_URL", env.OPENGENI_DATABASE_URL, contract.database.mode !== "inCluster"),
+    envOrRequiredRuntime(
+      "OPENGENI_DATABASE_URL",
+      env.OPENGENI_DATABASE_URL,
+      contract.database.mode !== "inCluster",
+    ),
     valueEnv("OPENGENI_AUTH_REQUIRED", String(contract.access.mode === "sharedKey")),
-    ...(contract.access.mode === "sharedKey" ? [requiredEnv("OPENGENI_ACCESS_KEY", env.OPENGENI_ACCESS_KEY)] : []),
+    ...(contract.access.mode === "sharedKey"
+      ? [requiredEnv("OPENGENI_ACCESS_KEY", env.OPENGENI_ACCESS_KEY)]
+      : []),
     valueEnv("OPENGENI_AUTH_ALLOW_HEALTH", String(contract.access.allowUnauthenticatedHealth)),
     valueEnv("OPENGENI_AUTH_ALLOW_METRICS", String(contract.access.allowUnauthenticatedMetrics)),
-    valueEnv("OPENGENI_DEPLOYMENT_REVISION", env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest"),
+    valueEnv(
+      "OPENGENI_DEPLOYMENT_REVISION",
+      env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest",
+    ),
     valueEnv("OPENGENI_PRODUCT_ACCESS_MODE", contract.product.accessMode),
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
@@ -1384,30 +1911,45 @@ function runtimeEnvValues(
       : []),
     ...(contract.product.accessMode === "managed"
       ? [
-        requiredEnv("OPENGENI_BETTER_AUTH_SECRET", env.OPENGENI_BETTER_AUTH_SECRET),
-        valueEnv("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS", env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? ""),
-        valueEnv("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS", env.OPENGENI_BETTER_AUTH_ALLOWED_HOSTS),
-        valueEnv("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN", env.OPENGENI_BETTER_AUTH_COOKIE_DOMAIN),
-        requiredEnv("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY", env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY),
-        requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
-        valueEnv("OPENGENI_EMAIL_FROM", env.OPENGENI_EMAIL_FROM ?? "OpenGeni <auth@mail.opengeni.ai>"),
-        valueEnv("OPENGENI_GITHUB_APP_MANIFEST_BASE_URL", env.OPENGENI_GITHUB_APP_MANIFEST_BASE_URL ?? publicBaseUrl),
-        requiredEnv("OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET", env.OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET),
-        requiredEnv("OPENGENI_GITHUB_APP_ID", env.OPENGENI_GITHUB_APP_ID),
-        requiredEnv("OPENGENI_GITHUB_CLIENT_ID", env.OPENGENI_GITHUB_CLIENT_ID),
-        requiredEnv("OPENGENI_GITHUB_CLIENT_SECRET", env.OPENGENI_GITHUB_CLIENT_SECRET),
-        requiredEnv("OPENGENI_GITHUB_APP_SLUG", env.OPENGENI_GITHUB_APP_SLUG),
-        requiredEnv("OPENGENI_GITHUB_APP_PRIVATE_KEY", env.OPENGENI_GITHUB_APP_PRIVATE_KEY),
-      ]
+          requiredEnv("OPENGENI_BETTER_AUTH_SECRET", env.OPENGENI_BETTER_AUTH_SECRET),
+          valueEnv(
+            "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
+            env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? "",
+          ),
+          valueEnv("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS", env.OPENGENI_BETTER_AUTH_ALLOWED_HOSTS),
+          valueEnv("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN", env.OPENGENI_BETTER_AUTH_COOKIE_DOMAIN),
+          requiredEnv(
+            "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+            env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
+          ),
+          requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
+          valueEnv(
+            "OPENGENI_EMAIL_FROM",
+            env.OPENGENI_EMAIL_FROM ?? "OpenGeni <auth@mail.opengeni.ai>",
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_APP_MANIFEST_BASE_URL",
+            env.OPENGENI_GITHUB_APP_MANIFEST_BASE_URL ?? publicBaseUrl,
+          ),
+          requiredEnv(
+            "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
+            env.OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET,
+          ),
+          requiredEnv("OPENGENI_GITHUB_APP_ID", env.OPENGENI_GITHUB_APP_ID),
+          requiredEnv("OPENGENI_GITHUB_CLIENT_ID", env.OPENGENI_GITHUB_CLIENT_ID),
+          requiredEnv("OPENGENI_GITHUB_CLIENT_SECRET", env.OPENGENI_GITHUB_CLIENT_SECRET),
+          requiredEnv("OPENGENI_GITHUB_APP_SLUG", env.OPENGENI_GITHUB_APP_SLUG),
+          requiredEnv("OPENGENI_GITHUB_APP_PRIVATE_KEY", env.OPENGENI_GITHUB_APP_PRIVATE_KEY),
+        ]
       : []),
     ...(contract.product.billingMode === "stripe"
       ? [
-        requiredEnv("OPENGENI_STRIPE_SECRET_KEY", env.OPENGENI_STRIPE_SECRET_KEY),
-        requiredEnv("OPENGENI_STRIPE_PUBLISHABLE_KEY", env.OPENGENI_STRIPE_PUBLISHABLE_KEY),
-        requiredEnv("OPENGENI_STRIPE_WEBHOOK_SECRET", env.OPENGENI_STRIPE_WEBHOOK_SECRET),
-        requiredEnv("OPENGENI_STRIPE_CREDITS_PRODUCT_ID", env.OPENGENI_STRIPE_CREDITS_PRODUCT_ID),
-        requiredEnv("OPENGENI_MODEL_PRICING_JSON", env.OPENGENI_MODEL_PRICING_JSON),
-      ]
+          requiredEnv("OPENGENI_STRIPE_SECRET_KEY", env.OPENGENI_STRIPE_SECRET_KEY),
+          requiredEnv("OPENGENI_STRIPE_PUBLISHABLE_KEY", env.OPENGENI_STRIPE_PUBLISHABLE_KEY),
+          requiredEnv("OPENGENI_STRIPE_WEBHOOK_SECRET", env.OPENGENI_STRIPE_WEBHOOK_SECRET),
+          requiredEnv("OPENGENI_STRIPE_CREDITS_PRODUCT_ID", env.OPENGENI_STRIPE_CREDITS_PRODUCT_ID),
+          requiredEnv("OPENGENI_MODEL_PRICING_JSON", env.OPENGENI_MODEL_PRICING_JSON),
+        ]
       : []),
     ...(contract.product.entitlementsMode === "static"
       ? [requiredEnv("OPENGENI_STATIC_ENTITLEMENTS_JSON", env.OPENGENI_STATIC_ENTITLEMENTS_JSON)]
@@ -1417,11 +1959,19 @@ function runtimeEnvValues(
       : []),
     envOrRequiredRuntime(
       "OPENGENI_TEMPORAL_HOST",
-      terraformOutputString(terraformOutputs, "temporal_host") ?? platformRuntimeEnv(contract, "OPENGENI_TEMPORAL_HOST") ?? env.OPENGENI_TEMPORAL_HOST,
+      terraformOutputString(terraformOutputs, "temporal_host") ??
+        platformRuntimeEnv(contract, "OPENGENI_TEMPORAL_HOST") ??
+        env.OPENGENI_TEMPORAL_HOST,
       contract.temporal.mode !== "inCluster" && !usesOfficialPlatformChart(contract, "temporal"),
     ),
-    valueEnv("OPENGENI_TEMPORAL_NAMESPACE", terraformOutputString(terraformOutputs, "temporal_namespace") ?? contract.temporal.namespace),
-    valueEnv("OPENGENI_TEMPORAL_TASK_QUEUE", terraformOutputString(terraformOutputs, "temporal_task_queue") ?? contract.temporal.taskQueue),
+    valueEnv(
+      "OPENGENI_TEMPORAL_NAMESPACE",
+      terraformOutputString(terraformOutputs, "temporal_namespace") ?? contract.temporal.namespace,
+    ),
+    valueEnv(
+      "OPENGENI_TEMPORAL_TASK_QUEUE",
+      terraformOutputString(terraformOutputs, "temporal_task_queue") ?? contract.temporal.taskQueue,
+    ),
     envOrRequiredRuntime(
       "OPENGENI_NATS_URL",
       platformRuntimeEnv(contract, "OPENGENI_NATS_URL") ?? env.OPENGENI_NATS_URL,
@@ -1431,24 +1981,41 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_API_PORT", "8000"),
     valueEnv("OPENGENI_SANDBOX_BACKEND", contract.sandbox.backend),
     valueEnv("OPENGENI_OPENAI_PROVIDER", inferredOpenAiProvider(env)),
-    valueEnv("OPENGENI_OPENAI_MODEL", env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5"),
-    valueEnv("OPENGENI_OPENAI_ALLOWED_MODELS", env.OPENGENI_OPENAI_ALLOWED_MODELS ?? env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5"),
+    valueEnv(
+      "OPENGENI_OPENAI_MODEL",
+      env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5",
+    ),
+    valueEnv(
+      "OPENGENI_OPENAI_ALLOWED_MODELS",
+      env.OPENGENI_OPENAI_ALLOWED_MODELS ??
+        env.OPENGENI_OPENAI_MODEL ??
+        env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ??
+        "gpt-5.5",
+    ),
     valueEnv("OPENGENI_OPENAI_REASONING_EFFORT", env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low"),
-    valueEnv("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS", env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh"),
+    valueEnv(
+      "OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS",
+      env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh",
+    ),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
-        env.OPENGENI_AZURE_OPENAI_BASE_URL
-          ? requiredEnv("OPENGENI_AZURE_OPENAI_BASE_URL", env.OPENGENI_AZURE_OPENAI_BASE_URL)
-          : requiredEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT),
-        ...(env.OPENGENI_AZURE_OPENAI_BASE_URL && env.OPENGENI_AZURE_OPENAI_ENDPOINT
-          ? [valueEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT)]
-          : []),
-        requiredEnv("OPENGENI_AZURE_OPENAI_DEPLOYMENT", env.OPENGENI_AZURE_OPENAI_DEPLOYMENT),
-        ...(azureOpenAIApiVersionRequired(env)
-          ? [requiredEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION)]
-          : []),
-        requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
-      ]
+          env.OPENGENI_AZURE_OPENAI_BASE_URL
+            ? requiredEnv("OPENGENI_AZURE_OPENAI_BASE_URL", env.OPENGENI_AZURE_OPENAI_BASE_URL)
+            : requiredEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT),
+          ...(env.OPENGENI_AZURE_OPENAI_BASE_URL && env.OPENGENI_AZURE_OPENAI_ENDPOINT
+            ? [valueEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT)]
+            : []),
+          requiredEnv("OPENGENI_AZURE_OPENAI_DEPLOYMENT", env.OPENGENI_AZURE_OPENAI_DEPLOYMENT),
+          ...(azureOpenAIApiVersionRequired(env)
+            ? [
+                requiredEnv(
+                  "OPENGENI_AZURE_OPENAI_API_VERSION",
+                  env.OPENGENI_AZURE_OPENAI_API_VERSION,
+                ),
+              ]
+            : []),
+          requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
+        ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
   ];
 
@@ -1456,7 +2023,9 @@ function runtimeEnvValues(
     const output = terraformOutputs.object_storage_azure_connection_string;
     const connectionStringEntry: RuntimeEnvEntry = {
       key: "OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING",
-      value: env.OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING ?? terraformOutputString(terraformOutputs, "object_storage_azure_connection_string"),
+      value:
+        env.OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING ??
+        terraformOutputString(terraformOutputs, "object_storage_azure_connection_string"),
       required: true,
     };
     if (output?.sensitive) {
@@ -1464,38 +2033,79 @@ function runtimeEnvValues(
     }
     entries.push(
       valueEnv("OPENGENI_OBJECT_STORAGE_BACKEND", "azure-blob"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_BUCKET", terraformOutputString(terraformOutputs, "object_storage_bucket") ?? contract.objectStorage.bucket),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_BUCKET",
+        terraformOutputString(terraformOutputs, "object_storage_bucket") ??
+          contract.objectStorage.bucket,
+      ),
       connectionStringEntry,
     );
   } else if (contract.objectStorage.api === "aws-s3") {
     entries.push(
       valueEnv("OPENGENI_OBJECT_STORAGE_BACKEND", "aws-s3"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_BUCKET", terraformOutputString(terraformOutputs, "object_storage_bucket") ?? contract.objectStorage.bucket),
-      valueEnv("OPENGENI_OBJECT_STORAGE_REGION", terraformOutputString(terraformOutputs, "region") ?? contract.runtime.region ?? env.AWS_REGION ?? "us-east-1"),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_BUCKET",
+        terraformOutputString(terraformOutputs, "object_storage_bucket") ??
+          contract.objectStorage.bucket,
+      ),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_REGION",
+        terraformOutputString(terraformOutputs, "region") ??
+          contract.runtime.region ??
+          env.AWS_REGION ??
+          "us-east-1",
+      ),
       valueEnv("OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE", "false"),
     );
   } else if (contract.objectStorage.api === "gcs") {
     entries.push(
       valueEnv("OPENGENI_OBJECT_STORAGE_BACKEND", "gcs"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_BUCKET", terraformOutputString(terraformOutputs, "object_storage_bucket") ?? contract.objectStorage.bucket),
-      valueEnv("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID", terraformOutputString(terraformOutputs, "project_id") ?? env.GOOGLE_CLOUD_PROJECT),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_BUCKET",
+        terraformOutputString(terraformOutputs, "object_storage_bucket") ??
+          contract.objectStorage.bucket,
+      ),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID",
+        terraformOutputString(terraformOutputs, "project_id") ?? env.GOOGLE_CLOUD_PROJECT,
+      ),
     );
   } else if (contract.objectStorage.mode === "inCluster") {
     entries.push(
       valueEnv("OPENGENI_OBJECT_STORAGE_BACKEND", "s3-compatible"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_BUCKET", terraformOutputString(terraformOutputs, "object_storage_bucket") ?? contract.objectStorage.bucket),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_BUCKET",
+        terraformOutputString(terraformOutputs, "object_storage_bucket") ??
+          contract.objectStorage.bucket,
+      ),
       valueEnv("OPENGENI_OBJECT_STORAGE_REGION", env.OPENGENI_OBJECT_STORAGE_REGION ?? "us-east-1"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_S3_PROVIDER", env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible"),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
+        env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible",
+      ),
     );
   } else {
     entries.push(
       valueEnv("OPENGENI_OBJECT_STORAGE_BACKEND", "s3-compatible"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_BUCKET", terraformOutputString(terraformOutputs, "object_storage_bucket") ?? contract.objectStorage.bucket),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_BUCKET",
+        terraformOutputString(terraformOutputs, "object_storage_bucket") ??
+          contract.objectStorage.bucket,
+      ),
       requiredEnv("OPENGENI_OBJECT_STORAGE_ENDPOINT", env.OPENGENI_OBJECT_STORAGE_ENDPOINT),
-      requiredEnv("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID", env.OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID),
-      requiredEnv("OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY", env.OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY),
+      requiredEnv(
+        "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID",
+        env.OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID,
+      ),
+      requiredEnv(
+        "OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
+        env.OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY,
+      ),
       valueEnv("OPENGENI_OBJECT_STORAGE_REGION", env.OPENGENI_OBJECT_STORAGE_REGION ?? "us-east-1"),
-      valueEnv("OPENGENI_OBJECT_STORAGE_S3_PROVIDER", env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible"),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_S3_PROVIDER",
+        env.OPENGENI_OBJECT_STORAGE_S3_PROVIDER ?? "S3Compatible",
+      ),
     );
   }
 
@@ -1531,7 +2141,11 @@ function inferredOpenAiProvider(env: Record<string, string | undefined>): "opena
   if (env.OPENGENI_OPENAI_PROVIDER === "openai" || env.OPENGENI_OPENAI_PROVIDER === "azure") {
     return env.OPENGENI_OPENAI_PROVIDER;
   }
-  if (env.OPENGENI_AZURE_OPENAI_API_KEY || env.OPENGENI_AZURE_OPENAI_BASE_URL || env.OPENGENI_AZURE_OPENAI_ENDPOINT) {
+  if (
+    env.OPENGENI_AZURE_OPENAI_API_KEY ||
+    env.OPENGENI_AZURE_OPENAI_BASE_URL ||
+    env.OPENGENI_AZURE_OPENAI_ENDPOINT
+  ) {
     return "azure";
   }
   return "openai";
@@ -1558,7 +2172,11 @@ function valueEnv(key: string, value: string | undefined): RuntimeEnvEntry {
   return { key, value: nonEmpty(value), required: false };
 }
 
-function envOrRequiredRuntime(key: string, value: string | undefined, required: boolean): RuntimeEnvEntry {
+function envOrRequiredRuntime(
+  key: string,
+  value: string | undefined,
+  required: boolean,
+): RuntimeEnvEntry {
   return required ? requiredEnv(key, value) : valueEnv(key, value);
 }
 
@@ -1608,7 +2226,11 @@ function terraformOutputObject(outputs: TerraformOutputs, name: string): Record<
   return out;
 }
 
-function addGeneratedImageValues(values: Record<string, string>, tag: string, env: Record<string, string | undefined>): void {
+function addGeneratedImageValues(
+  values: Record<string, string>,
+  tag: string,
+  env: Record<string, string | undefined>,
+): void {
   const digests: Record<string, string | undefined> = {
     api: env.OPENGENI_API_IMAGE_DIGEST,
     worker: env.OPENGENI_WORKER_IMAGE_DIGEST,
@@ -1629,9 +2251,12 @@ function addRuntimeConfigHelmValues(
   const publicBaseUrl = env.OPENGENI_PUBLIC_BASE_URL ?? contract.product.publicBaseUrl;
   values["config.OPENGENI_AUTH_REQUIRED"] = String(contract.access.mode === "sharedKey");
   values["config.OPENGENI_AUTH_ALLOW_HEALTH"] = String(contract.access.allowUnauthenticatedHealth);
-  values["config.OPENGENI_AUTH_ALLOW_METRICS"] = String(contract.access.allowUnauthenticatedMetrics);
+  values["config.OPENGENI_AUTH_ALLOW_METRICS"] = String(
+    contract.access.allowUnauthenticatedMetrics,
+  );
   values["config.OPENGENI_ENVIRONMENT"] = env.OPENGENI_ENVIRONMENT ?? contract.profile;
-  values["config.OPENGENI_DEPLOYMENT_REVISION"] = env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest";
+  values["config.OPENGENI_DEPLOYMENT_REVISION"] =
+    env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest";
   values["config.OPENGENI_PRODUCT_ACCESS_MODE"] = contract.product.accessMode;
   values["config.OPENGENI_BILLING_MODE"] = contract.product.billingMode;
   values["config.OPENGENI_ENTITLEMENTS_MODE"] = contract.product.entitlementsMode;
@@ -1642,19 +2267,31 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_TEMPORAL_TASK_QUEUE"] = contract.temporal.taskQueue;
   values["config.OPENGENI_SANDBOX_BACKEND"] = contract.sandbox.backend;
   values["config.OPENGENI_OPENAI_PROVIDER"] = inferredOpenAiProvider(env);
-  values["config.OPENGENI_OPENAI_MODEL"] = env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5";
-  values["config.OPENGENI_OPENAI_ALLOWED_MODELS"] = env.OPENGENI_OPENAI_ALLOWED_MODELS ?? env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5";
+  values["config.OPENGENI_OPENAI_MODEL"] =
+    env.OPENGENI_OPENAI_MODEL ?? env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.5";
+  values["config.OPENGENI_OPENAI_ALLOWED_MODELS"] =
+    env.OPENGENI_OPENAI_ALLOWED_MODELS ??
+    env.OPENGENI_OPENAI_MODEL ??
+    env.OPENGENI_AZURE_OPENAI_DEPLOYMENT ??
+    "gpt-5.5";
   values["config.OPENGENI_OPENAI_REASONING_EFFORT"] = env.OPENGENI_OPENAI_REASONING_EFFORT ?? "low";
-  values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] = env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh";
+  values["config.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"] =
+    env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh";
   if (publicBaseUrl) {
     values["config.OPENGENI_PUBLIC_BASE_URL"] = publicBaseUrl;
-    values["config.OPENGENI_WEB_ALLOWED_HOSTS"] = env.OPENGENI_WEB_ALLOWED_HOSTS ?? hostnameForUrl(publicBaseUrl) ?? "";
+    values["config.OPENGENI_WEB_ALLOWED_HOSTS"] =
+      env.OPENGENI_WEB_ALLOWED_HOSTS ?? hostnameForUrl(publicBaseUrl) ?? "";
   }
-  if (contract.profile.startsWith("preview") && contract.objectStorage.mode === "inCluster" && publicBaseUrl) {
+  if (
+    contract.profile.startsWith("preview") &&
+    contract.objectStorage.mode === "inCluster" &&
+    publicBaseUrl
+  ) {
     values["minio.publicEndpoint"] = publicBaseUrl;
   }
   if (contract.database.mode !== "inCluster") {
-    values["migrations.secret.existingSecret"] = env.OPENGENI_MIGRATIONS_SECRET_NAME ?? "opengeni-migrations";
+    values["migrations.secret.existingSecret"] =
+      env.OPENGENI_MIGRATIONS_SECRET_NAME ?? "opengeni-migrations";
   }
 }
 
@@ -1719,7 +2356,9 @@ function renderYaml(value: unknown, indent = 0): string {
     return `${" ".repeat(indent)}${yamlValue(value)}\n`;
   }
   const lines: string[] = [];
-  for (const [key, item] of Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
     if (item && typeof item === "object" && !Array.isArray(item)) {
       lines.push(`${" ".repeat(indent)}${key}:\n${renderYaml(item, indent + 2)}`);
     } else {

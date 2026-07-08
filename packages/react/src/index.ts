@@ -12,11 +12,29 @@ export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
-export type { SessionEventsConnectionState, UseSessionEventsOptions, UseSessionEventsResult } from "./hooks/use-session-events";
-export { useComposer, composeSendInput, shouldSubmitOnKey, FILE_ONLY_MESSAGE_TEXT } from "./hooks/use-composer";
-export type { ComposerMode, ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export type {
+  SessionEventsConnectionState,
+  UseSessionEventsOptions,
+  UseSessionEventsResult,
+} from "./hooks/use-session-events";
+export {
+  useComposer,
+  composeSendInput,
+  shouldSubmitOnKey,
+  FILE_ONLY_MESSAGE_TEXT,
+} from "./hooks/use-composer";
+export type {
+  ComposerMode,
+  ComposerSendExtras,
+  ComposerState,
+  UseComposerOptions,
+} from "./hooks/use-composer";
 export { useFileAttachments } from "./hooks/use-file-attachments";
-export type { FileAttachment, UseFileAttachmentsOptions, UseFileAttachmentsResult } from "./hooks/use-file-attachments";
+export type {
+  FileAttachment,
+  UseFileAttachmentsOptions,
+  UseFileAttachmentsResult,
+} from "./hooks/use-file-attachments";
 export {
   useTurnQueue,
   isTurnQueueEvent,
@@ -30,13 +48,25 @@ export type { UseTurnQueueOptions, UseTurnQueueResult } from "./hooks/use-turn-q
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
-export type { UseSessionControlOptions, UseSessionControlResult } from "./hooks/use-session-control";
+export type {
+  UseSessionControlOptions,
+  UseSessionControlResult,
+} from "./hooks/use-session-control";
 export { useScheduledTasks } from "./hooks/use-scheduled-tasks";
-export type { UseScheduledTasksOptions, UseScheduledTasksResult } from "./hooks/use-scheduled-tasks";
+export type {
+  UseScheduledTasksOptions,
+  UseScheduledTasksResult,
+} from "./hooks/use-scheduled-tasks";
 export { useWorkspaceSessions } from "./hooks/use-workspace-sessions";
-export type { UseWorkspaceSessionsOptions, UseWorkspaceSessionsResult } from "./hooks/use-workspace-sessions";
+export type {
+  UseWorkspaceSessionsOptions,
+  UseWorkspaceSessionsResult,
+} from "./hooks/use-workspace-sessions";
 export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
-export type { UseSessionLineageOptions, UseSessionLineageResult } from "./hooks/use-session-lineage";
+export type {
+  UseSessionLineageOptions,
+  UseSessionLineageResult,
+} from "./hooks/use-session-lineage";
 export { useEnvironments } from "./hooks/use-environments";
 export type { UseEnvironmentsOptions, UseEnvironmentsResult } from "./hooks/use-environments";
 export { usePacks } from "./hooks/use-packs";
@@ -46,7 +76,10 @@ export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-work
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
 export { useAvailableModels } from "./hooks/use-available-models";
-export type { UseAvailableModelsOptions, UseAvailableModelsResult } from "./hooks/use-available-models";
+export type {
+  UseAvailableModelsOptions,
+  UseAvailableModelsResult,
+} from "./hooks/use-available-models";
 
 // Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
 export { useSessionCapabilities } from "./hooks/use-session-capabilities";
@@ -88,7 +121,10 @@ export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sand
 
 // Workbench v2 turn-end capture (the cold-paint data layer)
 export { useWorkspaceCapture } from "./hooks/use-workspace-capture";
-export type { UseWorkspaceCaptureOptions, UseWorkspaceCaptureResult } from "./hooks/use-workspace-capture";
+export type {
+  UseWorkspaceCaptureOptions,
+  UseWorkspaceCaptureResult,
+} from "./hooks/use-workspace-capture";
 export { useWorkspaceEdit } from "./hooks/use-workspace-edit";
 export type {
   UseWorkspaceEditOptions,
@@ -135,7 +171,12 @@ export type {
 } from "./timeline";
 
 // Tool-renderer registry + the per-tool renderers (the timeline's extension API)
-export { createDefaultToolRegistry, createToolRegistry, defaultToolRegistry, rawTypeOf } from "./timeline";
+export {
+  createDefaultToolRegistry,
+  createToolRegistry,
+  defaultToolRegistry,
+  rawTypeOf,
+} from "./timeline";
 export type {
   CreateToolRegistryOptions,
   ToolRegistry,
@@ -227,7 +268,11 @@ export type { MessageTimelineProps } from "./components/message-timeline";
 export { Markdown } from "./components/markdown";
 export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
-export type { SessionStatusProps, StatusDotProps, SessionStatusMeta } from "./components/session-status";
+export type {
+  SessionStatusProps,
+  StatusDotProps,
+  SessionStatusMeta,
+} from "./components/session-status";
 export { FleetTile, sessionDisplayTitle } from "./components/fleet-tile";
 export type { FleetTileProps } from "./components/fleet-tile";
 
@@ -273,7 +318,11 @@ export type {
 export * from "./machines";
 // Multi-account Codex (P1): accounts list + active-switch hook.
 export { useCodexAccounts, isCodexAccountEvent } from "./hooks/use-codex-accounts";
-export type { CodexAccountsClientLike, UseCodexAccountsOptions, UseCodexAccountsResult } from "./hooks/use-codex-accounts";
+export type {
+  CodexAccountsClientLike,
+  UseCodexAccountsOptions,
+  UseCodexAccountsResult,
+} from "./hooks/use-codex-accounts";
 
 // Sandbox helpers
 export { gitFileDiffToPatch } from "./lib/git-patch";
@@ -281,4 +330,13 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
-export { CREDIT_EXHAUSTION_MESSAGE, formatBytes, formatRelativeTime, humanizeFailureReason, isCreditExhaustion, stringifyPayload, truncate, tryParseJson } from "./lib/format";
+export {
+  CREDIT_EXHAUSTION_MESSAGE,
+  formatBytes,
+  formatRelativeTime,
+  humanizeFailureReason,
+  isCreditExhaustion,
+  stringifyPayload,
+  truncate,
+  tryParseJson,
+} from "./lib/format";

@@ -17,7 +17,13 @@
 // IMPORT DISCIPLINE: sandbox symbols come ONLY from @opengeni/runtime/sandbox
 // (the agent-loop-free leaf) — enforced by sandbox-access-import-guard.test.ts.
 
-import { applyGitAuthPointerEnvironment, hasGitCredentialRepositorySelection, hasGitHubRepositorySelection, stableSandboxEnvironmentForRun, type Settings } from "@opengeni/config";
+import {
+  applyGitAuthPointerEnvironment,
+  hasGitCredentialRepositorySelection,
+  hasGitHubRepositorySelection,
+  stableSandboxEnvironmentForRun,
+  type Settings,
+} from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import type { Session } from "@opengeni/contracts";
 import {
@@ -120,7 +126,9 @@ export async function withChannelA<T>(
 
   if (acquired.role === "fenced") {
     await release();
-    throw new HTTPException(409, { message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry` });
+    throw new HTTPException(409, {
+      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); retry`,
+    });
   }
 
   let established: EstablishedSandboxSession | undefined;
@@ -136,11 +144,21 @@ export async function withChannelA<T>(
     // the SESSION's backend (the establish below passes backendOverride:
     // session.sandboxBackend, and HOME/token-file/askpass are backend-derived),
     // NOT the deployment default — mirrors sessionAttachEnvironment.
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, workspaceId, session.environmentId);
-    const settingsForSession = session.sandboxBackend !== settings.sandboxBackend
-      ? { ...settings, sandboxBackend: session.sandboxBackend }
-      : settings;
-    const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
+    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
+      db,
+      settings,
+      workspaceId,
+      session.environmentId,
+    );
+    const settingsForSession =
+      session.sandboxBackend !== settings.sandboxBackend
+        ? { ...settings, sandboxBackend: session.sandboxBackend }
+        : settings;
+    const environment = stableSandboxEnvironmentForRun(
+      settingsForSession,
+      workspaceEnvironment?.values ?? {},
+      { workspaceId },
+    );
     if (hasGitCredentialRepositorySelection(session.resources)) {
       applyGitAuthPointerEnvironment(
         environment,
@@ -169,13 +187,16 @@ export async function withChannelA<T>(
         });
       } catch (error) {
         await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
-        throw new HTTPException(409, { message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})` });
+        throw new HTTPException(409, {
+          message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
+        });
       }
       // Persist the LIVE box as the lease's resume_state so the NEXT op resumes
       // this box by id rather than cold-creating a rival (the box-churn the
       // prove-it surfaced). Fall back to the session envelope when serialize is
       // unavailable.
-      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
+      const resumeEnvelope =
+        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId,
         workspaceId,
@@ -188,7 +209,9 @@ export async function withChannelA<T>(
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
-        throw new HTTPException(409, { message: `sandbox lease superseded (epoch ${expectedEpoch}); retry` });
+        throw new HTTPException(409, {
+          message: `sandbox lease superseded (epoch ${expectedEpoch}); retry`,
+        });
       }
       leaseSnapshot = committed.lease;
     } else {
@@ -223,7 +246,11 @@ export async function withChannelA<T>(
     // default, or a swapped-to selfhosted machine). With the flag off the
     // established group session is used unchanged.
     const routedSession = routingEnabled(settings)
-      ? wrapChannelABoxWithRouting({ db, settings, bus }, { workspaceId, sessionId: session.id }, established).session
+      ? wrapChannelABoxWithRouting(
+          { db, settings, bus },
+          { workspaceId, sessionId: session.id },
+          established,
+        ).session
       : established.session;
 
     const service = new SandboxChannelAService({
@@ -245,10 +272,14 @@ export async function withChannelA<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown): unknown {
   if (error instanceof HTTPException) return error;
-  if (error instanceof ChannelAValidationError) return new HTTPException(400, { message: error.message });
-  if (error instanceof ChannelANotFoundError) return new HTTPException(404, { message: error.message });
-  if (error instanceof ChannelAConflictError) return new HTTPException(409, { message: error.message });
-  if (error instanceof ChannelAUnsupportedError) return new HTTPException(409, { message: error.message });
+  if (error instanceof ChannelAValidationError)
+    return new HTTPException(400, { message: error.message });
+  if (error instanceof ChannelANotFoundError)
+    return new HTTPException(404, { message: error.message });
+  if (error instanceof ChannelAConflictError)
+    return new HTTPException(409, { message: error.message });
+  if (error instanceof ChannelAUnsupportedError)
+    return new HTTPException(409, { message: error.message });
   return error;
 }
 
@@ -261,7 +292,9 @@ export function mapChannelAError(error: unknown): unknown {
 // destroyed the box mid-flight, so a subsequent fs.read/git/exec hit a different
 // (cold-restored) box and 404'd. We DO NOT close the session; only the reaper
 // (provider stop at refcount 0) terminates a box.
-async function dropEstablishedHandle(established: EstablishedSandboxSession | undefined): Promise<void> {
+async function dropEstablishedHandle(
+  established: EstablishedSandboxSession | undefined,
+): Promise<void> {
   // No-op beyond dropping the reference: the lease owns lifecycle, the reaper
   // owns teardown. Never session.close()/terminate() a non-owned handle here.
   void established;

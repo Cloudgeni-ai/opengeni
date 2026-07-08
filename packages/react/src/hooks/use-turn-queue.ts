@@ -1,7 +1,12 @@
 import type { SessionEvent, SessionTurn, UpdateSessionTurnRequest } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useDebouncedCallback, useMutationRunner, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
+import {
+  useDebouncedCallback,
+  useMutationRunner,
+  useSessionEventTrigger,
+  type SessionEventFeedOptions,
+} from "./internal";
 
 /** Event types that change the turn queue (queue/edit/reorder/claim/finish). */
 export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
@@ -12,16 +17,27 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
 export function queueFromTurns(turns: SessionTurn[]): SessionTurn[] {
   return turns
     .filter((turn) => turn.status === "queued")
-    .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+    .sort(
+      (a, b) =>
+        a.position - b.position ||
+        a.createdAt.localeCompare(b.createdAt) ||
+        a.id.localeCompare(b.id),
+    );
 }
 
 /** The turn currently holding the session (running or awaiting approval). */
 export function activeTurnFromTurns(turns: SessionTurn[]): SessionTurn | null {
-  return turns.find((turn) => turn.status === "running" || turn.status === "requires_action") ?? null;
+  return (
+    turns.find((turn) => turn.status === "running" || turn.status === "requires_action") ?? null
+  );
 }
 
 /** Optimistic projection of a queued-turn edit. */
-export function applyTurnEdit(turns: SessionTurn[], turnId: string, update: UpdateSessionTurnRequest): SessionTurn[] {
+export function applyTurnEdit(
+  turns: SessionTurn[],
+  turnId: string,
+  update: UpdateSessionTurnRequest,
+): SessionTurn[] {
   return turns.map((turn) => {
     if (turn.id !== turnId || turn.status !== "queued") {
       return turn;
@@ -54,13 +70,18 @@ export function applyTurnReorder(turns: SessionTurn[], turnIds: string[]): Sessi
 
 /** Optimistic projection of a queued-turn delete (server marks it cancelled). */
 export function applyTurnRemoval(turns: SessionTurn[], turnId: string): SessionTurn[] {
-  return turns.map((turn) => (turn.id === turnId && turn.status === "queued" ? { ...turn, status: "cancelled" as const } : turn));
+  return turns.map((turn) =>
+    turn.id === turnId && turn.status === "queued"
+      ? { ...turn, status: "cancelled" as const }
+      : turn,
+  );
 }
 
-export type UseTurnQueueOptions = ClientOverride & SessionEventFeedOptions & {
-  /** Optional safety-net polling (ms). Off by default — turn.* events drive updates. */
-  pollIntervalMs?: number | undefined;
-};
+export type UseTurnQueueOptions = ClientOverride &
+  SessionEventFeedOptions & {
+    /** Optional safety-net polling (ms). Off by default — turn.* events drive updates. */
+    pollIntervalMs?: number | undefined;
+  };
 
 export type UseTurnQueueResult = {
   /** All turns the API returned (history + queue), newest server view. */
@@ -93,7 +114,10 @@ export type UseTurnQueueResult = {
  * from `useSessionEvents` to reuse its connection) or a dedicated tail
  * stream. All mutations apply optimistically and reconcile with the server.
  */
-export function useTurnQueue(sessionId: string | null | undefined, options: UseTurnQueueOptions = {}): UseTurnQueueResult {
+export function useTurnQueue(
+  sessionId: string | null | undefined,
+  options: UseTurnQueueOptions = {},
+): UseTurnQueueResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [turns, setTurns] = useState<SessionTurn[]>([]);
@@ -163,7 +187,9 @@ export function useTurnQueue(sessionId: string | null | undefined, options: UseT
         return null;
       }
       setTurns((current) => applyTurnEdit(current, turnId, update));
-      const result = await mutation.run(() => client.updateQueuedTurn(workspaceId, sessionId, turnId, update));
+      const result = await mutation.run(() =>
+        client.updateQueuedTurn(workspaceId, sessionId, turnId, update),
+      );
       if (result) {
         setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
       } else {
@@ -180,7 +206,9 @@ export function useTurnQueue(sessionId: string | null | undefined, options: UseT
         return null;
       }
       setTurns((current) => applyTurnReorder(current, turnIds));
-      const result = await mutation.run(() => client.reorderQueuedTurns(workspaceId, sessionId, turnIds));
+      const result = await mutation.run(() =>
+        client.reorderQueuedTurns(workspaceId, sessionId, turnIds),
+      );
       if (result) {
         // The server returns the queued turns; merge them over local state.
         setTurns((current) => {
@@ -201,7 +229,9 @@ export function useTurnQueue(sessionId: string | null | undefined, options: UseT
         return null;
       }
       setTurns((current) => applyTurnRemoval(current, turnId));
-      const result = await mutation.run(() => client.deleteQueuedTurn(workspaceId, sessionId, turnId));
+      const result = await mutation.run(() =>
+        client.deleteQueuedTurn(workspaceId, sessionId, turnId),
+      );
       if (result) {
         setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
       } else {

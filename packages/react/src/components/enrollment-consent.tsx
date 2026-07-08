@@ -95,7 +95,10 @@ export function EnrollmentConsent({
         className={className}
         tone="danger"
         title="Could not complete enrollment"
-        body={errorMessage ?? "The code may have expired. Re-run the install one-liner on the machine for a fresh code."}
+        body={
+          errorMessage ??
+          "The code may have expired. Re-run the install one-liner on the machine for a fresh code."
+        }
       />
     );
   }
@@ -113,10 +116,13 @@ export function EnrollmentConsent({
           <ShieldAlertIcon className="size-5" aria-hidden />
         </span>
         <div className="min-w-0">
-          <h1 className="text-og-md font-semibold text-og-fg">Give the agent your whole machine?</h1>
+          <h1 className="text-og-md font-semibold text-og-fg">
+            Give the agent your whole machine?
+          </h1>
           <p className="mt-1 text-og-base text-og-fg-muted">
-            Approving lets the OpenGeni agent run on <span className="font-medium text-og-fg">{machine.machineName}</span> with
-            full access. This is your real computer — not a sandbox.
+            Approving lets the OpenGeni agent run on{" "}
+            <span className="font-medium text-og-fg">{machine.machineName}</span> with full access.
+            This is your real computer — not a sandbox.
           </p>
         </div>
       </div>
@@ -127,7 +133,9 @@ export function EnrollmentConsent({
         <span className="font-og-mono text-og-fg-subtle">
           {machine.os}/{machine.arch}
         </span>
-        <span aria-hidden className="text-og-fg-subtle">·</span>
+        <span aria-hidden className="text-og-fg-subtle">
+          ·
+        </span>
         <span className="text-og-fg-subtle">
           code <span className="font-og-mono font-medium text-og-fg">{userCode}</span>
         </span>
@@ -171,15 +179,16 @@ export function EnrollmentConsent({
               Also let the agent control my mouse & keyboard
             </span>
             <span className="mt-0.5 block text-og-sm text-og-fg-muted">
-              Optional. Enables computer-use — the agent can move the pointer, type, and click on this machine's desktop. Leave
-              off to let it only watch.
+              Optional. Enables computer-use — the agent can move the pointer, type, and click on
+              this machine's desktop. Leave off to let it only watch.
             </span>
           </span>
         </label>
       ) : (
         <p className="flex items-start gap-2 rounded-og-md border border-og-border bg-og-bg px-3 py-2 text-og-sm text-og-fg-muted">
           <CircleAlertIcon className="mt-px size-3.5 shrink-0 text-og-fg-subtle" aria-hidden />
-          This machine has no display, so screen control isn't available — files, terminal, and git only.
+          This machine has no display, so screen control isn't available — files, terminal, and git
+          only.
         </p>
       )}
 
@@ -225,7 +234,11 @@ function ConsentResult({
         ? "border-og-status-failed/30"
         : "border-og-border";
   const iconClass =
-    tone === "ok" ? "text-og-status-running" : tone === "danger" ? "text-og-status-failed" : "text-og-fg-subtle";
+    tone === "ok"
+      ? "text-og-status-running"
+      : tone === "danger"
+        ? "text-og-status-failed"
+        : "text-og-fg-subtle";
   return (
     <div
       data-enrollment-result={tone}
@@ -235,7 +248,12 @@ function ConsentResult({
         className,
       )}
     >
-      <span className={cn("flex size-10 items-center justify-center rounded-full bg-og-surface-2", iconClass)}>
+      <span
+        className={cn(
+          "flex size-10 items-center justify-center rounded-full bg-og-surface-2",
+          iconClass,
+        )}
+      >
         <LaptopIcon className="size-5" aria-hidden />
       </span>
       <h1 className="text-og-md font-semibold text-og-fg">{title}</h1>

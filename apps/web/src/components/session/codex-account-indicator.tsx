@@ -27,7 +27,9 @@ const AUTO = "auto";
 
 function accountLabel(account: CodexAccount | undefined | null): string {
   if (!account) return "—";
-  return account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "Codex account";
+  return (
+    account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "Codex account"
+  );
 }
 
 // The tighter of the two windows' remaining %, off the CACHED fields (no live
@@ -41,7 +43,13 @@ function tighterRemaining(account: CodexAccount | undefined | null): number | nu
 }
 
 /** A compact remaining-quota bar of the tighter window. Reads cache only. */
-function MiniBar({ account, className }: { account: CodexAccount | undefined | null; className?: string }) {
+function MiniBar({
+  account,
+  className,
+}: {
+  account: CodexAccount | undefined | null;
+  className?: string;
+}) {
   const remaining = tighterRemaining(account);
   if (remaining == null) return null;
   const pct = Math.min(100, Math.max(0, remaining));
@@ -83,7 +91,8 @@ export function CodexAccountIndicator({
     return null;
   }
 
-  const effective = codex.accounts.find((account) => account.id === codex.effectiveAccountId) ?? null;
+  const effective =
+    codex.accounts.find((account) => account.id === codex.effectiveAccountId) ?? null;
   const triggerLabel = accountLabel(effective);
   const plan = effective?.plan ?? null;
   const hasAccounts = codex.accounts.length > 0;
@@ -159,7 +168,9 @@ export function CodexAccountIndicator({
               <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
               <MiniBar account={account} />
               {account.status !== "active" ? (
-                <span className="shrink-0 text-2xs text-status-waiting">{account.status === "needs_relogin" ? "relogin" : account.status}</span>
+                <span className="shrink-0 text-2xs text-status-waiting">
+                  {account.status === "needs_relogin" ? "relogin" : account.status}
+                </span>
               ) : null}
               {isPinning ? (
                 <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />

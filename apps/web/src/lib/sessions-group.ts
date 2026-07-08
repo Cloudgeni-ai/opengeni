@@ -14,7 +14,12 @@ export const SESSION_GROUP_LABELS: Record<SessionRecencyGroup, string> = {
 };
 
 /** The render order of recency groups, top → bottom. */
-export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = ["today", "yesterday", "previous7", "older"];
+export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
+  "today",
+  "yesterday",
+  "previous7",
+  "older",
+];
 
 /** Live states that earn the pinned-to-top, breathing-dot treatment. */
 const RUNNING_STATUSES = new Set<SessionStatus>(["running", "queued", "requires_action"]);

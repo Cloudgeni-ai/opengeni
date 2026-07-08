@@ -17,11 +17,18 @@ describe("assertConfiguredModel — codex subscription models", () => {
   });
 
   test("accepts a codex model at the edge when the feature is enabled", () => {
-    expect(() => assertConfiguredModel(testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-5.5")).not.toThrow();
+    expect(() =>
+      assertConfiguredModel(testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-5.5"),
+    ).not.toThrow();
   });
 
   test("still rejects a non-codex unknown model even when the feature is enabled", () => {
-    expect(() => assertConfiguredModel(testSettings({ codexSubscriptionEnabled: true }), "totally-bogus-model")).toThrow(HTTPException);
+    expect(() =>
+      assertConfiguredModel(
+        testSettings({ codexSubscriptionEnabled: true }),
+        "totally-bogus-model",
+      ),
+    ).toThrow(HTTPException);
   });
 
   test("a normal deployment-allowed model is unaffected", () => {

@@ -21,8 +21,20 @@
 export type ApiSandboxSession = {
   state?: Record<string, unknown> & { sandboxId?: string };
   running?(): Promise<boolean>;
-  exec?(args: { cmd: string; workdir?: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }): Promise<unknown>;
-  execCommand?(args: { cmd: string; workdir?: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }): Promise<string>;
+  exec?(args: {
+    cmd: string;
+    workdir?: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<unknown>;
+  execCommand?(args: {
+    cmd: string;
+    workdir?: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
   shutdown?(options?: unknown): Promise<void>;
   delete?(options?: unknown): Promise<void>;
   close?(): Promise<void>;

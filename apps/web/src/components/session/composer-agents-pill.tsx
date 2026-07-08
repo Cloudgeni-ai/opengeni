@@ -67,8 +67,12 @@ export function ComposerAgentsPill({
             </span>
             {live ? (
               <>
-                <span aria-hidden className="shrink-0 text-fg-subtle">·</span>
-                <span className="shrink-0 font-medium text-status-running">{runningCount} running</span>
+                <span aria-hidden className="shrink-0 text-fg-subtle">
+                  ·
+                </span>
+                <span className="shrink-0 font-medium text-status-running">
+                  {runningCount} running
+                </span>
               </>
             ) : null}
           </button>
@@ -93,7 +97,11 @@ export function ComposerAgentsPill({
               {/* count > 0 here (the pill only renders with children), so the
                   tree always has rows — no loading/empty branch to guard. */}
               <div className="mt-2">
-                <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={() => setOpen(false)} />
+                <SubagentTree
+                  workspaceId={workspaceId}
+                  nodes={nodes}
+                  onNavigate={() => setOpen(false)}
+                />
               </div>
             </div>
           </Popover.Content>

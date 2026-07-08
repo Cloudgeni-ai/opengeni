@@ -8,11 +8,24 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { MenuIcon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SessionHeader } from "@/components/rail/session-header";
-import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "@/components/rail/rail-context";
+import {
+  RAIL_DEFAULT_WIDTH,
+  RAIL_MAX_WIDTH,
+  RAIL_MIN_WIDTH,
+  useRail,
+} from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
@@ -30,7 +43,12 @@ function RailBody() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
       {/* Brand */}
-      <div className={cn("flex h-12 shrink-0 items-center", rail.collapsed ? "justify-center px-2" : "px-3")}>
+      <div
+        className={cn(
+          "flex h-12 shrink-0 items-center",
+          rail.collapsed ? "justify-center px-2" : "px-3",
+        )}
+      >
         <Link
           to="/workspaces/$workspaceId/sessions"
           params={{ workspaceId: rail.workspaceId }}
@@ -69,7 +87,13 @@ function RailBody() {
  * the collapse toggle elsewhere; this is a pointer affordance (hidden from the
  * a11y tree beyond its separator role + label).
  */
-function RailResizeHandle({ onStart, active }: { onStart: (event: ReactPointerEvent) => void; active: boolean }) {
+function RailResizeHandle({
+  onStart,
+  active,
+}: {
+  onStart: (event: ReactPointerEvent) => void;
+  active: boolean;
+}) {
   const rail = useRail();
   return (
     <div
@@ -83,7 +107,9 @@ function RailResizeHandle({ onStart, active }: { onStart: (event: ReactPointerEv
       <span
         className={cn(
           "absolute inset-y-0 right-1 w-px transition-[width,background-color] duration-150",
-          active ? "w-0.5 bg-brand/70" : "bg-transparent group-hover:w-0.5 group-hover:bg-border-strong",
+          active
+            ? "w-0.5 bg-brand/70"
+            : "bg-transparent group-hover:w-0.5 group-hover:bg-border-strong",
         )}
       />
     </div>
@@ -108,35 +134,40 @@ export function RailShell({ children }: { children: ReactNode }) {
   // otherwise the listeners and the col-resize cursor / no-select body styles
   // linger until an unrelated pointer release elsewhere.
   const endResizeRef = useRef<(() => void) | null>(null);
-  const startResize = useCallback((event: ReactPointerEvent) => {
-    // Ignore anything but a primary-button / touch drag.
-    if (event.button !== 0) {
-      return;
-    }
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = rail.width;
-    const clamp = (w: number) => Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(w)));
-    setLiveWidth(startWidth);
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
-    const onMove = (moveEvent: PointerEvent) => setLiveWidth(clamp(startWidth + (moveEvent.clientX - startX)));
-    const teardown = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-      endResizeRef.current = null;
-    };
-    const onUp = (upEvent: PointerEvent) => {
-      rail.setWidth(clamp(startWidth + (upEvent.clientX - startX)));
-      setLiveWidth(null);
-      teardown();
-    };
-    endResizeRef.current = teardown;
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  }, [rail]);
+  const startResize = useCallback(
+    (event: ReactPointerEvent) => {
+      // Ignore anything but a primary-button / touch drag.
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = rail.width;
+      const clamp = (w: number) =>
+        Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(w)));
+      setLiveWidth(startWidth);
+      document.body.style.userSelect = "none";
+      document.body.style.cursor = "col-resize";
+      const onMove = (moveEvent: PointerEvent) =>
+        setLiveWidth(clamp(startWidth + (moveEvent.clientX - startX)));
+      const teardown = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+        endResizeRef.current = null;
+      };
+      const onUp = (upEvent: PointerEvent) => {
+        rail.setWidth(clamp(startWidth + (upEvent.clientX - startX)));
+        setLiveWidth(null);
+        teardown();
+      };
+      endResizeRef.current = teardown;
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [rail],
+  );
   // Unmount / route-change mid-drag: run the drag teardown so listeners and
   // body styles never leak.
   useEffect(() => () => endResizeRef.current?.(), []);
@@ -157,7 +188,10 @@ export function RailShell({ children }: { children: ReactNode }) {
         return;
       }
       const target = event.target as HTMLElement | null;
-      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
+      if (
+        target &&
+        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+      ) {
         return;
       }
       event.preventDefault();
@@ -275,9 +309,17 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
         onToggleInspector={() => context.setInspectorOpen((open) => !open)}
         onRename={context.updateSessionTitle}
         leading={hamburger}
-        sandboxSlot={<SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />}
+        sandboxSlot={
+          <SessionSandboxSwitcher workspaceId={session.workspaceId} sessionId={session.id} />
+        }
         // Codex-prefix-gated inside the component: absent for host-credit sessions.
-        codexSlot={<CodexAccountIndicator workspaceId={session.workspaceId} sessionId={session.id} model={session.model} />}
+        codexSlot={
+          <CodexAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            model={session.model}
+          />
+        }
         // The "N agents" indicator now lives above the composer (front and
         // center) as ComposerAgentsPill, not in this header — see session.tsx.
       />

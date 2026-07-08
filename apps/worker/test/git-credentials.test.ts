@@ -15,15 +15,17 @@ describe("sandbox git credentials", () => {
     const calls: GitCredentialsRequest[] = [];
     const result = await sandboxEnvironmentForRun(
       provisionedSettings(),
-      [{
-        kind: "repository",
-        uri: "https://github.com/acme/private.git",
-        ref: "main",
-        provider: "github",
-        githubInstallationId: 123,
-        githubRepositoryId: 456,
-        connectionId: "github-connection",
-      }],
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          provider: "github",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+          connectionId: "github-connection",
+        },
+      ],
       {},
       {
         scope,
@@ -34,21 +36,25 @@ describe("sandbox git credentials", () => {
       },
     );
 
-    expect(calls).toEqual([{
-      accountId: scope.accountId,
-      workspaceId: scope.workspaceId,
-      purpose: "token",
-      installationId: 123,
-      repositoryIds: [456],
-      repositoryRefs: [{
-        provider: "github",
-        uri: "https://github.com/acme/private.git",
-        ref: "main",
-        repositoryId: 456,
+    expect(calls).toEqual([
+      {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        purpose: "token",
         installationId: 123,
-        connectionId: "github-connection",
-      }],
-    }]);
+        repositoryIds: [456],
+        repositoryRefs: [
+          {
+            provider: "github",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            repositoryId: 456,
+            installationId: 123,
+            connectionId: "github-connection",
+          },
+        ],
+      },
+    ]);
     expect(result.gitToken).toBe("ghs_brokered");
     expect(result.gitTokens).toEqual({ github: "ghs_brokered" });
     expect(Object.values(result.environment)).not.toContain("ghs_brokered");
@@ -103,13 +109,15 @@ describe("sandbox git credentials", () => {
         purpose: "token",
         installationId: 0,
         repositoryIds: [],
-        repositoryRefs: [{
-          provider: "gitlab",
-          uri: "https://gitlab.com/acme/private.git",
-          ref: "main",
-          repositoryId: "gl-456",
-          connectionId: "gitlab-connection",
-        }],
+        repositoryRefs: [
+          {
+            provider: "gitlab",
+            uri: "https://gitlab.com/acme/private.git",
+            ref: "main",
+            repositoryId: "gl-456",
+            connectionId: "gitlab-connection",
+          },
+        ],
       },
       {
         accountId: scope.accountId,
@@ -118,14 +126,16 @@ describe("sandbox git credentials", () => {
         purpose: "token",
         installationId: 0,
         repositoryIds: [],
-        repositoryRefs: [{
-          provider: "azure_devops",
-          uri: "https://dev.azure.com/acme/project/_git/private",
-          ref: "main",
-          repositoryId: "az-repo-789",
-          projectId: "project",
-          connectionId: "ado-connection",
-        }],
+        repositoryRefs: [
+          {
+            provider: "azure_devops",
+            uri: "https://dev.azure.com/acme/project/_git/private",
+            ref: "main",
+            repositoryId: "az-repo-789",
+            projectId: "project",
+            connectionId: "ado-connection",
+          },
+        ],
       },
     ]);
     expect(result.gitToken).toBeUndefined();
@@ -138,7 +148,9 @@ describe("sandbox git credentials", () => {
     expect(result.environment.GIT_COMMITTER_NAME).toBe("GitLab Bot");
     expect(result.environment.GIT_COMMITTER_EMAIL).toBe("gitlab-bot@example.com");
     expect(result.environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
-    expect(result.environment.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
+    expect(result.environment.OPENGENI_GIT_CREDENTIALS_DIR).toBe(
+      "/workspace/.opengeni/git-credentials",
+    );
     expect(Object.values(result.environment)).not.toContain("gitlab-token");
     expect(Object.values(result.environment)).not.toContain("azure_devops-token");
   });

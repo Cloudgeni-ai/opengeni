@@ -12,7 +12,10 @@ import type { MetricsSample } from "@opengeni/agent-proto";
 
 describe("parseAgentEventSubject", () => {
   test("extracts workspaceId + agentId from agent.<ws>.<id>.events", () => {
-    expect(parseAgentEventSubject("agent.ws-123.ag-456.events")).toEqual({ workspaceId: "ws-123", agentId: "ag-456" });
+    expect(parseAgentEventSubject("agent.ws-123.ag-456.events")).toEqual({
+      workspaceId: "ws-123",
+      agentId: "ag-456",
+    });
   });
 
   test("the wildcard subscription subject is agent.*.*.events", () => {
@@ -31,9 +34,13 @@ describe("wireSampleToDbSample", () => {
     return {
       sampledAtMs: String(1_700_000_000_000),
       cpuPercent: 42.5,
-      load1: 0.5, load5: 0.4, load15: 0.3,
-      memUsedBytes: "1024", memTotalBytes: "4096",
-      diskUsedBytes: "2048", diskTotalBytes: "8192",
+      load1: 0.5,
+      load5: 0.4,
+      load15: 0.3,
+      memUsedBytes: "1024",
+      memTotalBytes: "4096",
+      diskUsedBytes: "2048",
+      diskTotalBytes: "8192",
       runQueue: 2,
       gpus: [],
       ...overrides,
@@ -61,12 +68,14 @@ describe("wireSampleToDbSample", () => {
   });
 
   test("the FIRST GPU is surfaced (the primary accelerator)", () => {
-    const db = wireSampleToDbSample(wire({
-      gpus: [
-        { name: "A100", utilPercent: 73, memUsedBytes: "4096", memTotalBytes: "40960" },
-        { name: "A100#2", utilPercent: 12, memUsedBytes: "1024", memTotalBytes: "40960" },
-      ],
-    }));
+    const db = wireSampleToDbSample(
+      wire({
+        gpus: [
+          { name: "A100", utilPercent: 73, memUsedBytes: "4096", memTotalBytes: "40960" },
+          { name: "A100#2", utilPercent: 12, memUsedBytes: "1024", memTotalBytes: "40960" },
+        ],
+      }),
+    );
     expect(db.gpuUtilPercent).toBe(73);
     expect(db.gpuMemUsedBytes).toBe(4096);
     expect(db.gpuMemTotalBytes).toBe(40960);

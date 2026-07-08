@@ -13,13 +13,7 @@
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
 // external embedder (cloudgeni #1577) uses — that is criterion F1.
-import {
-  type ReactNode,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CpuIcon, LaptopIcon, RefreshCwIcon } from "lucide-react";
@@ -63,7 +57,10 @@ export const WORKBENCH_TAB_FILES = "files";
  * 2). This remains exported as a standalone helper for hosts that already hold
  * the event log and want the same decision without the capture fetch.
  */
-export function initialWorkspaceTab(events: SessionEvent[] | undefined, override?: string | null): string {
+export function initialWorkspaceTab(
+  events: SessionEvent[] | undefined,
+  override?: string | null,
+): string {
   if (override) return override;
   let bestSeq = -1;
   let bestFileCount = 0;
@@ -149,7 +146,9 @@ export type UseSandboxWorkspaceTabsResult = {
  * dock "brain": capability negotiation, capture-backed cold reads, prewarm
  * flags, desktop consent, and the xterm theme observer — all package-local.
  */
-export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions): UseSandboxWorkspaceTabsResult {
+export function useSandboxWorkspaceTabs(
+  options: UseSandboxWorkspaceTabsOptions,
+): UseSandboxWorkspaceTabsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const { sessionId, events, onNotify } = options;
   const initialTab = options.initialTab ?? null;
@@ -195,7 +194,8 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
   // The REAL interactive terminal is the ttyd pty-ws stream. When it's live the
   // legacy HTTP PTY must NOT run; `useSandboxTerminal` opens its HTTP PTY only as
   // the firehose-mode fallback (a backend without ttyd).
-  const ptyWsLive = capabilities?.Terminal.transport === "pty-ws" && Boolean(capabilities?.Terminal.url);
+  const ptyWsLive =
+    capabilities?.Terminal.transport === "pty-ws" && Boolean(capabilities?.Terminal.url);
   const ptyCapable = (capabilities?.Terminal.ptyCapable ?? false) && !ptyWsLive;
   const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable, liveness });
   const desktopAdvertised =
@@ -231,7 +231,8 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
     capture: captureState.capture,
     // A reverted optimistic mutation (e.g. a 409 rename collision) surfaces as a
     // host notification — the tree silently rolls back, the user sees why.
-    onMutationError: (error, op) => onNotify?.({ kind: "error", message: `Could not ${op}: ${error.message}` }),
+    onMutationError: (error, op) =>
+      onNotify?.({ kind: "error", message: `Could not ${op}: ${error.message}` }),
   });
   const git = useSandboxGit(sessionId, {
     events,
@@ -255,7 +256,10 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
     const derive = () => setXtermTheme(xtermThemeFromTokens());
     derive();
     const observer = new MutationObserver(derive);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-og-theme", "class"] });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-og-theme", "class"],
+    });
     return () => observer.disconnect();
   }, []);
 
@@ -309,7 +313,8 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
     if (initialTab) {
       defaultTabRef.current = initialTab;
     } else if (captureState.fileCount !== null) {
-      defaultTabRef.current = captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
+      defaultTabRef.current =
+        captureState.fileCount > 0 ? WORKBENCH_TAB_CHANGES : WORKBENCH_TAB_FILES;
     }
   }
   // null only during the brief pre-first-resolve window (no host override yet).
@@ -383,7 +388,9 @@ export function useSandboxWorkspaceTabs(options: UseSandboxWorkspaceTabsOptions)
         id: "desktop",
         label: "Desktop",
         badge: watchDesktop ? (
-          <span className="rounded-og-xs bg-og-status-running/20 px-1 text-2xs text-og-status-running">Live</span>
+          <span className="rounded-og-xs bg-og-status-running/20 px-1 text-2xs text-og-status-running">
+            Live
+          </span>
         ) : undefined,
         content: (
           <DesktopViewer
@@ -482,7 +489,11 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     className,
   } = props;
 
-  const { tabs: workbenchTabs, machine, defaultTab } = useSandboxWorkspaceTabs({
+  const {
+    tabs: workbenchTabs,
+    machine,
+    defaultTab,
+  } = useSandboxWorkspaceTabs({
     ...(props.client ? { client: props.client } : {}),
     ...(props.workspaceId ? { workspaceId: props.workspaceId } : {}),
     sessionId,
@@ -536,7 +547,13 @@ function DirtyBadge({ count }: { count: number }) {
 }
 
 /** A machine-kind glyph for the chip popover. */
-function MachineKindIcon({ kind, className }: { kind: MachineView["kind"] | undefined; className?: string }) {
+function MachineKindIcon({
+  kind,
+  className,
+}: {
+  kind: MachineView["kind"] | undefined;
+  className?: string;
+}) {
   const Icon = kind === "selfhosted" ? LaptopIcon : CpuIcon;
   return <Icon className={cn("size-3.5 shrink-0 text-og-fg-subtle", className)} aria-hidden />;
 }
@@ -573,7 +590,10 @@ function MachineStateChip({
           aria-label={`Machine: ${chip.label}`}
           className="inline-flex items-center gap-1.5 rounded-og-sm px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-9"
         >
-          <span className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))} aria-hidden />
+          <span
+            className={cn("size-1.5 shrink-0 rounded-full", chipDotClass(chip.state))}
+            aria-hidden
+          />
           <span className="max-w-[11rem] truncate">{chip.label}</span>
         </button>
       </Popover.Trigger>
@@ -590,7 +610,10 @@ function MachineStateChip({
           <div className="mt-2.5 flex items-center justify-between gap-2">
             <span className="text-og-xs text-og-fg-subtle">Connection</span>
             {activeMachine ? (
-              <ConnectionStatusPill status={connectionStatusForState(activeMachine.state)} size="sm" />
+              <ConnectionStatusPill
+                status={connectionStatusForState(activeMachine.state)}
+                size="sm"
+              />
             ) : (
               <span className="text-og-xs text-og-fg-muted">{chip.label}</span>
             )}
@@ -602,7 +625,10 @@ function MachineStateChip({
           ) : null}
           {activeMachine && activeMachine.sharedSessionCount > 1 ? (
             <div className="mt-2.5">
-              <SharedMachineDisclosure sharedSessionCount={activeMachine.sharedSessionCount} density="full" />
+              <SharedMachineDisclosure
+                sharedSessionCount={activeMachine.sharedSessionCount}
+                density="full"
+              />
             </div>
           ) : null}
           {error ? (

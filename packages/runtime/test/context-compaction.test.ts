@@ -38,7 +38,12 @@ function userParts(parts: unknown[]): CompactionItem {
 }
 
 function assistant(text: string): CompactionItem {
-  return { type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text }] };
+  return {
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text }],
+  };
 }
 
 function call(id: string, name = "shell"): CompactionItem {
@@ -59,17 +64,19 @@ const THRESHOLD = Math.floor(WINDOW * DEFAULT_COMPACTION_THRESHOLD_RATIO);
 
 describe("codex-parity constants and summary marker", () => {
   test("uses Codex's checkpoint prompt and summary prefix verbatim", () => {
-    expect(COMPACTION_PROMPT).toBe([
-      "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.",
-      "",
-      "Include:",
-      "- Current progress and key decisions made",
-      "- Important context, constraints, or user preferences",
-      "- What remains to be done (clear next steps)",
-      "- Any critical data, examples, or references needed to continue",
-      "",
-      "Be concise, structured, and focused on helping the next LLM seamlessly continue the work.",
-    ].join("\n"));
+    expect(COMPACTION_PROMPT).toBe(
+      [
+        "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.",
+        "",
+        "Include:",
+        "- Current progress and key decisions made",
+        "- Important context, constraints, or user preferences",
+        "- What remains to be done (clear next steps)",
+        "- Any critical data, examples, or references needed to continue",
+        "",
+        "Be concise, structured, and focused on helping the next LLM seamlessly continue the work.",
+      ].join("\n"),
+    );
     expect(SUMMARY_PREFIX).toBe(
       "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:",
     );
@@ -86,20 +93,24 @@ describe("codex-parity constants and summary marker", () => {
 
 describe("single client compaction threshold", () => {
   test("computes 60 percent of the model context window by default", () => {
-    expect(clientCompactionThresholdTokens({
-      contextWindowTokens: WINDOW,
-      contextReservedOutputTokens: RESERVED_OUTPUT,
-    })).toBe(THRESHOLD);
+    expect(
+      clientCompactionThresholdTokens({
+        contextWindowTokens: WINDOW,
+        contextReservedOutputTokens: RESERVED_OUTPUT,
+      }),
+    ).toBe(THRESHOLD);
   });
 
   test("supports an env-configurable ratio with a defensive clamp", () => {
     expect(clampCompactionThresholdRatio(0.1)).toBe(MIN_COMPACTION_THRESHOLD_RATIO);
     expect(clampCompactionThresholdRatio(2)).toBe(MAX_COMPACTION_THRESHOLD_RATIO);
-    expect(clientCompactionThresholdTokens({
-      contextWindowTokens: 1000,
-      contextReservedOutputTokens: 0,
-      contextCompactionThresholdRatio: 0.75,
-    })).toBe(750);
+    expect(
+      clientCompactionThresholdTokens({
+        contextWindowTokens: 1000,
+        contextReservedOutputTokens: 0,
+        contextCompactionThresholdRatio: 0.75,
+      }),
+    ).toBe(750);
   });
 
   test("prefers provider-reported input tokens over the estimate", () => {
@@ -145,7 +156,11 @@ describe("codex-parity rebuild", () => {
     const active = [user("u1"), assistant("a1"), call("c1"), result("c1")];
     const promptInput = buildCompactionPromptInput(active);
     expect(promptInput.slice(0, -1)).toEqual(active);
-    expect(promptInput.at(-1)).toEqual({ type: "message", role: "user", content: COMPACTION_PROMPT });
+    expect(promptInput.at(-1)).toEqual({
+      type: "message",
+      role: "user",
+      content: COMPACTION_PROMPT,
+    });
   });
 
   test("replacement history keeps only real user messages plus one summary", () => {
@@ -172,17 +187,22 @@ describe("codex-parity rebuild", () => {
   });
 
   test("drops images from retained user messages", () => {
-    const rebuilt = buildCompactionReplacementHistory([
-      userParts([
-        { type: "input_text", text: "look at this" },
-        { type: "input_image", image_url: "data:image/png;base64,abc" },
-      ]),
-    ], "summary");
-    expect((rebuilt[0] as { content?: unknown }).content).toEqual([{ type: "input_text", text: "look at this" }]);
+    const rebuilt = buildCompactionReplacementHistory(
+      [
+        userParts([
+          { type: "input_text", text: "look at this" },
+          { type: "input_image", image_url: "data:image/png;base64,abc" },
+        ]),
+      ],
+      "summary",
+    );
+    expect((rebuilt[0] as { content?: unknown }).content).toEqual([
+      { type: "input_text", text: "look at this" },
+    ]);
   });
 
   test("caps each retained user message at 20k estimated tokens with a middle marker", () => {
-    const long = `${"a".repeat((COMPACT_USER_MESSAGE_MAX_TOKENS * 2) * 4)}TAIL`;
+    const long = `${"a".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS * 2 * 4)}TAIL`;
     const rebuilt = buildCompactionReplacementHistory([user(long)], "summary");
     const content = String(rebuilt[0]!.content);
     expect(content).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
@@ -192,13 +212,10 @@ describe("codex-parity rebuild", () => {
   });
 
   test("rebuilt active history is orphan-clean because tool items are dropped", () => {
-    const rebuilt = buildCompactionReplacementHistory([
-      user("old"),
-      call("c0"),
-      result("c0"),
-      assistant("done"),
-      user("new"),
-    ], "summary");
+    const rebuilt = buildCompactionReplacementHistory(
+      [user("old"), call("c0"), result("c0"), assistant("done"), user("new")],
+      "summary",
+    );
     expect(sanitizeHistoryItemsForModel(rebuilt)).toEqual(rebuilt);
   });
 });
@@ -210,14 +227,24 @@ describe("provider-proof compaction transcript", () => {
       responses: {
         create: async (request: { input?: unknown }) => {
           seenInput = request.input;
-          if (Array.isArray(request.input) && request.input.some((item) => item && typeof item === "object" && "callId" in item)) {
-            throw Object.assign(new Error("Missing required parameter: input[1].call_id. You provided callId."), { status: 400 });
+          if (
+            Array.isArray(request.input) &&
+            request.input.some((item) => item && typeof item === "object" && "callId" in item)
+          ) {
+            throw Object.assign(
+              new Error("Missing required parameter: input[1].call_id. You provided callId."),
+              { status: 400 },
+            );
           }
           return { output_text: "rendered summary" };
         },
       },
     };
-    const input = buildCompactionPromptInput([user("deploy it"), call("call_vern"), result("call_vern")]);
+    const input = buildCompactionPromptInput([
+      user("deploy it"),
+      call("call_vern"),
+      result("call_vern"),
+    ]);
 
     const summary = await summarizeForCompaction(
       testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
@@ -246,7 +273,12 @@ describe("provider-proof compaction transcript", () => {
     const summary = await summarizeForCompaction(
       testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
       buildCompactionPromptInput([user("deploy it")]),
-      { client: fakeClient as any, api: "responses", model: "scripted-model", promptCacheKey: "session-123" },
+      {
+        client: fakeClient as any,
+        api: "responses",
+        model: "scripted-model",
+        promptCacheKey: "session-123",
+      },
     );
 
     expect(summary).toBe("rendered summary");
@@ -285,7 +317,9 @@ describe("deterministic fallback compaction", () => {
     expect(fallback.at(-1)).toMatchObject({ [COMPACTION_SUMMARY_MARKER]: true });
     expect(String(fallback.at(-1)?.content)).toContain("Non-LLM context compaction fallback");
     expect(fallback.some((item) => item.role === "system")).toBe(true);
-    expect(String(fallback.find((item) => item.role === "user")?.content)).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+    expect(String(fallback.find((item) => item.role === "user")?.content)).toContain(
+      USER_MESSAGE_TRUNCATION_MARKER.trim(),
+    );
   });
 });
 
@@ -311,8 +345,10 @@ describe("enforceInputBudget (read-path guard backstop)", () => {
 
   test("trims the oldest history at a clean boundary until it fits", () => {
     const items: CompactionItem[] = [
-      user("old turn"), assistant("x".repeat(1_000_000)),
-      user("recent turn"), assistant("kept"),
+      user("old turn"),
+      assistant("x".repeat(1_000_000)),
+      user("recent turn"),
+      assistant("kept"),
     ];
     const out = enforceInputBudget(items, 100);
     expect(out.trimmed).toBe(true);
@@ -322,8 +358,10 @@ describe("enforceInputBudget (read-path guard backstop)", () => {
 
   test("accounts for trailing tokens", () => {
     const items: CompactionItem[] = [
-      user("old"), assistant("x".repeat(400)),
-      user("recent"), assistant("a"),
+      user("old"),
+      assistant("x".repeat(400)),
+      user("recent"),
+      assistant("a"),
     ];
     const out = enforceInputBudget(items, estimateTokens(items), 200);
     expect(out.trimmed).toBe(true);
@@ -331,8 +369,14 @@ describe("enforceInputBudget (read-path guard backstop)", () => {
 
   test("does not split tool-call pairs", () => {
     const items: CompactionItem[] = [
-      user("old"), call("c0"), result("c0"), assistant("x".repeat(1_000_000)),
-      user("recent"), call("c1"), result("c1"), assistant("done"),
+      user("old"),
+      call("c0"),
+      result("c0"),
+      assistant("x".repeat(1_000_000)),
+      user("recent"),
+      call("c1"),
+      result("c1"),
+      assistant("done"),
     ];
     const out = enforceInputBudget(items, 100);
     expect(sanitizeHistoryItemsForModel(out.items)).toEqual(out.items);
@@ -354,7 +398,14 @@ describe("extractResponseOutputText", () => {
     const response = {
       output: [
         { type: "reasoning", content: [] },
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "part-A" }, { type: "output_text", text: "-B" }] },
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "part-A" },
+            { type: "output_text", text: "-B" },
+          ],
+        },
       ],
     };
     expect(extractResponseOutputText(response)).toBe("part-A-B");
@@ -364,7 +415,11 @@ describe("extractResponseOutputText", () => {
     const response = {
       output: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "ECHOED PROMPT" }] },
-        { type: "message", role: "assistant", content: [{ type: "output_text", text: "real-summary" }] },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "real-summary" }],
+        },
       ],
     };
     expect(extractResponseOutputText(response)).toBe("real-summary");

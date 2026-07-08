@@ -54,13 +54,22 @@ export async function provisionRoles(
   const schema = validateIdentifier("targetSchema", options.targetSchema ?? "public");
   const rlsStrategy: RlsStrategy = options.rlsStrategy ?? "force";
 
-  const appRole = validateIdentifier("appRole", options.appRole ?? (process.env.OPENGENI_APP_DATABASE_USER?.trim() || "opengeni_app"));
+  const appRole = validateIdentifier(
+    "appRole",
+    options.appRole ?? (process.env.OPENGENI_APP_DATABASE_USER?.trim() || "opengeni_app"),
+  );
   const appPassword = options.appPassword ?? process.env.OPENGENI_APP_DATABASE_PASSWORD;
-  const temporalRole = validateIdentifier("temporalRole", options.temporalRole ?? (process.env.OPENGENI_TEMPORAL_DATABASE_USER?.trim() || "opengeni_temporal"));
-  const temporalPassword = options.temporalPassword ?? process.env.OPENGENI_TEMPORAL_DATABASE_PASSWORD;
-  const temporalDatabases = (options.temporalDatabases
-    ?? commaSeparated(process.env.OPENGENI_TEMPORAL_DATABASES ?? "temporal,temporal_visibility"))
-    .map((name) => validateIdentifier("temporalDatabases", name));
+  const temporalRole = validateIdentifier(
+    "temporalRole",
+    options.temporalRole ??
+      (process.env.OPENGENI_TEMPORAL_DATABASE_USER?.trim() || "opengeni_temporal"),
+  );
+  const temporalPassword =
+    options.temporalPassword ?? process.env.OPENGENI_TEMPORAL_DATABASE_PASSWORD;
+  const temporalDatabases = (
+    options.temporalDatabases ??
+    commaSeparated(process.env.OPENGENI_TEMPORAL_DATABASES ?? "temporal,temporal_visibility")
+  ).map((name) => validateIdentifier("temporalDatabases", name));
 
   const sql = postgres(adminConnection, { max: 1 });
   try {
@@ -70,7 +79,9 @@ export async function provisionRoles(
     let provisionedAppRole: string | null = null;
     if (rlsStrategy === "force") {
       if (!appPassword) {
-        throw new Error("OPENGENI_APP_DATABASE_PASSWORD (or appPassword) is required for rlsStrategy 'force'");
+        throw new Error(
+          "OPENGENI_APP_DATABASE_PASSWORD (or appPassword) is required for rlsStrategy 'force'",
+        );
       }
       await ensureLoginRole(sql, appRole, appPassword);
       provisionedAppRole = appRole;
@@ -120,10 +131,16 @@ async function ensureDatabase(sql: postgres.Sql, database: string, owner: string
   if (!existing[0]?.exists) {
     await sql.unsafe(`CREATE DATABASE ${identifier(database)} OWNER ${identifier(owner)}`);
   }
-  await sql.unsafe(`GRANT ALL PRIVILEGES ON DATABASE ${identifier(database)} TO ${identifier(owner)}`);
+  await sql.unsafe(
+    `GRANT ALL PRIVILEGES ON DATABASE ${identifier(database)} TO ${identifier(owner)}`,
+  );
 }
 
-async function grantTemporalRoleInDatabase(adminConnection: string, database: string, role: string): Promise<void> {
+async function grantTemporalRoleInDatabase(
+  adminConnection: string,
+  database: string,
+  role: string,
+): Promise<void> {
   const databaseUrl = databaseUrlFor(adminConnection, database);
   const databaseSql = postgres(databaseUrl, { max: 1 });
   try {
@@ -139,7 +156,11 @@ async function grantTemporalRoleInDatabase(adminConnection: string, database: st
  * passes `public`; embedded passes the dedicated schema. The grants are guarded
  * on schema existence so provisioning before migrate is a safe no-op.
  */
-async function grantAppRoleIfSchemaExists(sql: postgres.Sql, role: string, schema: string): Promise<void> {
+async function grantAppRoleIfSchemaExists(
+  sql: postgres.Sql,
+  role: string,
+  schema: string,
+): Promise<void> {
   await sql.unsafe(`
 DO $$
 BEGIN
@@ -156,7 +177,10 @@ END $$;
 }
 
 function commaSeparated(value: string): string[] {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function validateIdentifier(name: string, value: string): string {
@@ -167,7 +191,7 @@ function validateIdentifier(name: string, value: string): string {
 }
 
 function identifier(value: string): string {
-  return `"${value.replace(/"/g, "\"\"")}"`;
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function literal(value: string): string {
@@ -185,14 +209,19 @@ function databaseUrlFor(value: string, database: string): string {
 // invokes — standalone byte-for-byte the historical script (public schema,
 // force strategy, env-driven creds).
 if (import.meta.main) {
-  const adminUrl = process.env.OPENGENI_MIGRATIONS_DATABASE_URL
-    ?? process.env.OPENGENI_DATABASE_ADMIN_URL
-    ?? process.env.OPENGENI_DATABASE_URL;
+  const adminUrl =
+    process.env.OPENGENI_MIGRATIONS_DATABASE_URL ??
+    process.env.OPENGENI_DATABASE_ADMIN_URL ??
+    process.env.OPENGENI_DATABASE_URL;
   if (!adminUrl) {
-    throw new Error("OPENGENI_MIGRATIONS_DATABASE_URL, OPENGENI_DATABASE_ADMIN_URL, or OPENGENI_DATABASE_URL is required");
+    throw new Error(
+      "OPENGENI_MIGRATIONS_DATABASE_URL, OPENGENI_DATABASE_ADMIN_URL, or OPENGENI_DATABASE_URL is required",
+    );
   }
   const result = await provisionRoles(adminUrl, {
-    ...(process.env.OPENGENI_DB_SCHEMA?.trim() ? { targetSchema: process.env.OPENGENI_DB_SCHEMA.trim() } : {}),
+    ...(process.env.OPENGENI_DB_SCHEMA?.trim()
+      ? { targetSchema: process.env.OPENGENI_DB_SCHEMA.trim() }
+      : {}),
   });
   console.log(JSON.stringify(result, null, 2));
 }

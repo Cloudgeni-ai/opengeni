@@ -26,13 +26,39 @@ type NavTarget =
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/settings";
 
-const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> = [
-  { to: "/workspaces/$workspaceId/environments", icon: BoxIcon, label: "Environments", description: "Secret variable sets for sandboxes" },
-  { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines", description: "Your own connected computers" },
-  { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities", description: "Packs, MCP servers, and tools" },
-  { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules", description: "Run agents on a schedule" },
-  { to: "/workspaces/$workspaceId/documents", icon: FileSearchIcon, label: "Documents", description: "Indexed knowledge for agents" },
-];
+const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
+  [
+    {
+      to: "/workspaces/$workspaceId/environments",
+      icon: BoxIcon,
+      label: "Environments",
+      description: "Secret variable sets for sandboxes",
+    },
+    {
+      to: "/workspaces/$workspaceId/machines",
+      icon: LaptopIcon,
+      label: "Machines",
+      description: "Your own connected computers",
+    },
+    {
+      to: "/workspaces/$workspaceId/capabilities",
+      icon: PlugIcon,
+      label: "Capabilities",
+      description: "Packs, MCP servers, and tools",
+    },
+    {
+      to: "/workspaces/$workspaceId/schedules",
+      icon: CalendarClockIcon,
+      label: "Schedules",
+      description: "Run agents on a schedule",
+    },
+    {
+      to: "/workspaces/$workspaceId/documents",
+      icon: FileSearchIcon,
+      label: "Documents",
+      description: "Indexed knowledge for agents",
+    },
+  ];
 
 export function WorkspaceNav() {
   const rail = useRail();

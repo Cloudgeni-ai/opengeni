@@ -54,11 +54,17 @@ export function extForCodec(codec: RecordingCodec): string {
 
 /** No exec/execCommand on the session — the box cannot run ffmpeg. */
 export class RecordingUnavailableError extends Error {
-  constructor(message: string) { super(message); this.name = "RecordingUnavailableError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "RecordingUnavailableError";
+  }
 }
 /** ffmpeg failed, the file is missing, or the byte read failed. */
 export class RecordingError extends Error {
-  constructor(message: string, readonly reason: "ffmpeg-error" | "box-death" | "max-bytes-exceeded" | "display-unavailable") {
+  constructor(
+    message: string,
+    readonly reason: "ffmpeg-error" | "box-death" | "max-bytes-exceeded" | "display-unavailable",
+  ) {
     super(message);
     this.name = "RecordingError";
   }
@@ -67,11 +73,31 @@ export class RecordingError extends Error {
 // The structural slice of a provider session the recording loop drives. exec and
 // execCommand are optional (Modal has only execCommand — F1); readFile present on
 // every desktop-capable provider.
-type ExecResultLike = { output?: string; stdout?: string; stderr?: string; exitCode?: number | null; sessionId?: number };
+type ExecResultLike = {
+  output?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  sessionId?: number;
+};
 type RecordingSession = {
-  exec?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike>;
-  execCommand?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
-  readFile?: (args: { path: string; runAs?: string; maxBytes?: number }) => Promise<string | Uint8Array>;
+  exec?: (args: {
+    cmd: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<ExecResultLike>;
+  execCommand?: (args: {
+    cmd: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
+  readFile?: (args: {
+    path: string;
+    runAs?: string;
+    maxBytes?: number;
+  }) => Promise<string | Uint8Array>;
 };
 
 function shq(s: string): string {
@@ -80,7 +106,9 @@ function shq(s: string): string {
 
 function resultOutput(result: ExecResultLike | string): string {
   if (typeof result === "string") return result;
-  return [result.output, result.stderr, result.stdout].filter((v): v is string => typeof v === "string" && v.length > 0).join("\n");
+  return [result.output, result.stderr, result.stdout]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join("\n");
 }
 
 // Default per-command output cap (tokens). The byte-read path overrides this to
@@ -97,7 +125,10 @@ async function run(
   // `maxOutputTokens: null` disables the provider's output truncation entirely
   // (SDK truncateOutput returns the raw text when the cap is nullish).
   const args = { cmd, ...(runAs ? { runAs } : {}), yieldTimeMs, maxOutputTokens } as {
-    cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number;
+    cmd: string;
+    runAs?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
   };
   if (typeof session.exec === "function") {
     return resultOutput(await session.exec(args));
@@ -105,7 +136,9 @@ async function run(
   if (typeof session.execCommand === "function") {
     return resultOutput(await session.execCommand(args));
   }
-  throw new RecordingUnavailableError("session cannot run commands (no exec/execCommand) — recording unavailable");
+  throw new RecordingUnavailableError(
+    "session cannot run commands (no exec/execCommand) — recording unavailable",
+  );
 }
 
 // Extract the command body from a provider exec banner. Modal's execCommand
@@ -149,7 +182,10 @@ export type RecordingProcess = {
  * block on the recording). A hard `-t <maxSeconds>` ceiling bounds a runaway file
  * across a multi-day turn. Returns the handle the caller carries to stop+finalize.
  */
-export async function startRecording(session: unknown, input: StartRecordingInput): Promise<RecordingProcess> {
+export async function startRecording(
+  session: unknown,
+  input: StartRecordingInput,
+): Promise<RecordingProcess> {
   const s = session as RecordingSession;
   const codec = input.codec ?? "h264-mp4";
   const dimensions = input.dimensions ?? DEFAULT_DIMENSIONS;
@@ -162,9 +198,10 @@ export async function startRecording(session: unknown, input: StartRecordingInpu
   const pidFile = `${tmp}/og-rec-${input.recordingId}.pid`;
   const logFile = `${tmp}/og-rec-${input.recordingId}.log`;
   const [w, h] = dimensions;
-  const enc = codec === "vp9-webm"
-    ? `-c:v libvpx-vp9 -b:v 0 -crf 32 -row-mt 1`
-    : `-c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart`;
+  const enc =
+    codec === "vp9-webm"
+      ? `-c:v libvpx-vp9 -b:v 0 -crf 32 -row-mt 1`
+      : `-c:v libx264 -preset veryfast -pix_fmt yuv420p -movflags +faststart`;
   const ffmpeg =
     `nohup ffmpeg -hide_banner -loglevel error -f x11grab -draw_mouse 1 -framerate ${framerate} ` +
     `-video_size ${w}x${h} -i ${display}.0 -t ${maxSeconds} ${enc} ${boxPath} ` +
@@ -225,14 +262,31 @@ export type FinalizeRecordingResult = {
  * F14: duration is wall-clock (now − startedAt), a close approximation of the
  * SIGINT-flushed video length.
  */
-export async function readRecordingBytes(session: unknown, proc: RecordingProcess, maxBytes = DEFAULT_MAX_BYTES): Promise<FinalizeRecordingResult> {
+export async function readRecordingBytes(
+  session: unknown,
+  proc: RecordingProcess,
+  maxBytes = DEFAULT_MAX_BYTES,
+): Promise<FinalizeRecordingResult> {
   const s = session as RecordingSession;
   if (typeof s.exec !== "function" && typeof s.execCommand !== "function") {
-    throw new RecordingUnavailableError("session cannot run commands (no exec/execCommand) — recording finalize unavailable");
+    throw new RecordingUnavailableError(
+      "session cannot run commands (no exec/execCommand) — recording finalize unavailable",
+    );
   }
   // F8: size-gate on the box before reading into memory.
-  const sizeOut = (await run(s, `bash -lc ${shq(`stat -c %s ${proc.boxPath} 2>/dev/null || echo MISSING`)}`, proc.runAs)).trim();
-  const sizeLine = sizeOut.split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? "MISSING";
+  const sizeOut = (
+    await run(
+      s,
+      `bash -lc ${shq(`stat -c %s ${proc.boxPath} 2>/dev/null || echo MISSING`)}`,
+      proc.runAs,
+    )
+  ).trim();
+  const sizeLine =
+    sizeOut
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop() ?? "MISSING";
   if (sizeLine === "MISSING" || sizeLine === "") {
     throw new RecordingError(`recording file missing on box: ${proc.boxPath}`, "box-death");
   }
@@ -257,7 +311,10 @@ export async function readRecordingBytes(session: unknown, proc: RecordingProces
   try {
     bytes = Uint8Array.from(Buffer.from(base64, "base64"));
   } catch (error) {
-    throw new RecordingError(`recording base64 decode failed: ${error instanceof Error ? error.message : String(error)}`, "ffmpeg-error");
+    throw new RecordingError(
+      `recording base64 decode failed: ${error instanceof Error ? error.message : String(error)}`,
+      "ffmpeg-error",
+    );
   }
   if (bytes.length === 0) {
     throw new RecordingError(`recording read returned 0 bytes: ${proc.boxPath}`, "ffmpeg-error");
@@ -274,13 +331,23 @@ export async function readRecordingBytes(session: unknown, proc: RecordingProces
  * Delete the box artifacts. F9: call this ONLY after the storage PUT confirmed
  * and the `available` row committed — never before. Best-effort; never throws.
  */
-export async function deleteRecordingArtifacts(session: unknown, proc: RecordingProcess): Promise<void> {
+export async function deleteRecordingArtifacts(
+  session: unknown,
+  proc: RecordingProcess,
+): Promise<void> {
   const s = session as RecordingSession;
   const logFile = proc.boxPath.replace(/\.(mp4|webm)$/, ".log");
-  await run(s, `rm -f ${proc.boxPath} ${proc.pidFile} ${logFile}`, proc.runAs).catch(() => undefined);
+  await run(s, `rm -f ${proc.boxPath} ${proc.pidFile} ${logFile}`, proc.runAs).catch(
+    () => undefined,
+  );
 }
 
 /** The storage object key for a recording artifact (parallels the file-asset layout). */
-export function recordingStorageKey(workspaceId: string, sessionId: string, recordingId: string, codec: RecordingCodec): string {
+export function recordingStorageKey(
+  workspaceId: string,
+  sessionId: string,
+  recordingId: string,
+  codec: RecordingCodec,
+): string {
   return `recordings/${workspaceId}/${sessionId}/${recordingId}.${extForCodec(codec)}`;
 }

@@ -79,24 +79,25 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     const { client, terminated, retagged } = fakeModalClient([
       { id: "sb-live", createdAt: 1_000, tags: [] },
     ]);
-    const result = await sweepModalOrphanSandboxes(
-      testSettings(MODAL_SETTINGS),
-      [LIVE_LEASE],
-      { client: client as any, now: new Date(1_000_000 + 60 * 60_000) },
-    );
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+    });
     expect(terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
     expect(result.skipped).toBe(1);
     // Attribution healed so the box stops looking sweep-eligible.
-    expect(retagged).toEqual([{
-      id: "sb-live",
-      tags: {
-        opengeni: "true",
-        opengeni_lease_id: "lease-1",
-        opengeni_workspace_id: "ws-1",
-        opengeni_sandbox_group_id: "grp-1",
+    expect(retagged).toEqual([
+      {
+        id: "sb-live",
+        tags: {
+          opengeni: "true",
+          opengeni_lease_id: "lease-1",
+          opengeni_workspace_id: "ws-1",
+          opengeni_sandbox_group_id: "grp-1",
+        },
       },
-    }]);
+    ]);
   });
 
   test("never terminates a STALE-TAGGED box a live lease points at — and re-tags it", async () => {
@@ -106,14 +107,17 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
       {
         id: "sb-live",
         createdAt: 1_000,
-        tags: attributionTags({ leaseId: "lease-OLD", workspaceId: "ws-1", sandboxGroupId: "grp-1" }),
+        tags: attributionTags({
+          leaseId: "lease-OLD",
+          workspaceId: "ws-1",
+          sandboxGroupId: "grp-1",
+        }),
       },
     ]);
-    const result = await sweepModalOrphanSandboxes(
-      testSettings(MODAL_SETTINGS),
-      [LIVE_LEASE],
-      { client: client as any, now: new Date(1_000_000 + 60 * 60_000) },
-    );
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+    });
     expect(terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
     expect(retagged.map((r) => r.tags.opengeni_lease_id)).toEqual(["lease-1"]);
@@ -127,11 +131,10 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
         tags: attributionTags({ leaseId: "lease-1", workspaceId: "ws-1", sandboxGroupId: "grp-1" }),
       },
     ]);
-    const result = await sweepModalOrphanSandboxes(
-      testSettings(MODAL_SETTINGS),
-      [LIVE_LEASE],
-      { client: client as any, now: new Date(1_000_000 + 60 * 60_000) },
-    );
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+    });
     expect(terminated).toEqual([]);
     expect(retagged).toEqual([]);
     expect(result.skipped).toBe(1);
@@ -145,18 +148,24 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
       {
         id: "sb-stale",
         createdAt: 1_000,
-        tags: attributionTags({ leaseId: "lease-GONE", workspaceId: "ws-2", sandboxGroupId: "grp-2" }),
+        tags: attributionTags({
+          leaseId: "lease-GONE",
+          workspaceId: "ws-2",
+          sandboxGroupId: "grp-2",
+        }),
       },
       // Fresh unattributed box still inside the grace window — spared.
       { id: "sb-fresh", createdAt: (1_000_000 + 55 * 60_000) / 1000, tags: [] },
     ]);
-    const result = await sweepModalOrphanSandboxes(
-      testSettings(MODAL_SETTINGS),
-      [LIVE_LEASE],
-      { client: client as any, now: new Date(1_000_000 + 60 * 60_000) },
-    );
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+    });
     expect(terminated.sort()).toEqual(["sb-derelict", "sb-stale"]);
-    expect(result.terminated.map((t) => t.reason).sort()).toEqual(["stale_attribution", "unattributed"]);
+    expect(result.terminated.map((t) => t.reason).sort()).toEqual([
+      "stale_attribution",
+      "unattributed",
+    ]);
   });
 
   test("a failed re-tag never fails the sweep and the box is still spared", async () => {
@@ -169,11 +178,10 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
         throw new Error("tag write refused");
       },
     });
-    const result = await sweepModalOrphanSandboxes(
-      testSettings(MODAL_SETTINGS),
-      [LIVE_LEASE],
-      { client: client as any, now: new Date(1_000_000 + 60 * 60_000) },
-    );
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+    });
     expect(terminated).toEqual([]);
     expect(result.terminated).toEqual([]);
     expect(result.skipped).toBe(1);

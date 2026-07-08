@@ -207,7 +207,12 @@ export function FileBrowser({
         items.push({ type: "node", node, depth });
         if (node.kind !== "dir" || !expanded.has(node.path)) continue;
         if (draftCreate && draftCreate.parent === node.path) {
-          items.push({ type: "create", parent: node.path, kind: draftCreate.kind, depth: depth + 1 });
+          items.push({
+            type: "create",
+            parent: node.path,
+            kind: draftCreate.kind,
+            depth: depth + 1,
+          });
         }
         const childless = node.children === undefined || node.children.length === 0;
         const isLoading = loadingPaths.has(node.path) || result.expandingPaths.has(node.path);
@@ -229,7 +234,9 @@ export function FileBrowser({
   // The visible NODE rows in order — drives keyboard up/down navigation.
   const flatRows = useMemo(
     () =>
-      renderItems.flatMap((item) => (item.type === "node" ? [{ node: item.node, depth: item.depth }] : [])),
+      renderItems.flatMap((item) =>
+        item.type === "node" ? [{ node: item.node, depth: item.depth }] : [],
+      ),
     [renderItems],
   );
 
@@ -429,7 +436,19 @@ export function FileBrowser({
           break;
       }
     },
-    [draftCreate, draftRename, flatRows, cursor, expanded, open, toggle, onSelectFile, startRename, runDelete, supportsMutation],
+    [
+      draftCreate,
+      draftRename,
+      flatRows,
+      cursor,
+      expanded,
+      open,
+      toggle,
+      onSelectFile,
+      startRename,
+      runDelete,
+      supportsMutation,
+    ],
   );
 
   // Close the context menu on any outside interaction.
@@ -555,7 +574,11 @@ export function FileBrowser({
             ) : (
               <span className="inline-block w-3 shrink-0" />
             )}
-            {isDir ? <FolderIcon className="size-3.5 shrink-0" /> : <FileIcon className="size-3.5 shrink-0" />}
+            {isDir ? (
+              <FolderIcon className="size-3.5 shrink-0" />
+            ) : (
+              <FileIcon className="size-3.5 shrink-0" />
+            )}
             <span className="truncate">{node.name}</span>
             {supportsMutation && (
               <span
@@ -667,7 +690,11 @@ export function FileBrowser({
             </>
           ) : null}
           <span className="ml-auto" />
-          <ToolbarButton label="Refresh" onClick={() => void result.refresh()} disabled={busy || result.loading}>
+          <ToolbarButton
+            label="Refresh"
+            onClick={() => void result.refresh()}
+            disabled={busy || result.loading}
+          >
             <RefreshCwIcon className={cn("size-3.5", result.loading && "animate-spin")} />
           </ToolbarButton>
         </div>
@@ -707,14 +734,20 @@ export function FileBrowser({
       >
         {showErrorEmpty ? (
           <div className="flex flex-col items-start gap-2 p-2 text-og-sm text-og-fg-subtle">
-            <div>{fallback ?? `Could not load files: ${result.error?.message ?? "refresh the file list to try again"}`}</div>
+            <div>
+              {fallback ??
+                `Could not load files: ${result.error?.message ?? "refresh the file list to try again"}`}
+            </div>
             <button
               type="button"
               onClick={() => void result.refresh()}
               disabled={result.loading}
               className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-10"
             >
-              <RefreshCwIcon className={cn("size-3.5", result.loading && "animate-spin")} aria-hidden />
+              <RefreshCwIcon
+                className={cn("size-3.5", result.loading && "animate-spin")}
+                aria-hidden
+              />
               Retry
             </button>
           </div>
@@ -822,9 +855,16 @@ function InlineInput({
   };
 
   return (
-    <div className="flex items-center gap-1 px-1 py-0.5" style={{ paddingLeft: `${depth * 12 + 4}px` }}>
+    <div
+      className="flex items-center gap-1 px-1 py-0.5"
+      style={{ paddingLeft: `${depth * 12 + 4}px` }}
+    >
       <span className="inline-block w-3 shrink-0" />
-      {kind === "dir" ? <FolderIcon className="size-3.5 shrink-0" /> : <FileIcon className="size-3.5 shrink-0" />}
+      {kind === "dir" ? (
+        <FolderIcon className="size-3.5 shrink-0" />
+      ) : (
+        <FileIcon className="size-3.5 shrink-0" />
+      )}
       <input
         ref={ref}
         value={value}

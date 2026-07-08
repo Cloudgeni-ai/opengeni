@@ -48,7 +48,10 @@ type PortResolvableSession = {
  *  `transport:null` (a value, never a crash) — a headless-only provider or a
  *  transient tunnel failure must not fail the whole handshake. */
 export class StreamPortUnavailableError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
     super(message);
     this.name = "StreamPortUnavailableError";
   }
@@ -103,7 +106,11 @@ const DEFAULT_RESOLUTION: [number, number] = [1280, 800];
  * the holder + validated at the in-box websockify edge).
  */
 export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
-  if (typeof endpoint.host !== "string" || endpoint.host.length === 0 || typeof endpoint.port !== "number") {
+  if (
+    typeof endpoint.host !== "string" ||
+    endpoint.host.length === 0 ||
+    typeof endpoint.port !== "number"
+  ) {
     throw new StreamPortUnavailableError(
       `provider returned a malformed exposed-port endpoint (host=${String(endpoint.host)}, port=${String(endpoint.port)})`,
     );
@@ -112,13 +119,18 @@ export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
   const scheme = tls ? "wss" : "ws";
   const defaultPort = tls ? 443 : 80;
   // Bracket a bare IPv6 host (urlForExposedPort parity).
-  const host = endpoint.host.includes(":") && !endpoint.host.startsWith("[") ? `[${endpoint.host}]` : endpoint.host;
+  const host =
+    endpoint.host.includes(":") && !endpoint.host.startsWith("[")
+      ? `[${endpoint.host}]`
+      : endpoint.host;
   // The path: default the root `/` (Modal/Daytona/Blaxel edge), or the
   // provider-supplied path (the selfhosted relay's `/stream` route, M8b). Always
   // leading-slash-normalized.
-  const rawPath = typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
+  const rawPath =
+    typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
   const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-  const origin = endpoint.port === defaultPort ? `${scheme}://${host}` : `${scheme}://${host}:${endpoint.port}`;
+  const origin =
+    endpoint.port === defaultPort ? `${scheme}://${host}` : `${scheme}://${host}:${endpoint.port}`;
   const authority = `${origin}${path}`;
   const query = endpoint.query ?? "";
   return query ? `${authority}?${query}` : authority;

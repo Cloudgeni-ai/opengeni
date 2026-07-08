@@ -25,7 +25,12 @@ export function CapabilityLogo({
   // A new src (e.g. switching the sheet to another item) gets a fresh attempt.
   useEffect(() => setFailed(false), [src]);
 
-  const box = size === "lg" ? "size-12 rounded-xl text-base" : size === "sm" ? "size-8 rounded-lg text-2xs" : "size-10 rounded-lg text-sm";
+  const box =
+    size === "lg"
+      ? "size-12 rounded-xl text-base"
+      : size === "sm"
+        ? "size-8 rounded-lg text-2xs"
+        : "size-10 rounded-lg text-sm";
   const showImage = src && !failed;
 
   return (

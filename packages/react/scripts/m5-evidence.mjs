@@ -13,7 +13,13 @@ const distDir = join(__dirname, "../demo/dist");
 const outDir = join(__dirname, "../.agent/ui-evidence/m5");
 const CHROMIUM = "/nix/store/7xr3qnq93srn4dgak7qw74dw836wpp1y-chromium-138.0.7204.49/bin/chromium";
 
-const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" };
+const MIME = {
+  ".html": "text/html",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+};
 
 const server = createServer(async (req, res) => {
   try {
@@ -23,7 +29,8 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { "content-type": MIME[extname(path)] ?? "application/octet-stream" });
     res.end(buf);
   } catch {
-    res.writeHead(404); res.end("not found");
+    res.writeHead(404);
+    res.end("not found");
   }
 });
 await new Promise((r) => server.listen(0, r));
@@ -49,7 +56,13 @@ async function shot(view, theme, w = 1200, h = 820) {
   await page.close();
 }
 
-for (const view of ["changes-large", "changes-small", "changes-guard", "files-dense", "files-residue"]) {
+for (const view of [
+  "changes-large",
+  "changes-small",
+  "changes-guard",
+  "files-dense",
+  "files-residue",
+]) {
   for (const theme of ["dark", "light"]) await shot(view, theme);
 }
 
@@ -59,21 +72,44 @@ for (const view of ["changes-large", "changes-small", "changes-guard", "files-de
   await page.goto(`${base}?view=changes-large&theme=dark`, { waitUntil: "networkidle" });
   await page.waitForTimeout(400);
   const readIdx = () =>
-    page.$$eval("[data-diff-section]", (els) => els.map((e) => Number(e.getAttribute("data-diff-index"))).sort((a, b) => a - b));
+    page.$$eval("[data-diff-section]", (els) =>
+      els.map((e) => Number(e.getAttribute("data-diff-index"))).sort((a, b) => a - b),
+    );
   const paneMetrics = () =>
-    page.$eval("[data-opengeni-changes-pane]", (el) => ({ scrollHeight: el.scrollHeight, clientHeight: el.clientHeight }));
+    page.$eval("[data-opengeni-changes-pane]", (el) => ({
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    }));
 
   const atTop = await readIdx();
   const { scrollHeight, clientHeight } = await paneMetrics();
   // Scroll ~75% down the pane.
   const target = Math.floor((scrollHeight - clientHeight) * 0.75);
-  await page.$eval("[data-opengeni-changes-pane]", (el, t) => { el.scrollTop = t; el.dispatchEvent(new Event("scroll")); }, target);
+  await page.$eval(
+    "[data-opengeni-changes-pane]",
+    (el, t) => {
+      el.scrollTop = t;
+      el.dispatchEvent(new Event("scroll"));
+    },
+    target,
+  );
   await page.waitForTimeout(400);
   const scrolled = await readIdx();
 
   const bounded = atTop.length < 40 && scrolled.length < 40 && atTop.length > 0;
   const shifted = scrolled[0] > atTop[0] && !scrolled.includes(0);
-  results.push({ proof: "D2 changes windowing", atTopFirst: atTop[0], atTopCount: atTop.length, scrolledFirst: scrolled[0], scrolledCount: scrolled.length, scrollHeight, target, bounded, shifted, PASS: bounded && shifted });
+  results.push({
+    proof: "D2 changes windowing",
+    atTopFirst: atTop[0],
+    atTopCount: atTop.length,
+    scrolledFirst: scrolled[0],
+    scrolledCount: scrolled.length,
+    scrollHeight,
+    target,
+    bounded,
+    shifted,
+    PASS: bounded && shifted,
+  });
   await page.close();
 }
 
@@ -85,7 +121,12 @@ for (const view of ["changes-large", "changes-small", "changes-guard", "files-de
   const rows = await page.$$eval('[role="treeitem"]', (els) => els.length);
   // 2000 files are all visible; virtua mounts only a bounded window near the
   // viewport (~viewport/rowHeight + buffer), never all 2000.
-  results.push({ proof: "Files virtualization (2000 visible)", mountedTreeItems: rows, bounded: rows < 200, PASS: rows > 0 && rows < 200 });
+  results.push({
+    proof: "Files virtualization (2000 visible)",
+    mountedTreeItems: rows,
+    bounded: rows < 200,
+    PASS: rows > 0 && rows < 200,
+  });
   await page.close();
 }
 

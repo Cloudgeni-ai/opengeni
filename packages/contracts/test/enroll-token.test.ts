@@ -51,7 +51,10 @@ describe("EnrollTokenPayload sign/verify", () => {
 
   test("verify rejects an expired token (exp < now)", async () => {
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const token = await signEnrollToken(SECRET, payload({ iat: nowSeconds - 10, exp: nowSeconds - 1 }));
+    const token = await signEnrollToken(
+      SECRET,
+      payload({ iat: nowSeconds - 10, exp: nowSeconds - 1 }),
+    );
     expect(await verifyEnrollToken(SECRET, token, nowSeconds)).toBeNull();
     // ...and it still verifies fine BEFORE expiry.
     expect(await verifyEnrollToken(SECRET, token, nowSeconds - 5)).not.toBeNull();
@@ -62,7 +65,9 @@ describe("EnrollTokenPayload sign/verify", () => {
     const [encoded, signature] = token.slice("oget_".length).split(".");
     // Swap the workspaceId in the payload but keep the original signature.
     const tamperedClaims = payload({ workspaceId: WORKSPACE_B });
-    const tamperedEncoded = Buffer.from(JSON.stringify(tamperedClaims), "utf8").toString("base64url");
+    const tamperedEncoded = Buffer.from(JSON.stringify(tamperedClaims), "utf8").toString(
+      "base64url",
+    );
     expect(tamperedEncoded).not.toBe(encoded);
     const tamperedToken = `oget_${tamperedEncoded}.${signature}`;
     expect(await verifyEnrollToken(SECRET, tamperedToken)).toBeNull();
@@ -73,7 +78,14 @@ describe("EnrollTokenPayload sign/verify", () => {
     // It is correctly SIGNED (so HMAC passes) but the schema's z.literal("enroll")
     // rejects it — a token from another plane that reused this prefix is refused.
     const now = Math.floor(Date.now() / 1000);
-    const claims = { typ: "bearer", workspaceId: WORKSPACE_A, accountId: ACCOUNT_A, allowScreenControl: false, iat: now, exp: now + 3600 };
+    const claims = {
+      typ: "bearer",
+      workspaceId: WORKSPACE_A,
+      accountId: ACCOUNT_A,
+      allowScreenControl: false,
+      iat: now,
+      exp: now + 3600,
+    };
     const encoded = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
     const { createHmac } = await import("node:crypto");
     const signature = createHmac("sha256", SECRET).update(encoded).digest("base64url");

@@ -1,25 +1,94 @@
 import { describe, expect, test } from "bun:test";
-import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
+import {
+  OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+  RunContext,
+  RunRawModelStreamEvent,
+  getAllMcpTools,
+  invalidateServerToolsCache,
+} from "@openai/agents";
+import {
+  AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+  DEFAULT_AGENT_INSTRUCTIONS,
+  getSettings,
+} from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, appendWorkspaceMemory, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelCallUsageTelemetry, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import {
+  applyMissingManifestEntries,
+  pinProvidedSessionManifestEnvironment,
+  azureCliLoginCommand,
+  azureOpenAIDefaultQuery,
+  buildOpenGeniAgent,
+  buildManifest,
+  composeAgentInstructions,
+  coreInstructions,
+  appendToolspaceInstructions,
+  appendWorkspaceMemory,
+  TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
+  GENESIS_TITLE_DIRECTIVE,
+  lazySkillSourceWithPackSkills,
+  deserializeSandboxSessionStateEnvelope,
+  ensureReadableStreamFrom,
+  materializeSandboxFileDownloads,
+  repositoryCloneCommand,
+  repositoryUsesSandboxClone,
+  mcpToolErrorOutput,
+  modelCallUsageTelemetry,
+  modelResponseUsageFromSdkEvent,
+  normalizeSdkEvent,
+  normalizeToolOutputForEvent,
+  prepareRunInput,
+  stripProviderItemIdsFilter,
+  callModelInputFilterForSettings,
+  prefixedMcpToolName,
+  prepareAgentTools,
+  runAzureCliLoginHook,
+  runRepositoryCloneHook,
+  runToolspaceTokenSeedHook,
+  sandboxCommandExitCode,
+  sandboxFileDownloadsForAgent,
+  sandboxRunAs,
+  toolspaceTokenSeedCommand,
+  withSandboxFileDownloads,
+  withSandboxLifecycleHooks,
+  type ResolveConnectionCredentialInput,
+  type ResolveConnectionCredentialResult,
+} from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
-import { codexRequestStorage, type CodexRequestContext, type CodexTokenSnapshot } from "@opengeni/codex";
+import {
+  codexRequestStorage,
+  type CodexRequestContext,
+  type CodexTokenSnapshot,
+} from "@opengeni/codex";
 
-function makeCodexContext(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): CodexRequestContext {
-  const token: CodexTokenSnapshot = overrides.token ?? { accessToken: "tok-123", chatgptAccountId: "acct-9", isFedramp: false };
+function makeCodexContext(
+  overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {},
+): CodexRequestContext {
+  const token: CodexTokenSnapshot = overrides.token ?? {
+    accessToken: "tok-123",
+    chatgptAccountId: "acct-9",
+    isFedramp: false,
+  };
   return {
     clientVersion: "0.0.0-test",
-    getToken: overrides.tokenError ? async () => { throw overrides.tokenError; } : async () => token,
+    getToken: overrides.tokenError
+      ? async () => {
+          throw overrides.tokenError;
+        }
+      : async () => token,
     refresh: async () => token,
     resolveModel: (slug: string) => slug,
   };
 }
 
-const CODEX_APPS_ENTRY = (url: string) => ({ id: "codex_apps", name: "codex_apps", url, cacheToolsList: false });
+const CODEX_APPS_ENTRY = (url: string) => ({
+  id: "codex_apps",
+  name: "codex_apps",
+  url,
+  cacheToolsList: false,
+});
 
 describe("runtime event normalization", () => {
   test("does not send legacy Azure api-version query for v1 base URLs", () => {
@@ -41,10 +110,12 @@ describe("runtime event normalization", () => {
   });
 
   test("maps core SDK text deltas into session deltas", () => {
-    const [event] = normalizeSdkEvent(new RunRawModelStreamEvent({
-      type: "output_text_delta",
-      delta: "hello",
-    } as any));
+    const [event] = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "output_text_delta",
+        delta: "hello",
+      } as any),
+    );
 
     expect(event).toEqual({
       type: "agent.message.delta",
@@ -142,22 +213,26 @@ describe("runtime event normalization", () => {
   });
 
   test("normalizes model-call usage telemetry fields defensively", () => {
-    expect(modelCallUsageTelemetry({
-      inputTokens: 100,
-      outputTokens: 20,
-      inputTokensDetails: { cached_tokens: 80 },
-      outputTokensDetails: { reasoning_tokens: 7 },
-    })).toEqual({
+    expect(
+      modelCallUsageTelemetry({
+        inputTokens: 100,
+        outputTokens: 20,
+        inputTokensDetails: { cached_tokens: 80 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    ).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       cachedTokens: 80,
       reasoningTokens: 7,
     });
-    expect(modelCallUsageTelemetry({
-      inputTokens: 50,
-      outputTokens: 10,
-      inputTokensDetails: { cached_input_tokens: 30 },
-    })).toEqual({
+    expect(
+      modelCallUsageTelemetry({
+        inputTokens: 50,
+        outputTokens: 10,
+        inputTokensDetails: { cached_input_tokens: 30 },
+      }),
+    ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 30,
@@ -181,16 +256,18 @@ describe("runtime event normalization", () => {
   });
 
   test("maps Responses reasoning summary deltas into text-only reasoning events", () => {
-    const events = normalizeSdkEvent(new RunRawModelStreamEvent({
-      type: "model",
-      providerData: {
-        rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
-      },
+    const events = normalizeSdkEvent(
+      new RunRawModelStreamEvent({
+        type: "model",
+        providerData: {
+          rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        },
         event: {
           type: "response.reasoning_summary_text.delta",
           delta: "Checking credentials",
         },
-    } as any));
+      } as any),
+    );
 
     expect(events).toEqual([
       { type: "agent.reasoning.delta", payload: { text: "Checking credentials" } },
@@ -245,7 +322,9 @@ describe("runtime event normalization", () => {
     expect(event?.type).toBe("agent.toolCall.output");
     const payload = event?.payload as { id: string; output: unknown };
     expect(payload.id).toBe("call-shot");
-    expect(payload.output).toBe(`data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`);
+    expect(payload.output).toBe(
+      `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`,
+    );
     // No raw typed-array / object-of-numbers survives into the serialized event.
     expect(JSON.stringify(event)).not.toContain('"0":137');
   });
@@ -253,14 +332,19 @@ describe("runtime event normalization", () => {
   describe("normalizeToolOutputForEvent", () => {
     test("Uint8Array structured image → data-URL string", () => {
       const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes, mediaType: "image/png" } })).toBe(
-        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(
+        normalizeToolOutputForEvent({
+          type: "image",
+          image: { data: bytes, mediaType: "image/png" },
+        }),
+      ).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
     });
 
     test("object-of-numbers (JSON-round-tripped Uint8Array) → data-URL string", () => {
       const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
-      const roundTripped = JSON.parse(JSON.stringify({ type: "image", image: { data: bytes, mediaType: "image/jpeg" } }));
+      const roundTripped = JSON.parse(
+        JSON.stringify({ type: "image", image: { data: bytes, mediaType: "image/jpeg" } }),
+      );
       expect(normalizeToolOutputForEvent(roundTripped)).toBe(
         `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
       );
@@ -274,30 +358,40 @@ describe("runtime event normalization", () => {
     });
 
     test("base64 string / data-URL image data pass through as a data-URL", () => {
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: "aGk=", mediaType: "image/webp" } })).toBe(
-        "data:image/webp;base64,aGk=",
-      );
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: "data:image/png;base64,aGk=" } })).toBe(
-        "data:image/png;base64,aGk=",
-      );
+      expect(
+        normalizeToolOutputForEvent({
+          type: "image",
+          image: { data: "aGk=", mediaType: "image/webp" },
+        }),
+      ).toBe("data:image/webp;base64,aGk=");
+      expect(
+        normalizeToolOutputForEvent({
+          type: "image",
+          image: { data: "data:image/png;base64,aGk=" },
+        }),
+      ).toBe("data:image/png;base64,aGk=");
     });
 
     test("already-normalized input_image content item → its data-URL", () => {
-      expect(normalizeToolOutputForEvent({ type: "input_image", image: "data:image/png;base64,aGk=" })).toBe(
-        "data:image/png;base64,aGk=",
-      );
+      expect(
+        normalizeToolOutputForEvent({ type: "input_image", image: "data:image/png;base64,aGk=" }),
+      ).toBe("data:image/png;base64,aGk=");
     });
 
     test("a single-image array unwraps to the bare data-URL string", () => {
       const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38]);
-      expect(normalizeToolOutputForEvent([{ type: "image", image: { data: bytes, mediaType: "image/gif" } }])).toBe(
-        `data:image/gif;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(
+        normalizeToolOutputForEvent([
+          { type: "image", image: { data: bytes, mediaType: "image/gif" } },
+        ]),
+      ).toBe(`data:image/gif;base64,${Buffer.from(bytes).toString("base64")}`);
     });
 
     test("text outputs pass through unchanged", () => {
       expect(normalizeToolOutputForEvent("plain tool output")).toBe("plain tool output");
-      expect(normalizeToolOutputForEvent("data:image/png;base64,aGk=")).toBe("data:image/png;base64,aGk=");
+      expect(normalizeToolOutputForEvent("data:image/png;base64,aGk=")).toBe(
+        "data:image/png;base64,aGk=",
+      );
     });
 
     test("hosted computer_call data-URL string output is unchanged", () => {
@@ -355,25 +449,40 @@ describe("runtime event normalization", () => {
   });
 
   describe("per-MCP-server tool approval policy", () => {
-    type ApprovalAgent = { getMcpTools: (runContext: RunContext) => Promise<Awaited<ReturnType<typeof getAllMcpTools>>> };
+    type ApprovalAgent = {
+      getMcpTools: (runContext: RunContext) => Promise<Awaited<ReturnType<typeof getAllMcpTools>>>;
+    };
 
     // Resolves an agent's MCP tools and reports which prefixed tool names need
     // approval (invoking each tool's needsApproval predicate).
     async function approvalMapForAgent(agent: ApprovalAgent): Promise<Record<string, boolean>> {
       const tools = await agent.getMcpTools(new RunContext());
-      const entries = await Promise.all(tools.map(async (tool) => {
-        const needs = tool.type === "function"
-          ? Boolean(await (tool.needsApproval as (rc: unknown, input: unknown, details: unknown) => boolean | Promise<boolean>)(new RunContext(), "{}", {}))
-          : false;
-        return [tool.name, needs] as const;
-      }));
+      const entries = await Promise.all(
+        tools.map(async (tool) => {
+          const needs =
+            tool.type === "function"
+              ? Boolean(
+                  await (
+                    tool.needsApproval as (
+                      rc: unknown,
+                      input: unknown,
+                      details: unknown,
+                    ) => boolean | Promise<boolean>
+                  )(new RunContext(), "{}", {}),
+                )
+              : false;
+          return [tool.name, needs] as const;
+        }),
+      );
       return Object.fromEntries(entries);
     }
 
     // Builds an agent with a real test MCP server ("docs": search_documents +
     // fetch_document) under the given requireApproval policy, then resolves the
     // agent's MCP tools and reports which prefixed tool names need approval.
-    async function mcpToolApprovalMap(requireApproval: boolean | string[] | undefined): Promise<Record<string, boolean>> {
+    async function mcpToolApprovalMap(
+      requireApproval: boolean | string[] | undefined,
+    ): Promise<Record<string, boolean>> {
       const mcp = startTestMcpServer();
       const serverConfig = {
         id: "docs",
@@ -382,7 +491,9 @@ describe("runtime event normalization", () => {
         cacheToolsList: false,
         ...(requireApproval !== undefined ? { requireApproval } : {}),
       };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [{ kind: "mcp", id: "docs" }]);
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
       try {
         const agent = buildOpenGeniAgent(
           testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] }),
@@ -413,8 +524,16 @@ describe("runtime event normalization", () => {
 
     test("requireApproval survives the sandbox clone() tool-resolution path", async () => {
       const mcp = startTestMcpServer();
-      const serverConfig = { id: "docs", name: "Document Search", url: mcp.url, cacheToolsList: false, requireApproval: true as const };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [{ kind: "mcp", id: "docs" }]);
+      const serverConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        requireApproval: true as const,
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
+        { kind: "mcp", id: "docs" },
+      ]);
       try {
         const agent = buildOpenGeniAgent(
           // Sandbox backend → a SandboxAgent, whose tools are resolved on a fresh
@@ -428,10 +547,18 @@ describe("runtime event normalization", () => {
         // an instance-own getMcpTools override is dropped — approval must be
         // re-installed onto the clone or it silently bypasses on every sandbox turn.
         const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
-        expect(await approvalMapForAgent(clone)).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+        expect(await approvalMapForAgent(clone)).toEqual({
+          docs__search_documents: true,
+          docs__fetch_document: true,
+        });
         // clone-of-clone (resume paths) must keep the policy too.
-        const grandchild = (clone as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
-        expect(await approvalMapForAgent(grandchild)).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+        const grandchild = (
+          clone as unknown as { clone: (config: unknown) => ApprovalAgent }
+        ).clone({});
+        expect(await approvalMapForAgent(grandchild)).toEqual({
+          docs__search_documents: true,
+          docs__fetch_document: true,
+        });
       } finally {
         await prepared.close();
         mcp.close();
@@ -444,13 +571,31 @@ describe("runtime event normalization", () => {
       // Server ids where one is a prefix of the other, so their tool prefixes
       // collide: `my__` (outer) is a prefix of `my___` (inner). A tool like
       // `my___fetch_document` (inner) also startsWith `my__` (outer).
-      const outerConfig = { id: "my", name: "Outer", url: outer.url, cacheToolsList: false, requireApproval: ["search_documents"] };
-      const innerConfig = { id: "my_", name: "Inner", url: inner.url, cacheToolsList: false, requireApproval: true as const };
+      const outerConfig = {
+        id: "my",
+        name: "Outer",
+        url: outer.url,
+        cacheToolsList: false,
+        requireApproval: ["search_documents"],
+      };
+      const innerConfig = {
+        id: "my_",
+        name: "Inner",
+        url: inner.url,
+        cacheToolsList: false,
+        requireApproval: true as const,
+      };
       // Order [outer, inner] puts the SHORTER (colliding) prefix first, so a
       // first-match find over UNSORTED policies would mis-bind inner's tools to
       // outer's narrower policy and bypass gating on my___fetch_document.
-      const settings = testSettings({ sandboxBackend: "none", mcpServers: [outerConfig, innerConfig] });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "my" }, { kind: "mcp", id: "my_" }]);
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [outerConfig, innerConfig],
+      });
+      const prepared = await prepareAgentTools(settings, [
+        { kind: "mcp", id: "my" },
+        { kind: "mcp", id: "my_" },
+      ]);
       try {
         const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
         expect(await approvalMapForAgent(agent)).toEqual({
@@ -473,7 +618,7 @@ describe("runtime event normalization", () => {
   test("uses normal Azure CLI service principal login hook", () => {
     const command = azureCliLoginCommand();
     expect(command).toContain("export HOME=");
-    expect(command).toContain("mkdir -p \"$HOME/.azure\"");
+    expect(command).toContain('mkdir -p "$HOME/.azure"');
     expect(command).toContain("command -v az");
     expect(command).toContain("az login --service-principal");
     expect(command).toContain("az account set --subscription");
@@ -483,12 +628,15 @@ describe("runtime event normalization", () => {
 
   test("runs Azure CLI login hook as the sandbox agent user", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    await runAzureCliLoginHook({
-      execCommand: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { status: 0, output: "" };
-      },
-    } as any, { environment: {}, runAs: "sandbox" });
+    await runAzureCliLoginHook(
+      {
+        execCommand: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { status: 0, output: "" };
+        },
+      } as any,
+      { environment: {}, runAs: "sandbox" },
+    );
     expect(calls).toHaveLength(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
@@ -496,31 +644,45 @@ describe("runtime event normalization", () => {
 
   test("emits lifecycle hook failure events", async () => {
     const events: Array<{ type: string; payload: unknown }> = [];
-    await expect(runAzureCliLoginHook({
-      execCommand: async () => ({ status: 1, output: "login failed" }),
-    } as any, {
-      environment: {},
-      onRuntimeEvent: (event) => {
-        events.push(event);
-      },
-    })).rejects.toThrow("login failed");
-    expect(events.map((event) => event.type)).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    await expect(
+      runAzureCliLoginHook(
+        {
+          execCommand: async () => ({ status: 1, output: "login failed" }),
+        } as any,
+        {
+          environment: {},
+          onRuntimeEvent: (event) => {
+            events.push(event);
+          },
+        },
+      ),
+    ).rejects.toThrow("login failed");
+    expect(events.map((event) => event.type)).toEqual([
+      "sandbox.operation.started",
+      "sandbox.operation.failed",
+    ]);
   });
 
   test("runs sandbox lifecycle hooks once per session object", async () => {
     const session = {};
     let runs = 0;
-    const client = withSandboxLifecycleHooks({
-      backendId: "test",
-      create: async () => session,
-      resume: async () => session,
-    } as any, [{
-      id: "test-hook",
-      phase: "beforeAgentStart",
-      run: async () => {
-        runs += 1;
-      },
-    }], { environment: {} });
+    const client = withSandboxLifecycleHooks(
+      {
+        backendId: "test",
+        create: async () => session,
+        resume: async () => session,
+      } as any,
+      [
+        {
+          id: "test-hook",
+          phase: "beforeAgentStart",
+          run: async () => {
+            runs += 1;
+          },
+        },
+      ],
+      { environment: {} },
+    );
 
     await (client.create as any)();
     await client.resume!({} as any);
@@ -531,20 +693,26 @@ describe("runtime event normalization", () => {
   test("retries sandbox lifecycle hooks after a failed attempt on the same session object", async () => {
     const session = {};
     let runs = 0;
-    const client = withSandboxLifecycleHooks({
-      backendId: "test",
-      create: async () => session,
-      resume: async () => session,
-    } as any, [{
-      id: "test-hook",
-      phase: "beforeAgentStart",
-      run: async () => {
-        runs += 1;
-        if (runs === 1) {
-          throw new Error("hook failed");
-        }
-      },
-    }], { environment: {} });
+    const client = withSandboxLifecycleHooks(
+      {
+        backendId: "test",
+        create: async () => session,
+        resume: async () => session,
+      } as any,
+      [
+        {
+          id: "test-hook",
+          phase: "beforeAgentStart",
+          run: async () => {
+            runs += 1;
+            if (runs === 1) {
+              throw new Error("hook failed");
+            }
+          },
+        },
+      ],
+      { environment: {} },
+    );
 
     await expect((client.create as any)()).rejects.toThrow("hook failed");
     await expect(client.resume!({} as any)).resolves.toBe(session);
@@ -570,11 +738,14 @@ describe("runtime event normalization", () => {
   });
 
   test("keeps text-only first-turn input as a string", async () => {
-    const prepared = await prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
-      kind: "message",
-      text: "hello",
-      serializedRunState: null,
-    });
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "hello",
+        serializedRunState: null,
+      },
+    );
     expect(prepared.input).toBe("hello");
   });
 
@@ -585,11 +756,14 @@ describe("runtime event normalization", () => {
     // "Run state is missing schema version" and break the next turn. The reader
     // must recognize the sentinel and start clean instead, returning the bare
     // text exactly as a null state would.
-    const prepared = await prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
-      kind: "message",
-      text: "first message after clear",
-      serializedRunState: CLEARED_RUN_STATE_BLOB,
-    });
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "first message after clear",
+        serializedRunState: CLEARED_RUN_STATE_BLOB,
+      },
+    );
     expect(prepared.input).toBe("first message after clear");
     // And critically it carries no resurrected sandbox-resume descriptor.
     expect(prepared.serializedRunStateForSandbox).toBeUndefined();
@@ -614,24 +788,37 @@ describe("runtime event normalization", () => {
     // (its function_call lost to a write-path desync) must still produce a
     // valid model input instead of one the Responses API 400s on. The read
     // path sanitizes the in-memory copy; the orphan never reaches the model.
-    const orphan = { type: "function_call_result", callId: "call_orphan", output: { type: "text", text: "stale" } };
+    const orphan = {
+      type: "function_call_result",
+      callId: "call_orphan",
+      output: { type: "text", text: "stale" },
+    };
     const validCall = { type: "function_call", callId: "call_ok", name: "tool", arguments: "{}" };
-    const validResult = { type: "function_call_result", callId: "call_ok", output: { type: "text", text: "ok" } };
-    const prepared = await prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
-      kind: "message",
-      text: "continue",
-      historyItems: [
-        { type: "message", role: "user", content: "earlier" } as any,
-        orphan as any,
-        validCall as any,
-        validResult as any,
-      ],
-    });
+    const validResult = {
+      type: "function_call_result",
+      callId: "call_ok",
+      output: { type: "text", text: "ok" },
+    };
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          { type: "message", role: "user", content: "earlier" } as any,
+          orphan as any,
+          validCall as any,
+          validResult as any,
+        ],
+      },
+    );
     const input = prepared.input as Array<Record<string, unknown>>;
     expect(Array.isArray(input)).toBe(true);
     // The orphan is gone; the valid pair and the new user turn remain in order.
     expect(input.filter((item) => item.type === "function_call_result")).toEqual([validResult]);
-    expect(input.some((item) => item.type === "function_call_result" && item.callId === "call_orphan")).toBe(false);
+    expect(
+      input.some((item) => item.type === "function_call_result" && item.callId === "call_orphan"),
+    ).toBe(false);
     expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
   });
 
@@ -694,15 +881,25 @@ describe("runtime event normalization", () => {
     expect(sandboxRunAs(testSettings({ sandboxBackend: "local" }))).toBeUndefined();
     expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBeUndefined();
     expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
-    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs).toBeUndefined();
-    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "local" }), []) as any).runAs).toBeUndefined();
-    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any).runAs).toBeUndefined();
-    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "local" }), []) as any).runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any).runAs,
+    ).toBeUndefined();
+    expect(
+      (buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs,
+    ).toBeUndefined();
   });
 
   test("includes read-only attachment guidance in agent instructions", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect(agent.instructions).toContain("Attached files are mounted read-only; copy them before modifying.");
+    expect(agent.instructions).toContain(
+      "Attached files are mounted read-only; copy them before modifying.",
+    );
   });
 
   test("surfaces attached workspace environment metadata in agent instructions", () => {
@@ -713,9 +910,15 @@ describe("runtime event normalization", () => {
         variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
       },
     });
-    expect(agent.instructions).toContain('A workspace environment named "azure-prod" is attached to this session');
-    expect(agent.instructions).toContain("Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.");
-    expect(agent.instructions).toContain("Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.");
+    expect(agent.instructions).toContain(
+      'A workspace environment named "azure-prod" is attached to this session',
+    );
+    expect(agent.instructions).toContain(
+      "Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.",
+    );
+    expect(agent.instructions).toContain(
+      "Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
+    );
   });
 
   test("omits workspace environment instructions when no environment is attached or metadata is empty", () => {
@@ -725,7 +928,9 @@ describe("runtime event normalization", () => {
     const minimal = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       workspaceEnvironment: { name: "bare", description: "  ", variableNames: [] },
     });
-    expect(minimal.instructions).toContain('A workspace environment named "bare" is attached to this session');
+    expect(minimal.instructions).toContain(
+      'A workspace environment named "bare" is attached to this session',
+    );
     expect(minimal.instructions).not.toContain("Exported environment variables:");
     expect(minimal.instructions).not.toContain("Environment notes from the operator:");
   });
@@ -753,7 +958,9 @@ describe("runtime event normalization", () => {
 
   test("default template composes byte-identically to the pinned default preamble (no override, no environment)", () => {
     // Direct composition: default template + empty CORE-with-no-env.
-    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(
+      HISTORICAL_DEFAULT_INSTRUCTIONS,
+    );
     // End-to-end through the agent builder with the default settings template.
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
@@ -772,32 +979,45 @@ describe("runtime event normalization", () => {
       "Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
     ].join(" ");
     expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, env)).toBe(expected);
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceEnvironment: env });
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      workspaceEnvironment: env,
+    });
     expect(agent.instructions).toBe(expected);
   });
 
   test("a white-label persona override is substituted at {{core}} but keeps the non-bypassable CORE", () => {
     const template = `You are ACME's deployment co-pilot. ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER} Stay on brand.`;
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { instructionsTemplate: template });
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+    });
     expect(agent.instructions).toContain("You are ACME's deployment co-pilot.");
     expect(agent.instructions).not.toContain("You are an OpenGeni workspace agent.");
     // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
     expect(agent.instructions).toContain("you call opengeni__goal_complete with concrete evidence");
-    expect(agent.instructions).toBe(`You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`);
+    expect(agent.instructions).toBe(
+      `You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`,
+    );
   });
 
   test("a persona template without the marker still gets the CORE appended (non-bypassable fail-safe)", () => {
     const template = "You are ACME's deployment co-pilot.";
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { instructionsTemplate: template });
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+    });
     expect(agent.instructions).toBe(`${template} ${coreInstructions().join(" ")}`);
     expect(agent.instructions).toContain("opengeni__goal_complete");
   });
 
   test("the per-call override beats the deployment-default template", () => {
-    const settings = testSettings({ sandboxBackend: "none", agentInstructionsTemplate: `DEPLOY DEFAULT ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}` });
+    const settings = testSettings({
+      sandboxBackend: "none",
+      agentInstructionsTemplate: `DEPLOY DEFAULT ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
+    });
     const withoutOverride = buildOpenGeniAgent(settings, []);
     expect(withoutOverride.instructions.startsWith("DEPLOY DEFAULT ")).toBe(true);
-    const withOverride = buildOpenGeniAgent(settings, [], { instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}` });
+    const withOverride = buildOpenGeniAgent(settings, [], {
+      instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`,
+    });
     expect(withOverride.instructions.startsWith("WORKSPACE OVERRIDE ")).toBe(true);
     expect(withOverride.instructions).not.toContain("DEPLOY DEFAULT");
   });
@@ -809,7 +1029,9 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
     // Exact ordering: workspace persona + CORE first, session instructions last.
-    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`);
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`,
+    );
     // And it rides the same instructions string (system-level), never a message.
     expect(agent.instructions.endsWith("SESSION RULE: always answer in French.")).toBe(true);
   });
@@ -823,9 +1045,13 @@ describe("runtime event normalization", () => {
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
     const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { sessionInstructions: undefined });
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: undefined,
+    });
     // A blank/whitespace-only value is also a no-op (trimmed to nothing).
-    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { sessionInstructions: "   " });
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "   ",
+    });
     expect(withUndefined.instructions).toBe(base.instructions);
     expect(withBlank.instructions).toBe(base.instructions);
     expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
@@ -836,8 +1062,12 @@ describe("runtime event normalization", () => {
     expect(appendWorkspaceMemory("base", "   ")).toBe("base");
 
     const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: undefined });
-    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: "   " });
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      workspaceMemory: undefined,
+    });
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      workspaceMemory: "   ",
+    });
     expect(withUndefined.instructions).toBe(base.instructions);
     expect(withBlank.instructions).toBe(base.instructions);
     expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
@@ -852,9 +1082,12 @@ describe("runtime event normalization", () => {
       sessionInstructions: "SESSION RULE: always answer in French.",
     });
 
-    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`);
-    expect(agent.instructions.indexOf(workspaceMemory))
-      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`,
+    );
+    expect(agent.instructions.indexOf(workspaceMemory)).toBeLessThan(
+      agent.instructions.indexOf("SESSION RULE"),
+    );
   });
 
   test("the genesis title directive stays LAST, after per-session instructions", () => {
@@ -865,7 +1098,9 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toContain("Session-scoped rule.");
     // Genesis directive is appended after everything, including the session slice.
     expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
-    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE));
+    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
+      agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE),
+    );
   });
 
   // ── generic programmatic-tool-calling (toolspace) substrate directive ──────
@@ -876,7 +1111,9 @@ describe("runtime event normalization", () => {
   const toolspaceOn = { sandboxBackend: "none", toolspaceEnabled: true } as const;
 
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
-    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], { toolspaceTokenSeed: "ogd_seed" });
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      toolspaceTokenSeed: "ogd_seed",
+    });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
     const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
@@ -885,9 +1122,13 @@ describe("runtime event normalization", () => {
   });
 
   test("NEGATIVE: feature flag off (even with a token seed) omits the directive", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", toolspaceEnabled: false }), [], {
-      toolspaceTokenSeed: "ogd_seed",
-    });
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", toolspaceEnabled: false }),
+      [],
+      {
+        toolspaceTokenSeed: "ogd_seed",
+      },
+    );
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
@@ -915,8 +1156,9 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(
       `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
     );
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
-      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+      agent.instructions.indexOf("SESSION RULE"),
+    );
   });
 
   test("workspace memory composes after the toolspace directive and before the per-session slice", () => {
@@ -932,10 +1174,12 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(
       `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
     );
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
-      .toBeLessThan(agent.instructions.indexOf(workspaceMemory));
-    expect(agent.instructions.indexOf(workspaceMemory))
-      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+      agent.instructions.indexOf(workspaceMemory),
+    );
+    expect(agent.instructions.indexOf(workspaceMemory)).toBeLessThan(
+      agent.instructions.indexOf("SESSION RULE"),
+    );
   });
 
   test("the toolspace directive stays before the genesis directive, which remains LAST", () => {
@@ -946,14 +1190,18 @@ describe("runtime event normalization", () => {
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
-    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
-      .toBeLessThan(agent.instructions.indexOf("Session-scoped rule."));
-    expect(agent.instructions.indexOf("Session-scoped rule."))
-      .toBeLessThan(agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE));
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
+      agent.instructions.indexOf("Session-scoped rule."),
+    );
+    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
+      agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE),
+    );
   });
 
   test("appendToolspaceInstructions joins by space and no-ops when unavailable", () => {
-    expect(appendToolspaceInstructions("BASE", true)).toBe(`BASE ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}`);
+    expect(appendToolspaceInstructions("BASE", true)).toBe(
+      `BASE ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}`,
+    );
     expect(appendToolspaceInstructions("BASE", false)).toBe("BASE");
   });
 
@@ -968,29 +1216,38 @@ describe("runtime event normalization", () => {
 
   test("builds native S3 mount entries for file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
-    const manifest = buildManifest(testSettings({
-      objectStorageEndpoint: "http://127.0.0.1:9000",
-      objectStorageSandboxEndpoint: "http://host.docker.internal:9000",
-      objectStorageAccessKeyId: "minioadmin",
-      objectStorageSecretAccessKey: "minioadmin",
-    }), [{ kind: "file", fileId }]);
+    const manifest = buildManifest(
+      testSettings({
+        objectStorageEndpoint: "http://127.0.0.1:9000",
+        objectStorageSandboxEndpoint: "http://host.docker.internal:9000",
+        objectStorageAccessKeyId: "minioadmin",
+        objectStorageSecretAccessKey: "minioadmin",
+      }),
+      [{ kind: "file", fileId }],
+    );
     const entry = manifest.entries[`files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.bucket).toBe("opengeni-files");
     expect(entry.prefix).toBe(`files/${fileId}/original`);
     expect(entry.endpointUrl).toBe("http://host.docker.internal:9000");
     expect(entry.s3Provider).toBe("Minio");
-    expect(entry.mountStrategy).toEqual({ type: "in_container", pattern: { type: "rclone", mode: "fuse" } });
+    expect(entry.mountStrategy).toEqual({
+      type: "in_container",
+      pattern: { type: "rclone", mode: "fuse" },
+    });
   });
 
   test("uses Modal cloud bucket strategy for Modal S3-compatible file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000011";
-    const manifest = buildManifest(testSettings({
-      sandboxBackend: "modal",
-      objectStorageEndpoint: "https://s3.example.com",
-      objectStorageAccessKeyId: "access-key",
-      objectStorageSecretAccessKey: "secret-key",
-    }), [{ kind: "file", fileId }]);
+    const manifest = buildManifest(
+      testSettings({
+        sandboxBackend: "modal",
+        objectStorageEndpoint: "https://s3.example.com",
+        objectStorageAccessKeyId: "access-key",
+        objectStorageSecretAccessKey: "secret-key",
+      }),
+      [{ kind: "file", fileId }],
+    );
     const entry = manifest.entries[`files/${fileId}`] as any;
     expect(entry.type).toBe("s3_mount");
     expect(entry.mountStrategy).toMatchObject({ type: "modal_cloud_bucket" });
@@ -998,10 +1255,14 @@ describe("runtime event normalization", () => {
 
   test("builds native Azure Blob mount entries for file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000020";
-    const manifest = buildManifest(testSettings({
-      objectStorageBackend: "azure-blob",
-      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
-    }), [{ kind: "file", fileId }]);
+    const manifest = buildManifest(
+      testSettings({
+        objectStorageBackend: "azure-blob",
+        objectStorageAzureConnectionString:
+          "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+      }),
+      [{ kind: "file", fileId }],
+    );
     const entry = manifest.entries[`files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.container).toBe("opengeni-files");
@@ -1009,15 +1270,22 @@ describe("runtime event normalization", () => {
     expect(entry.accountName).toBe("acct");
     expect(entry.accountKey).toBe("secret");
     expect(entry.endpointUrl).toBeUndefined();
-    expect(entry.mountStrategy).toEqual({ type: "in_container", pattern: { type: "rclone", mode: "fuse" } });
+    expect(entry.mountStrategy).toEqual({
+      type: "in_container",
+      pattern: { type: "rclone", mode: "fuse" },
+    });
   });
 
   test("keeps custom Azure Blob mount endpoints for non-standard storage hosts", () => {
     const fileId = "00000000-0000-4000-8000-000000000022";
-    const manifest = buildManifest(testSettings({
-      objectStorageBackend: "azure-blob",
-      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://custom.blob.example.test/",
-    }), [{ kind: "file", fileId }]);
+    const manifest = buildManifest(
+      testSettings({
+        objectStorageBackend: "azure-blob",
+        objectStorageAzureConnectionString:
+          "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://custom.blob.example.test/",
+      }),
+      [{ kind: "file", fileId }],
+    );
     const entry = manifest.entries[`files/${fileId}`] as any;
     expect(entry.type).toBe("azure_blob_mount");
     expect(entry.endpointUrl).toBe("https://custom.blob.example.test");
@@ -1025,11 +1293,19 @@ describe("runtime event normalization", () => {
 
   test("requires signed download materialization for Modal Azure Blob file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000021";
-    expect(() => buildManifest(testSettings({
-      sandboxBackend: "modal",
-      objectStorageBackend: "azure-blob",
-      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
-    }), [{ kind: "file", fileId }])).toThrow("Modal sandbox Azure Blob file resources require pre-signed download materialization");
+    expect(() =>
+      buildManifest(
+        testSettings({
+          sandboxBackend: "modal",
+          objectStorageBackend: "azure-blob",
+          objectStorageAzureConnectionString:
+            "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+        }),
+        [{ kind: "file", fileId }],
+      ),
+    ).toThrow(
+      "Modal sandbox Azure Blob file resources require pre-signed download materialization",
+    );
   });
 
   test("uses inline manifest files for Modal Azure Blob file materialization when content is provided", () => {
@@ -1037,18 +1313,23 @@ describe("runtime event normalization", () => {
     const settings = testSettings({
       sandboxBackend: "modal",
       objectStorageBackend: "azure-blob",
-      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+      objectStorageAzureConnectionString:
+        "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
     });
-    const downloads = [{
-      fileId,
-      mountPath: `files/${fileId}`,
-      filename: "source.txt",
-      content: new TextEncoder().encode("hello"),
-      sizeBytes: 12,
-    }];
+    const downloads = [
+      {
+        fileId,
+        mountPath: `files/${fileId}`,
+        filename: "source.txt",
+        content: new TextEncoder().encode("hello"),
+        sizeBytes: 12,
+      },
+    ];
     const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
     const entry = manifest.entries[`files/${fileId}`] as any;
-    const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], { fileResourceDownloads: downloads });
+    const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], {
+      fileResourceDownloads: downloads,
+    });
 
     expect(entry.type).toBe("dir");
     expect(entry.children["source.txt"].type).toBe("file");
@@ -1060,23 +1341,29 @@ describe("runtime event normalization", () => {
   test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
     const commands: string[] = [];
     const events: string[] = [];
-    await materializeSandboxFileDownloads({
-      state: { manifest: new Manifest({ root: "/workspace" }) },
-      exec: async ({ cmd }: { cmd: string }) => {
-        commands.push(cmd);
-        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+    await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        exec: async ({ cmd }: { cmd: string }) => {
+          commands.push(cmd);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: "files/file-1",
+          filename: "input.txt",
+          url: "https://storage.example/input.txt?sig=secret",
+          sizeBytes: 5,
+        },
+      ],
+      {
+        onRuntimeEvent: (event) => {
+          events.push(JSON.stringify(event));
+        },
       },
-    } as any, [{
-      fileId: "file-1",
-      mountPath: "files/file-1",
-      filename: "input.txt",
-      url: "https://storage.example/input.txt?sig=secret",
-      sizeBytes: 5,
-    }], {
-      onRuntimeEvent: (event) => {
-        events.push(JSON.stringify(event));
-      },
-    });
+    );
 
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("set -eu");
@@ -1090,33 +1377,43 @@ describe("runtime event normalization", () => {
 
   test("reports signed file download failures without throwing", async () => {
     const events: Array<{ type: string; payload: any }> = [];
-    const result = await materializeSandboxFileDownloads({
-      state: { manifest: new Manifest({ root: "/workspace" }) },
-      execCommand: async () => [
-        "Chunk ID: abc123",
-        "Wall time: 0.0000 seconds",
-        "Process exited with code 2",
-        "Output:",
-        "/bin/sh: 1: set: Illegal option -o pipefail",
-      ].join("\n"),
-    } as any, [{
-      fileId: "file-1",
-      mountPath: "files/file-1",
-      filename: "input.txt",
-      url: "https://storage.example/input.txt?sig=secret",
-      sizeBytes: 5,
-    }], {
-      onRuntimeEvent: (event) => {
-        events.push(event as any);
+    const result = await materializeSandboxFileDownloads(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        execCommand: async () =>
+          [
+            "Chunk ID: abc123",
+            "Wall time: 0.0000 seconds",
+            "Process exited with code 2",
+            "Output:",
+            "/bin/sh: 1: set: Illegal option -o pipefail",
+          ].join("\n"),
+      } as any,
+      [
+        {
+          fileId: "file-1",
+          mountPath: "files/file-1",
+          filename: "input.txt",
+          url: "https://storage.example/input.txt?sig=secret",
+          sizeBytes: 5,
+        },
+      ],
+      {
+        onRuntimeEvent: (event) => {
+          events.push(event as any);
+        },
       },
-    });
+    );
 
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]?.filename).toBe("input.txt");
     expect(result.failures[0]?.exitCode).toBe(2);
     expect(result.failures[0]?.reason).toContain("failed with exit code 2");
     expect(result.failures[0]?.reason).toContain("Illegal option");
-    expect(events.map((event) => event.type)).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
+    expect(events.map((event) => event.type)).toEqual([
+      "sandbox.operation.started",
+      "sandbox.operation.failed",
+    ]);
     expect(events[1]?.payload.exitCode).toBe(2);
     expect(events[1]?.payload.error).toContain("Illegal option");
     expect(JSON.stringify(events)).not.toContain("sig=secret");
@@ -1129,7 +1426,8 @@ describe("runtime event normalization", () => {
       create: async () => {
         const session = {
           state: { manifest: new Manifest({ root: "/workspace" }) },
-          execCommand: async () => "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
+          execCommand: async () =>
+            "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
         };
         sessions.push(session);
         return session;
@@ -1137,18 +1435,21 @@ describe("runtime event normalization", () => {
       resume: async (state: any) => {
         const session = {
           state,
-          execCommand: async () => "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
+          execCommand: async () =>
+            "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
         };
         sessions.push(session);
         return session;
       },
     };
-    const client = withSandboxFileDownloads(baseClient as any, [{
-      fileId: "file-1",
-      mountPath: "files/file-1",
-      filename: "input.txt",
-      url: "https://storage.example/input.txt?sig=secret",
-    }]);
+    const client = withSandboxFileDownloads(baseClient as any, [
+      {
+        fileId: "file-1",
+        mountPath: "files/file-1",
+        filename: "input.txt",
+        url: "https://storage.example/input.txt?sig=secret",
+      },
+    ]);
 
     await client.create!();
     await client.resume!({ manifest: new Manifest({ root: "/workspace" }) } as any);
@@ -1157,11 +1458,13 @@ describe("runtime event normalization", () => {
   });
 
   test("keeps repository resources as git repo manifest entries", () => {
-    const manifest = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/app.git",
-      ref: "main",
-    }]);
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
+    ]);
     expect(manifest.entries["repos/acme/app"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
@@ -1171,13 +1474,15 @@ describe("runtime event normalization", () => {
   });
 
   test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
-    const manifest = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]);
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ]);
     expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain("git_repo");
@@ -1187,13 +1492,15 @@ describe("runtime event normalization", () => {
   });
 
   test("keeps Modal repository resources out of SDK git repo materialization", () => {
-    const manifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]);
+    const manifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ]);
 
     expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
     const serialized = JSON.stringify(manifest);
@@ -1206,33 +1513,41 @@ describe("runtime event normalization", () => {
   test("emits manifests without extra path grants so remote sandbox clients accept them", () => {
     // Modal's sandbox client rejects any manifest carrying extraPathGrants at
     // create/apply time; the bundled-skills source must not reintroduce one.
-    const modalManifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]);
+    const modalManifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ]);
     expect(modalManifest.extraPathGrants).toEqual([]);
     expect(buildManifest(testSettings(), []).extraPathGrants).toEqual([]);
   });
 
   test("clones repository resources inside the sandbox without embedding credentials", () => {
-    const command = repositoryCloneCommand([{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      subpath: "packages/api",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]);
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        subpath: "packages/api",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ]);
 
-    expect(command).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
-    expect(command).toContain("git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null");
+    expect(command).toContain(
+      'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
+    );
+    expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
-    expect(command).toContain("clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'");
+    expect(command).toContain(
+      "clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+    );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
     // TOKEN-BROKER (B2): the provisioned askpass script legitimately references the
@@ -1244,64 +1559,78 @@ describe("runtime event normalization", () => {
   });
 
   test("TOKEN-BROKER (B1/B2): the clone command writes provider token FILES and provisions askpass + CLI wrappers before the clone", () => {
-    const command = repositoryCloneCommand([{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }]);
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ]);
 
     // The seed writer reads only per-exec OPENGENI_GIT_*_TOKEN_SEED vars (never
     // manifest values) and writes STABLE token files ATOMICALLY: pid-suffixed temp
     // under umask 077, renamed into place.
     expect(command).toContain("umask 077");
-    expect(command).toContain("write_git_provider_token github \"${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}\"");
-    expect(command).toContain("write_git_provider_token gitlab \"${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}\"");
-    expect(command).toContain("write_git_provider_token azure_devops \"${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}\"");
-    expect(command).toContain("printf '%s' \"$token\" > \"$token_file.tmp.$$\"");
-    expect(command).toContain("mv -f \"$token_file.tmp.$$\" \"$token_file\"");
-    expect(command).toContain("mv -f \"$credential_dir/github-token.tmp.$$\" \"$credential_dir/github-token\"");
+    expect(command).toContain(
+      'write_git_provider_token github "${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}"',
+    );
+    expect(command).toContain(
+      'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
+    );
+    expect(command).toContain(
+      'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
+    );
+    expect(command).toContain('printf \'%s\' "$token" > "$token_file.tmp.$$"');
+    expect(command).toContain('mv -f "$token_file.tmp.$$" "$token_file"');
+    expect(command).toContain(
+      'mv -f "$credential_dir/github-token.tmp.$$" "$credential_dir/github-token"',
+    );
 
     // TOKEN-BROKER (B2): the SAME setup block PROVISIONS the git-askpass helper at
     // SETUP (runtime) into the per-box, user-writable $GIT_ASKPASS (a manifest env
     // pointer, default $HOME/.opengeni/askpass), so auth is correct on ANY box image
     // without a baked script. Written via a QUOTED heredoc to a temp, chmod 0755,
     // then renamed into place (same atomicity as the token file).
-    expect(command).toContain("git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"");
+    expect(command).toContain('git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"');
     expect(command).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
-    expect(command).toContain("chmod 0755 \"$git_askpass.tmp.$$\"");
-    expect(command).toContain("mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"");
+    expect(command).toContain('chmod 0755 "$git_askpass.tmp.$$"');
+    expect(command).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
     // The provisioned askpass' Password branch selects a provider by prompt host
     // and reads the corresponding token FILE.
     expect(command).toContain("*github.com*|*githubusercontent.com*) printf '%s\\n' github ;;");
     expect(command).toContain("*gitlab*) printf '%s\\n' gitlab ;;");
-    expect(command).toContain("*dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;");
-    expect(command).toContain("*Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;");
+    expect(command).toContain(
+      "*dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
+    );
+    expect(command).toContain(
+      '*Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
+    );
     expect(command).toContain("github) printf '%s\\n' \"x-access-token\" ;;");
 
     // Provider CLI shims are installed early on PATH by the manifest env. They
     // read the CURRENT token file at invocation time and exec the real binary.
-    expect(command).toContain("wrapper_dir=\"${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}\"");
+    expect(command).toContain('wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"');
     expect(command).toContain("for opengeni_git_cli_tool in gh glab az; do");
     expect(command).toContain("gh) provider=github; token_env=GH_TOKEN ;;");
     expect(command).toContain("glab) provider=gitlab; token_env=GITLAB_TOKEN ;;");
     expect(command).toContain("az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;");
-    expect(command).toContain("GH_TOKEN) export GH_TOKEN=\"$token\" ;;");
-    expect(command).toContain("GITLAB_TOKEN) export GITLAB_TOKEN=\"$token\" ;;");
-    expect(command).toContain("AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT=\"$token\" ;;");
+    expect(command).toContain('GH_TOKEN) export GH_TOKEN="$token" ;;');
+    expect(command).toContain('GITLAB_TOKEN) export GITLAB_TOKEN="$token" ;;');
+    expect(command).toContain('AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT="$token" ;;');
 
     // Helper writes MUST come BEFORE the fetch that consumes them (order matters:
     // GIT_ASKPASS execs the provisioned script, which reads the token file, during
     // the fetch).
     expect(command.indexOf("write_git_provider_token github")).toBeLessThan(
-      command.indexOf("git -C \"$tmp\" fetch"),
+      command.indexOf('git -C "$tmp" fetch'),
     );
-    expect(command.indexOf("cat > \"$git_askpass.tmp.$$\"")).toBeLessThan(
-      command.indexOf("git -C \"$tmp\" fetch"),
+    expect(command.indexOf('cat > "$git_askpass.tmp.$$"')).toBeLessThan(
+      command.indexOf('git -C "$tmp" fetch'),
     );
     expect(command.indexOf("cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'")).toBeLessThan(
-      command.indexOf("git -C \"$tmp\" fetch"),
+      command.indexOf('git -C "$tmp" fetch'),
     );
     // The token VALUE is never literally in the command (only the env-var reference);
     // the "x-access-token" USERNAME constant is not a credential.
@@ -1325,64 +1654,108 @@ describe("runtime event normalization", () => {
     // Cloud home backend: the clone fires today (modal always clones; any
     // backend clones a GitHub-App-connected repo). These are the unchanged
     // cloud paths.
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo)).toBe(true);
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), plainRepo)).toBe(true);
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo)).toBe(true);
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(false);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo)).toBe(
+      true,
+    );
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), plainRepo)).toBe(
+      true,
+    );
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo)).toBe(
+      true,
+    );
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(
+      false,
+    );
 
     // Home backend IS selfhosted: gated with no caller change (active backend
     // defaults to the home backend).
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), githubRepo)).toBe(false);
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), plainRepo)).toBe(false);
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), githubRepo),
+    ).toBe(false);
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), plainRepo),
+    ).toBe(false);
 
     // Cloud home backend but ACTIVE sandbox swapped to a connected machine:
     // the explicit active-backend signal suppresses the clone even though the
     // home backend (modal/docker) would otherwise clone.
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "selfhosted")).toBe(false);
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo, "selfhosted")).toBe(false);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "modal" }),
+        githubRepo,
+        "selfhosted",
+      ),
+    ).toBe(false);
+    expect(
+      repositoryUsesSandboxClone(
+        testSettings({ sandboxBackend: "docker" }),
+        githubRepo,
+        "selfhosted",
+      ),
+    ).toBe(false);
 
     // Active backend is another cloud box (a sibling Modal swap): still clones.
-    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal")).toBe(true);
+    expect(
+      repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal"),
+    ).toBe(true);
   });
 
   test("buildOpenGeniAgent accepts the activeSandboxBackend option for both cloud and selfhosted targets", () => {
-    const resources = [{
-      kind: "repository" as const,
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }];
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ];
     // The gating itself is covered behaviourally by the predicate test above
     // (the per-agent clone-hook set is held in a private WeakMap). Here we only
     // guard that the new option is accepted on the SandboxAgent build path for a
     // cloud home backend whether or not the active backend is swapped.
-    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, { activeSandboxBackend: "selfhosted" })).not.toThrow();
-    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, { activeSandboxBackend: "modal" })).not.toThrow();
-    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources)).not.toThrow();
+    expect(() =>
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
+        activeSandboxBackend: "selfhosted",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
+        activeSandboxBackend: "modal",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources),
+    ).not.toThrow();
   });
 
   test("runs repository clone hook as a sandbox lifecycle hook", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const events: string[] = [];
-    await runRepositoryCloneHook({
-      execCommand: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { status: 0, output: "" };
+    await runRepositoryCloneHook(
+      {
+        execCommand: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { status: 0, output: "" };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ],
+      {
+        environment: { GH_TOKEN: "secret-token" },
+        runAs: "sandbox",
+        onRuntimeEvent: (event) => {
+          events.push(event.type);
+        },
       },
-    } as any, [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }], {
-      environment: { GH_TOKEN: "secret-token" },
-      runAs: "sandbox",
-      onRuntimeEvent: (event) => {
-        events.push(event.type);
-      },
-    });
+    );
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.runAs).toBe("sandbox");
@@ -1394,29 +1767,37 @@ describe("runtime event normalization", () => {
 
   test("TOKEN-BROKER (B1): the clone hook seeds the git token PER-EXEC (command prefix), never on the exec env/manifest", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    await runRepositoryCloneHook({
-      exec: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+    await runRepositoryCloneHook(
+      {
+        exec: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ],
+      {
+        environment: { HOME: "/workspace" },
+        runAs: "sandbox",
+        gitTokenSeed: "ghs_liveToken123",
       },
-    } as any, [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }], {
-      environment: { HOME: "/workspace" },
-      runAs: "sandbox",
-      gitTokenSeed: "ghs_liveToken123",
-    });
+    );
 
     expect(calls).toHaveLength(1);
     // The seed is inlined as an ephemeral export PREFIX on the command text — it is
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
     expect(calls[0]?.environment).toBeUndefined();
-    expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'");
+    expect(String(calls[0]?.cmd)).toContain(
+      "export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'",
+    );
     expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
     // The prefix precedes the seed writer that writes the file.
     expect(String(calls[0]?.cmd).indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
@@ -1427,31 +1808,39 @@ describe("runtime event normalization", () => {
     // box on ANY image gets a correct askpass at setup, no baked script required.
     const cmd = String(calls[0]?.cmd);
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
-    expect(cmd).toContain("chmod 0755 \"$git_askpass.tmp.$$\"");
-    expect(cmd).toContain("mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"");
-    expect(cmd).toContain("*Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;");
+    expect(cmd).toContain('chmod 0755 "$git_askpass.tmp.$$"');
+    expect(cmd).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
+    expect(cmd).toContain(
+      '*Password*) cat "$(token_file_for_provider "$provider")" 2>/dev/null || printf \'\\n\' ;;',
+    );
   });
 
   test("TOKEN-BROKER (B1): the clone hook seeds GitLab and Azure DevOps tokens per-exec", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    await runRepositoryCloneHook({
-      exec: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+    await runRepositoryCloneHook(
+      {
+        exec: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/private.git",
+          ref: "main",
+          provider: "gitlab",
+          repositoryId: "gl-456",
+        },
+      ],
+      {
+        environment: { HOME: "/workspace" },
+        gitTokenSeeds: {
+          gitlab: "glpat_liveToken123",
+          azure_devops: "azdo_liveToken456",
+        },
       },
-    } as any, [{
-      kind: "repository",
-      uri: "https://gitlab.com/acme/private.git",
-      ref: "main",
-      provider: "gitlab",
-      repositoryId: "gl-456",
-    }], {
-      environment: { HOME: "/workspace" },
-      gitTokenSeeds: {
-        gitlab: "glpat_liveToken123",
-        azure_devops: "azdo_liveToken456",
-      },
-    });
+    );
 
     const cmd = String(calls[0]?.cmd);
     expect(calls[0]?.environment).toBeUndefined();
@@ -1463,20 +1852,26 @@ describe("runtime event normalization", () => {
 
   test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
     const calls: Array<Record<string, unknown>> = [];
-    await runRepositoryCloneHook({
-      exec: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+    await runRepositoryCloneHook(
+      {
+        exec: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        },
+      ],
+      {
+        environment: { HOME: "/workspace" },
       },
-    } as any, [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }], {
-      environment: { HOME: "/workspace" },
-    });
+    );
 
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
@@ -1485,23 +1880,33 @@ describe("runtime event normalization", () => {
 
   test("TOOLSPACE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
     const command = toolspaceTokenSeedCommand();
-    expect(command).toContain("if [ -n \"${OPENGENI_TOOLSPACE_TOKEN_SEED:-}\" ]; then");
+    expect(command).toContain('if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then');
     expect(command).toContain("umask 077");
-    expect(command).toContain("token_file=\"${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}\"");
-    expect(command).toContain("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\" > \"$token_file.tmp.$$\"");
-    expect(command).toContain("mv -f \"$token_file.tmp.$$\" \"$token_file\"");
+    expect(command).toContain(
+      'token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    );
+    expect(command).toContain(
+      'printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
+    );
+    expect(command).toContain('mv -f "$token_file.tmp.$$" "$token_file"');
 
     const calls: Array<Record<string, unknown>> = [];
-    await runToolspaceTokenSeedHook({
-      exec: async (args: Record<string, unknown>) => {
-        calls.push(args);
-        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
-      },
-    } as any, {
-      environment: { HOME: "/workspace", OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token" },
-      runAs: "sandbox",
-      toolspaceTokenSeed: "ogd_toolspace_live",
-    } as any);
+    await runToolspaceTokenSeedHook(
+      {
+        exec: async (args: Record<string, unknown>) => {
+          calls.push(args);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      {
+        environment: {
+          HOME: "/workspace",
+          OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+        },
+        runAs: "sandbox",
+        toolspaceTokenSeed: "ogd_toolspace_live",
+      } as any,
+    );
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.environment).toBeUndefined();
@@ -1514,38 +1919,49 @@ describe("runtime event normalization", () => {
 
   test("fails repository clone hook when sandbox command is still running", async () => {
     const events: string[] = [];
-    await expect(runRepositoryCloneHook({
-      execCommand: async () => [
-        "Chunk ID: abc123",
-        "Wall time: 1.0000 seconds",
-        "Process running with session ID 1",
-        "Output:",
-        "",
-      ].join("\n"),
-    } as any, [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      githubInstallationId: 123,
-      githubRepositoryId: 456,
-    }], {
-      environment: { GH_TOKEN: "secret-token" },
-      onRuntimeEvent: (event) => {
-        events.push(event.type);
-      },
-    })).rejects.toThrow("did not finish before the lifecycle command timeout");
+    await expect(
+      runRepositoryCloneHook(
+        {
+          execCommand: async () =>
+            [
+              "Chunk ID: abc123",
+              "Wall time: 1.0000 seconds",
+              "Process running with session ID 1",
+              "Output:",
+              "",
+            ].join("\n"),
+        } as any,
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+        {
+          environment: { GH_TOKEN: "secret-token" },
+          onRuntimeEvent: (event) => {
+            events.push(event.type);
+          },
+        },
+      ),
+    ).rejects.toThrow("did not finish before the lifecycle command timeout");
 
     expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
   });
 
   test("keeps repository subpaths as git repo manifest subpaths", () => {
-    const manifest = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/private.git",
-      ref: "main",
-      mountPath: "repos/acme/private/README.md",
-      subpath: "README.md",
-    }]);
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        mountPath: "repos/acme/private/README.md",
+        subpath: "README.md",
+      },
+    ]);
     expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
@@ -1556,11 +1972,13 @@ describe("runtime event normalization", () => {
   });
 
   test("applies only missing manifest entries to resumed sandbox sessions", async () => {
-    const current = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/one.git",
-      ref: "main",
-    }]);
+    const current = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+      },
+    ]);
     const target = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -1574,12 +1992,15 @@ describe("runtime event normalization", () => {
       },
     ]);
     const applied: Manifest[] = [];
-    await applyMissingManifestEntries({
-      state: { manifest: current },
-      applyManifest: async (manifest: Manifest) => {
-        applied.push(manifest);
-      },
-    } as any, target);
+    await applyMissingManifestEntries(
+      {
+        state: { manifest: current },
+        applyManifest: async (manifest: Manifest) => {
+          applied.push(manifest);
+        },
+      } as any,
+      target,
+    );
     expect(applied).toHaveLength(1);
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
   });
@@ -1620,14 +2041,18 @@ describe("runtime event normalization", () => {
     // Env refresh applied (owned semantics preserved).
     expect(applied).toHaveLength(1);
     expect(Object.keys(applied[0]!.entries)).toEqual([]);
-    expect(JSON.parse(JSON.stringify((session.state.manifest as Manifest).environment))).toMatchObject({
+    expect(
+      JSON.parse(JSON.stringify((session.state.manifest as Manifest).environment)),
+    ).toMatchObject({
       GH_TOKEN: { value: "new-token" },
     });
     // Drift rides a durable event as key names only — values are secrets.
-    expect(events).toEqual([{
-      type: "sandbox.env.drift",
-      payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
-    }]);
+    expect(events).toEqual([
+      {
+        type: "sandbox.env.drift",
+        payload: { added: ["NEW_KEY"], removed: [], changed: ["GH_TOKEN"] },
+      },
+    ]);
     expect(JSON.stringify(events)).not.toContain("token");
   });
 
@@ -1661,12 +2086,16 @@ describe("runtime event normalization", () => {
     expect(JSON.parse(JSON.stringify(agent.defaultManifest.environment))).toMatchObject({
       HOME: { value: "/workspace" },
     });
-    expect(JSON.parse(JSON.stringify(agent.defaultManifest.environment))).not.toHaveProperty("NEW_KEY");
+    expect(JSON.parse(JSON.stringify(agent.defaultManifest.environment))).not.toHaveProperty(
+      "NEW_KEY",
+    );
     expect(Object.keys(agent.defaultManifest.entries)).toEqual(["repos/acme/one"]);
-    expect(events).toEqual([{
-      type: "sandbox.env.drift",
-      payload: { added: ["NEW_KEY"], removed: [], changed: [] },
-    }]);
+    expect(events).toEqual([
+      {
+        type: "sandbox.env.drift",
+        payload: { added: ["NEW_KEY"], removed: [], changed: [] },
+      },
+    ]);
   });
 
   test("provided-session env pin is a no-op without drift", async () => {
@@ -1677,23 +2106,35 @@ describe("runtime event normalization", () => {
     });
     const agent = { defaultManifest: manifest };
     const events: { type: string; payload: unknown }[] = [];
-    await pinProvidedSessionManifestEnvironment(agent as any, {
-      state: { manifest: new Manifest({ root: "/workspace", entries: {}, environment: { HOME: "/workspace" } }) },
-    } as any, {
-      onRuntimeEvent: (event) => {
-        events.push(event);
+    await pinProvidedSessionManifestEnvironment(
+      agent as any,
+      {
+        state: {
+          manifest: new Manifest({
+            root: "/workspace",
+            entries: {},
+            environment: { HOME: "/workspace" },
+          }),
+        },
+      } as any,
+      {
+        onRuntimeEvent: (event) => {
+          events.push(event);
+        },
       },
-    });
+    );
     expect(agent.defaultManifest).toBe(manifest);
     expect(events).toEqual([]);
   });
 
   test("normalizes serialized manifest state before applying missing entries", async () => {
-    const current = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/one.git",
-      ref: "main",
-    }]);
+    const current = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+      },
+    ]);
     const target = buildManifest(testSettings(), [
       {
         kind: "repository",
@@ -1707,13 +2148,16 @@ describe("runtime event normalization", () => {
       },
     ]);
     const applied: Manifest[] = [];
-    await applyMissingManifestEntries({
-      state: { manifest: JSON.parse(JSON.stringify(current)) },
-      applyManifest: async (manifest: Manifest) => {
-        expect(typeof manifest.mountTargetsForMaterialization).toBe("function");
-        applied.push(manifest);
-      },
-    } as any, JSON.parse(JSON.stringify(target)));
+    await applyMissingManifestEntries(
+      {
+        state: { manifest: JSON.parse(JSON.stringify(current)) },
+        applyManifest: async (manifest: Manifest) => {
+          expect(typeof manifest.mountTargetsForMaterialization).toBe("function");
+          applied.push(manifest);
+        },
+      } as any,
+      JSON.parse(JSON.stringify(target)),
+    );
     expect(applied).toHaveLength(1);
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
   });
@@ -1721,51 +2165,66 @@ describe("runtime event normalization", () => {
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
     const manifestRecord = JSON.parse(JSON.stringify(new Manifest({ entries: {} })));
     let received: Record<string, unknown> | null = null;
-    const restored = await deserializeSandboxSessionStateEnvelope({
-      backendId: "docker",
-      deserializeSessionState: async (state: Record<string, unknown>) => {
-        received = state;
-        return {
-          manifest: new Manifest(state.manifest as any),
+    const restored = await deserializeSandboxSessionStateEnvelope(
+      {
+        backendId: "docker",
+        deserializeSessionState: async (state: Record<string, unknown>) => {
+          received = state;
+          return {
+            manifest: new Manifest(state.manifest as any),
+            workspaceRootPath: "/tmp/workspace",
+            workspaceReady: true,
+          } as any;
+        },
+      } as any,
+      {
+        providerState: {
           workspaceRootPath: "/tmp/workspace",
-          workspaceReady: true,
-        } as any;
+        },
+        manifest: manifestRecord,
+        workspaceReady: true,
       },
-    } as any, {
-      providerState: {
-        workspaceRootPath: "/tmp/workspace",
-      },
-      manifest: manifestRecord,
-      workspaceReady: true,
-    });
+    );
     expect(received?.manifest).toEqual(manifestRecord);
     expect(typeof restored?.manifest.mountTargetsForMaterialization).toBe("function");
   });
 
   test("fails when resumed sandbox sessions cannot apply missing manifest entries", async () => {
-    const target = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/two.git",
-      ref: "main",
-    }]);
-    await expect(applyMissingManifestEntries({
-      state: { manifest: new Manifest({ root: "/workspace" }) },
-    } as any, target)).rejects.toThrow("cannot apply new manifest entries");
+    const target = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/two.git",
+        ref: "main",
+      },
+    ]);
+    await expect(
+      applyMissingManifestEntries(
+        {
+          state: { manifest: new Manifest({ root: "/workspace" }) },
+        } as any,
+        target,
+      ),
+    ).rejects.toThrow("cannot apply new manifest entries");
   });
 
   test("uses materializeEntry fallback for resumed sandbox sessions without applyManifest", async () => {
-    const target = buildManifest(testSettings(), [{
-      kind: "repository",
-      uri: "https://github.com/acme/two.git",
-      ref: "main",
-    }]);
-    const materialized: string[] = [];
-    await applyMissingManifestEntries({
-      state: { manifest: new Manifest({ root: "/workspace" }) },
-      materializeEntry: async ({ path }: { path: string }) => {
-        materialized.push(path);
+    const target = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/two.git",
+        ref: "main",
       },
-    } as any, target);
+    ]);
+    const materialized: string[] = [];
+    await applyMissingManifestEntries(
+      {
+        state: { manifest: new Manifest({ root: "/workspace" }) },
+        materializeEntry: async ({ path }: { path: string }) => {
+          materialized.push(path);
+        },
+      } as any,
+      target,
+    );
     expect(materialized).toEqual(["repos/acme/two"]);
   });
 
@@ -1779,29 +2238,40 @@ describe("runtime event normalization", () => {
 
   test("prefixes MCP tool names deterministically", () => {
     expect(prefixedMcpToolName("docs", "search_documents")).toBe("docs__search_documents");
-    expect(prefixedMcpToolName("files", "files_get_download_url")).toBe("files__files_get_download_url");
+    expect(prefixedMcpToolName("files", "files_get_download_url")).toBe(
+      "files__files_get_download_url",
+    );
   });
 
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
     const mcp = startTestMcpServer();
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "docs",
-        name: "Document Search",
-        url: mcp.url,
-        allowedTools: ["search_documents"],
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "docs" }]);
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            allowedTools: ["search_documents"],
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "docs" }],
+    );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toEqual(["docs__search_documents"]);
 
-      const result = await prepared.mcpServers[0]!.callTool("docs__search_documents", { query: "network policy" });
+      const result = await prepared.mcpServers[0]!.callTool("docs__search_documents", {
+        query: "network policy",
+      });
       expect(JSON.stringify(result)).toContain("found document for network policy");
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
-      await expect(prepared.mcpServers[0]!.callTool("docs__fetch_document", { id: "doc-1" })).rejects.toThrow("not allowed");
+      await expect(
+        prepared.mcpServers[0]!.callTool("docs__fetch_document", { id: "doc-1" }),
+      ).rejects.toThrow("not allowed");
     } finally {
       await prepared.close();
       mcp.close();
@@ -1811,22 +2281,29 @@ describe("runtime event normalization", () => {
   test("sends the shared access key to first-party MCP servers", async () => {
     const accessKey = "local-mcp-access-key";
     const mcp = startTestMcpServer({ requiredHeaders: { "x-opengeni-access-key": accessKey } });
-    const prepared = await prepareAgentTools(testSettings({
-      authRequired: true,
-      accessKey,
-      opengeniMcpUrl: mcp.url,
-      mcpServers: [{
-        id: "opengeni",
-        name: "OpenGeni",
-        url: mcp.url,
-        allowedTools: ["search_documents"],
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "opengeni" }]);
+    const prepared = await prepareAgentTools(
+      testSettings({
+        authRequired: true,
+        accessKey,
+        opengeniMcpUrl: mcp.url,
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: "OpenGeni",
+            url: mcp.url,
+            allowedTools: ["search_documents"],
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "opengeni" }],
+    );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toEqual(["opengeni__search_documents"]);
-      const result = await prepared.mcpServers[0]!.callTool("opengeni__search_documents", { query: "auth" });
+      const result = await prepared.mcpServers[0]!.callTool("opengeni__search_documents", {
+        query: "auth",
+      });
       expect(JSON.stringify(result)).toContain("found document for auth");
     } finally {
       await prepared.close();
@@ -1836,19 +2313,26 @@ describe("runtime event normalization", () => {
 
   test("sends configured credential headers to third-party MCP servers", async () => {
     const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-secure",
-        name: "Secure capability MCP",
-        url: mcp.url,
-        headers: { "x-api-key": "capability-credential" },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-secure" }]);
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-secure",
+            name: "Secure capability MCP",
+            url: mcp.url,
+            headers: { "x-api-key": "capability-credential" },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-secure" }],
+    );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain("cap-secure__search_documents");
-      const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", { query: "headers" });
+      const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", {
+        query: "headers",
+      });
       expect(JSON.stringify(result)).toContain("found document for headers");
     } finally {
       await prepared.close();
@@ -1860,32 +2344,45 @@ describe("runtime event normalization", () => {
     const connectionId = "11111111-1111-4111-8111-111111111111";
     const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer broker-token" } });
     const resolved: ResolveConnectionCredentialInput[] = [];
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-broker",
-        name: "Brokered capability MCP",
-        url: mcp.url,
-        connectionRef: {
-          connectionId,
-          providerDomain: "api.example.com",
-          kind: "api_key",
-          subjectScope: "workspace",
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-broker",
+            name: "Brokered capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-broker" }],
+      {
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        resolveCredential: async (input) => {
+          resolved.push(input);
+          return { status: "ok", connectionId, headers: { authorization: "Bearer broker-token" } };
         },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-broker" }], {
-      workspaceId: "22222222-2222-4222-8222-222222222222",
-      resolveCredential: async (input) => {
-        resolved.push(input);
-        return { status: "ok", connectionId, headers: { authorization: "Bearer broker-token" } };
       },
-    });
+    );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain("cap-broker__search_documents");
-      const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", { query: "broker" });
+      const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", {
+        query: "broker",
+      });
       expect(JSON.stringify(result)).toContain("found document for broker");
-      expect(resolved.some((input) => input.connectionRef.connectionId === connectionId && input.serverId === "cap-broker")).toBe(true);
+      expect(
+        resolved.some(
+          (input) =>
+            input.connectionRef.connectionId === connectionId && input.serverId === "cap-broker",
+        ),
+      ).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -1896,32 +2393,42 @@ describe("runtime event normalization", () => {
     const connectionId = "33333333-3333-4333-8333-333333333333";
     const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer fresh-token" } });
     const resolved: ResolveConnectionCredentialInput[] = [];
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-refresh",
-        name: "Refreshable capability MCP",
-        url: mcp.url,
-        connectionRef: {
-          connectionId,
-          providerDomain: "api.example.com",
-          kind: "api_key",
-          subjectScope: "workspace",
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-refresh",
+            name: "Refreshable capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-refresh" }],
+      {
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+          resolved.push(input);
+          return {
+            status: "ok",
+            connectionId,
+            headers: {
+              authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token",
+            },
+          };
         },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-refresh" }], {
-      workspaceId: "44444444-4444-4444-8444-444444444444",
-      resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
-        resolved.push(input);
-        return {
-          status: "ok",
-          connectionId,
-          headers: { authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token" },
-        };
       },
-    });
+    );
     try {
-      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", { query: "refresh" });
+      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", {
+        query: "refresh",
+      });
       expect(JSON.stringify(result)).toContain("found document for refresh");
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
     } finally {
@@ -1935,40 +2442,57 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer scoped-token" },
       forbiddenTools: ["search_documents"],
-      forbiddenAuthenticateHeader: 'Bearer error="insufficient_scope", scope="documents:read documents:write"',
+      forbiddenAuthenticateHeader:
+        'Bearer error="insufficient_scope", scope="documents:read documents:write"',
     });
     const authNeeded: unknown[] = [];
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-scoped",
-        name: "Scoped capability MCP",
-        url: mcp.url,
-        connectionRef: {
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-scoped",
+            name: "Scoped capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              scopes: ["documents:read"],
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-scoped" }],
+      {
+        workspaceId: "66666666-6666-4666-8666-666666666666",
+        resolveCredential: async () => ({
+          status: "ok",
           connectionId,
-          providerDomain: "api.example.com",
-          kind: "api_key",
-          scopes: ["documents:read"],
-          subjectScope: "workspace",
+          headers: { authorization: "Bearer scoped-token" },
+        }),
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
         },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-scoped" }], {
-      workspaceId: "66666666-6666-4666-8666-666666666666",
-      resolveCredential: async () => ({ status: "ok", connectionId, headers: { authorization: "Bearer scoped-token" } }),
-      onAuthNeeded: (payload) => { authNeeded.push(payload); },
-    });
+      },
+    );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-scoped__search_documents", { query: "scope" });
+      const result = await prepared.mcpServers[0]!.callTool("cap-scoped__search_documents", {
+        query: "scope",
+      });
       expect(result).toMatchObject({ isError: true });
-      expect(authNeeded).toContainEqual(expect.objectContaining({
-        serverId: "cap-scoped",
-        toolName: "search_documents",
-        providerDomain: "api.example.com",
-        connectionId,
-        reason: "insufficient_scope",
-        scopes: ["documents:read", "documents:write"],
-      }));
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "cap-scoped",
+          toolName: "search_documents",
+          providerDomain: "api.example.com",
+          connectionId,
+          reason: "insufficient_scope",
+          scopes: ["documents:read", "documents:write"],
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
@@ -1982,29 +2506,42 @@ describe("runtime event normalization", () => {
       forbiddenTools: ["search_documents"],
     });
     const authNeeded: unknown[] = [];
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-forbidden",
-        name: "Forbidden capability MCP",
-        url: mcp.url,
-        connectionRef: {
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-forbidden",
+            name: "Forbidden capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              scopes: ["documents:read"],
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-forbidden" }],
+      {
+        workspaceId: "67676767-6767-4676-8676-676767676767",
+        resolveCredential: async () => ({
+          status: "ok",
           connectionId,
-          providerDomain: "api.example.com",
-          kind: "api_key",
-          scopes: ["documents:read"],
-          subjectScope: "workspace",
+          headers: { authorization: "Bearer scoped-token" },
+        }),
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
         },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-forbidden" }], {
-      workspaceId: "67676767-6767-4676-8676-676767676767",
-      resolveCredential: async () => ({ status: "ok", connectionId, headers: { authorization: "Bearer scoped-token" } }),
-      onAuthNeeded: (payload) => { authNeeded.push(payload); },
-    });
+      },
+    );
     try {
       await prepared.mcpServers[0]!.listTools();
-      await expect(prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", { query: "scope" }))
-        .rejects.toThrow(/403|forbidden|insufficient_scope/i);
+      await expect(
+        prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", { query: "scope" }),
+      ).rejects.toThrow(/403|forbidden|insufficient_scope/i);
       expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
@@ -2016,47 +2553,59 @@ describe("runtime event normalization", () => {
     const connectionId = "77777777-7777-4777-8777-777777777777";
     const mcp = startTestMcpServer();
     const authNeeded: unknown[] = [];
-    const prepared = await prepareAgentTools(testSettings({
-      mcpServers: [{
-        id: "cap-auth-needed",
-        name: "Auth-needed capability MCP",
-        url: mcp.url,
-        connectionRef: {
-          connectionId,
-          providerDomain: "api.example.com",
-          kind: "api_key",
-          subjectScope: "workspace",
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap-auth-needed",
+            name: "Auth-needed capability MCP",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.example.com",
+              kind: "api_key",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "cap-auth-needed" }],
+      {
+        workspaceId: "88888888-8888-4888-8888-888888888888",
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+          if (input.toolName) {
+            return {
+              status: "auth_needed",
+              reason: "missing_connection",
+              providerDomain: "api.example.com",
+              connectionId,
+              authorizationUrl: "https://api.example.com/oauth/start",
+            };
+          }
+          return { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } };
         },
-        cacheToolsList: false,
-      }],
-    }), [{ kind: "mcp", id: "cap-auth-needed" }], {
-      workspaceId: "88888888-8888-4888-8888-888888888888",
-      resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
-        if (input.toolName) {
-          return {
-            status: "auth_needed",
-            reason: "missing_connection",
-            providerDomain: "api.example.com",
-            connectionId,
-            authorizationUrl: "https://api.example.com/oauth/start",
-          };
-        }
-        return { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } };
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
+        },
       },
-      onAuthNeeded: (payload) => { authNeeded.push(payload); },
-    });
+    );
     try {
       await prepared.mcpServers[0]!.listTools();
-      const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", { query: "auth" });
+      const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", {
+        query: "auth",
+      });
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify(result)).toContain("Authentication required");
       expect(mcp.calls).toEqual([]);
-      expect(authNeeded).toContainEqual(expect.objectContaining({
-        serverId: "cap-auth-needed",
-        toolName: "search_documents",
-        reason: "missing_connection",
-        authorizationUrl: "https://api.example.com/oauth/start",
-      }));
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "cap-auth-needed",
+          toolName: "search_documents",
+          reason: "missing_connection",
+          authorizationUrl: "https://api.example.com/oauth/start",
+        }),
+      );
     } finally {
       await prepared.close();
       mcp.close();
@@ -2068,36 +2617,46 @@ describe("runtime event normalization", () => {
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
-      const prepared = await prepareAgentTools(testSettings({
-        mcpServers: [{
-          id: "cap-missing",
-          name: "Missing auth capability MCP",
-          url: "http://127.0.0.1:9/mcp",
-          connectionRef: {
-            providerDomain: "api.example.com",
-            kind: "api_key",
-            subjectScope: "workspace",
-          },
-          cacheToolsList: false,
-        }],
-      }), [{ kind: "mcp", id: "cap-missing" }], {
-        workspaceId: "99999999-9999-4999-8999-999999999999",
-        resolveCredential: async () => ({
-          status: "auth_needed",
-          reason: "missing_connection",
-          providerDomain: "api.example.com",
-          authorizationUrl: "https://api.example.com/oauth/start",
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "cap-missing",
+              name: "Missing auth capability MCP",
+              url: "http://127.0.0.1:9/mcp",
+              connectionRef: {
+                providerDomain: "api.example.com",
+                kind: "api_key",
+                subjectScope: "workspace",
+              },
+              cacheToolsList: false,
+            },
+          ],
         }),
-        onAuthNeeded: (payload) => { authNeeded.push(payload); },
-      });
+        [{ kind: "mcp", id: "cap-missing" }],
+        {
+          workspaceId: "99999999-9999-4999-8999-999999999999",
+          resolveCredential: async () => ({
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "api.example.com",
+            authorizationUrl: "https://api.example.com/oauth/start",
+          }),
+          onAuthNeeded: (payload) => {
+            authNeeded.push(payload);
+          },
+        },
+      );
       try {
         expect(prepared.mcpServers).toHaveLength(0);
-        expect(authNeeded).toContainEqual(expect.objectContaining({
-          serverId: "cap-missing",
-          reason: "missing_connection",
-          providerDomain: "api.example.com",
-          authorizationUrl: "https://api.example.com/oauth/start",
-        }));
+        expect(authNeeded).toContainEqual(
+          expect.objectContaining({
+            serverId: "cap-missing",
+            reason: "missing_connection",
+            providerDomain: "api.example.com",
+            authorizationUrl: "https://api.example.com/oauth/start",
+          }),
+        );
       } finally {
         await prepared.close();
       }
@@ -2109,28 +2668,42 @@ describe("runtime event normalization", () => {
   test("connecting without the required credential headers fails", async () => {
     const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
     try {
-      await expect(prepareAgentTools(testSettings({
-        mcpServers: [{
-          id: "cap-secure",
-          name: "Secure capability MCP",
-          url: mcp.url,
-          cacheToolsList: false,
-        }],
-      }), [{ kind: "mcp", id: "cap-secure" }])).rejects.toThrow();
+      await expect(
+        prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "cap-secure",
+                name: "Secure capability MCP",
+                url: mcp.url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "cap-secure" }],
+        ),
+      ).rejects.toThrow();
     } finally {
       mcp.close();
     }
   });
 
   test("codex_apps: injects the dynamic ChatGPT bearer + account-id from the codex ALS at connect", async () => {
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" },
+    });
     const prepared = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
+        { kind: "mcp", id: "codex_apps" },
+      ]),
+    );
     try {
       expect(prepared.mcpServers).toHaveLength(1);
       const tools = await prepared.mcpServers[0]!.listTools();
       expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
-      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", { query: "gmail" });
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", {
+        query: "gmail",
+      });
       expect(JSON.stringify(result)).toContain("found document for gmail");
     } finally {
       await prepared.close();
@@ -2139,9 +2712,15 @@ describe("runtime event normalization", () => {
   });
 
   test("codex_apps: emits X-OpenAI-Product-Sku only when configured", async () => {
-    const withSku = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" } });
+    const withSku = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" },
+    });
     const preparedWith = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ codexProductSku: "plus", mcpServers: [CODEX_APPS_ENTRY(withSku.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+      prepareAgentTools(
+        testSettings({ codexProductSku: "plus", mcpServers: [CODEX_APPS_ENTRY(withSku.url)] }),
+        [{ kind: "mcp", id: "codex_apps" }],
+      ),
+    );
     try {
       expect(preparedWith.mcpServers).toHaveLength(1); // connected => SKU header accepted
     } finally {
@@ -2151,9 +2730,14 @@ describe("runtime event normalization", () => {
 
     // With the SKU unset, a server that REQUIRES the header rejects the connect,
     // and the best-effort drop leaves codex_apps absent (no throw).
-    const requiresSku = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" } });
+    const requiresSku = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" },
+    });
     const preparedWithout = await codexRequestStorage.run(makeCodexContext(), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [
+        { kind: "mcp", id: "codex_apps" },
+      ]),
+    );
     try {
       expect(preparedWithout.mcpServers).toHaveLength(0); // header absent => connect rejected => dropped
     } finally {
@@ -2168,7 +2752,10 @@ describe("runtime event normalization", () => {
     // server fails auth at connect, and because codex_apps is best-effort the
     // call resolves with codex_apps simply absent (contrast the strict
     // third-party test above, which throws).
-    const prepared = await prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]);
+    const prepared = await prepareAgentTools(
+      testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }),
+      [{ kind: "mcp", id: "codex_apps" }],
+    );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
     } finally {
@@ -2179,8 +2766,13 @@ describe("runtime event normalization", () => {
 
   test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop", async () => {
     const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
-    const prepared = await codexRequestStorage.run(makeCodexContext({ tokenError: new Error("needs_relogin") }), () =>
-      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+    const prepared = await codexRequestStorage.run(
+      makeCodexContext({ tokenError: new Error("needs_relogin") }),
+      () =>
+        prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
+          { kind: "mcp", id: "codex_apps" },
+        ]),
+    );
     try {
       expect(prepared.mcpServers).toHaveLength(0);
     } finally {
@@ -2192,15 +2784,32 @@ describe("runtime event normalization", () => {
   test("codex_apps best-effort partition does NOT weaken strict guarantees for sibling servers", async () => {
     // A required (non-codex) server that fails auth must still throw even when a
     // codex_apps server rides alongside it in the same prepare call.
-    const required = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const required = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     const apps = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
     try {
-      await expect(codexRequestStorage.run(makeCodexContext(), () => prepareAgentTools(testSettings({
-        mcpServers: [
-          { id: "cap-secure", name: "Secure capability MCP", url: required.url, cacheToolsList: false }, // no headers => fails strict
-          CODEX_APPS_ENTRY(apps.url),
-        ],
-      }), [{ kind: "mcp", id: "cap-secure" }, { kind: "mcp", id: "codex_apps" }]))).rejects.toThrow();
+      await expect(
+        codexRequestStorage.run(makeCodexContext(), () =>
+          prepareAgentTools(
+            testSettings({
+              mcpServers: [
+                {
+                  id: "cap-secure",
+                  name: "Secure capability MCP",
+                  url: required.url,
+                  cacheToolsList: false,
+                }, // no headers => fails strict
+                CODEX_APPS_ENTRY(apps.url),
+              ],
+            }),
+            [
+              { kind: "mcp", id: "cap-secure" },
+              { kind: "mcp", id: "codex_apps" },
+            ],
+          ),
+        ),
+      ).rejects.toThrow();
     } finally {
       required.close();
       apps.close();
@@ -2213,26 +2822,37 @@ describe("runtime event normalization", () => {
     // the failure must drop the server with a warning and let the turn proceed
     // instead of failing before the model runs. The config carries NO
     // credential header, so the required-header server 401s.
-    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
     try {
-      const prepared = await prepareAgentTools(testSettings({
-        mcpServers: [{
-          id: "geni-notebook",
-          name: "Geni Notebook",
-          url: broken.url,
-          cacheToolsList: false,
-        }],
-      }), [{ kind: "mcp", id: "geni-notebook", optional: true }]);
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "geni-notebook",
+              name: "Geni Notebook",
+              url: broken.url,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "geni-notebook", optional: true }],
+      );
       try {
         expect(prepared.mcpServers).toHaveLength(0); // 401 at connect => dropped, no throw
       } finally {
         await prepared.close();
       }
       // A warning names the skipped server so the drop is observable.
-      const warned = warnings.some((args) => args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")));
+      const warned = warnings.some((args) =>
+        args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")),
+      );
       expect(warned).toBe(true);
     } finally {
       console.warn = originalWarn;
@@ -2244,20 +2864,25 @@ describe("runtime event normalization", () => {
     // A broken optional capability server rides alongside a working required
     // server: the required one must still connect and remain available while the
     // optional one is skipped.
-    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     const healthy = startTestMcpServer();
     const originalWarn = console.warn;
     console.warn = () => {};
     try {
-      const prepared = await prepareAgentTools(testSettings({
-        mcpServers: [
-          { id: "geni-notebook", name: "Geni Notebook", url: broken.url, cacheToolsList: false },
-          { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "geni-notebook", name: "Geni Notebook", url: broken.url, cacheToolsList: false },
+            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "geni-notebook", optional: true },
+          { kind: "mcp", id: "docs" },
         ],
-      }), [
-        { kind: "mcp", id: "geni-notebook", optional: true },
-        { kind: "mcp", id: "docs" },
-      ]);
+      );
       try {
         expect(prepared.mcpServers.map((server) => server.name)).toEqual(["docs"]);
         const tools = await prepared.mcpServers[0]!.listTools();
@@ -2275,16 +2900,25 @@ describe("runtime event normalization", () => {
   test("explicitly-requested (non-optional) capability MCP whose connect fails still fails the turn", async () => {
     // The strict contract is unchanged: a tool the caller explicitly requested
     // (no `optional` flag) that cannot connect must fail the turn.
-    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const broken = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     try {
-      await expect(prepareAgentTools(testSettings({
-        mcpServers: [{
-          id: "geni-notebook",
-          name: "Geni Notebook",
-          url: broken.url,
-          cacheToolsList: false,
-        }],
-      }), [{ kind: "mcp", id: "geni-notebook" }])).rejects.toThrow();
+      await expect(
+        prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "geni-notebook",
+                name: "Geni Notebook",
+                url: broken.url,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "geni-notebook" }],
+        ),
+      ).rejects.toThrow();
     } finally {
       broken.close();
     }
@@ -2313,18 +2947,23 @@ describe("runtime event normalization", () => {
     const opengeniDefault = getSettings().mcpServers.find((server) => server.id === "opengeni");
     expect(opengeniDefault).toBeDefined();
 
-    const settingsForAuthorization = (authorization: string) => testSettings({
-      mcpServers: [{
-        id: "opengeni",
-        name: opengeniDefault!.name,
-        url: mcp.url,
-        headers: { authorization },
-        cacheToolsList: opengeniDefault!.cacheToolsList,
-      }],
-    });
+    const settingsForAuthorization = (authorization: string) =>
+      testSettings({
+        mcpServers: [
+          {
+            id: "opengeni",
+            name: opengeniDefault!.name,
+            url: mcp.url,
+            headers: { authorization },
+            cacheToolsList: opengeniDefault!.cacheToolsList,
+          },
+        ],
+      });
 
     const toolNamesFor = async (authorization: string): Promise<string[]> => {
-      const prepared = await prepareAgentTools(settingsForAuthorization(authorization), [{ kind: "mcp", id: "opengeni" }]);
+      const prepared = await prepareAgentTools(settingsForAuthorization(authorization), [
+        { kind: "mcp", id: "opengeni" },
+      ]);
       try {
         // Drive the exact code path the agent runner uses (getAllMcpTools),
         // which is what populates the process-global cache.
@@ -2352,7 +2991,9 @@ describe("runtime event normalization", () => {
   });
 
   test("rejects unknown MCP tool ids during runtime preparation", async () => {
-    await expect(prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }])).rejects.toThrow("Unknown MCP server id");
+    await expect(
+      prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }]),
+    ).rejects.toThrow("Unknown MCP server id");
   });
 });
 
@@ -2376,7 +3017,11 @@ describe("pack skills in the sandbox skill index", () => {
   const infraSkill = {
     name: "infra-ops",
     files: [
-      { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate workspace infrastructure.\n---\n# Infra ops\n" },
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: infra-ops\ndescription: Operate workspace infrastructure.\n---\n# Infra ops\n",
+      },
       { path: "references/runbook.md", content: "Runbook." },
     ],
   };
@@ -2399,7 +3044,9 @@ describe("pack skills in the sandbox skill index", () => {
     // Pack skill content is carried in-memory from the manifest.
     expect(sourceDir.children["infra-ops"].type).toBe("dir");
     expect(sourceDir.children["infra-ops"].children["SKILL.md"].content).toContain("# Infra ops");
-    expect(sourceDir.children["infra-ops"].children.references.children["runbook.md"].content).toBe("Runbook.");
+    expect(sourceDir.children["infra-ops"].children.references.children["runbook.md"].content).toBe(
+      "Runbook.",
+    );
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const names = index.map((entry) => entry.name);
     expect(names).toContain("checkov");
@@ -2410,16 +3057,22 @@ describe("pack skills in the sandbox skill index", () => {
   });
 
   test("an explicit pack skill description wins over SKILL.md frontmatter", () => {
-    const source = lazySkillSourceWithPackSkills([{ ...infraSkill, description: "Explicit description." }]);
+    const source = lazySkillSourceWithPackSkills([
+      { ...infraSkill, description: "Explicit description." },
+    ]);
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe("Explicit description.");
+    expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe(
+      "Explicit description.",
+    );
   });
 
   test("a pack skill shadows a bundled skill with the same name", () => {
-    const source = lazySkillSourceWithPackSkills([{
-      name: "checkov",
-      files: [{ path: "SKILL.md", content: "---\ndescription: Pack-provided checkov.\n---\n" }],
-    }]);
+    const source = lazySkillSourceWithPackSkills([
+      {
+        name: "checkov",
+        files: [{ path: "SKILL.md", content: "---\ndescription: Pack-provided checkov.\n---\n" }],
+      },
+    ]);
     const sourceDir = source.source as { type: string; children: Record<string, any> };
     expect(sourceDir.children.checkov.type).toBe("dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
@@ -2429,27 +3082,52 @@ describe("pack skills in the sandbox skill index", () => {
   });
 
   test("rejects unsafe pack skill content instead of mounting it", () => {
-    expect(() => lazySkillSourceWithPackSkills([{
-      name: "bad",
-      files: [{ path: "SKILL.md", content: "x" }, { path: "../escape.md", content: "x" }],
-    }])).toThrow("Invalid pack skill file path");
-    expect(() => lazySkillSourceWithPackSkills([{
-      name: "no-entry",
-      files: [{ path: "references/only.md", content: "x" }],
-    }])).toThrow("missing a top-level SKILL.md");
-    expect(() => lazySkillSourceWithPackSkills([
-      { name: "dup", files: [{ path: "SKILL.md", content: "a" }] },
-      { name: "dup", files: [{ path: "SKILL.md", content: "b" }] },
-    ])).toThrow("Duplicate pack skill name");
-    expect(() => lazySkillSourceWithPackSkills([{
-      name: "bad/name",
-      files: [{ path: "SKILL.md", content: "x" }],
-    }])).toThrow("Invalid pack skill name");
+    expect(() =>
+      lazySkillSourceWithPackSkills([
+        {
+          name: "bad",
+          files: [
+            { path: "SKILL.md", content: "x" },
+            { path: "../escape.md", content: "x" },
+          ],
+        },
+      ]),
+    ).toThrow("Invalid pack skill file path");
+    expect(() =>
+      lazySkillSourceWithPackSkills([
+        {
+          name: "no-entry",
+          files: [{ path: "references/only.md", content: "x" }],
+        },
+      ]),
+    ).toThrow("missing a top-level SKILL.md");
+    expect(() =>
+      lazySkillSourceWithPackSkills([
+        { name: "dup", files: [{ path: "SKILL.md", content: "a" }] },
+        { name: "dup", files: [{ path: "SKILL.md", content: "b" }] },
+      ]),
+    ).toThrow("Duplicate pack skill name");
+    expect(() =>
+      lazySkillSourceWithPackSkills([
+        {
+          name: "bad/name",
+          files: [{ path: "SKILL.md", content: "x" }],
+        },
+      ]),
+    ).toThrow("Invalid pack skill name");
   });
 
   test("buildOpenGeniAgent feeds pack skills through the SDK skills capability", () => {
-    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], { packSkills: [infraSkill] });
-    const capabilities = (agent as any).capabilities as Array<{ type: string; lazyFrom?: { source: { type: string }; getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }> } }>;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      packSkills: [infraSkill],
+    });
+    const capabilities = (agent as any).capabilities as Array<{
+      type: string;
+      lazyFrom?: {
+        source: { type: string };
+        getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }>;
+      };
+    }>;
     const skillsCapability = capabilities.find((capability) => capability.type === "skills");
     expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
     const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
@@ -2457,7 +3135,12 @@ describe("pack skills in the sandbox skill index", () => {
     // Backward compatibility: without pack skills the capability keeps the
     // plain bundled local-dir source.
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
-    const plainCapability = ((plainAgent as any).capabilities as Array<{ type: string; lazyFrom?: { source: { type: string } } }>).find((capability) => capability.type === "skills");
+    const plainCapability = (
+      (plainAgent as any).capabilities as Array<{
+        type: string;
+        lazyFrom?: { source: { type: string } };
+      }>
+    ).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
   });
 });
@@ -2470,9 +3153,28 @@ describe("provider item id stripping", () => {
       content: [{ type: "input_text", text: "thinking" }],
       providerData: { encrypted_content: "gAAAA-opaque" },
     } as any;
-    const message = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi" }] } as any;
-    const functionCall = { type: "function_call", id: "fc_1", callId: "call_abc", name: "exec_command", arguments: "{}", status: "completed" } as any;
-    const functionOutput = { type: "function_call_result", id: "fco_1", callId: "call_abc", status: "completed", output: { type: "text", text: "ok" } } as any;
+    const message = {
+      type: "message",
+      id: "msg_1",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "hi" }],
+    } as any;
+    const functionCall = {
+      type: "function_call",
+      id: "fc_1",
+      callId: "call_abc",
+      name: "exec_command",
+      arguments: "{}",
+      status: "completed",
+    } as any;
+    const functionOutput = {
+      type: "function_call_result",
+      id: "fco_1",
+      callId: "call_abc",
+      status: "completed",
+      output: { type: "text", text: "ok" },
+    } as any;
     const userMessage = { type: "message", role: "user", content: "do the thing" } as any;
     const input = [reasoning, message, functionCall, functionOutput, userMessage];
     const result = stripProviderItemIdsFilter({
@@ -2533,13 +3235,16 @@ describe("provider item id stripping", () => {
   });
 
   test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
-    const filter = callModelInputFilterForSettings(testSettings({
-      openaiProvider: "openai",
-      contextCompactionMode: "auto",
-      contextWindowTokens: 100,
-      contextReservedOutputTokens: 0,
-    }))!;
-    const image = (n: number) => `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
+    const filter = callModelInputFilterForSettings(
+      testSettings({
+        openaiProvider: "openai",
+        contextCompactionMode: "auto",
+        contextWindowTokens: 100,
+        contextReservedOutputTokens: 0,
+      }),
+    )!;
+    const image = (n: number) =>
+      `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
     const prefix = [
       { type: "message", role: "user", content: "old" },
       { type: "function_call_result", callId: "a", output: image(1) },
@@ -2570,18 +3275,22 @@ describe("provider item id stripping", () => {
   });
 
   test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {
-    const clientFilter = callModelInputFilterForSettings(testSettings({
-      openaiProvider: "azure",
-      contextCompactionMode: "client",
-      contextWindowTokens: 100,
-      contextReservedOutputTokens: 0,
-    }))!;
-    const serverFilter = callModelInputFilterForSettings(testSettings({
-      openaiProvider: "openai",
-      contextCompactionMode: "server",
-      contextWindowTokens: 100,
-      contextReservedOutputTokens: 0,
-    }))!;
+    const clientFilter = callModelInputFilterForSettings(
+      testSettings({
+        openaiProvider: "azure",
+        contextCompactionMode: "client",
+        contextWindowTokens: 100,
+        contextReservedOutputTokens: 0,
+      }),
+    )!;
+    const serverFilter = callModelInputFilterForSettings(
+      testSettings({
+        openaiProvider: "openai",
+        contextCompactionMode: "server",
+        contextWindowTokens: 100,
+        contextReservedOutputTokens: 0,
+      }),
+    )!;
     const input = [
       { type: "message", role: "user", content: "old turn" },
       { type: "message", role: "assistant", content: "x".repeat(1_000) },
@@ -2589,8 +3298,16 @@ describe("provider item id stripping", () => {
       { type: "message", role: "assistant", content: "ok" },
     ] as any;
 
-    const clientOut = await clientFilter({ modelData: { input }, agent: {} as any, context: undefined });
-    const serverOut = await serverFilter({ modelData: { input }, agent: {} as any, context: undefined });
+    const clientOut = await clientFilter({
+      modelData: { input },
+      agent: {} as any,
+      context: undefined,
+    });
+    const serverOut = await serverFilter({
+      modelData: { input },
+      agent: {} as any,
+      context: undefined,
+    });
 
     expect(clientOut.input).toEqual(input.slice(2));
     expect(serverOut.input).toEqual(input);
@@ -2598,8 +3315,13 @@ describe("provider item id stripping", () => {
 
   test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
-    expect((agent as any).modelSettings.providerData).toEqual({ include: ["reasoning.encrypted_content"] });
-    const disabled = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", openaiReasoningEncryptedContent: false }), []);
+    expect((agent as any).modelSettings.providerData).toEqual({
+      include: ["reasoning.encrypted_content"],
+    });
+    const disabled = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", openaiReasoningEncryptedContent: false }),
+      [],
+    );
     expect((disabled as any).modelSettings.providerData).toBeUndefined();
   });
 });

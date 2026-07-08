@@ -130,8 +130,11 @@ export interface SelfhostedNegotiationInput {
  * with the online/offline/reconnecting/consent_required/display_unavailable cells
  * correctly decided. Async because it issues the liveness probe.
  */
-export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiationInput): Promise<SessionCapabilities> {
-  const probeResponded = input.probeResponded ?? (input.session ? await input.session.ping() : false);
+export async function negotiateSelfhostedCapabilities(
+  input: SelfhostedNegotiationInput,
+): Promise<SessionCapabilities> {
+  const probeResponded =
+    input.probeResponded ?? (input.session ? await input.session.ping() : false);
   const liveness = selfhostedLiveness({
     enrollment: input.enrollment,
     probeResponded,
@@ -142,7 +145,8 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
   // descriptor-shaped cells (FS/Terminal/Git/Desktop) negotiate as on a warm box
   // when online, and a cold box when not reachable (no live tunnel). The
   // selfhosted overlay below then stamps the selfhosted-specific reasons.
-  const baseLiveness: NegotiationContext["liveness"] = liveness.state === "online" ? "warm" : "cold";
+  const baseLiveness: NegotiationContext["liveness"] =
+    liveness.state === "online" ? "warm" : "cold";
   const base: NegotiationContext = {
     sessionId: input.sessionId,
     backend: "selfhosted",
@@ -152,7 +156,9 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
     desktopEnabled: input.desktopEnabled ?? true,
     terminalEnabled: input.terminalEnabled ?? true,
     computerUseEnabled: input.computerUseEnabled ?? true,
-    ...(input.desktopAcknowledged !== undefined ? { desktopAcknowledged: input.desktopAcknowledged } : {}),
+    ...(input.desktopAcknowledged !== undefined
+      ? { desktopAcknowledged: input.desktopAcknowledged }
+      : {}),
     ...(input.shared !== undefined ? { shared: input.shared } : {}),
     ...(input.sharedSessionIds !== undefined ? { sharedSessionIds: input.sharedSessionIds } : {}),
     ...(input.now ? { now: input.now } : {}),
@@ -166,11 +172,19 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
   // is the dominant degrade (like os_unsupported): an offline/reconnecting agent
   // knocks out every reachable capability with the single coherent reason.
   if (liveness.state !== "online") {
-    const reason: CapabilityUnavailableReason = liveness.state === "offline" ? "agent_offline" : "agent_reconnecting";
+    const reason: CapabilityUnavailableReason =
+      liveness.state === "offline" ? "agent_offline" : "agent_reconnecting";
     return {
       ...caps,
       FileSystem: { ...caps.FileSystem, available: false, readOnly: true, reason },
-      Terminal: { ...caps.Terminal, transport: null, url: null, token: null, expiresAt: null, reason },
+      Terminal: {
+        ...caps.Terminal,
+        transport: null,
+        url: null,
+        token: null,
+        expiresAt: null,
+        reason,
+      },
       Git: { ...caps.Git, available: false, reason },
       DesktopStream: {
         ...caps.DesktopStream,
@@ -209,22 +223,23 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
     const reason: CapabilityUnavailableReason = "display_unavailable";
     return {
       ...caps,
-      DesktopStream: caps.DesktopStream.transport !== null
-        ? {
-          ...caps.DesktopStream,
-          transport: null,
-          client: null,
-          mode: "read-only",
-          url: null,
-          token: null,
-          expiresAt: null,
-          requiresAcknowledgment: false,
-          acknowledged: false,
-          shared: false,
-          sharedSessionIds: [],
-          reason,
-        }
-        : caps.DesktopStream,
+      DesktopStream:
+        caps.DesktopStream.transport !== null
+          ? {
+              ...caps.DesktopStream,
+              transport: null,
+              client: null,
+              mode: "read-only",
+              url: null,
+              token: null,
+              expiresAt: null,
+              requiresAcknowledgment: false,
+              acknowledged: false,
+              shared: false,
+              sharedSessionIds: [],
+              reason,
+            }
+          : caps.DesktopStream,
       Recording: caps.Recording.available
         ? { ...caps.Recording, available: false, modes: [], codecs: [], reason }
         : caps.Recording,
@@ -240,9 +255,10 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
     // so no input is forwarded even if the base offered an interactive mode.
     return {
       ...caps,
-      DesktopStream: caps.DesktopStream.transport !== null
-        ? { ...caps.DesktopStream, mode: "read-only" }
-        : caps.DesktopStream,
+      DesktopStream:
+        caps.DesktopStream.transport !== null
+          ? { ...caps.DesktopStream, mode: "read-only" }
+          : caps.DesktopStream,
       ComputerUse: caps.ComputerUse.available
         ? { ...caps.ComputerUse, available: false, reason: "consent_required" }
         : caps.ComputerUse,

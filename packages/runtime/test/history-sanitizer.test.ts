@@ -24,21 +24,43 @@ function userMessage(text: string) {
   return { type: "message", role: "user", content: text };
 }
 function assistantMessage(text: string) {
-  return { type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text }] };
+  return {
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text }],
+  };
 }
 function functionCall(callId: string, name = "tool") {
   return { type: "function_call", callId, name, arguments: "{}", status: "completed" };
 }
 function functionResult(callId: string) {
-  return { type: "function_call_result", callId, status: "completed", output: { type: "text", text: "ok" } };
+  return {
+    type: "function_call_result",
+    callId,
+    status: "completed",
+    output: { type: "text", text: "ok" },
+  };
 }
 // tool_search items (progressive connector disclosure). The SDK holds the wire
 // shape: snake_case call_id, arguments round-tripped as-is (an object).
 function toolSearchCall(callId: string) {
-  return { type: "tool_search_call", call_id: callId, status: "completed", execution: "client", arguments: { query: "send an email" } };
+  return {
+    type: "tool_search_call",
+    call_id: callId,
+    status: "completed",
+    execution: "client",
+    arguments: { query: "send an email" },
+  };
 }
 function toolSearchOutput(callId: string) {
-  return { type: "tool_search_output", call_id: callId, status: "completed", execution: "client", tools: [{ type: "function", name: "codex_apps__gmail_send_email" }] };
+  return {
+    type: "tool_search_output",
+    call_id: callId,
+    status: "completed",
+    execution: "client",
+    tools: [{ type: "function", name: "codex_apps__gmail_send_email" }],
+  };
 }
 
 describe("sanitizeHistoryItemsForModel", () => {
@@ -68,11 +90,7 @@ describe("sanitizeHistoryItemsForModel", () => {
   });
 
   test("drops a dangling function_call that has no result", () => {
-    const items = [
-      userMessage("hi"),
-      reasoning("rs_1"),
-      functionCall("call_dangling"),
-    ];
+    const items = [userMessage("hi"), reasoning("rs_1"), functionCall("call_dangling")];
     const result = sanitizeHistoryItemsForModel(items);
     // The dangling call is dropped, and the reasoning item that produced it is
     // dropped with it (Responses API ties reasoning to its following call).
@@ -124,15 +142,21 @@ describe("sanitizeHistoryItemsForModel", () => {
       assistantMessage("done"),
     ];
     const result = sanitizeHistoryItemsForModel(items);
-    expect(result).toEqual([
-      items[0], items[1], items[2], items[3], items[4], items[6],
-    ]);
+    expect(result).toEqual([items[0], items[1], items[2], items[3], items[4], items[6]]);
   });
 
   test("accepts snake_case call_id correlation as well as camelCase callId", () => {
     const call = { type: "function_call", call_id: "call_snake", name: "t", arguments: "{}" };
-    const orphan = { type: "function_call_result", call_id: "call_missing", output: { type: "text", text: "x" } };
-    const result = { type: "function_call_result", call_id: "call_snake", output: { type: "text", text: "ok" } };
+    const orphan = {
+      type: "function_call_result",
+      call_id: "call_missing",
+      output: { type: "text", text: "x" },
+    };
+    const result = {
+      type: "function_call_result",
+      call_id: "call_snake",
+      output: { type: "text", text: "ok" },
+    };
     const items = [userMessage("hi"), call, result, orphan];
     const sanitized = sanitizeHistoryItemsForModel(items);
     expect(sanitized).toEqual([items[0], call, result]);
@@ -179,8 +203,18 @@ describe("normalizeComputerCallActions", () => {
   });
 
   test("passes through items without the conflict byte-identical (same references)", () => {
-    const actionOnly = { type: "computer_call", callId: "cu_a", status: "completed", action: { type: "screenshot" } };
-    const actionsOnly = { type: "computer_call", callId: "cu_b", status: "completed", actions: [{ type: "click", x: 1, y: 2 }] };
+    const actionOnly = {
+      type: "computer_call",
+      callId: "cu_a",
+      status: "completed",
+      action: { type: "screenshot" },
+    };
+    const actionsOnly = {
+      type: "computer_call",
+      callId: "cu_b",
+      status: "completed",
+      actions: [{ type: "click", x: 1, y: 2 }],
+    };
     const items = [userMessage("hi"), actionOnly, functionCall("call_1"), actionsOnly];
     const result = normalizeComputerCallActions(items);
     // No conflict anywhere → every item is the same reference, order preserved.
@@ -333,7 +367,11 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     // The exact wire shape the SDK produces on action-timeout: image_url is "".
     const body = {
       input: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "click the button" }] },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "click the button" }],
+        },
         {
           type: "computer_call_output",
           call_id: "cu_1",
@@ -428,10 +466,22 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     const body = {
       input: [
         { type: "message", role: "user", content: "go" },
-        { type: "computer_call_output", call_id: "cu_a", output: { type: "computer_screenshot", image_url: "" } },
+        {
+          type: "computer_call_output",
+          call_id: "cu_a",
+          output: { type: "computer_screenshot", image_url: "" },
+        },
         { type: "function_call_result", call_id: "fn_1", output: { type: "text", text: "ok" } },
-        { type: "computer_call_output", call_id: "cu_b", output: { type: "computer_screenshot", image_url: realDataUri } },
-        { type: "computer_call_output", call_id: "cu_c", output: { type: "computer_screenshot", image_url: null } },
+        {
+          type: "computer_call_output",
+          call_id: "cu_b",
+          output: { type: "computer_screenshot", image_url: realDataUri },
+        },
+        {
+          type: "computer_call_output",
+          call_id: "cu_c",
+          output: { type: "computer_screenshot", image_url: null },
+        },
       ],
     };
     const changed = rewriteEmptyComputerCallOutputImageUrls(body);
@@ -463,7 +513,13 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     const OLD_BLANK_1x1 =
       "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     const body = {
-      input: [{ type: "computer_call_output", call_id: "cu_x", output: { type: "computer_screenshot", image_url: "" } }],
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_x",
+          output: { type: "computer_screenshot", image_url: "" },
+        },
+      ],
     };
     rewriteEmptyComputerCallOutputImageUrls(body);
     const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
@@ -587,7 +643,10 @@ describe("stripReasoningEncryptedContent", () => {
   });
 
   test("returns the SAME reference when there is nothing encrypted to strip", () => {
-    const reasoningNoBlob = { type: "reasoning", content: [{ type: "input_text", text: "t" }] } as any;
+    const reasoningNoBlob = {
+      type: "reasoning",
+      content: [{ type: "input_text", text: "t" }],
+    } as any;
     expect(stripReasoningEncryptedContent(reasoningNoBlob)).toBe(reasoningNoBlob);
   });
 
@@ -614,24 +673,61 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
   // content. Both HOLE A vectors (foreign blob 400, foreign rs_ id rejection) are
   // closed because neither the blob nor the id survives.
 
-  const fullBlob = () => JSON.stringify({
-    $schemaVersion: "1.12",
-    originalInput: [
-      { type: "reasoning", id: "rs_orig", content: [{ type: "input_text", text: "t" }], providerData: { encrypted_content: "enc-orig", keep: "yes" } },
-      { type: "message", role: "user", content: "the question" },
-    ],
-    modelResponses: [
-      { output: [
-        { type: "reasoning", id: "rs_resp", content: [], providerData: { encryptedContent: "enc-resp-camel" } },
-        { type: "function_call", callId: "call_1", name: "t", arguments: "{}" },
-      ] },
-    ],
-    lastModelResponse: { output: [{ type: "reasoning", id: "rs_last", content: [], providerData: { encrypted_content: "enc-last" } }] },
-    generatedItems: [
-      { type: "reasoning_item", rawItem: { type: "reasoning", id: "rs_gen", content: [], providerData: { encrypted_content: "enc-gen" } } },
-      { type: "message_output_item", rawItem: { type: "message", role: "assistant", content: [{ type: "output_text", text: "the answer" }] } },
-    ],
-  });
+  const fullBlob = () =>
+    JSON.stringify({
+      $schemaVersion: "1.12",
+      originalInput: [
+        {
+          type: "reasoning",
+          id: "rs_orig",
+          content: [{ type: "input_text", text: "t" }],
+          providerData: { encrypted_content: "enc-orig", keep: "yes" },
+        },
+        { type: "message", role: "user", content: "the question" },
+      ],
+      modelResponses: [
+        {
+          output: [
+            {
+              type: "reasoning",
+              id: "rs_resp",
+              content: [],
+              providerData: { encryptedContent: "enc-resp-camel" },
+            },
+            { type: "function_call", callId: "call_1", name: "t", arguments: "{}" },
+          ],
+        },
+      ],
+      lastModelResponse: {
+        output: [
+          {
+            type: "reasoning",
+            id: "rs_last",
+            content: [],
+            providerData: { encrypted_content: "enc-last" },
+          },
+        ],
+      },
+      generatedItems: [
+        {
+          type: "reasoning_item",
+          rawItem: {
+            type: "reasoning",
+            id: "rs_gen",
+            content: [],
+            providerData: { encrypted_content: "enc-gen" },
+          },
+        },
+        {
+          type: "message_output_item",
+          rawItem: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "the answer" }],
+          },
+        },
+      ],
+    });
 
   test("strips encrypted_content (snake+camel) and the rs_ id from reasoning in every location", () => {
     const out = stripReasoningIdentityFromSerializedRunState(fullBlob());
@@ -657,7 +753,16 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
       $schemaVersion: "1.12",
       originalInput: [{ type: "message", role: "user", content: "hi" }],
       modelResponses: [],
-      generatedItems: [{ type: "message_output_item", rawItem: { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] } }],
+      generatedItems: [
+        {
+          type: "message_output_item",
+          rawItem: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "ok" }],
+          },
+        },
+      ],
     });
     expect(stripReasoningIdentityFromSerializedRunState(blob)).toBe(blob);
   });
@@ -679,10 +784,14 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
   });
 });
 
-
 describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connector disclosure)", () => {
   test("keeps a well-formed tool_search_call -> tool_search_output pair byte-identical", () => {
-    const items = [userMessage("check mail"), toolSearchCall("ts1"), toolSearchOutput("ts1"), assistantMessage("ok")];
+    const items = [
+      userMessage("check mail"),
+      toolSearchCall("ts1"),
+      toolSearchOutput("ts1"),
+      assistantMessage("ok"),
+    ];
     const out = sanitizeHistoryItemsForModel(items);
     expect(out).toEqual(items);
     expect(out[1]).toBe(items[1]); // same references
@@ -701,14 +810,31 @@ describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connect
   });
 
   test("drops a reasoning item stranded by a dropped dangling tool_search_call", () => {
-    const items = [userMessage("q"), reasoning("rs1"), toolSearchCall("ts1"), assistantMessage("a")];
+    const items = [
+      userMessage("q"),
+      reasoning("rs1"),
+      toolSearchCall("ts1"),
+      assistantMessage("a"),
+    ];
     const out = sanitizeHistoryItemsForModel(items);
     expect(out.map((i) => i.type)).toEqual(["message", "message"]);
   });
 
   test("correlates a tool_search pair whose call id rides ONLY providerData (SDK getToolSearchProviderCallId shape)", () => {
-    const call = { type: "tool_search_call", status: "completed", execution: "client", arguments: { query: "x" }, providerData: { call_id: "tsP" } };
-    const output = { type: "tool_search_output", status: "completed", execution: "client", tools: [], providerData: { call_id: "tsP" } };
+    const call = {
+      type: "tool_search_call",
+      status: "completed",
+      execution: "client",
+      arguments: { query: "x" },
+      providerData: { call_id: "tsP" },
+    };
+    const output = {
+      type: "tool_search_output",
+      status: "completed",
+      execution: "client",
+      tools: [],
+      providerData: { call_id: "tsP" },
+    };
     const items = [userMessage("q"), call, output];
     expect(sanitizeHistoryItemsForModel(items)).toEqual(items);
   });
@@ -725,7 +851,12 @@ describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connect
     ];
     const out = sanitizeHistoryItemsForModel(items);
     expect(out.map((i) => (i as { type: string }).type)).toEqual([
-      "message", "tool_search_call", "tool_search_output", "function_call", "function_call_result", "message",
+      "message",
+      "tool_search_call",
+      "tool_search_output",
+      "function_call",
+      "function_call_result",
+      "message",
     ]);
   });
 });

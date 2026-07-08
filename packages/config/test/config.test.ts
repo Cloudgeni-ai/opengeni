@@ -28,14 +28,10 @@ import {
 describe(".env.example", () => {
   test("shell-sources and validates with the stock example values", () => {
     const envPath = fileURLToPath(new URL("../../../.env.example", import.meta.url));
-    const source = spawnSync(
-      "bash",
-      ["-c", "set -a; . \"$1\"; env -0", "bash", envPath],
-      {
-        encoding: "utf8",
-        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-      },
-    );
+    const source = spawnSync("bash", ["-c", 'set -a; . "$1"; env -0', "bash", envPath], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    });
     if (source.status !== 0) {
       throw new Error(`.env.example failed to source:\n${source.stderr}`);
     }
@@ -81,15 +77,22 @@ describe("sandbox preparation profiles", () => {
     expect(names).toContain("GITHUB_TOKEN");
     expect(names).toContain("GIT_AUTHOR_NAME");
     expect(names).toContain("CUSTOM_PROVIDER_TOKEN");
-    expect(sandboxLifecycleHookIds({
-      ...settings,
-      sandboxPreparationProfiles: "azure,github",
-    })).toEqual(["azure-cli-login"]);
-    expect(collectSandboxEnvironment({
-      ...settings,
-      sandboxPreparationProfiles: "azure,github",
-      sandboxEnvAllowlist: "CUSTOM_PROVIDER_TOKEN",
-    }, env)).toEqual({
+    expect(
+      sandboxLifecycleHookIds({
+        ...settings,
+        sandboxPreparationProfiles: "azure,github",
+      }),
+    ).toEqual(["azure-cli-login"]);
+    expect(
+      collectSandboxEnvironment(
+        {
+          ...settings,
+          sandboxPreparationProfiles: "azure,github",
+          sandboxEnvAllowlist: "CUSTOM_PROVIDER_TOKEN",
+        },
+        env,
+      ),
+    ).toEqual({
       ARM_CLIENT_ID: "arm-client",
       GITHUB_TOKEN: "github-token",
       GIT_AUTHOR_NAME: "Local Author",
@@ -99,18 +102,23 @@ describe("sandbox preparation profiles", () => {
 
   test("rejects combining none with other profiles", () => {
     const settings = withEnv({}, () => getSettings());
-    expect(() => sandboxEnvironmentVariableNames({
-      ...settings,
-      sandboxPreparationProfiles: "none,github",
-    })).toThrow("cannot combine none");
+    expect(() =>
+      sandboxEnvironmentVariableNames({
+        ...settings,
+        sandboxPreparationProfiles: "none,github",
+      }),
+    ).toThrow("cannot combine none");
   });
 
   test("ignores old sandbox env configuration names", () => {
-    const settings = withEnv({
-      OPENGENI_SANDBOX_ENV_PROFILES: "azure,github",
-      OPENGENI_SANDBOX_ENV_EXTRA_VARS: "CUSTOM_PROVIDER_TOKEN",
-      OPENGENI_SANDBOX_ENV_VARS: "GH_TOKEN",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_ENV_PROFILES: "azure,github",
+        OPENGENI_SANDBOX_ENV_EXTRA_VARS: "CUSTOM_PROVIDER_TOKEN",
+        OPENGENI_SANDBOX_ENV_VARS: "GH_TOKEN",
+      },
+      () => getSettings(),
+    );
     expect(settings.sandboxPreparationProfiles).toBe("none");
     expect(sandboxEnvironmentVariableNames(settings)).toEqual([]);
     expect(sandboxLifecycleHookIds(settings)).toEqual([]);
@@ -135,11 +143,14 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("parses startup dependency retry settings", () => {
-    const settings = withEnv({
-      OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "5",
-      OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "10",
-      OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "50",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "5",
+        OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "10",
+        OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "50",
+      },
+      () => getSettings(),
+    );
     expect(startupRetryOptions(settings)).toEqual({
       attempts: 5,
       initialDelayMs: 10,
@@ -148,16 +159,19 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("parses boolean environment values without treating false as true", () => {
-    const settings = withEnv({
-      OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: "false",
-      OPENGENI_OBSERVABILITY_METRICS_ENABLED: "true",
-      OPENGENI_DISABLE_OPENAI_TRACING: "false",
-      OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "0",
-      OPENGENI_AUTH_REQUIRED: "true",
-      OPENGENI_ACCESS_KEY: "test-access-key",
-      OPENGENI_AUTH_ALLOW_HEALTH: "yes",
-      OPENGENI_AUTH_ALLOW_METRICS: "no",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: "false",
+        OPENGENI_OBSERVABILITY_METRICS_ENABLED: "true",
+        OPENGENI_DISABLE_OPENAI_TRACING: "false",
+        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "0",
+        OPENGENI_AUTH_REQUIRED: "true",
+        OPENGENI_ACCESS_KEY: "test-access-key",
+        OPENGENI_AUTH_ALLOW_HEALTH: "yes",
+        OPENGENI_AUTH_ALLOW_METRICS: "no",
+      },
+      () => getSettings(),
+    );
 
     expect(settings.observabilityStructuredLogs).toBe(false);
     expect(settings.observabilityMetricsEnabled).toBe(true);
@@ -170,44 +184,72 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("requires an access key when shared-key auth is enabled", () => {
-    expect(() => withEnv({
-      OPENGENI_AUTH_REQUIRED: "true",
-    }, () => getSettings())).toThrow("OPENGENI_ACCESS_KEY is required");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_AUTH_REQUIRED: "true",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_ACCESS_KEY is required");
   });
 
   test("requires configured mode to have an auth boundary outside local and test", () => {
-    expect(() => withEnv({
-      OPENGENI_ENVIRONMENT: "production",
-      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
-      OPENGENI_DELEGATION_SECRET: "",
-      OPENGENI_AUTH_REQUIRED: "false",
-    }, () => getSettings())).toThrow("OPENGENI_PRODUCT_ACCESS_MODE=configured requires OPENGENI_DELEGATION_SECRET or OPENGENI_AUTH_REQUIRED=true outside local/test");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_DELEGATION_SECRET: "",
+          OPENGENI_AUTH_REQUIRED: "false",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_PRODUCT_ACCESS_MODE=configured requires OPENGENI_DELEGATION_SECRET or OPENGENI_AUTH_REQUIRED=true outside local/test",
+    );
 
-    expect(withEnv({
-      OPENGENI_ENVIRONMENT: "production",
-      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
-      OPENGENI_DELEGATION_SECRET: "configured-delegation-secret",
-    }, () => getSettings()).productAccessMode).toBe("configured");
+    expect(
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_DELEGATION_SECRET: "configured-delegation-secret",
+        },
+        () => getSettings(),
+      ).productAccessMode,
+    ).toBe("configured");
 
-    expect(withEnv({
-      OPENGENI_ENVIRONMENT: "production",
-      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
-      OPENGENI_DELEGATION_SECRET: "",
-      OPENGENI_AUTH_REQUIRED: "true",
-      OPENGENI_ACCESS_KEY: "configured-shared-key",
-    }, () => getSettings()).productAccessMode).toBe("configured");
+    expect(
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_DELEGATION_SECRET: "",
+          OPENGENI_AUTH_REQUIRED: "true",
+          OPENGENI_ACCESS_KEY: "configured-shared-key",
+        },
+        () => getSettings(),
+      ).productAccessMode,
+    ).toBe("configured");
   });
 
   test("stream-token secret resolves explicit first, then falls back to delegationSecret", () => {
-    const explicit = withEnv({
-      OPENGENI_DELEGATION_SECRET: "delegation",
-      OPENGENI_STREAM_TOKEN_SECRET: "stream-explicit",
-    }, () => getSettings());
+    const explicit = withEnv(
+      {
+        OPENGENI_DELEGATION_SECRET: "delegation",
+        OPENGENI_STREAM_TOKEN_SECRET: "stream-explicit",
+      },
+      () => getSettings(),
+    );
     expect(resolveStreamTokenSecret(explicit)).toBe("stream-explicit");
 
-    const fallback = withEnv({
-      OPENGENI_DELEGATION_SECRET: "delegation-only",
-    }, () => getSettings());
+    const fallback = withEnv(
+      {
+        OPENGENI_DELEGATION_SECRET: "delegation-only",
+      },
+      () => getSettings(),
+    );
     expect(resolveStreamTokenSecret(fallback)).toBe("delegation-only");
 
     const neither = withEnv({}, () => getSettings());
@@ -217,15 +259,20 @@ describe("sandbox preparation profiles", () => {
   test("desktop enabled WITHOUT a stream-token secret GRACEFULLY DEGRADES (boots + warns, no throw)", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
     try {
       // The whole point of I8/OD-8: desktop on + no secret is NOT a boot-fail.
       // getSettings() returns settings (does not throw), emits a loud warning,
       // and streamTokenDegraded() flags the runtime degrade to transport:null.
-      const settings = withEnv({
-        OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
-        OPENGENI_DELEGATION_SECRET: "",
-      }, () => getSettings());
+      const settings = withEnv(
+        {
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_DELEGATION_SECRET: "",
+        },
+        () => getSettings(),
+      );
       expect(settings.sandboxDesktopEnabled).toBe(true);
       expect(streamTokenDegraded(settings)).toBe(true);
       expect(warnings.some((line) => line.includes("GRACEFULLY DEGRADE"))).toBe(true);
@@ -237,12 +284,17 @@ describe("sandbox preparation profiles", () => {
   test("desktop enabled WITH a stream-token secret does not degrade and does not warn", () => {
     const warnings: string[] = [];
     const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
     try {
-      const settings = withEnv({
-        OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
-        OPENGENI_STREAM_TOKEN_SECRET: "stream-secret",
-      }, () => getSettings());
+      const settings = withEnv(
+        {
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_STREAM_TOKEN_SECRET: "stream-secret",
+        },
+        () => getSettings(),
+      );
       expect(streamTokenDegraded(settings)).toBe(false);
       expect(warnings.some((line) => line.includes("GRACEFULLY DEGRADE"))).toBe(false);
     } finally {
@@ -252,24 +304,32 @@ describe("sandbox preparation profiles", () => {
 
   test("streamControlEnabled defaults to false (the input plane is OFF in v1)", () => {
     expect(withEnv({}, () => getSettings()).streamControlEnabled).toBe(false);
-    expect(withEnv({ OPENGENI_STREAM_CONTROL_ENABLED: "true" }, () => getSettings()).streamControlEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_STREAM_CONTROL_ENABLED: "true" }, () => getSettings())
+        .streamControlEnabled,
+    ).toBe(true);
   });
 
   test("retries startup dependency operations with bounded backoff", async () => {
     const retries: string[] = [];
     let calls = 0;
-    const result = await retryStartupDependency("NATS", async () => {
-      calls += 1;
-      if (calls < 3) {
-        throw new Error(`not ready ${calls}`);
-      }
-      return "connected";
-    }, {
-      attempts: 4,
-      initialDelayMs: 0,
-      maxDelayMs: 0,
-      onRetry: (event) => retries.push(`${event.label}:${event.attempt}/${event.attempts}:${event.delayMs}`),
-    });
+    const result = await retryStartupDependency(
+      "NATS",
+      async () => {
+        calls += 1;
+        if (calls < 3) {
+          throw new Error(`not ready ${calls}`);
+        }
+        return "connected";
+      },
+      {
+        attempts: 4,
+        initialDelayMs: 0,
+        maxDelayMs: 0,
+        onRetry: (event) =>
+          retries.push(`${event.label}:${event.attempt}/${event.attempts}:${event.delayMs}`),
+      },
+    );
 
     expect(result).toBe("connected");
     expect(calls).toBe(3);
@@ -278,22 +338,31 @@ describe("sandbox preparation profiles", () => {
 
   test("throws the final startup dependency error after all attempts fail", async () => {
     let calls = 0;
-    await expect(retryStartupDependency("Temporal", async () => {
-      calls += 1;
-      throw new Error("still down");
-    }, {
-      attempts: 2,
-      initialDelayMs: 0,
-      maxDelayMs: 0,
-    })).rejects.toThrow("still down");
+    await expect(
+      retryStartupDependency(
+        "Temporal",
+        async () => {
+          calls += 1;
+          throw new Error("still down");
+        },
+        {
+          attempts: 2,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+        },
+      ),
+    ).rejects.toThrow("still down");
     expect(calls).toBe(2);
   });
 
   test("collects git identity settings for sandbox pass-through", () => {
-    const settings = withEnv({
-      OPENGENI_GIT_AUTHOR_NAME: "OpenGeni Agent",
-      OPENGENI_GIT_AUTHOR_EMAIL: "infra@example.com",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_GIT_AUTHOR_NAME: "OpenGeni Agent",
+        OPENGENI_GIT_AUTHOR_EMAIL: "infra@example.com",
+      },
+      () => getSettings(),
+    );
     expect(collectGitIdentityEnvironment(settings)).toEqual({
       GIT_AUTHOR_NAME: "OpenGeni Agent",
       GIT_AUTHOR_EMAIL: "infra@example.com",
@@ -303,30 +372,40 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("does not collect ambient host git identity by default", () => {
-    const settings = withEnv({
-      GIT_AUTHOR_NAME: "Host Author",
-      GIT_AUTHOR_EMAIL: "host@example.com",
-      GIT_COMMITTER_NAME: "Host Committer",
-      GIT_COMMITTER_EMAIL: "committer@example.com",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        GIT_AUTHOR_NAME: "Host Author",
+        GIT_AUTHOR_EMAIL: "host@example.com",
+        GIT_COMMITTER_NAME: "Host Committer",
+        GIT_COMMITTER_EMAIL: "committer@example.com",
+      },
+      () => getSettings(),
+    );
     expect(collectGitIdentityEnvironment(settings)).toEqual({});
-    expect(collectSandboxEnvironment(settings, {
-      GIT_AUTHOR_NAME: "Host Author",
-      GIT_AUTHOR_EMAIL: "host@example.com",
-    })).toEqual({});
+    expect(
+      collectSandboxEnvironment(settings, {
+        GIT_AUTHOR_NAME: "Host Author",
+        GIT_AUTHOR_EMAIL: "host@example.com",
+      }),
+    ).toEqual({});
   });
 
   test("passes ambient git identity only through the github preparation profile", () => {
     const settings = withEnv({}, () => getSettings());
-    expect(collectSandboxEnvironment({
-      ...settings,
-      sandboxPreparationProfiles: "github",
-    }, {
-      GIT_AUTHOR_NAME: "Host Author",
-      GIT_AUTHOR_EMAIL: "host@example.com",
-      GIT_COMMITTER_NAME: "Host Committer",
-      GIT_COMMITTER_EMAIL: "committer@example.com",
-    })).toEqual({
+    expect(
+      collectSandboxEnvironment(
+        {
+          ...settings,
+          sandboxPreparationProfiles: "github",
+        },
+        {
+          GIT_AUTHOR_NAME: "Host Author",
+          GIT_AUTHOR_EMAIL: "host@example.com",
+          GIT_COMMITTER_NAME: "Host Committer",
+          GIT_COMMITTER_EMAIL: "committer@example.com",
+        },
+      ),
+    ).toEqual({
       GIT_AUTHOR_NAME: "Host Author",
       GIT_AUTHOR_EMAIL: "host@example.com",
       GIT_COMMITTER_NAME: "Host Committer",
@@ -335,7 +414,9 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("parses MCP server registry JSON", () => {
-    const parsed = parseMcpServers('[{"id":"docs","name":"Document Search","url":"http://127.0.0.1:8787/mcp","allowedTools":["search_documents"]}]');
+    const parsed = parseMcpServers(
+      '[{"id":"docs","name":"Document Search","url":"http://127.0.0.1:8787/mcp","allowedTools":["search_documents"]}]',
+    );
     const settings = {
       ...withEnv({}, () => getSettings()),
       mcpServers: parsed as ReturnType<typeof getSettings>["mcpServers"],
@@ -366,30 +447,54 @@ describe("sandbox preparation profiles", () => {
     expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
       name: "Document Search",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp/docs`,
-      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases", "knowledge_search", "knowledge_fetch", "memory_search", "memory_propose"],
+      allowedTools: [
+        "search_documents",
+        "fetch_document_chunk",
+        "list_document_bases",
+        "knowledge_search",
+        "knowledge_fetch",
+        "memory_search",
+        "memory_propose",
+      ],
     });
   });
 
   test("derives built-in document MCP URL from OPENGENI_MCP_URL", () => {
-    const settings = withEnv({
-      OPENGENI_MCP_URL: "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
-    }, () => getSettings());
-    expect(settings.mcpServers.find((server) => server.id === "opengeni")?.url).toBe("http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp");
-    expect(settings.mcpServers.find((server) => server.id === "docs")?.url).toBe("http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp/docs");
+    const settings = withEnv(
+      {
+        OPENGENI_MCP_URL:
+          "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+      },
+      () => getSettings(),
+    );
+    expect(settings.mcpServers.find((server) => server.id === "opengeni")?.url).toBe(
+      "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp",
+    );
+    expect(settings.mcpServers.find((server) => server.id === "docs")?.url).toBe(
+      "http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp/docs",
+    );
   });
 
   test("defaults toolspace off and only adds sandbox pointers when enabled", () => {
     const off = withEnv({}, () => getSettings());
     expect(off.toolspaceEnabled).toBe(false);
     expect(off.toolspaceMaxCallsPerTurn).toBe(200);
-    expect(stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_TOKEN_FILE).toBeUndefined();
-    expect(stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_URL).toBeUndefined();
+    expect(
+      stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" })
+        .OPENGENI_TOOLSPACE_TOKEN_FILE,
+    ).toBeUndefined();
+    expect(
+      stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_URL,
+    ).toBeUndefined();
 
-    const on = withEnv({
-      OPENGENI_TOOLSPACE_ENABLED: "true",
-      OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
-      OPENGENI_DELEGATION_SECRET: "delegation-secret",
-    }, () => getSettings());
+    const on = withEnv(
+      {
+        OPENGENI_TOOLSPACE_ENABLED: "true",
+        OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
+        OPENGENI_DELEGATION_SECRET: "delegation-secret",
+      },
+      () => getSettings(),
+    );
     expect(on.toolspaceEnabled).toBe(true);
     expect(on.toolspaceMaxCallsPerTurn).toBe(17);
     expect(stableSandboxEnvironmentForRun(on, {}, { workspaceId: "ws-1" })).toMatchObject({
@@ -421,38 +526,50 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("requires a delegation secret when toolspace is enabled", () => {
-    expect(() => withEnv({
-      OPENGENI_TOOLSPACE_ENABLED: "true",
-    }, () => getSettings())).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_TOOLSPACE_ENABLED: "true",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   });
 
   test("does not duplicate a custom files MCP profile", () => {
-    withEnv({
-      OPENGENI_MCP_SERVERS: '[{"id":"files","name":"Custom Files","url":"http://127.0.0.1:8787/mcp","allowedTools":["custom_download"]}]',
-    }, () => {
-      const settings = getSettings();
-      const ids = settings.mcpServers.map((server) => server.id);
-      expect(ids.filter((id) => id === "files")).toHaveLength(1);
-      expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
-        name: "Custom Files",
-        url: "http://127.0.0.1:8787/mcp",
-        allowedTools: ["custom_download"],
-      });
-    });
+    withEnv(
+      {
+        OPENGENI_MCP_SERVERS:
+          '[{"id":"files","name":"Custom Files","url":"http://127.0.0.1:8787/mcp","allowedTools":["custom_download"]}]',
+      },
+      () => {
+        const settings = getSettings();
+        const ids = settings.mcpServers.map((server) => server.id);
+        expect(ids.filter((id) => id === "files")).toHaveLength(1);
+        expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
+          name: "Custom Files",
+          url: "http://127.0.0.1:8787/mcp",
+          allowedTools: ["custom_download"],
+        });
+      },
+    );
   });
 
   test("ignores pre-OpenGeni environment variable names", () => {
-    withEnv({
-      INFRA_AGENT_SERVICE_NAME: "legacy-service",
-      INFRA_AGENT_DATABASE_URL: "postgres://legacy:legacy@127.0.0.1:5432/legacy",
-      INFRA_AGENT_OBJECT_STORAGE_BUCKET: "legacy-files",
-    }, () => {
-      const settings = getSettings();
+    withEnv(
+      {
+        INFRA_AGENT_SERVICE_NAME: "legacy-service",
+        INFRA_AGENT_DATABASE_URL: "postgres://legacy:legacy@127.0.0.1:5432/legacy",
+        INFRA_AGENT_OBJECT_STORAGE_BUCKET: "legacy-files",
+      },
+      () => {
+        const settings = getSettings();
 
-      expect(settings.serviceName).toBe("opengeni");
-      expect(settings.databaseUrl).toBe("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni");
-      expect(settings.objectStorageBucket).toBe("opengeni-files");
-    });
+        expect(settings.serviceName).toBe("opengeni");
+        expect(settings.databaseUrl).toBe("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni");
+        expect(settings.objectStorageBucket).toBe("opengeni-files");
+      },
+    );
   });
 
   test("rejects non-array MCP server registry JSON", () => {
@@ -460,136 +577,176 @@ describe("sandbox preparation profiles", () => {
   });
 
   test("parses object storage settings and rejects incomplete credentials", () => {
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
-      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
-      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
-      OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
-    }, () => {
-      const settings = getSettings();
-      expect(settings.objectStorageBackend).toBe("s3-compatible");
-      expect(settings.objectStorageEndpoint).toBe("http://127.0.0.1:9000");
-      expect(settings.objectStorageBucket).toBe("opengeni-files");
-      expect(settings.objectStorageForcePathStyle).toBe(true);
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+      },
+      () => {
+        const settings = getSettings();
+        expect(settings.objectStorageBackend).toBe("s3-compatible");
+        expect(settings.objectStorageEndpoint).toBe("http://127.0.0.1:9000");
+        expect(settings.objectStorageBucket).toBe("opengeni-files");
+        expect(settings.objectStorageForcePathStyle).toBe(true);
+      },
+    );
 
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
-      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
-    }, () => {
-      expect(() => getSettings()).toThrow("both be set or both omitted");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+      },
+      () => {
+        expect(() => getSettings()).toThrow("both be set or both omitted");
+      },
+    );
   });
 
   test("parses Azure Blob object storage settings", () => {
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
-      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: "storage-key",
-    }, () => {
-      const settings = getSettings();
-      expect(settings.objectStorageBackend).toBe("azure-blob");
-      expect(settings.objectStorageBucket).toBe("opengeni-files");
-      expect(settings.objectStorageAzureAccountName).toBe("opengeni");
-      expect(settings.objectStorageAzureAccountKey).toBe("storage-key");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: "storage-key",
+      },
+      () => {
+        const settings = getSettings();
+        expect(settings.objectStorageBackend).toBe("azure-blob");
+        expect(settings.objectStorageBucket).toBe("opengeni-files");
+        expect(settings.objectStorageAzureAccountName).toBe("opengeni");
+        expect(settings.objectStorageAzureAccountKey).toBe("storage-key");
+      },
+    );
 
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
-    }, () => {
-      expect(() => getSettings()).toThrow("Azure Blob storage requires");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+      },
+      () => {
+        expect(() => getSettings()).toThrow("Azure Blob storage requires");
+      },
+    );
 
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
-      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
-      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
-      OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
-      OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING: "UseDevelopmentStorage=true",
-    }, () => {
-      expect(() => getSettings()).toThrow("Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+        OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING: "UseDevelopmentStorage=true",
+      },
+      () => {
+        expect(() => getSettings()).toThrow(
+          "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE",
+        );
+      },
+    );
   });
 
   test("parses native AWS S3 object storage without static key assumptions", () => {
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "aws-s3",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_REGION: "us-east-1",
-    }, () => {
-      const settings = getSettings();
-      expect(settings.objectStorageBackend).toBe("aws-s3");
-      expect(settings.objectStorageBucket).toBe("opengeni-files");
-      expect(settings.objectStorageRegion).toBe("us-east-1");
-      expect(settings.objectStorageAccessKeyId).toBeUndefined();
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "aws-s3",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_REGION: "us-east-1",
+      },
+      () => {
+        const settings = getSettings();
+        expect(settings.objectStorageBackend).toBe("aws-s3");
+        expect(settings.objectStorageBucket).toBe("opengeni-files");
+        expect(settings.objectStorageRegion).toBe("us-east-1");
+        expect(settings.objectStorageAccessKeyId).toBeUndefined();
+      },
+    );
   });
 
   test("parses GCS object storage settings and validates inline credentials JSON", () => {
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
-    }, () => {
-      const settings = getSettings();
-      expect(settings.objectStorageBackend).toBe("gcs");
-      expect(settings.objectStorageBucket).toBe("opengeni-files");
-      expect(settings.objectStorageGcsProjectId).toBe("opengeni-test");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
+      },
+      () => {
+        const settings = getSettings();
+        expect(settings.objectStorageBackend).toBe("gcs");
+        expect(settings.objectStorageBucket).toBe("opengeni-files");
+        expect(settings.objectStorageGcsProjectId).toBe("opengeni-test");
+      },
+    );
 
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
-      OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON: "not-json",
-    }, () => {
-      expect(() => getSettings()).toThrow("GCS_CREDENTIALS_JSON must be valid JSON");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+        OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON: "not-json",
+      },
+      () => {
+        expect(() => getSettings()).toThrow("GCS_CREDENTIALS_JSON must be valid JSON");
+      },
+    );
 
-    withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
-      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
-    }, () => {
-      expect(() => getSettings()).toThrow("GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS");
-    });
+    withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+      },
+      () => {
+        expect(() => getSettings()).toThrow("GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS");
+      },
+    );
   });
 
   test("parses document indexing settings", () => {
-    withEnv({
-      OPENGENI_DOCUMENT_CHUNK_SIZE: "2000",
-      OPENGENI_DOCUMENT_CHUNK_OVERLAP: "200",
-      OPENGENI_DOCUMENT_EMBEDDING_PROVIDER: "deterministic",
-      OPENGENI_DOCUMENT_EMBEDDING_MODEL: "local-test",
-      OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS: "3072",
-    }, () => {
-      const settings = getSettings();
-      expect(settings.documentParser).toBe("liteparse");
-      expect(settings.documentChunkSize).toBe(2000);
-      expect(settings.documentChunkOverlap).toBe(200);
-      expect(settings.documentEmbeddingProvider).toBe("deterministic");
-      expect(settings.documentEmbeddingModel).toBe("local-test");
-      expect(settings.documentEmbeddingDimensions).toBe(3072);
-    });
+    withEnv(
+      {
+        OPENGENI_DOCUMENT_CHUNK_SIZE: "2000",
+        OPENGENI_DOCUMENT_CHUNK_OVERLAP: "200",
+        OPENGENI_DOCUMENT_EMBEDDING_PROVIDER: "deterministic",
+        OPENGENI_DOCUMENT_EMBEDDING_MODEL: "local-test",
+        OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS: "3072",
+      },
+      () => {
+        const settings = getSettings();
+        expect(settings.documentParser).toBe("liteparse");
+        expect(settings.documentChunkSize).toBe(2000);
+        expect(settings.documentChunkOverlap).toBe(200);
+        expect(settings.documentEmbeddingProvider).toBe("deterministic");
+        expect(settings.documentEmbeddingModel).toBe("local-test");
+        expect(settings.documentEmbeddingDimensions).toBe(3072);
+      },
+    );
   });
 
   test("rejects invalid document chunk overlap", () => {
-    withEnv({
-      OPENGENI_DOCUMENT_CHUNK_SIZE: "100",
-      OPENGENI_DOCUMENT_CHUNK_OVERLAP: "100",
-    }, () => {
-      expect(() => getSettings()).toThrow("must be smaller");
-    });
+    withEnv(
+      {
+        OPENGENI_DOCUMENT_CHUNK_SIZE: "100",
+        OPENGENI_DOCUMENT_CHUNK_OVERLAP: "100",
+      },
+      () => {
+        expect(() => getSettings()).toThrow("must be smaller");
+      },
+    );
   });
 
   test("parses static usage limits and rejects empty static mode", () => {
-    const limits = parseStaticUsageLimitsJson('{"maxWorkspacesPerAccount":2,"maxFileUploadBytes":1048576}');
+    const limits = parseStaticUsageLimitsJson(
+      '{"maxWorkspacesPerAccount":2,"maxFileUploadBytes":1048576}',
+    );
     expect(limits).toEqual({ maxWorkspacesPerAccount: 2, maxFileUploadBytes: 1048576 });
 
-    withEnv({
-      OPENGENI_USAGE_LIMITS_MODE: "static",
-      OPENGENI_STATIC_USAGE_LIMITS_JSON: '{"maxApiKeysPerWorkspace":1}',
-    }, () => {
-      expect(configuredStaticUsageLimits(getSettings())).toEqual({ maxApiKeysPerWorkspace: 1 });
-    });
+    withEnv(
+      {
+        OPENGENI_USAGE_LIMITS_MODE: "static",
+        OPENGENI_STATIC_USAGE_LIMITS_JSON: '{"maxApiKeysPerWorkspace":1}',
+      },
+      () => {
+        expect(configuredStaticUsageLimits(getSettings())).toEqual({ maxApiKeysPerWorkspace: 1 });
+      },
+    );
 
     withEnv({ OPENGENI_USAGE_LIMITS_MODE: "static" }, () => {
       expect(() => getSettings()).toThrow("STATIC_USAGE_LIMITS_JSON");
@@ -602,23 +759,29 @@ describe("sandbox preparation profiles", () => {
       models: ["gpt-5.5"],
     });
 
-    withEnv({
-      OPENGENI_ENTITLEMENTS_MODE: "static",
-      OPENGENI_STATIC_ENTITLEMENTS_JSON: '{"github":true}',
-    }, () => {
-      expect(configuredEntitlements(getSettings())).toEqual({ github: true });
-    });
+    withEnv(
+      {
+        OPENGENI_ENTITLEMENTS_MODE: "static",
+        OPENGENI_STATIC_ENTITLEMENTS_JSON: '{"github":true}',
+      },
+      () => {
+        expect(configuredEntitlements(getSettings())).toEqual({ github: true });
+      },
+    );
 
-    withEnv({
-      OPENGENI_ENTITLEMENTS_MODE: "managed",
-      OPENGENI_STATIC_ENTITLEMENTS_JSON: '{"custom.feature":"enabled"}',
-    }, () => {
-      expect(configuredEntitlements(getSettings())).toMatchObject({
-        "managed.auth.email_password": true,
-        "managed.api_keys": true,
-        "custom.feature": "enabled",
-      });
-    });
+    withEnv(
+      {
+        OPENGENI_ENTITLEMENTS_MODE: "managed",
+        OPENGENI_STATIC_ENTITLEMENTS_JSON: '{"custom.feature":"enabled"}',
+      },
+      () => {
+        expect(configuredEntitlements(getSettings())).toMatchObject({
+          "managed.auth.email_password": true,
+          "managed.api_keys": true,
+          "custom.feature": "enabled",
+        });
+      },
+    );
 
     withEnv({ OPENGENI_ENTITLEMENTS_MODE: "static" }, () => {
       expect(() => getSettings()).toThrow("STATIC_ENTITLEMENTS_JSON");
@@ -630,7 +793,9 @@ describe("workspace environments encryption key", () => {
   const validKey = Buffer.alloc(32, 7).toString("base64");
 
   test("decodes a base64 key of exactly 32 bytes", () => {
-    const settings = withEnv({ OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey }, () => getSettings());
+    const settings = withEnv({ OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey }, () =>
+      getSettings(),
+    );
     const key = environmentsEncryptionKeyBytes(settings);
     expect(key).not.toBeNull();
     expect(key!.length).toBe(32);
@@ -642,9 +807,14 @@ describe("workspace environments encryption key", () => {
   });
 
   test("rejects keys that do not decode to 32 bytes at boot", () => {
-    expect(() => withEnv({
-      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(16, 1).toString("base64"),
-    }, () => getSettings())).toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(16, 1).toString("base64"),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes");
   });
 
   test("requires the key for managed mode outside local/test", () => {
@@ -656,18 +826,29 @@ describe("workspace environments encryption key", () => {
       OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
       OPENGENI_RESEND_API_KEY: "re_test",
     };
-    expect(() => withEnv(managedEnv, () => getSettings()))
-      .toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test");
-    expect(withEnv({
-      ...managedEnv,
-      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey,
-    }, () => getSettings()).environmentsEncryptionKey).toBe(validKey);
-    expect(withEnv({
-      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
-      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
-      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
-    }, () => getSettings()).environmentsEncryptionKey).toBeUndefined();
+    expect(() => withEnv(managedEnv, () => getSettings())).toThrow(
+      "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test",
+    );
+    expect(
+      withEnv(
+        {
+          ...managedEnv,
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey,
+        },
+        () => getSettings(),
+      ).environmentsEncryptionKey,
+    ).toBe(validKey);
+    expect(
+      withEnv(
+        {
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+          OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+        },
+        () => getSettings(),
+      ).environmentsEncryptionKey,
+    ).toBeUndefined();
   });
 });
 
@@ -679,16 +860,21 @@ describe("provider item id policy", () => {
   });
 
   test("can preserve provider item ids and disable encrypted reasoning", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "preserve",
-      OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT: "false",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "preserve",
+        OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT: "false",
+      },
+      () => getSettings(),
+    );
     expect(settings.openaiProviderItemIds).toBe("preserve");
     expect(settings.openaiReasoningEncryptedContent).toBe(false);
   });
 
   test("rejects unknown provider item id policies", () => {
-    expect(() => withEnv({ OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "sometimes" }, () => getSettings())).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "sometimes" }, () => getSettings()),
+    ).toThrow();
   });
 });
 
@@ -703,47 +889,76 @@ describe("backend-gated sandbox required-credential validation", () => {
 
   test("docker/local/none require no sandbox credentials", () => {
     for (const backend of ["docker", "local", "none"]) {
-      expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: backend }, () => getSettings())).not.toThrow();
+      expect(() =>
+        withEnv({ OPENGENI_SANDBOX_BACKEND: backend }, () => getSettings()),
+      ).not.toThrow();
     }
   });
 
   test("modal requires the token only when sandboxBackend=modal", () => {
     // Backend=modal WITHOUT the token → fails (gated).
-    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "modal" }, () => getSettings()))
-      .toThrow("OPENGENI_MODAL_TOKEN_ID is required when OPENGENI_SANDBOX_BACKEND=modal");
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "modal" }, () => getSettings())).toThrow(
+      "OPENGENI_MODAL_TOKEN_ID is required when OPENGENI_SANDBOX_BACKEND=modal",
+    );
     // Backend=modal WITH the token (and app name defaulted) → passes.
-    expect(() => withEnv({
-      OPENGENI_SANDBOX_BACKEND: "modal",
-      OPENGENI_MODAL_TOKEN_ID: "ak-test",
-      OPENGENI_MODAL_TOKEN_SECRET: "as-test",
-    }, () => getSettings())).not.toThrow();
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
     // The SAME missing-token config but backend=docker → does NOT fail on modal.
-    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings())).not.toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
+    ).not.toThrow();
   });
 
   test("daytona requires its api key only when active", () => {
-    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "daytona" }, () => getSettings()))
-      .toThrow("OPENGENI_DAYTONA_API_KEY is required when OPENGENI_SANDBOX_BACKEND=daytona");
-    expect(() => withEnv({
-      OPENGENI_SANDBOX_BACKEND: "daytona",
-      OPENGENI_DAYTONA_API_KEY: "dk-test",
-    }, () => getSettings())).not.toThrow();
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "daytona" }, () => getSettings())).toThrow(
+      "OPENGENI_DAYTONA_API_KEY is required when OPENGENI_SANDBOX_BACKEND=daytona",
+    );
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "daytona",
+          OPENGENI_DAYTONA_API_KEY: "dk-test",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
     // daytona creds are irrelevant when modal is active (modal has its own gate).
-    expect(() => withEnv({
-      OPENGENI_SANDBOX_BACKEND: "modal",
-      OPENGENI_MODAL_TOKEN_ID: "ak",
-      OPENGENI_MODAL_TOKEN_SECRET: "as",
-    }, () => getSettings())).not.toThrow();
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
   });
 
   test("vercel requires BOTH the token and the project id when active", () => {
-    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "vercel", OPENGENI_VERCEL_TOKEN: "vt" }, () => getSettings()))
-      .toThrow("OPENGENI_VERCEL_PROJECT_ID is required when OPENGENI_SANDBOX_BACKEND=vercel");
-    expect(() => withEnv({
-      OPENGENI_SANDBOX_BACKEND: "vercel",
-      OPENGENI_VERCEL_TOKEN: "vt",
-      OPENGENI_VERCEL_PROJECT_ID: "prj",
-    }, () => getSettings())).not.toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "vercel", OPENGENI_VERCEL_TOKEN: "vt" }, () =>
+        getSettings(),
+      ),
+    ).toThrow("OPENGENI_VERCEL_PROJECT_ID is required when OPENGENI_SANDBOX_BACKEND=vercel");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "vercel",
+          OPENGENI_VERCEL_TOKEN: "vt",
+          OPENGENI_VERCEL_PROJECT_ID: "prj",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
   });
 
   test("runloop/e2b/blaxel/cloudflare each gate their own single credential", () => {
@@ -754,17 +969,24 @@ describe("backend-gated sandbox required-credential validation", () => {
       ["cloudflare", "OPENGENI_CLOUDFLARE_WORKER_URL", "https://worker.example.com"],
     ];
     for (const [backend, envKey, value] of cases) {
-      expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: backend }, () => getSettings()))
-        .toThrow(`${envKey} is required when OPENGENI_SANDBOX_BACKEND=${backend}`);
-      expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: backend, [envKey]: value }, () => getSettings()))
-        .not.toThrow();
+      expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: backend }, () => getSettings())).toThrow(
+        `${envKey} is required when OPENGENI_SANDBOX_BACKEND=${backend}`,
+      );
+      expect(() =>
+        withEnv({ OPENGENI_SANDBOX_BACKEND: backend, [envKey]: value }, () => getSettings()),
+      ).not.toThrow();
     }
   });
 
   test("the modal token stays a both-or-neither pair regardless of the active backend", () => {
     // Half-configured Modal token while backend=docker: still a misconfig.
-    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "docker", OPENGENI_MODAL_TOKEN_ID: "only-id" }, () => getSettings()))
-      .toThrow("OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted");
+    expect(() =>
+      withEnv({ OPENGENI_SANDBOX_BACKEND: "docker", OPENGENI_MODAL_TOKEN_ID: "only-id" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted",
+    );
   });
 
   test("SANDBOX_REQUIRED_ENV + requiredSandboxEnvForBackend agree", () => {
@@ -776,7 +998,9 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(requiredSandboxEnvForBackend("docker")).toEqual([]);
     // every backend in the table maps to a (possibly empty) env list.
     for (const backend of Object.keys(SANDBOX_REQUIRED_ENV)) {
-      expect(Array.isArray(requiredSandboxEnvForBackend(backend as keyof typeof SANDBOX_REQUIRED_ENV))).toBe(true);
+      expect(
+        Array.isArray(requiredSandboxEnvForBackend(backend as keyof typeof SANDBOX_REQUIRED_ENV)),
+      ).toBe(true);
     }
   });
 });
@@ -788,16 +1012,13 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     // the effective box idle timeout — which defaults to the hard lifetime (3600s).
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(3600);
-    expect(
-      settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs,
-    ).toBeLessThan(effectiveModalIdleTimeoutSeconds(settings) * 1000);
+    expect(settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs).toBeLessThan(
+      effectiveModalIdleTimeoutSeconds(settings) * 1000,
+    );
   });
 
   test("an explicit idle timeout overrides the default", () => {
-    const settings = withEnv(
-      { OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1200" },
-      () => getSettings(),
-    );
+    const settings = withEnv({ OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1200" }, () => getSettings());
     expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(1200);
   });
 
@@ -805,23 +1026,27 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     // Pin the idle timeout BELOW idleGrace so Modal's idle-reap would kill the box
     // before the reaper waits out the drain grace to snapshot it — the exact
     // failure mode (file lost across box churn). Boot must reject it.
-    expect(() => withEnv(
-      {
-        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
-        OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
-      },
-      () => getSettings(),
-    )).toThrow(/idle timeout/i);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
+          OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/idle timeout/i);
   });
 
   test("boot fails when an explicit idle timeout exceeds the hard lifetime", () => {
-    expect(() => withEnv(
-      {
-        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
-        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
-      },
-      () => getSettings(),
-    )).toThrow(/must not exceed the hard provider/i);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+          OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must not exceed the hard provider/i);
   });
 });
 

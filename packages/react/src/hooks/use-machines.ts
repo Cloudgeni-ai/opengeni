@@ -21,7 +21,10 @@ import type { MachinesResponse, MachineView, MetricSample } from "../types/machi
  */
 export type MachinesClientLike = {
   /** GET /v1/workspaces/:ws/machines — the dashboard list + active pointer. */
-  listMachines: (workspaceId: string, options?: { sessionId?: string }) => Promise<MachinesResponse>;
+  listMachines: (
+    workspaceId: string,
+    options?: { sessionId?: string },
+  ) => Promise<MachinesResponse>;
   /** GET .../machines/:enrollmentId/metrics/series — the downsampled history. */
   machineMetricsSeries?: (
     workspaceId: string,
@@ -69,7 +72,10 @@ export type UseMachinesResult = {
   /** Whether the host wired an attach/swap path (drives the card affordance). */
   canAttach: boolean;
   /** Fetch a downsampled metric series for one enrolled machine. */
-  fetchSeries: (enrollmentId: string, window?: "15m" | "1h" | "6h" | "24h") => Promise<MetricSample[]>;
+  fetchSeries: (
+    enrollmentId: string,
+    window?: "15m" | "1h" | "6h" | "24h",
+  ) => Promise<MetricSample[]>;
   attaching: boolean;
   /** The sandbox id of the in-flight attach (for per-card spinner gating). */
   attachingSandboxId: string | null;
@@ -89,14 +95,18 @@ const EMPTY: MachinesResponse = { activeSandboxId: null, activeEpoch: 0, machine
  */
 export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const machinesClient = (options.machinesClient ?? (client as unknown as MachinesClientLike)) satisfies MachinesClientLike;
+  const machinesClient = (options.machinesClient ??
+    (client as unknown as MachinesClientLike)) satisfies MachinesClientLike;
   const sessionId = options.sessionId;
 
   const load = useCallback(async () => {
     return await machinesClient.listMachines(workspaceId, sessionId ? { sessionId } : undefined);
   }, [machinesClient, workspaceId, sessionId]);
 
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
   // The sandbox id of the in-flight attach (drives the per-card spinner).
   const [attachingSandboxId, setAttachingSandboxId] = useState<string | null>(null);
@@ -132,7 +142,10 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   );
 
   const fetchSeries = useCallback(
-    async (enrollmentId: string, window: "15m" | "1h" | "6h" | "24h" = "1h"): Promise<MetricSample[]> => {
+    async (
+      enrollmentId: string,
+      window: "15m" | "1h" | "6h" | "24h" = "1h",
+    ): Promise<MetricSample[]> => {
       if (!machinesClient.machineMetricsSeries) return [];
       return await machinesClient.machineMetricsSeries(workspaceId, enrollmentId, { window });
     },

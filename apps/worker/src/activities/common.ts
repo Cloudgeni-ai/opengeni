@@ -22,7 +22,13 @@ export function assertReusableSessionRevivable(status: SessionStatus): void {
   }
 }
 
-export function scheduledUserMessagePayload(prompt: string, resources: ResourceRef[], tools: ToolRef[], taskId: string, runId: string): Record<string, unknown> {
+export function scheduledUserMessagePayload(
+  prompt: string,
+  resources: ResourceRef[],
+  tools: ToolRef[],
+  taskId: string,
+  runId: string,
+): Record<string, unknown> {
   return {
     text: prompt,
     scheduledTaskId: taskId,

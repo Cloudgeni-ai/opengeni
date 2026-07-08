@@ -1,7 +1,7 @@
-import { ChevronDownIcon } from "lucide-react"
-import * as React from "react"
+import { ChevronDownIcon } from "lucide-react";
+import * as React from "react";
 
-import { cn } from "@/lib/utils"
+import { cn } from "@/lib/utils";
 
 const Select = React.forwardRef<HTMLSelectElement, React.ComponentProps<"select">>(
   ({ className, children, ...props }, ref) => (
@@ -16,10 +16,13 @@ const Select = React.forwardRef<HTMLSelectElement, React.ComponentProps<"select"
       >
         {children}
       </select>
-      <ChevronDownIcon aria-hidden="true" className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
+      <ChevronDownIcon
+        aria-hidden="true"
+        className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-subtle"
+      />
     </span>
   ),
-)
-Select.displayName = "Select"
+);
+Select.displayName = "Select";
 
-export { Select }
+export { Select };

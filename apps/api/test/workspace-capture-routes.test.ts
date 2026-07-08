@@ -59,7 +59,12 @@ describe("M2 capture-read route discipline (static)", () => {
       expect(grantAt, "handler must call requireAccessGrant").toBeGreaterThanOrEqual(0);
       expect(body).toContain('"files:read"');
       // No query read or capture load precedes the grant (auth-before-anything).
-      for (const needle of ["c.req.query", "latestWorkspaceCapture", "workspaceCaptureAtRevision", "getSession("]) {
+      for (const needle of [
+        "c.req.query",
+        "latestWorkspaceCapture",
+        "workspaceCaptureAtRevision",
+        "getSession(",
+      ]) {
         const at = body.indexOf(needle);
         if (at >= 0) expect(at, `${needle} must not precede the grant`).toBeGreaterThan(grantAt);
       }
@@ -100,9 +105,17 @@ const BIG_REF = "workspace-captures/ws/sess/blobs/ccc";
 
 function baseStats(): WorkspaceCaptureManifest["stats"] {
   return {
-    repoCount: 1, fileCount: 1, additions: 1, deletions: 0, totalBytes: 12,
-    tooLargeCount: 0, binaryCount: 0, treeEntryCount: 1, treeTruncated: false,
-    durationMs: 42, fingerprint: "fp-1",
+    repoCount: 1,
+    fileCount: 1,
+    additions: 1,
+    deletions: 0,
+    totalBytes: 12,
+    tooLargeCount: 0,
+    binaryCount: 0,
+    treeEntryCount: 1,
+    treeTruncated: false,
+    durationMs: 42,
+    fingerprint: "fp-1",
   };
 }
 
@@ -113,7 +126,15 @@ function makeManifest(files: WorkspaceCaptureManifest["files"]): WorkspaceCaptur
     capturedAt: "2026-07-08T00:00:00.000Z",
     turnId: "turn-1",
     leaseEpoch: 5,
-    treeIndex: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
+    treeIndex: {
+      name: "",
+      path: "",
+      type: "dir",
+      sizeBytes: null,
+      mtimeMs: null,
+      mode: null,
+      truncated: false,
+    },
     treeTruncated: false,
     repos: [],
     files,
@@ -140,7 +161,9 @@ function makeRow(overrides: Partial<WorkspaceCaptureRow> = {}): WorkspaceCapture
 }
 
 // In-memory storage: byte map for reads, a stub signer that records the key.
-function fakeStorage(objects: Record<string, Uint8Array>): CaptureStoragePort & { signed: string[] } {
+function fakeStorage(
+  objects: Record<string, Uint8Array>,
+): CaptureStoragePort & { signed: string[] } {
   const signed: string[] = [];
   return {
     signed,
@@ -150,15 +173,27 @@ function fakeStorage(objects: Record<string, Uint8Array>): CaptureStoragePort & 
     },
     async createGetUrl({ key }) {
       signed.push(key);
-      return { url: `https://signed.example/${key}`, expiresAt: new Date("2026-07-08T00:05:00.000Z") };
+      return {
+        url: `https://signed.example/${key}`,
+        expiresAt: new Date("2026-07-08T00:05:00.000Z"),
+      };
     },
   };
 }
 
-function fileEntry(over: Partial<WorkspaceCaptureManifest["files"][number]>): WorkspaceCaptureManifest["files"][number] {
+function fileEntry(
+  over: Partial<WorkspaceCaptureManifest["files"][number]>,
+): WorkspaceCaptureManifest["files"][number] {
   return {
-    path: "src/app.ts", status: "modified", hash: "aaa", baseHash: null,
-    contentRef: TEXT_REF, sizeBytes: 12, isBinary: false, tooLarge: false, deleted: false,
+    path: "src/app.ts",
+    status: "modified",
+    hash: "aaa",
+    baseHash: null,
+    contentRef: TEXT_REF,
+    sizeBytes: 12,
+    isBinary: false,
+    tooLarge: false,
+    deleted: false,
     ...over,
   };
 }
@@ -182,19 +217,26 @@ describe("serveWorkspaceCapture (manifest response)", () => {
   test("row with malformed stats (poison/synthetic row) → {available:false}, never 500", async () => {
     // Mirrors a real dev-DB artifact: a synthetic row with stats={} + a stub
     // manifest key. Must degrade, not throw a ZodError up as a 500.
-    const res = await serveWorkspaceCapture(makeRow({ stats: {}, manifestKey: "m" }), fakeStorage({ m: new TextEncoder().encode("not json") }));
+    const res = await serveWorkspaceCapture(
+      makeRow({ stats: {}, manifestKey: "m" }),
+      fakeStorage({ m: new TextEncoder().encode("not json") }),
+    );
     expect(res).toEqual({ available: false });
   });
 
   test("manifest blob that fails schema validation → {available:false}", async () => {
-    const storage = fakeStorage({ [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify({ version: 1, bogus: true })) });
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify({ version: 1, bogus: true })),
+    });
     const res = await serveWorkspaceCapture(makeRow(), storage);
     expect(res).toEqual({ available: false });
   });
 
   test("small manifest → inline (metadata + manifest, no signed URL)", async () => {
     const manifest = makeManifest([fileEntry({})]);
-    const storage = fakeStorage({ [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)) });
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)),
+    });
     const res = await serveWorkspaceCapture(makeRow(), storage);
     expect(res.available).toBe(true);
     if (!res.available) throw new Error("unreachable");
@@ -224,9 +266,15 @@ describe("serveWorkspaceCapture (manifest response)", () => {
 });
 
 describe("serveWorkspaceCaptureFile (single after-image)", () => {
-  function storageWith(files: WorkspaceCaptureManifest["files"], blobs: Record<string, Uint8Array> = {}) {
+  function storageWith(
+    files: WorkspaceCaptureManifest["files"],
+    blobs: Record<string, Uint8Array> = {},
+  ) {
     const manifest = makeManifest(files);
-    return fakeStorage({ [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)), ...blobs });
+    return fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(JSON.stringify(manifest)),
+      ...blobs,
+    });
   }
 
   async function expect404(promise: Promise<unknown>): Promise<number> {
@@ -240,7 +288,9 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
   }
 
   test("no capture row → 404", async () => {
-    expect(await expect404(serveWorkspaceCaptureFile(null, "src/app.ts", fakeStorage({})))).toBe(404);
+    expect(await expect404(serveWorkspaceCaptureFile(null, "src/app.ts", fakeStorage({})))).toBe(
+      404,
+    );
   });
 
   test("path not in the manifest → 404", async () => {
@@ -249,12 +299,28 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
   });
 
   test("deleted file → 404", async () => {
-    const storage = storageWith([fileEntry({ path: "gone.ts", status: "deleted", deleted: true, contentRef: null, hash: null })]);
+    const storage = storageWith([
+      fileEntry({
+        path: "gone.ts",
+        status: "deleted",
+        deleted: true,
+        contentRef: null,
+        hash: null,
+      }),
+    ]);
     expect(await expect404(serveWorkspaceCaptureFile(makeRow(), "gone.ts", storage))).toBe(404);
   });
 
   test("tooLarge file → marker (metadata only, no content/URL)", async () => {
-    const storage = storageWith([fileEntry({ path: "big.bin", tooLarge: true, contentRef: null, hash: null, sizeBytes: 9_000_000 })]);
+    const storage = storageWith([
+      fileEntry({
+        path: "big.bin",
+        tooLarge: true,
+        contentRef: null,
+        hash: null,
+        sizeBytes: 9_000_000,
+      }),
+    ]);
     const res = await serveWorkspaceCaptureFile(makeRow(), "big.bin", storage);
     expect(res.tooLarge).toBe(true);
     expect(res.content).toBeNull();
@@ -265,7 +331,10 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
 
   test("small text file → inline utf8 content (bytes resolved from contentRef)", async () => {
     const bytes = new TextEncoder().encode("hello world\n");
-    const storage = storageWith([fileEntry({ path: "src/app.ts", contentRef: TEXT_REF, sizeBytes: bytes.byteLength })], { [TEXT_REF]: bytes });
+    const storage = storageWith(
+      [fileEntry({ path: "src/app.ts", contentRef: TEXT_REF, sizeBytes: bytes.byteLength })],
+      { [TEXT_REF]: bytes },
+    );
     const res = await serveWorkspaceCaptureFile(makeRow(), "src/app.ts", storage);
     expect(res.encoding).toBe("utf8");
     expect(res.content).toBe("hello world\n");
@@ -275,7 +344,17 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
 
   test("small binary file → inline base64 content", async () => {
     const bytes = new Uint8Array([0x00, 0x01, 0xff, 0xfe]);
-    const storage = storageWith([fileEntry({ path: "logo.png", isBinary: true, contentRef: BIN_REF, sizeBytes: bytes.byteLength })], { [BIN_REF]: bytes });
+    const storage = storageWith(
+      [
+        fileEntry({
+          path: "logo.png",
+          isBinary: true,
+          contentRef: BIN_REF,
+          sizeBytes: bytes.byteLength,
+        }),
+      ],
+      { [BIN_REF]: bytes },
+    );
     const res = await serveWorkspaceCaptureFile(makeRow(), "logo.png", storage);
     expect(res.encoding).toBe("base64");
     expect(res.content).toBe(Buffer.from(bytes).toString("base64"));
@@ -283,7 +362,13 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
 
   test("file above the inline cap → signed URL, no inline content", async () => {
     const storage = storageWith(
-      [fileEntry({ path: "big.txt", contentRef: BIG_REF, sizeBytes: CAPTURE_INLINE_FILE_MAX_BYTES + 1 })],
+      [
+        fileEntry({
+          path: "big.txt",
+          contentRef: BIG_REF,
+          sizeBytes: CAPTURE_INLINE_FILE_MAX_BYTES + 1,
+        }),
+      ],
       { [BIG_REF]: new Uint8Array(1) },
     );
     const res = await serveWorkspaceCaptureFile(makeRow(), "big.txt", storage);
@@ -293,7 +378,9 @@ describe("serveWorkspaceCaptureFile (single after-image)", () => {
   });
 
   test("after-image blob missing (GC race) → marker, no throw", async () => {
-    const storage = storageWith([fileEntry({ path: "src/app.ts", contentRef: TEXT_REF, sizeBytes: 12 })]); // no TEXT_REF blob
+    const storage = storageWith([
+      fileEntry({ path: "src/app.ts", contentRef: TEXT_REF, sizeBytes: 12 }),
+    ]); // no TEXT_REF blob
     const res = await serveWorkspaceCaptureFile(makeRow(), "src/app.ts", storage);
     expect(res.content).toBeNull();
     expect(res.contentUrl).toBeNull();

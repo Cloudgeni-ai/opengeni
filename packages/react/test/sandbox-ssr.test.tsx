@@ -22,7 +22,17 @@ import { SandboxTerminal } from "../src/components/sandbox-terminal";
 describe("SSR safety (no DOM / no window)", () => {
   test("SandboxTerminal renders to a string on the server (placeholder, no xterm import)", () => {
     const html = renderToString(
-      <SandboxTerminal result={{ chunks: [], running: false, write: null, activePtyId: null, close: () => {}, error: null }} placeholder="loading" />,
+      <SandboxTerminal
+        result={{
+          chunks: [],
+          running: false,
+          write: null,
+          activePtyId: null,
+          close: () => {},
+          error: null,
+        }}
+        placeholder="loading"
+      />,
     );
     // The placeholder is present; xterm is NOT imported during the server render
     // (the import lives inside useEffect, which does not run during SSR).
@@ -56,7 +66,9 @@ describe("desktop transport reducers (pure, @opengeni/sdk)", () => {
     expect(nextDesktopState("connecting", { type: "connected" })).toBe("connected");
     expect(nextDesktopState("connected", { type: "rotate" })).toBe("rotating");
     expect(nextDesktopState("connected", { type: "disconnected" })).toBe("reconnecting");
-    expect(nextDesktopState("ended" as DesktopConnectionState, { type: "disconnected" })).toBe("ended");
+    expect(nextDesktopState("ended" as DesktopConnectionState, { type: "disconnected" })).toBe(
+      "ended",
+    );
     expect(nextDesktopState("connected", { type: "fail" })).toBe("error");
     expect(nextDesktopState("connected", { type: "abort" })).toBe("ended");
   });
@@ -64,10 +76,20 @@ describe("desktop transport reducers (pure, @opengeni/sdk)", () => {
   test("applyUrlRotation drops a stale-epoch rotation, applies a fresh one", () => {
     const cap = { url: "https://old.example/vnc.html", token: "old", expiresAt: null };
     const stale: StreamUrlRotatedPayload = {
-      url: "https://stale.example", token: "x", expiresAt: null, leaseEpoch: 1, transport: "vnc-ws", viewerId: null,
+      url: "https://stale.example",
+      token: "x",
+      expiresAt: null,
+      leaseEpoch: 1,
+      transport: "vnc-ws",
+      viewerId: null,
     };
     const fresh: StreamUrlRotatedPayload = {
-      url: "https://new.example", token: "y", expiresAt: "2026-01-01T00:00:00Z", leaseEpoch: 3, transport: "vnc-ws", viewerId: null,
+      url: "https://new.example",
+      token: "y",
+      expiresAt: "2026-01-01T00:00:00Z",
+      leaseEpoch: 3,
+      transport: "vnc-ws",
+      viewerId: null,
     };
     expect(applyUrlRotation(cap, stale, 2)).toBeNull();
     const applied = applyUrlRotation(cap, fresh, 2);

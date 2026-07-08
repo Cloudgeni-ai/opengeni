@@ -67,8 +67,22 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, resolveActiveDesktopTransport, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
-import { settingsWithEnabledCapabilityMcpServers, settingsWithSessionMcpServerMetadata } from "@opengeni/core";
+import {
+  attachViewer,
+  detachViewer,
+  heartbeatViewer,
+  mintDesktopStream,
+  mintTerminalStream,
+  readGroupLease,
+  resolveActiveDesktopTransport,
+  viewerHeartbeatIntervalMs,
+  type DesktopStreamMint,
+  type TerminalStreamMint,
+} from "../sandbox/viewer";
+import {
+  settingsWithEnabledCapabilityMcpServers,
+  settingsWithSessionMcpServerMetadata,
+} from "@opengeni/core";
 import {
   normalizeResources,
   validateFileResources,
@@ -105,13 +119,23 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // "null" = roots only; a uuid = children of that session; anything else is
     // a client error (an unvalidated value would surface as a Postgres uuid
     // cast failure -> 500).
-    if (parentSessionId !== undefined && parentSessionId !== "null" && !z.string().uuid().safeParse(parentSessionId).success) {
-      throw new HTTPException(400, { message: "parentSessionId must be a session id or the literal \"null\"" });
+    if (
+      parentSessionId !== undefined &&
+      parentSessionId !== "null" &&
+      !z.string().uuid().safeParse(parentSessionId).success
+    ) {
+      throw new HTTPException(400, {
+        message: 'parentSessionId must be a session id or the literal "null"',
+      });
     }
-    return c.json(await listSessions(db, workspaceId, {
-      limit: boundedLimit(c.req.query("limit")),
-      ...(parentSessionId !== undefined ? { parentSessionId: parentSessionId === "null" ? null : parentSessionId } : {}),
-    }));
+    return c.json(
+      await listSessions(db, workspaceId, {
+        limit: boundedLimit(c.req.query("limit")),
+        ...(parentSessionId !== undefined
+          ? { parentSessionId: parentSessionId === "null" ? null : parentSessionId }
+          : {}),
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -142,7 +166,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
     if (!target) {
-      throw new HTTPException(400, { message: "target is required (\"auto\" or an account id)" });
+      throw new HTTPException(400, { message: 'target is required ("auto" or an account id)' });
     }
     const pinned = target === "auto" ? null : target;
     const ok = await setSessionCodexPin(db, workspaceId, sessionId, pinned);
@@ -192,7 +216,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session goal not found" });
     }
     if (existing.status === "completed") {
-      throw new HTTPException(409, { message: "session goal is completed; set a new goal instead" });
+      throw new HTTPException(409, {
+        message: "session goal is completed; set a new goal instead",
+      });
     }
     if (payload.status === "paused") {
       const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
@@ -201,41 +227,54 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         pausedReason: "api",
       });
       if (changed) {
-        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-          type: "goal.paused",
-          payload: {
-            goalId: goal.id,
-            actor: "api",
-            reason: "api",
-            ...(payload.rationale ? { rationale: payload.rationale } : {}),
-            autoContinuations: goal.autoContinuations,
-            noProgressStreak: goal.noProgressStreak,
+        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+          {
+            type: "goal.paused",
+            payload: {
+              goalId: goal.id,
+              actor: "api",
+              reason: "api",
+              ...(payload.rationale ? { rationale: payload.rationale } : {}),
+              autoContinuations: goal.autoContinuations,
+              noProgressStreak: goal.noProgressStreak,
+            },
           },
-        }]);
+        ]);
       }
       return c.json(goal);
     }
     // Resume: only valid from paused; resets counters and re-arms the loop.
     if (existing.status !== "paused") {
-      throw new HTTPException(409, { message: `session goal is ${existing.status}; only paused goals can be resumed` });
+      throw new HTTPException(409, {
+        message: `session goal is ${existing.status}; only paused goals can be resumed`,
+      });
     }
-    const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, { status: "active" });
+    const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
+      status: "active",
+    });
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
-      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-        type: "goal.resumed",
-        payload: {
-          goalId: goal.id,
-          text: goal.text,
-          ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-          version: goal.version,
-          actor: "api",
+      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+        {
+          type: "goal.resumed",
+          payload: {
+            goalId: goal.id,
+            text: goal.text,
+            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+            version: goal.version,
+            actor: "api",
+          },
         },
-      }]);
+      ]);
       // signalWithStart restarts a completed workflow whose first claim finds no
       // queued turn, so maybeContinueGoal fires — resume works on an idle session.
-      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
+      await workflowClient.wakeSessionWorkflow({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        workflowId: workflowIdForSession(sessionId),
+      });
     }
     return c.json(goal);
   });
@@ -250,7 +289,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         await bus.publish(workspaceId, sessionId, [event]);
       } catch (error) {
-        console.warn(`[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`, error);
+        console.warn(
+          `[api] live publish failed for cleared goal ${workspaceId}/${sessionId}; event is durable and reconciles on replay`,
+          error,
+        );
       }
     }
     return c.body(null, 204);
@@ -270,24 +312,38 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // missing/false confirm is a client error (400), not a server fault.
     const clearBody = ClearSessionContextRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!clearBody.success) {
-      throw new HTTPException(400, { message: "context clear requires an explicit { confirm: true }" });
+      throw new HTTPException(400, {
+        message: "context clear requires an explicit { confirm: true }",
+      });
     }
     const session = await requireSession(db, workspaceId, sessionId);
     // Clearing mid-turn would strand the in-flight RunState (and, in
     // requires_action, an awaiting approval whose resume needs that blob).
     // Refuse, mirroring the goal 409 guards.
-    if (session.status === "queued" || session.status === "running" || session.status === "requires_action") {
-      throw new HTTPException(409, { message: `session is ${session.status}; cannot clear context mid-turn — stop the turn first` });
+    if (
+      session.status === "queued" ||
+      session.status === "running" ||
+      session.status === "requires_action"
+    ) {
+      throw new HTTPException(409, {
+        message: `session is ${session.status}; cannot clear context mid-turn — stop the turn first`,
+      });
     }
-    const result = await clearSessionContext(db, { accountId: grant.accountId, workspaceId, sessionId });
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "session.context.cleared",
-      payload: {
-        clearedBy: "api",
-        supersededItems: result.supersededItems,
-        markerPosition: result.markerPosition,
+    const result = await clearSessionContext(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+    });
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "session.context.cleared",
+        payload: {
+          clearedBy: "api",
+          supersededItems: result.supersededItems,
+          markerPosition: result.markerPosition,
+        },
       },
-    }]);
+    ]);
     return c.body(null, 204);
   });
 
@@ -312,7 +368,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ status: "queued", message: "Compaction will run before the next turn." });
     }
     if (mode === "server") {
-      return c.json({ status: "noop", message: "This session's provider compacts context automatically; no manual compaction is needed." });
+      return c.json({
+        status: "noop",
+        message:
+          "This session's provider compacts context automatically; no manual compaction is needed.",
+      });
     }
     return c.json({ status: "noop", message: "Context compaction is disabled for this session." });
   });
@@ -340,7 +400,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
-    return sseSessionStream(db, bus, workspaceId, sessionId, Number.isFinite(after) ? after : 0, c.req.raw.signal);
+    return sseSessionStream(
+      db,
+      bus,
+      workspaceId,
+      sessionId,
+      Number.isFinite(after) ? after : 0,
+      c.req.raw.signal,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/turns", async (c) => {
@@ -348,7 +415,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    return c.json(await listSessionTurns(db, workspaceId, sessionId, boundedLimit(c.req.query("limit"))));
+    return c.json(
+      await listSessionTurns(db, workspaceId, sessionId, boundedLimit(c.req.query("limit"))),
+    );
   });
 
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
@@ -367,8 +436,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings),
       session.mcpServers,
     );
-    const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
-    const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, runtimeSettings) : existing.tools;
+    const resources =
+      payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
+    const tools =
+      payload.tools !== undefined
+        ? validateToolRefs(payload.tools, runtimeSettings)
+        : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -377,17 +450,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const turn = await updateQueuedSessionTurn(db, workspaceId, turnId, {
       ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
       ...(payload.model !== undefined ? { model: payload.model } : {}),
-      ...(payload.reasoningEffort !== undefined ? { reasoningEffort: payload.reasoningEffort } : {}),
+      ...(payload.reasoningEffort !== undefined
+        ? { reasoningEffort: payload.reasoningEffort }
+        : {}),
       ...(payload.sandboxBackend !== undefined ? { sandboxBackend: payload.sandboxBackend } : {}),
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
       resources,
       tools,
     });
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "turn.updated",
-      turnId: turn.id,
-      payload: { turnId: turn.id },
-    }]);
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "turn.updated",
+        turnId: turn.id,
+        payload: { turnId: turn.id },
+      },
+    ]);
     return c.json(turn);
   });
 
@@ -398,11 +475,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = ReorderSessionTurnsRequest.parse(await c.req.json());
     const turns = await reorderQueuedSessionTurns(db, workspaceId, sessionId, payload.turnIds);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "turn.updated",
-      payload: { reorderedTurnIds: payload.turnIds },
-    }]);
-    await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "turn.updated",
+        payload: { reorderedTurnIds: payload.turnIds },
+      },
+    ]);
+    await workflowClient.wakeSessionWorkflow({
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      workflowId: workflowIdForSession(sessionId),
+    });
     return c.json(turns);
   });
 
@@ -414,11 +498,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
     const turn = await cancelQueuedSessionTurn(db, workspaceId, turnId);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "turn.cancelled",
-      turnId: turn.id,
-      payload: { turnId: turn.id, triggerEventId: turn.triggerEventId },
-    }]);
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "turn.cancelled",
+        turnId: turn.id,
+        payload: { turnId: turn.id, triggerEventId: turn.triggerEventId },
+      },
+    ]);
     return c.json(turn);
   });
 
@@ -444,13 +530,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     const session = await requireSession(db, workspaceId, sessionId);
     if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
-      throw new HTTPException(409, { message: `session is ${session.status}; no approval is pending` });
+      throw new HTTPException(409, {
+        message: `session is ${session.status}; no approval is pending`,
+      });
     }
-    const eventsToAppend: AppendEventInput[] = [{
-      type: event.type,
-      payload: event.payload,
-      ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-    }];
+    const eventsToAppend: AppendEventInput[] = [
+      {
+        type: event.type,
+        payload: event.payload,
+        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+      },
+    ];
     const appended = await appendAndPublishEvents(db, bus, workspaceId, sessionId, eventsToAppend);
     const accepted = appended[0];
     if (!accepted) {
@@ -487,7 +577,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // The viewer-holder lifecycle rides the sandbox lease, which is dormant
       // until the flag flips per-environment. A 404 (not 403) keeps the route
       // invisible while disabled — it does not exist for this deployment yet.
-      throw new HTTPException(404, { message: "sandbox ownership is not enabled for this deployment" });
+      throw new HTTPException(404, {
+        message: "sandbox ownership is not enabled for this deployment",
+      });
     }
   }
 
@@ -517,7 +609,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+    const lease = await readGroupLease(
+      { db, settings },
+      { workspaceId, sandboxGroupId: session.sandboxGroupId },
+    );
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
     // Per-principal acknowledgment: A acknowledging does not consent for B. The
     // un-redacted desktop stream ALWAYS requires the un-redacted ack; a shared box
@@ -526,8 +621,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // WITHOUT un-redacted consent could be handed a live VNC URL + scoped token
     // from this read path while being correctly 409'd on attach (a consent-gate
     // bypass of the un-redacted pixel plane).
-    const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
-    const acknowledged = ack ? (ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)) : false;
+    const ack = await getStreamAcknowledgment(db, {
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      subjectId: grant.subjectId,
+    });
+    const acknowledged = ack
+      ? ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)
+      : false;
 
     // P4.2 — the pixel DATA PLANE, served API-direct. When the backend is
     // desktop-capable AND sandboxDesktopEnabled AND the (shared, if shared)
@@ -540,22 +641,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // (no secret / display-stack or tunnel failure) returns null → transport:null.
     let desktopStream: DesktopStreamMint | null = null;
     const desktopUnlocked =
-      settings.sandboxDesktopEnabled
-      && !streamTokenDegraded(settings)
-      && acknowledged
-      && (session.activeSandboxId != null || lease?.liveness === "warm" || lease?.liveness === "draining");
+      settings.sandboxDesktopEnabled &&
+      !streamTokenDegraded(settings) &&
+      acknowledged &&
+      (session.activeSandboxId != null ||
+        lease?.liveness === "warm" ||
+        lease?.liveness === "draining");
     if (desktopUnlocked) {
-      desktopStream = await mintDesktopStream({ db, settings, bus }, {
-        accountId: grant.accountId,
-        workspaceId,
-        session,
-        // The handshake's token is scoped to the calling principal (it is a read,
-        // not a viewer-holder acquire); the per-holder token is re-minted on
-        // POST /viewers. A previousEpoch != current would have rotated already
-        // via the warming-commit; the read does not itself drive rotation.
-        viewerId: grant.subjectId,
-        ...(lease ? { lease } : {}),
-      });
+      desktopStream = await mintDesktopStream(
+        { db, settings, bus },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          session,
+          // The handshake's token is scoped to the calling principal (it is a read,
+          // not a viewer-holder acquire); the per-holder token is re-minted on
+          // POST /viewers. A previousEpoch != current would have rotated already
+          // via the warming-commit; the read does not itself drive rotation.
+          viewerId: grant.subjectId,
+          ...(lease ? { lease } : {}),
+        },
+      );
     }
 
     // P5.t — the REAL PTY terminal cell, served API-DIRECT. Independent of the
@@ -565,17 +671,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // returns null → the Terminal cell falls back to the sse-events firehose.
     let terminalStream: TerminalStreamMint | null = null;
     const terminalUnlocked =
-      settings.sandboxTerminalEnabled
-      && !streamTokenDegraded(settings)
-      && (session.activeSandboxId != null || lease?.liveness === "warm" || lease?.liveness === "draining");
+      settings.sandboxTerminalEnabled &&
+      !streamTokenDegraded(settings) &&
+      (session.activeSandboxId != null ||
+        lease?.liveness === "warm" ||
+        lease?.liveness === "draining");
     if (terminalUnlocked) {
-      terminalStream = await mintTerminalStream({ db, settings, bus }, {
-        accountId: grant.accountId,
-        workspaceId,
-        session,
-        viewerId: grant.subjectId,
-        ...(lease ? { lease } : {}),
-      });
+      terminalStream = await mintTerminalStream(
+        { db, settings, bus },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          session,
+          viewerId: grant.subjectId,
+          ...(lease ? { lease } : {}),
+        },
+      );
     }
 
     const capabilities = negotiateCapabilities({
@@ -649,8 +760,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // place (resolveActiveDesktopTransport), covering BOTH swap directions.
     let responseCapabilities = capabilities;
     if (capabilities.DesktopStream.transport !== null) {
-      const activeSandbox = session.activeSandboxId ? await getSandbox(db, workspaceId, session.activeSandboxId) : null;
-      const wire = resolveActiveDesktopTransport(activeSandbox?.kind === "selfhosted", settings.sandboxDesktopInteractive !== false);
+      const activeSandbox = session.activeSandboxId
+        ? await getSandbox(db, workspaceId, session.activeSandboxId)
+        : null;
+      const wire = resolveActiveDesktopTransport(
+        activeSandbox?.kind === "selfhosted",
+        settings.sandboxDesktopInteractive !== false,
+      );
       responseCapabilities = {
         ...capabilities,
         DesktopStream: { ...capabilities.DesktopStream, ...wire },
@@ -664,29 +780,35 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   // shared-exposure disclosure). Reuses the acknowledgment machinery — gated on
   // stream:acknowledge, no new permission. Until this is recorded the
   // desktop-stream (viewer attach) path returns 409 (P3.2 consent gate).
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities/acknowledge", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:acknowledge");
-    assertOwnershipEnabled();
-    const sessionId = c.req.param("sessionId");
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
-    }
-    const recorded = await recordStreamAcknowledgment(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      subjectId: grant.subjectId,
-      acknowledgeUnredacted: parsed.data.acknowledgeUnredacted,
-      acknowledgeShared: parsed.data.acknowledgeShared,
-    });
-    return c.json({ acknowledged: recorded.acknowledgedUnredacted, acknowledgedShared: recorded.acknowledgedShared });
-  });
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities/acknowledge",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "stream:acknowledge");
+      assertOwnershipEnabled();
+      const sessionId = c.req.param("sessionId");
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
+      }
+      const recorded = await recordStreamAcknowledgment(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        subjectId: grant.subjectId,
+        acknowledgeUnredacted: parsed.data.acknowledgeUnredacted,
+        acknowledgeShared: parsed.data.acknowledgeShared,
+      });
+      return c.json({
+        acknowledged: recorded.acknowledgedUnredacted,
+        acknowledgedShared: recorded.acknowledgedShared,
+      });
+    },
+  );
 
   // POST .../viewers — acquire a viewer holder on the desktop-stream (un-redacted
   // pixel) path. Gated on stream:view (strictly broader than sessions:read: the
@@ -722,7 +844,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const wantDesktop = parsed.data.desktop ?? false;
     const { shared } = await resolveSharedExposure(workspaceId, session);
     if (wantDesktop) {
-      const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
+      const ack = await getStreamAcknowledgment(db, {
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        subjectId: grant.subjectId,
+      });
       if (!ack?.acknowledgedUnredacted) {
         throw new HTTPException(409, { message: "stream_acknowledgment_required" });
       }
@@ -733,7 +859,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // SELFHOSTED ACTIVE: when the session's active sandbox is selfhosted, skip
     // attachViewer (it warms the Modal group box — the wrong target). Synthesize a
     // result shaped like ViewerAttachResult and mint relay cells directly.
-    const activeSandbox = session.activeSandboxId ? await getSandbox(db, workspaceId, session.activeSandboxId) : null;
+    const activeSandbox = session.activeSandboxId
+      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      : null;
     const selfhostedActive = activeSandbox?.kind === "selfhosted";
 
     let stream: DesktopStreamMint | null = null;
@@ -751,35 +879,44 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         dataPlaneUrl: null,
       };
       if (
-        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
-        && !streamTokenDegraded(settings)
+        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled) &&
+        !streamTokenDegraded(settings)
       ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
-          stream = await mintDesktopStream({ db, settings, bus }, {
-            accountId: grant.accountId,
-            workspaceId,
-            session,
-            viewerId,
-            // No Modal lease for selfhosted-active; the mint routes to the relay.
-          });
+          stream = await mintDesktopStream(
+            { db, settings, bus },
+            {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId,
+              // No Modal lease for selfhosted-active; the mint routes to the relay.
+            },
+          );
         }
         if (settings.sandboxTerminalEnabled) {
-          terminal = await mintTerminalStream({ db, settings, bus }, {
-            accountId: grant.accountId,
-            workspaceId,
-            session,
-            viewerId,
-            // No Modal lease for selfhosted-active; the mint routes to the relay.
-          });
+          terminal = await mintTerminalStream(
+            { db, settings, bus },
+            {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId,
+              // No Modal lease for selfhosted-active; the mint routes to the relay.
+            },
+          );
         }
       }
     } else {
-      result = await attachViewer({ db, settings }, {
-        accountId: grant.accountId,
-        workspaceId,
-        session,
-        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
-      });
+      result = await attachViewer(
+        { db, settings },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          session,
+          ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+        },
+      );
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
@@ -789,34 +926,43 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // box is warm here (attachViewer spun it up or attached), so the handshake's
       // never-spin-up rule does not apply.
       if (
-        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
-        && !streamTokenDegraded(settings)
+        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled) &&
+        !streamTokenDegraded(settings)
       ) {
-        const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+        const lease = await readGroupLease(
+          { db, settings },
+          { workspaceId, sandboxGroupId: session.sandboxGroupId },
+        );
         if (lease) {
           // The pixel cell is minted only when the caller asked for the desktop plane
           // (and consented above). A terminal-only attach skips it — the box is warm,
           // the terminal mint below still runs.
           if (wantDesktop && settings.sandboxDesktopEnabled) {
-            stream = await mintDesktopStream({ db, settings, bus }, {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId: result.viewerId,
-              lease,
-            });
+            stream = await mintDesktopStream(
+              { db, settings, bus },
+              {
+                accountId: grant.accountId,
+                workspaceId,
+                session,
+                viewerId: result.viewerId,
+                lease,
+              },
+            );
           }
           // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
           // address (independent of the desktop toggle). A degraded mint leaves the
           // terminal fields null → the client falls back to the sse-events firehose.
           if (settings.sandboxTerminalEnabled) {
-            terminal = await mintTerminalStream({ db, settings, bus }, {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId: result.viewerId,
-              lease,
-            });
+            terminal = await mintTerminalStream(
+              { db, settings, bus },
+              {
+                accountId: grant.accountId,
+                workspaceId,
+                session,
+                viewerId: result.viewerId,
+                lease,
+              },
+            );
           }
         }
       }
@@ -833,7 +979,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         // (vnc-ws/novnc). Hardcoding vnc-ws here handed a machine's relay URL to the
         // noVNC renderer (and vice-versa on the swap-away case) → "closed before it
         // opened". Key off the SAME selfhostedActive the mint routed on.
-        transport: stream ? (selfhostedActive ? ("relay-frames" as const) : ("vnc-ws" as const)) : null,
+        transport: stream
+          ? selfhostedActive
+            ? ("relay-frames" as const)
+            : ("vnc-ws" as const)
+          : null,
         client: stream ? (selfhostedActive ? ("frames" as const) : ("novnc" as const)) : null,
         // The REAL PTY terminal address (pty-ws), null when degraded.
         terminalUrl: terminal?.url ?? null,
@@ -847,28 +997,34 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).
   // The desktop-stream lifecycle is gated on stream:view (the un-redacted plane).
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
-    assertOwnershipEnabled();
-    const sessionId = c.req.param("sessionId");
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
-    }
-    const alive = await heartbeatViewer({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      viewerId: c.req.param("viewerId"),
-      expectedEpoch: parsed.data.leaseEpoch,
-    });
-    return c.json({ alive });
-  });
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+      assertOwnershipEnabled();
+      const sessionId = c.req.param("sessionId");
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
+      }
+      const alive = await heartbeatViewer(
+        { db, settings },
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          viewerId: c.req.param("viewerId"),
+          expectedEpoch: parsed.data.leaseEpoch,
+        },
+      );
+      return c.json({ alive });
+    },
+  );
 
   // DELETE .../viewers/:viewerId — release the holder (idempotent).
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId", async (c) => {
@@ -880,12 +1036,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    await detachViewer({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      viewerId: c.req.param("viewerId"),
-    });
+    await detachViewer(
+      { db, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        viewerId: c.req.param("viewerId"),
+      },
+    );
     return c.body(null, 204);
   });
 
@@ -895,25 +1054,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   // group-refcount liveness). Gated on stream:view (no new permission). The
   // live-RFB force-disconnect of an already-open socket is a P4 follow-up; the
   // holder-drop (so the box can drain) is the v1 deliverable.
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
-    assertOwnershipEnabled();
-    const sessionId = c.req.param("sessionId");
-    const session = await getSession(db, workspaceId, sessionId);
-    if (!session) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    const result = await revokeViewer(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      viewerId: c.req.param("viewerId"),
-      idleGraceMs: settings.sandboxIdleGraceMs,
-    });
-    // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
-    return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
-  });
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+      assertOwnershipEnabled();
+      const sessionId = c.req.param("sessionId");
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      const result = await revokeViewer(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        viewerId: c.req.param("viewerId"),
+        idleGraceMs: settings.sandboxIdleGraceMs,
+      });
+      // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
+      return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
+    },
+  );
 
   // ══════════════════════ Channel-A structured services (P4.4) ══════════════
   //
@@ -955,7 +1117,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return { accountId: grant.accountId, workspaceId, session, subjectId: grant.subjectId };
   }
 
-  async function parseChannelABody<T>(c: Context, schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } }): Promise<T> {
+  async function parseChannelABody<T>(
+    c: Context,
+    schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } },
+  ): Promise<T> {
     const raw = await c.req.json().catch(() => undefined);
     const result = schema.safeParse(raw ?? {});
     if (!result.success) {
@@ -968,42 +1133,54 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsListRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsList(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsList(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, FsReadRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsRead(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsRead(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsWriteRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsWrite(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsWrite(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsDeleteRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsDelete(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsDelete(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsMoveRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsMove(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsMove(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", async (c) => {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsMkdirRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsMkdir(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.fsMkdir(req),
+    );
     return c.json(out);
   });
 
@@ -1011,28 +1188,36 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitStatusRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitStatus(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.gitStatus(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitDiffRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitDiff(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.gitDiff(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitLogRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitLog(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.gitLog(req),
+    );
     return c.json(out);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
     const ctx = await channelAPreamble(c, "files:read");
     const req = await parseChannelABody(c, GitShowRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitShow(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.gitShow(req),
+    );
     return c.json(out);
   });
 
@@ -1092,7 +1277,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, TerminalExecRequest);
-    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.terminalExec(req));
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+      service.terminalExec(req),
+    );
     return c.json(out);
   });
 
@@ -1118,10 +1305,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         openedBy: ctx.subjectId,
       });
       // Emit terminal.pty.started + any initial banner output on A1.
-      const started: TerminalPtyStartedPayload = { ptyId, cols: req.cols, rows: req.rows, shell: opened.shell, cwd: req.cwd };
+      const started: TerminalPtyStartedPayload = {
+        ptyId,
+        cols: req.cols,
+        rows: req.rows,
+        shell: opened.shell,
+        cwd: req.cwd,
+      };
       const events: AppendEventInput[] = [{ type: "terminal.pty.started", payload: started }];
       if (opened.initialOutput) {
-        const delta: TerminalPtyOutputDeltaPayload = { ptyId, stream: "stdout", chunk: opened.initialOutput, seq: 0 };
+        const delta: TerminalPtyOutputDeltaPayload = {
+          ptyId,
+          stream: "stdout",
+          chunk: opened.initialOutput,
+          seq: 0,
+        };
         events.push({ type: "terminal.pty.output.delta", payload: delta });
       }
       await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, events);
@@ -1143,10 +1341,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     let seq = 1;
     await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
       const output = await service.ptyWrite(req, pty.execSessionId!, req.data);
-      await updatePtySessionActivity(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId, execSessionId: pty.execSessionId });
+      await updatePtySessionActivity(db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        ptyId: req.ptyId,
+        execSessionId: pty.execSessionId,
+      });
       if (output) {
-        const delta: TerminalPtyOutputDeltaPayload = { ptyId: req.ptyId, stream: "stdout", chunk: output, seq: seq++ };
-        await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [{ type: "terminal.pty.output.delta", payload: delta }]);
+        const delta: TerminalPtyOutputDeltaPayload = {
+          ptyId: req.ptyId,
+          stream: "stdout",
+          chunk: output,
+          seq: seq++,
+        };
+        await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
+          { type: "terminal.pty.output.delta", payload: delta },
+        ]);
       }
     });
     return c.body(null, 204);
@@ -1160,9 +1370,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
     if (pty.execSessionId !== null) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.ptyResize(req, pty.execSessionId!));
+      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+        service.ptyResize(req, pty.execSessionId!),
+      );
     }
-    await updatePtySessionActivity(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId, cols: req.cols, rows: req.rows });
+    await updatePtySessionActivity(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      ptyId: req.ptyId,
+      cols: req.cols,
+      rows: req.rows,
+    });
     return c.body(null, 204);
   });
 
@@ -1172,10 +1390,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
     // Idempotent: closing an already-closed/absent PTY is a 204 no-op.
     if (pty) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.ptyClose(req, pty.execSessionId));
-      await closePtySession(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId });
+      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
+        service.ptyClose(req, pty.execSessionId),
+      );
+      await closePtySession(db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        ptyId: req.ptyId,
+      });
       const exited: TerminalPtyExitedPayload = { ptyId: req.ptyId, exitCode: 0, reason: "exit" };
-      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [{ type: "terminal.pty.exited", payload: exited }]);
+      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
+        { type: "terminal.pty.exited", payload: exited },
+      ]);
     }
     return c.body(null, 204);
   });
@@ -1213,7 +1439,9 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {
-  return Boolean(value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key));
+  return Boolean(
+    value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
+  );
 }
 
 function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {

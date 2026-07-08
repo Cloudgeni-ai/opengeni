@@ -37,7 +37,10 @@ describe("selfhostedLiveness — the online/reconnecting/offline derivation", ()
   });
 
   test("revoked enrollment → offline", () => {
-    expect(selfhostedLiveness({ enrollment: enrollment({ status: "revoked" }), probeResponded: true }).state).toBe("offline");
+    expect(
+      selfhostedLiveness({ enrollment: enrollment({ status: "revoked" }), probeResponded: true })
+        .state,
+    ).toBe("offline");
   });
 
   test("probe responds → online (+ consent/display flags derived from the row)", () => {
@@ -66,7 +69,11 @@ describe("selfhostedLiveness — the online/reconnecting/offline derivation", ()
   });
 
   test("probe missed and never seen → offline", () => {
-    const live = selfhostedLiveness({ enrollment: enrollment({ lastSeenAt: null }), probeResponded: false, now: NOW });
+    const live = selfhostedLiveness({
+      enrollment: enrollment({ lastSeenAt: null }),
+      probeResponded: false,
+      now: NOW,
+    });
     expect(live.state).toBe("offline");
   });
 });
@@ -221,7 +228,14 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
         session: session(Boolean(e)),
         now: NOW,
       });
-      for (const cell of [caps.FileSystem, caps.Terminal, caps.Git, caps.DesktopStream, caps.Recording, caps.ComputerUse]) {
+      for (const cell of [
+        caps.FileSystem,
+        caps.Terminal,
+        caps.Git,
+        caps.DesktopStream,
+        caps.Recording,
+        caps.ComputerUse,
+      ]) {
         expect(cell.reason === null || typeof cell.reason === "string").toBe(true);
       }
       expect(caps.leaseEpoch).toBe(2);

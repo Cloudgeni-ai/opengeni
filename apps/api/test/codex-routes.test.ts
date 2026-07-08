@@ -9,11 +9,21 @@ const WS_A = "00000000-0000-4000-8000-0000000000a1";
 const WS_B = "00000000-0000-4000-8000-0000000000b2";
 const ACCOUNT = "00000000-0000-4000-8000-0000000000c3";
 
-const settings = testSettings({ productAccessMode: "managed", delegationSecret: DELEGATION_SECRET });
+const settings = testSettings({
+  productAccessMode: "managed",
+  delegationSecret: DELEGATION_SECRET,
+});
 
 // db must never be touched on the paths under test (auth from token; start/poll
 // reach the device endpoints, not the database). It throws if it ever is.
-const poisonDb = new Proxy({}, { get() { throw new Error("db must not be touched on these route paths"); } });
+const poisonDb = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("db must not be touched on these route paths");
+    },
+  },
+);
 
 function app() {
   return createApp({
@@ -38,11 +48,14 @@ async function bearer(workspaceId: string, permissions: Permission[]): Promise<s
 }
 
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; });
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
 
 function mockDevice(handlers: { usercode?: () => Response; token?: () => Response }) {
   globalThis.fetch = (async (input: string | URL | Request) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.includes("/deviceauth/usercode") && handlers.usercode) return handlers.usercode();
     if (url.includes("/deviceauth/token") && handlers.token) return handlers.token();
     throw new Error(`unexpected fetch ${url}`);
@@ -50,20 +63,33 @@ function mockDevice(handlers: { usercode?: () => Response; token?: () => Respons
 }
 
 function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-async function start(workspaceId: string): Promise<{ status: number; body: { userCode: string; verificationUri: string; state: string } }> {
+async function start(
+  workspaceId: string,
+): Promise<{ status: number; body: { userCode: string; verificationUri: string; state: string } }> {
   const res = await app().request(`/v1/workspaces/${workspaceId}/codex/connect/start`, {
     method: "POST",
-    headers: { authorization: await bearer(workspaceId, ["workspace:admin"]), "content-type": "application/json" },
+    headers: {
+      authorization: await bearer(workspaceId, ["workspace:admin"]),
+      "content-type": "application/json",
+    },
   });
-  return { status: res.status, body: await res.json() as { userCode: string; verificationUri: string; state: string } };
+  return {
+    status: res.status,
+    body: (await res.json()) as { userCode: string; verificationUri: string; state: string },
+  };
 }
 
 describe("codex connect routes", () => {
   test("connect/start returns the user code, verification URL and a signed state", async () => {
-    mockDevice({ usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }) });
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
     const { status, body } = await start(WS_A);
     expect(status).toBe(200);
     expect(body.userCode).toBe("ABCD-1234");
@@ -72,12 +98,17 @@ describe("codex connect routes", () => {
   });
 
   test("connect/poll relays a pending device authorization", async () => {
-    mockDevice({ usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }) });
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
     const { body } = await start(WS_A);
     mockDevice({ token: () => new Response("", { status: 403 }) }); // still pending
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
       method: "POST",
-      headers: { authorization: await bearer(WS_A, ["workspace:admin"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(WS_A, ["workspace:admin"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ state: body.state }),
     });
     expect(res.status).toBe(200);
@@ -85,11 +116,16 @@ describe("codex connect routes", () => {
   });
 
   test("connect/poll rejects a state minted for a different workspace", async () => {
-    mockDevice({ usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }) });
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
     const { body } = await start(WS_A); // state bound to WS_A
     const res = await app().request(`/v1/workspaces/${WS_B}/codex/connect/poll`, {
       method: "POST",
-      headers: { authorization: await bearer(WS_B, ["workspace:admin"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(WS_B, ["workspace:admin"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ state: body.state }),
     });
     expect(res.status).toBe(400); // cross-workspace state is rejected before any device call
@@ -108,18 +144,24 @@ describe("codex multi-account routes (auth + validation)", () => {
   });
 
   test("POST /codex/accounts/:id/activate requires auth", async () => {
-    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1/activate`, { method: "POST" });
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1/activate`, {
+      method: "POST",
+    });
     expect([401, 403]).toContain(res.status);
   });
 
   test("DELETE /codex/accounts/:id requires auth", async () => {
-    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1`, { method: "DELETE" });
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1`, {
+      method: "DELETE",
+    });
     expect([401, 403]).toContain(res.status);
   });
 
   test("PATCH /codex/accounts/:id requires auth", async () => {
     const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1`, {
-      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "x" }),
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "x" }),
     });
     expect([401, 403]).toContain(res.status);
   });
@@ -128,7 +170,10 @@ describe("codex multi-account routes (auth + validation)", () => {
     const SESSION = "00000000-0000-4000-8000-0000000000d4";
     const res = await app().request(`/v1/workspaces/${WS_A}/sessions/${SESSION}/codex-account`, {
       method: "POST",
-      headers: { authorization: await bearer(WS_A, ["sessions:control"]), "content-type": "application/json" },
+      headers: {
+        authorization: await bearer(WS_A, ["sessions:control"]),
+        "content-type": "application/json",
+      },
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400); // target validation happens before setSessionCodexPin (poisonDb untouched)
@@ -137,7 +182,9 @@ describe("codex multi-account routes (auth + validation)", () => {
   test("POST /sessions/:id/codex-account requires auth", async () => {
     const SESSION = "00000000-0000-4000-8000-0000000000d4";
     const res = await app().request(`/v1/workspaces/${WS_A}/sessions/${SESSION}/codex-account`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ target: "auto" }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target: "auto" }),
     });
     expect([401, 403]).toContain(res.status);
   });

@@ -48,7 +48,9 @@ export const contendedMetrics: MetricSample = {
   sampledAt: "2026-06-26T09:15:00.000Z",
 };
 
-function machine(overrides: Partial<MachineView> & Pick<MachineView, "sandboxId" | "name" | "state">): MachineView {
+function machine(
+  overrides: Partial<MachineView> & Pick<MachineView, "sandboxId" | "name" | "state">,
+): MachineView {
   return {
     enrollmentId: overrides.enrollmentId ?? "enr-" + overrides.sandboxId,
     kind: "selfhosted",

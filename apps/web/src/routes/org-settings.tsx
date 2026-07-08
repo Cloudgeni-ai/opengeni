@@ -20,17 +20,31 @@ import { toast } from "sonner";
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
-import { entitlementEntries, formatMoneyMicros, formatTimestamp, validTopupAmount } from "@/lib/format";
+import {
+  entitlementEntries,
+  formatMoneyMicros,
+  formatTimestamp,
+  validTopupAmount,
+} from "@/lib/format";
 import { orgLabel } from "@/lib/org";
 import { hasAccountPermission } from "@/lib/permissions";
 import type { BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
 
-export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: string; checkout?: "success" | "cancelled" }) {
+export function OrgSettingsRoute({
+  workspaceId,
+  checkout,
+}: {
+  workspaceId: string;
+  checkout?: "success" | "cancelled";
+}) {
   const context = useAppContext();
   const client = context.client;
-  const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const organizationLabel = accountId ? orgLabel(accountId, context.accessContext.accountGrants) : "Organization";
+  const organizationLabel = accountId
+    ? orgLabel(accountId, context.accessContext.accountGrants)
+    : "Organization";
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingError, setBillingError] = useState<Error | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -39,9 +53,11 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
   const canManageBilling = hasAccountPermission(context.accessContext, accountId, "billing:manage");
-  const canReadBilling = canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
+  const canReadBilling =
+    canManageBilling || hasAccountPermission(context.accessContext, accountId, "billing:read");
   const canManageMembers = hasAccountPermission(context.accessContext, accountId, "members:manage");
-  const accountGrant = context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
+  const accountGrant =
+    context.accessContext.accountGrants.find((grant) => grant.accountId === accountId) ?? null;
   const usage = useBillingUsage({
     ...(accountId ? { accountId } : {}),
     workspaceId,
@@ -106,10 +122,15 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
   async function startCheckout(amountUsd: number) {
     setBusy(true);
     try {
-      const session = await client.createBillingCheckout({ amountUsd, ...(accountId ? { accountId } : {}) });
+      const session = await client.createBillingCheckout({
+        amountUsd,
+        ...(accountId ? { accountId } : {}),
+      });
       window.location.assign(session.url);
     } catch (error) {
-      toast.error("Checkout failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Checkout failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -121,13 +142,30 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
         <PageHeader
           icon={<BuildingIcon className="size-4" />}
           title="Organization"
-          description={context.authSession?.user.email ?? context.accessContext.subjectLabel ?? context.accessContext.subjectId}
-          actions={context.clientConfig.auth.mode === "managedSession" ? (
-            <Button type="button" variant="ghost" size="sm" onClick={() => void context.handleManagedSignOut().catch((error) => toast.error("Sign out failed", { description: String(error) }))}>
-              <LockIcon className="size-3.5" />
-              Sign out
-            </Button>
-          ) : undefined}
+          description={
+            context.authSession?.user.email ??
+            context.accessContext.subjectLabel ??
+            context.accessContext.subjectId
+          }
+          actions={
+            context.clientConfig.auth.mode === "managedSession" ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() =>
+                  void context
+                    .handleManagedSignOut()
+                    .catch((error) =>
+                      toast.error("Sign out failed", { description: String(error) }),
+                    )
+                }
+              >
+                <LockIcon className="size-3.5" />
+                Sign out
+              </Button>
+            ) : undefined
+          }
         />
 
         <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
@@ -150,15 +188,20 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
             <div>
               <h2 className="text-sm font-medium">Credits</h2>
               <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
-                {billing
-                  ? `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
-                  : !canReadBilling || !accountId
-                    ? "You don't have permission to view billing."
-                    : billingError
-                      ? "Couldn't load your balance"
-                      : billingLoading
-                        ? <><Loader2Icon className="size-3.5 animate-spin" />Loading balance…</>
-                        : "Billing balance unavailable"}
+                {billing ? (
+                  `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
+                ) : !canReadBilling || !accountId ? (
+                  "You don't have permission to view billing."
+                ) : billingError ? (
+                  "Couldn't load your balance"
+                ) : billingLoading ? (
+                  <>
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                    Loading balance…
+                  </>
+                ) : (
+                  "Billing balance unavailable"
+                )}
               </p>
             </div>
             <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
@@ -166,7 +209,11 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
             </span>
           </div>
           {billingError ? (
-            <LoadErrorState title="Couldn't load the billing balance" error={billingError} onRetry={() => void refreshBilling()} />
+            <LoadErrorState
+              title="Couldn't load the billing balance"
+              error={billingError}
+              onRetry={() => void refreshBilling()}
+            />
           ) : null}
           {billing?.mode === "stripe" && canManageBilling ? (
             <div className="grid gap-2">
@@ -183,13 +230,26 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
                     onChange={(event) => setTopupAmount(event.target.value)}
                   />
                 </label>
-                <Button type="button" variant="secondary" size="sm" disabled={busy || !validTopupAmount(topupAmount)} onClick={() => void startCheckout(Number(topupAmount))}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy || !validTopupAmount(topupAmount)}
+                  onClick={() => void startCheckout(Number(topupAmount))}
+                >
                   Add credits
                 </Button>
               </div>
               <div className="flex flex-wrap gap-2">
                 {[25, 100, 500, 1000].map((amount) => (
-                  <Button key={amount} type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setTopupAmount(amount.toFixed(2))}>
+                  <Button
+                    key={amount}
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => setTopupAmount(amount.toFixed(2))}
+                  >
                     {formatMoneyMicros(amount * 1_000_000, "usd")}
                   </Button>
                 ))}
@@ -197,7 +257,9 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
               <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
             </div>
           ) : (
-            <p className="text-xs text-fg-subtle">Credit checkout is available when Stripe billing is enabled for this deployment.</p>
+            <p className="text-xs text-fg-subtle">
+              Credit checkout is available when Stripe billing is enabled for this deployment.
+            </p>
           )}
         </section>
 
@@ -219,7 +281,11 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
         <MembersSection
           workspaceId={workspaceId}
           canManage={canManageMembers}
-          subjectLabel={accountGrant?.subjectLabel ?? context.accessContext.subjectLabel ?? context.accessContext.subjectId}
+          subjectLabel={
+            accountGrant?.subjectLabel ??
+            context.accessContext.subjectLabel ??
+            context.accessContext.subjectId
+          }
           role={accountGrant?.role ?? null}
         />
       </section>
@@ -228,16 +294,28 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
 }
 
 /** Aggregate usage events by type for the honest at-a-glance summary. */
-export function aggregateUsage(events: UsageEvent[]): Array<{ eventType: string; unit: string; total: number; count: number }> {
-  const byKey = new Map<string, { eventType: string; unit: string; total: number; count: number }>();
+export function aggregateUsage(
+  events: UsageEvent[],
+): Array<{ eventType: string; unit: string; total: number; count: number }> {
+  const byKey = new Map<
+    string,
+    { eventType: string; unit: string; total: number; count: number }
+  >();
   for (const event of events) {
     const key = `${event.eventType}\u0000${event.unit}`;
-    const entry = byKey.get(key) ?? { eventType: event.eventType, unit: event.unit, total: 0, count: 0 };
+    const entry = byKey.get(key) ?? {
+      eventType: event.eventType,
+      unit: event.unit,
+      total: 0,
+      count: 0,
+    };
     entry.total += event.quantity;
     entry.count += 1;
     byKey.set(key, entry);
   }
-  return [...byKey.values()].sort((a, b) => b.count - a.count || a.eventType.localeCompare(b.eventType));
+  return [...byKey.values()].sort(
+    (a, b) => b.count - a.count || a.eventType.localeCompare(b.eventType),
+  );
 }
 
 /** Plan & entitlements (/v1/billing/entitlements): the limits the org runs under. */
@@ -256,7 +334,9 @@ function EntitlementsSection(props: {
             <GaugeIcon className="size-3.5 text-brand" />
             Plan & entitlements
           </h2>
-          <p className="mt-1 text-xs text-fg-muted">The limits and features this organization runs under.</p>
+          <p className="mt-1 text-xs text-fg-muted">
+            The limits and features this organization runs under.
+          </p>
         </div>
         <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
           {props.entitlements?.mode ?? "unknown"}
@@ -266,18 +346,27 @@ function EntitlementsSection(props: {
       {!props.enabled ? (
         <p className="text-xs text-fg-subtle">You don't have permission to view plan limits.</p>
       ) : props.error ? (
-        <LoadErrorState title="Couldn't load entitlements" error={props.error} onRetry={props.onRetry} />
+        <LoadErrorState
+          title="Couldn't load entitlements"
+          error={props.error}
+          onRetry={props.onRetry}
+        />
       ) : !props.entitlements ? (
         <div className="flex items-center gap-2 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading entitlements
         </div>
       ) : rows.length === 0 ? (
-        <p className="text-xs text-fg-subtle">No entitlement limits — this deployment does not restrict the organization.</p>
+        <p className="text-xs text-fg-subtle">
+          No entitlement limits — this deployment does not restrict the organization.
+        </p>
       ) : (
         <div className="flex flex-wrap gap-2">
           {rows.map((row) => (
-            <span key={row.name} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs">
+            <span
+              key={row.name}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs"
+            >
               <span className="font-medium">{row.name}</span>
               <span className="font-mono text-2xs text-fg-muted">{row.value}</span>
             </span>
@@ -306,7 +395,13 @@ function UsageSection(props: {
           </h2>
           <p className="mt-1 text-xs text-fg-muted">Recent metered usage for this organization.</p>
         </div>
-        <Button type="button" variant="ghost" size="sm" disabled={!props.enabled || props.loading} onClick={props.onRefresh}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={!props.enabled || props.loading}
+          onClick={props.onRefresh}
+        >
           <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
           Refresh
         </Button>
@@ -329,10 +424,14 @@ function UsageSection(props: {
         <>
           <div className="flex flex-wrap gap-2">
             {summary.map((entry) => (
-              <span key={`${entry.eventType}:${entry.unit}`} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs">
+              <span
+                key={`${entry.eventType}:${entry.unit}`}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs"
+              >
                 <span className="font-medium">{entry.eventType}</span>
                 <span className="font-mono text-2xs text-fg-muted">
-                  {Number.isInteger(entry.total) ? entry.total : entry.total.toFixed(4)} {entry.unit}
+                  {Number.isInteger(entry.total) ? entry.total : entry.total.toFixed(4)}{" "}
+                  {entry.unit}
                 </span>
               </span>
             ))}
@@ -352,12 +451,19 @@ function UsageSection(props: {
                   <tr key={event.id}>
                     <td className="px-2 py-1.5 text-fg-muted">{event.eventType}</td>
                     <td className="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">
-                      {Number.isInteger(event.quantity) ? event.quantity : event.quantity.toFixed(6)} {event.unit}
+                      {Number.isInteger(event.quantity)
+                        ? event.quantity
+                        : event.quantity.toFixed(6)}{" "}
+                      {event.unit}
                     </td>
                     <td className="max-w-44 truncate px-2 py-1.5 font-mono text-2xs text-fg-subtle">
-                      {event.sourceResourceType ? `${event.sourceResourceType}:${event.sourceResourceId ?? ""}` : "—"}
+                      {event.sourceResourceType
+                        ? `${event.sourceResourceType}:${event.sourceResourceId ?? ""}`
+                        : "—"}
                     </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-fg-subtle">{formatTimestamp(event.occurredAt)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-fg-subtle">
+                      {formatTimestamp(event.occurredAt)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -373,7 +479,12 @@ function UsageSection(props: {
  *  member management. Access is granted per workspace (the workspace_memberships
  *  model), so the editable roster lives in Workspace settings → People with
  *  access; this read-only card stays honest by showing only the caller. */
-function MembersSection(props: { workspaceId: string; canManage: boolean; subjectLabel: string; role: string | null }) {
+function MembersSection(props: {
+  workspaceId: string;
+  canManage: boolean;
+  subjectLabel: string;
+  role: string | null;
+}) {
   return (
     <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
@@ -394,7 +505,9 @@ function MembersSection(props: { workspaceId: string; canManage: boolean; subjec
       <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{props.subjectLabel}</div>
-          <div className="mt-0.5 truncate text-xs text-fg-subtle">You{props.role ? ` · ${props.role}` : ""}</div>
+          <div className="mt-0.5 truncate text-xs text-fg-subtle">
+            You{props.role ? ` · ${props.role}` : ""}
+          </div>
         </div>
         <span className="shrink-0 rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
           {props.role ?? "member"}

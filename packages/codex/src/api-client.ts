@@ -27,15 +27,20 @@ export async function fetchCodexModels(
   a: CodexAuthHeaders,
   fetchImpl: CodexFetch = fetch,
 ): Promise<{ ok: boolean; status: number; slugs: string[] }> {
-  const res = await fetchImpl(`${CODEX_RESPONSES_BASE}/models?client_version=${encodeURIComponent(a.clientVersion)}`, {
-    method: "GET",
-    headers: subscriptionHeaders(a),
-  });
+  const res = await fetchImpl(
+    `${CODEX_RESPONSES_BASE}/models?client_version=${encodeURIComponent(a.clientVersion)}`,
+    {
+      method: "GET",
+      headers: subscriptionHeaders(a),
+    },
+  );
   if (!res.ok) {
     return { ok: false, status: res.status, slugs: [] };
   }
   const body = (await res.json()) as { models?: Array<{ slug?: string }> };
-  const slugs = (body.models ?? []).map((m) => m.slug).filter((s): s is string => typeof s === "string");
+  const slugs = (body.models ?? [])
+    .map((m) => m.slug)
+    .filter((s): s is string => typeof s === "string");
   return { ok: true, status: res.status, slugs };
 }
 

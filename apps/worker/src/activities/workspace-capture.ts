@@ -75,10 +75,28 @@ export const KEEP_LATEST_REVISIONS = 10;
 //    here — they stay fully visible.
 export const RESIDUE_DIRS: readonly string[] = [
   // build/dep residue
-  "node_modules", ".git", "dist", "build", "target", ".venv", "__pycache__", ".next",
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "target",
+  ".venv",
+  "__pycache__",
+  ".next",
   // desktop/system residue (never workspace content; churned by the desktop stack)
-  ".config", ".cache", ".local", ".dbus", ".gnupg", ".ssh", ".mozilla", ".xfce4",
-  ".pki", ".gvfs", ".dbus-keyrings", ".Xauthority", ".ICEauthority",
+  ".config",
+  ".cache",
+  ".local",
+  ".dbus",
+  ".gnupg",
+  ".ssh",
+  ".mozilla",
+  ".xfce4",
+  ".pki",
+  ".gvfs",
+  ".dbus-keyrings",
+  ".Xauthority",
+  ".ICEauthority",
 ];
 const RESIDUE_DIR_SET: ReadonlySet<string> = new Set(RESIDUE_DIRS);
 
@@ -115,13 +133,13 @@ export function isUnderResidueDir(wsPath: string): boolean {
 export function isBoxExitingError(error: unknown): boolean {
   const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
   return (
-    msg.includes("container exiting")
-    || msg.includes("container is exiting")
-    || msg.includes("container exited")
-    || msg.includes("sandbox has been terminated")
-    || msg.includes("sandbox is not running")
-    || msg.includes("sandbox has terminated")
-    || msg.includes("task has exited")
+    msg.includes("container exiting") ||
+    msg.includes("container is exiting") ||
+    msg.includes("container exited") ||
+    msg.includes("sandbox has been terminated") ||
+    msg.includes("sandbox is not running") ||
+    msg.includes("sandbox has terminated") ||
+    msg.includes("task has exited")
   );
 }
 
@@ -178,7 +196,9 @@ let loggedStorageNullOnce = false;
  * unaffected"). Returns void — the caller awaits it (it self-caps) and moves on
  * to release() regardless.
  */
-export async function captureWorkspaceRevision(input: CaptureWorkspaceRevisionInput): Promise<void> {
+export async function captureWorkspaceRevision(
+  input: CaptureWorkspaceRevisionInput,
+): Promise<void> {
   const { observability } = input;
   if (!input.settings.workspaceCaptureEnabled) {
     return; // flag off → capture skipped; reads fall back to live/wake (status quo)
@@ -188,7 +208,10 @@ export async function captureWorkspaceRevision(input: CaptureWorkspaceRevisionIn
       loggedStorageNullOnce = true;
       observability.info("workspace capture skipped — object storage not configured");
     }
-    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "skipped_no_storage" } });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "skipped_no_storage" },
+    });
     return;
   }
 
@@ -198,7 +221,10 @@ export async function captureWorkspaceRevision(input: CaptureWorkspaceRevisionIn
     await Promise.race([
       runCapture(input, { ...input, objectStorage: input.objectStorage }, startedAt),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`workspace capture exceeded ${CAPTURE_TIMEOUT_MS}ms`)), CAPTURE_TIMEOUT_MS);
+        timer = setTimeout(
+          () => reject(new Error(`workspace capture exceeded ${CAPTURE_TIMEOUT_MS}ms`)),
+          CAPTURE_TIMEOUT_MS,
+        );
       }),
     ]);
   } catch (error) {
@@ -210,7 +236,10 @@ export async function captureWorkspaceRevision(input: CaptureWorkspaceRevisionIn
       "error.message": error instanceof Error ? error.message : String(error),
       "workspace_capture.duration_ms": Date.now() - startedAt,
     });
-    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "failed" } });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "failed" },
+    });
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -332,8 +361,15 @@ async function runCapture(
   for (const [wsPath, info] of touched) {
     if (info.deleted) {
       files.push({
-        path: wsPath, status: "deleted", hash: null, baseHash: null,
-        contentRef: null, sizeBytes: 0, isBinary: false, tooLarge: false, deleted: true,
+        path: wsPath,
+        status: "deleted",
+        hash: null,
+        baseHash: null,
+        contentRef: null,
+        sizeBytes: 0,
+        isBinary: false,
+        tooLarge: false,
+        deleted: true,
       });
       continue;
     }
@@ -349,7 +385,11 @@ async function runCapture(
     // revision for a dead box.
     let read: Awaited<ReturnType<typeof svc.fsRead>>;
     try {
-      read = await svc.fsRead({ path: wsPath, encoding: "base64", maxBytes: PER_FILE_CONTENT_GUARD_BYTES });
+      read = await svc.fsRead({
+        path: wsPath,
+        encoding: "base64",
+        maxBytes: PER_FILE_CONTENT_GUARD_BYTES,
+      });
     } catch (error) {
       const boxExiting = classifyCaptureEntryError(error);
       if (boxExiting) throw boxExiting;
@@ -358,9 +398,15 @@ async function runCapture(
     if (read.truncated) {
       tooLargeCount += 1;
       files.push({
-        path: wsPath, status: info.status, hash: null, baseHash: null,
-        contentRef: null, sizeBytes: read.sizeBytes, isBinary: read.isBinary,
-        tooLarge: true, deleted: false,
+        path: wsPath,
+        status: info.status,
+        hash: null,
+        baseHash: null,
+        contentRef: null,
+        sizeBytes: read.sizeBytes,
+        isBinary: read.isBinary,
+        tooLarge: true,
+        deleted: false,
       });
       continue;
     }
@@ -377,7 +423,10 @@ async function runCapture(
           "opengeni.session_id": input.sessionId,
           "workspace_capture.total_bytes": totalBytes,
         });
-        observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "guard_tripped" } });
+        observability.incrementCounter({
+          name: "opengeni_workspace_capture_total",
+          labels: { result: "guard_tripped" },
+        });
         return;
       }
     }
@@ -387,9 +436,15 @@ async function runCapture(
       // flush guard (M3/C2) compares live content against the after-image `hash`,
       // not the HEAD blob, so baseHash is not load-bearing yet. Populating it would
       // cost an extra per-file round-trip at turn end (latency risk #1). Deferred.
-      path: wsPath, status: info.status, hash, baseHash: null,
-      contentRef, sizeBytes: bytes.byteLength, isBinary: read.isBinary,
-      tooLarge: false, deleted: false,
+      path: wsPath,
+      status: info.status,
+      hash,
+      baseHash: null,
+      contentRef,
+      sizeBytes: bytes.byteLength,
+      isBinary: read.isBinary,
+      tooLarge: false,
+      deleted: false,
     });
   }
 
@@ -400,7 +455,10 @@ async function runCapture(
   // diff/after-image probes.
   const fingerprint = changeFingerprint(repos, files);
   if (prev && prev.stats.fingerprint === fingerprint) {
-    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "skipped_empty" } });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "skipped_empty" },
+    });
     return;
   }
 
@@ -445,10 +503,21 @@ async function runCapture(
   for (const [key, bytes] of blobsToPut) {
     await storage.putObject({ key, contentType: "application/octet-stream", body: bytes });
   }
-  const treeBytes = utf8(JSON.stringify({ version: 1, root: tree.root, truncated: tree.truncated, entryCount: tree.entryCount }));
+  const treeBytes = utf8(
+    JSON.stringify({
+      version: 1,
+      root: tree.root,
+      truncated: tree.truncated,
+      entryCount: tree.entryCount,
+    }),
+  );
   await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
   const manifestBytes = utf8(JSON.stringify(manifest));
-  await storage.putObject({ key: manifestKey, contentType: "application/json", body: manifestBytes });
+  await storage.putObject({
+    key: manifestKey,
+    contentType: "application/json",
+    body: manifestBytes,
+  });
   const sizeBytes = totalBytes + treeBytes.byteLength + manifestBytes.byteLength;
 
   // ── 8. epoch-fenced insert (superseded lease → zero rows) ──────────────────
@@ -470,7 +539,10 @@ async function runCapture(
     // Lease superseded/released between capture and commit. Best-effort clean up
     // the turn-keyed blobs we just PUT (content blobs may be shared with a
     // surviving revision — leave them for the next GC); never throw.
-    observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "superseded" } });
+    observability.incrementCounter({
+      name: "opengeni_workspace_capture_total",
+      labels: { result: "superseded" },
+    });
     await safeDelete(storage, [manifestKey, treeKey], observability);
     return;
   }
@@ -484,12 +556,19 @@ async function runCapture(
       keepN,
     });
     if (plan.evictedRowIds.length > 0) {
-      await safeDelete(storage, [...plan.deleteBlobKeys, ...plan.deletePerRevisionKeys], observability);
+      await safeDelete(
+        storage,
+        [...plan.deleteBlobKeys, ...plan.deletePerRevisionKeys],
+        observability,
+      );
       gcDeleted = await deleteWorkspaceCaptureRows(input.db, {
         workspaceId: input.workspaceId,
         rowIds: plan.evictedRowIds,
       });
-      observability.incrementCounter({ name: "opengeni_workspace_capture_gc_deletions_total", amount: gcDeleted });
+      observability.incrementCounter({
+        name: "opengeni_workspace_capture_gc_deletions_total",
+        amount: gcDeleted,
+      });
     }
   } catch (gcError) {
     // GC is storage hygiene — a failure never affects the just-committed capture.
@@ -502,19 +581,29 @@ async function runCapture(
   // ── 10. announce (announce-only; hits the timeline projection default case) ─
   const durationMs = Date.now() - startedAt;
   stats.durationMs = durationMs;
-  observability.incrementCounter({ name: "opengeni_workspace_capture_total", labels: { result: "ok" } });
-  observability.observeHistogram({ name: "opengeni_workspace_capture_duration_seconds", value: durationMs / 1000 });
+  observability.incrementCounter({
+    name: "opengeni_workspace_capture_total",
+    labels: { result: "ok" },
+  });
+  observability.observeHistogram({
+    name: "opengeni_workspace_capture_duration_seconds",
+    value: durationMs / 1000,
+  });
   if (input.publish) {
-    await input.publish([{
-      type: "workspace.revision.captured",
-      payload: {
-        revision: inserted.revision,
-        turnId: input.turnId,
-        capturedAt,
-        leaseEpoch: input.leaseEpoch,
-        stats,
-      },
-    }]).catch(() => undefined);
+    await input
+      .publish([
+        {
+          type: "workspace.revision.captured",
+          payload: {
+            revision: inserted.revision,
+            turnId: input.turnId,
+            capturedAt,
+            leaseEpoch: input.leaseEpoch,
+            stats,
+          },
+        },
+      ])
+      .catch(() => undefined);
   }
 }
 
@@ -536,10 +625,14 @@ function changeFingerprint(repos: WorkspaceCaptureRepo[], files: WorkspaceCaptur
     .map((f) => `${f.path}|${f.status}|${f.hash ?? ""}|${f.deleted ? 1 : 0}|${f.tooLarge ? 1 : 0}`)
     .sort();
   const repoParts = repos
-    .map((r) => `${r.root}#${r.head ?? ""}#` + r.diff
-      .map((d) => `${d.path}:${d.status}:${d.additions}:${d.deletions}:${d.truncated ? 1 : 0}`)
-      .sort()
-      .join(","))
+    .map(
+      (r) =>
+        `${r.root}#${r.head ?? ""}#` +
+        r.diff
+          .map((d) => `${d.path}:${d.status}:${d.additions}:${d.deletions}:${d.truncated ? 1 : 0}`)
+          .sort()
+          .join(","),
+    )
     .sort();
   return sha256(utf8(JSON.stringify({ files: fileParts, repos: repoParts })));
 }
@@ -563,7 +656,11 @@ export function blobKey(workspaceId: string, sessionId: string, sha256Hex: strin
   return `workspace-captures/${workspaceId}/${sessionId}/blobs/${sha256Hex}`;
 }
 
-async function safeDelete(storage: ObjectStorage, keys: string[], observability: Observability): Promise<void> {
+async function safeDelete(
+  storage: ObjectStorage,
+  keys: string[],
+  observability: Observability,
+): Promise<void> {
   for (const key of keys) {
     await storage.deleteObject(key).catch((error) => {
       observability.warn("workspace capture blob delete failed (orphan left; capture unaffected)", {
@@ -586,7 +683,14 @@ async function buildTreeIndex(
   startedAt: number,
 ): Promise<{ root: FsTreeNode; entryCount: number; truncated: boolean }> {
   const root: FsTreeNode = {
-    name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, children: [], truncated: false,
+    name: "",
+    path: "",
+    type: "dir",
+    sizeBytes: null,
+    mtimeMs: null,
+    mode: null,
+    children: [],
+    truncated: false,
   };
   const byPath = new Map<string, FsTreeNode>([["", root]]);
   const queue: string[] = [""];
@@ -595,8 +699,14 @@ async function buildTreeIndex(
   let truncated = false;
 
   while (queue.length > 0) {
-    if (dirCalls >= TREE_MAX_DIRS || entryCount >= TREE_MAX_ENTRIES) { truncated = true; break; }
-    if (Date.now() - startedAt > CAPTURE_TIMEOUT_MS - 5_000) { truncated = true; break; } // leave headroom for PUTs
+    if (dirCalls >= TREE_MAX_DIRS || entryCount >= TREE_MAX_ENTRIES) {
+      truncated = true;
+      break;
+    }
+    if (Date.now() - startedAt > CAPTURE_TIMEOUT_MS - 5_000) {
+      truncated = true;
+      break;
+    } // leave headroom for PUTs
     const dir = queue.shift()!;
     dirCalls += 1;
     // Per-dir resilience: a directory can vanish or fail to list mid-walk (fs
@@ -617,7 +727,10 @@ async function buildTreeIndex(
     const parent = byPath.get(dir) ?? root;
     const children = collectImmediateChildren(listing.root);
     for (const child of children) {
-      if (entryCount >= TREE_MAX_ENTRIES) { truncated = true; break; }
+      if (entryCount >= TREE_MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
       const node: FsTreeNode = {
         name: child.name,
         path: child.path,

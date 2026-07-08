@@ -9,7 +9,12 @@ import {
   requireFile,
   type Database,
 } from "@opengeni/db";
-import { stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState, neutralizeToolSearchItemsInSerializedRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import {
+  stripReasoningEncryptedContent,
+  stripReasoningIdentityFromSerializedRunState,
+  neutralizeToolSearchItemsInSerializedRunState,
+  type OpenGeniRuntime,
+} from "@opengeni/runtime";
 
 /**
  * The codex account THIS turn runs on, threaded into every history read path so a
@@ -112,7 +117,9 @@ export function resumeRunStateForCodexAccount(
   // client-executor rehydration (which would THROW when the resuming account's
   // connector pool differs from the freezing account's); the flipped shape is
   // live-verified wire-safe. The model can still re-search on this account.
-  return neutralizeToolSearchItemsInSerializedRunState(stripReasoningIdentityFromSerializedRunState(state.serializedRunState));
+  return neutralizeToolSearchItemsInSerializedRunState(
+    stripReasoningIdentityFromSerializedRunState(state.serializedRunState),
+  );
 }
 
 /**
@@ -159,9 +166,17 @@ export async function turnInput(
       db,
       trigger.workspaceId,
       payload.text,
-      Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
+      Array.isArray(payload.resources) ? (payload.resources as ResourceRef[]) : [],
     );
-    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(text, options.unavailableSandboxFilesNote), settings, current);
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      withUnavailableSandboxFilesNote(text, options.unavailableSandboxFilesNote),
+      settings,
+      current,
+    );
   }
   if (trigger.type === "goal.continuation") {
     const payload = trigger.payload as { text?: unknown };
@@ -170,7 +185,15 @@ export async function turnInput(
     }
     // Threading the stored conversation keeps the agent's full context across
     // continuations — this is what makes "keep working" coherent.
-    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote), settings, current);
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote),
+      settings,
+      current,
+    );
   }
   if (trigger.type === "turn.preempted") {
     const payload = trigger.payload as { text?: unknown };
@@ -180,7 +203,15 @@ export async function turnInput(
     // A turn re-entering after a graceful worker shutdown checkpointed it
     // mid-flight: thread the stored conversation (which includes the turn's
     // original input and its progress so far) behind a resume notice.
-    return await messageInput(db, runtime, agent, trigger, withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote), settings, current);
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote),
+      settings,
+      current,
+    );
   }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
@@ -285,7 +316,9 @@ async function messageInput(
         // the RunState blob when no history rows exist yet. If the resuming turn's
         // codex account differs from the one that froze the blob, neutralize its
         // account-bound reasoning before replay (else byte-for-byte).
-        serializedRunState: latestState ? resumeRunStateForCodexAccount(latestState, current) : null,
+        serializedRunState: latestState
+          ? resumeRunStateForCodexAccount(latestState, current)
+          : null,
       },
       inputBudgetTokens ? { inputBudgetTokens } : {},
     ),
@@ -323,19 +356,19 @@ export async function userMessageTextWithAttachments(
       continue;
     }
     const file = await requireFile(db, workspaceId, resource.fileId);
-    attachedFiles.push(`- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`);
+    attachedFiles.push(
+      `- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`,
+    );
   }
   if (attachedFiles.length === 0) {
     return text;
   }
-  return [
-    text,
-    "",
-    "Attached files are available in the sandbox:",
-    ...attachedFiles,
-  ].join("\n");
+  return [text, "", "Attached files are available in the sandbox:", ...attachedFiles].join("\n");
 }
 
-function sandboxFilePath(resource: Extract<ResourceRef, { kind: "file" }>, file: FileAsset): string {
+function sandboxFilePath(
+  resource: Extract<ResourceRef, { kind: "file" }>,
+  file: FileAsset,
+): string {
   return `/workspace/${resource.mountPath ?? `files/${file.id}`}/${file.safeFilename}`;
 }

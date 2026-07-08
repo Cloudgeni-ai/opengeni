@@ -15,8 +15,18 @@ function liveBody(over: Record<string, unknown> = {}): Record<string, unknown> {
     rate_limit: {
       allowed: true,
       limit_reached: false,
-      primary_window: { used_percent: 40, reset_after_seconds: 3600, reset_at: 1_700_000_000, limit_window_seconds: 18000 },
-      secondary_window: { used_percent: 12, reset_after_seconds: 200_000, reset_at: 1_700_600_000, limit_window_seconds: 604800 },
+      primary_window: {
+        used_percent: 40,
+        reset_after_seconds: 3600,
+        reset_at: 1_700_000_000,
+        limit_window_seconds: 18000,
+      },
+      secondary_window: {
+        used_percent: 12,
+        reset_after_seconds: 200_000,
+        reset_at: 1_700_600_000,
+        limit_window_seconds: 604800,
+      },
     },
     ...over,
   };
@@ -46,7 +56,11 @@ describe("normalizeCodexUsage", () => {
     const body = liveBody({
       rate_limit: {
         primary_window: { used_percent: 5, reset_at: 1_700_600_000, limit_window_seconds: 604800 },
-        secondary_window: { used_percent: 70, reset_at: 1_700_000_000, limit_window_seconds: 18000 },
+        secondary_window: {
+          used_percent: 70,
+          reset_at: 1_700_000_000,
+          limit_window_seconds: 18000,
+        },
       },
     });
     const out = normalizeCodexUsage(200, body);
@@ -70,13 +84,19 @@ describe("normalizeCodexUsage", () => {
   });
 
   test("a 200 carrying limit_reached:true is a limit_reached state (not assumed 404-only)", () => {
-    const out = normalizeCodexUsage(200, liveBody({ rate_limit: { ...((liveBody().rate_limit) as object), limit_reached: true } }));
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({ rate_limit: { ...(liveBody().rate_limit as object), limit_reached: true } }),
+    );
     expect(out.status).toBe("limit_reached");
     expect(out.limitReached).toBe(true);
   });
 
   test("a 404 with a body normalizes to limit_reached", () => {
-    const out = normalizeCodexUsage(404, liveBody({ rate_limit: { ...(liveBody().rate_limit as object), allowed: false } }));
+    const out = normalizeCodexUsage(
+      404,
+      liveBody({ rate_limit: { ...(liveBody().rate_limit as object), allowed: false } }),
+    );
     expect(out.status).toBe("limit_reached");
     expect(out.limitReached).toBe(true);
   });
@@ -102,13 +122,33 @@ describe("normalizeCodexUsage", () => {
   });
 
   test("forward-compat: additionalLimits + credits are carried but unused", () => {
-    const out = normalizeCodexUsage(200, liveBody({
-      additional_limits: [{ limit_name: "spark", metered_feature: "codex_bengalfox", primary_window: { used_percent: 3, limit_window_seconds: 18000 }, secondary_window: null }],
-      credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: 12.5 },
-    }));
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({
+        additional_limits: [
+          {
+            limit_name: "spark",
+            metered_feature: "codex_bengalfox",
+            primary_window: { used_percent: 3, limit_window_seconds: 18000 },
+            secondary_window: null,
+          },
+        ],
+        credits: {
+          has_credits: true,
+          unlimited: false,
+          overage_limit_reached: false,
+          balance: 12.5,
+        },
+      }),
+    );
     expect(out.additionalLimits?.[0]?.limitName).toBe("spark");
     expect(out.additionalLimits?.[0]?.fiveHour?.percent).toBe(3);
-    expect(out.credits).toEqual({ hasCredits: true, unlimited: false, overageLimitReached: false, balance: "12.5" });
+    expect(out.credits).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      overageLimitReached: false,
+      balance: "12.5",
+    });
   });
 });
 

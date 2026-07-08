@@ -32,7 +32,11 @@ describe("P1.2 live Modal keystone re-confirm (gated)", () => {
   test.skipIf(!live || !isModal)(
     "injected NON-OWNED Modal session survives runAgentStream un-reaped; we terminate it in finally",
     async () => {
-      const settings = { ...getSettings(), sandboxBackend: "modal" as const, openaiModel: "scripted-model" };
+      const settings = {
+        ...getSettings(),
+        sandboxBackend: "modal" as const,
+        openaiModel: "scripted-model",
+      };
       configureOpenAI(settings);
 
       // Establish a REAL Modal box by id from a cold (null) envelope -> create().
@@ -69,7 +73,15 @@ describe("P1.2 live Modal keystone re-confirm (gated)", () => {
         expect(established.instanceId.length).toBeGreaterThan(0);
 
         const model = new ScriptedModel([
-          { output: [functionCall("exec_command", { cmd: "echo LIVE_KEYSTONE_P12 > /tmp/marker.txt && cat /tmp/marker.txt" }, "shell-1")] },
+          {
+            output: [
+              functionCall(
+                "exec_command",
+                { cmd: "echo LIVE_KEYSTONE_P12 > /tmp/marker.txt && cat /tmp/marker.txt" },
+                "shell-1",
+              ),
+            ],
+          },
           { output: [assistantMessage("live keystone ok")] },
         ]);
         const agent = buildOpenGeniAgent(settings, [], { model });

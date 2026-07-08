@@ -43,7 +43,9 @@ function parseArgs(argv: string[]): RefreshArgs {
 }
 
 function printUsage(): void {
-  console.log("Usage: bun run catalog:refresh [--url <catalog-json-url> | --input <raw-snapshot.json>] [--output data/catalog/integrations-snapshot.json]");
+  console.log(
+    "Usage: bun run catalog:refresh [--url <catalog-json-url> | --input <raw-snapshot.json>] [--output data/catalog/integrations-snapshot.json]",
+  );
 }
 
 async function fetchSnapshot(url: string): Promise<unknown> {
@@ -58,7 +60,9 @@ async function fetchSnapshot(url: string): Promise<unknown> {
 
 if (import.meta.main) {
   const args = parseArgs(process.argv.slice(2));
-  const snapshot = args.inputPath ? await readSnapshotFile(args.inputPath) : await fetchSnapshot(args.sourceUrl);
+  const snapshot = args.inputPath
+    ? await readSnapshotFile(args.inputPath)
+    : await fetchSnapshot(args.sourceUrl);
   await mkdir(dirname(args.outputPath), { recursive: true });
   let normalized = normalizeCatalogSnapshot(snapshot);
   let fallbackInput: string | null = null;
@@ -67,37 +71,52 @@ if (import.meta.main) {
     normalized = normalizeCatalogSnapshot(await readSnapshotFile(args.outputPath));
   }
   const probed = await probeCatalogSnapshot(normalized);
-  await writeFile(args.outputPath, `${JSON.stringify({
-    generatedAt: probed.generatedAt,
-    source: SOURCE,
-    cleanedAt: new Date().toISOString(),
-    cleaning: probed.cleaning,
-    probe: {
-      kept: probed.probe.kept,
-      dropped: probed.probe.dropped,
-      real: probed.probe.real,
-      unverified: probed.probe.unverified,
-      googleapisDropped: probed.probe.googleapisDropped,
-    },
-    importRows: probed.rows,
-    skipped: probed.skipped,
-    quarantined: probed.quarantined.map((item) => ({
-      row: item.row,
-      reason: item.reason,
-    })),
-  }, null, 2)}\n`);
-  console.log(JSON.stringify({
-    output: args.outputPath,
-    ...(fallbackInput ? { fallbackInput, fallbackReason: "source_normalized_to_zero_rows" } : {}),
-    generatedAt: probed.generatedAt,
-    before: normalized.cleaning.inputRows,
-    after: probed.cleaning.outputRows,
-    kept: probed.probe.kept,
-    dropped: probed.probe.dropped,
-    unverified: probed.probe.unverified,
-    googleapisDropped: probed.probe.googleapisDropped,
-    skipped: probed.skipped.length,
-    quarantined: probed.quarantined.length,
-    cleaning: probed.cleaning,
-  }, null, 2));
+  await writeFile(
+    args.outputPath,
+    `${JSON.stringify(
+      {
+        generatedAt: probed.generatedAt,
+        source: SOURCE,
+        cleanedAt: new Date().toISOString(),
+        cleaning: probed.cleaning,
+        probe: {
+          kept: probed.probe.kept,
+          dropped: probed.probe.dropped,
+          real: probed.probe.real,
+          unverified: probed.probe.unverified,
+          googleapisDropped: probed.probe.googleapisDropped,
+        },
+        importRows: probed.rows,
+        skipped: probed.skipped,
+        quarantined: probed.quarantined.map((item) => ({
+          row: item.row,
+          reason: item.reason,
+        })),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  console.log(
+    JSON.stringify(
+      {
+        output: args.outputPath,
+        ...(fallbackInput
+          ? { fallbackInput, fallbackReason: "source_normalized_to_zero_rows" }
+          : {}),
+        generatedAt: probed.generatedAt,
+        before: normalized.cleaning.inputRows,
+        after: probed.cleaning.outputRows,
+        kept: probed.probe.kept,
+        dropped: probed.probe.dropped,
+        unverified: probed.probe.unverified,
+        googleapisDropped: probed.probe.googleapisDropped,
+        skipped: probed.skipped.length,
+        quarantined: probed.quarantined.length,
+        cleaning: probed.cleaning,
+      },
+      null,
+      2,
+    ),
+  );
 }

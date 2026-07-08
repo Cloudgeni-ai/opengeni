@@ -1,10 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
-import { configuredProviders, resolveModelProvider, type ResolvedModelProvider } from "@opengeni/config";
+import {
+  configuredProviders,
+  resolveModelProvider,
+  type ResolvedModelProvider,
+} from "@opengeni/config";
 import { CODEX_MODEL_ID_PREFIX, CODEX_PROVIDER_BASE_URL, CODEX_PROVIDER_ID } from "@opengeni/codex";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
-import { buildModelInstance, buildOpenGeniAgent, buildOpenAIClientFromSettings, buildProviderClient, CodexSubscriptionUnavailableError, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
+import {
+  buildModelInstance,
+  buildOpenGeniAgent,
+  buildOpenAIClientFromSettings,
+  buildProviderClient,
+  CodexSubscriptionUnavailableError,
+  MultiProviderModelProvider,
+  resolveTurnModel,
+} from "../src/index";
 
 // The synthetic codex-subscription provider the worker overlay
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
@@ -94,7 +106,9 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
 describe("buildProviderClient", () => {
   test("a registry provider gets a client pointed at its base URL with its key/headers, cached by id", () => {
     const settings = multiProviderSettings();
-    const provider = configuredProviders(settings).find((candidate) => candidate.id === "fireworks")!;
+    const provider = configuredProviders(settings).find(
+      (candidate) => candidate.id === "fireworks",
+    )!;
     expect(provider).toBeDefined();
     const client = buildProviderClient(provider, settings);
     expect(client.baseURL).toBe("https://api.fireworks.ai/inference/v1");
@@ -135,10 +149,14 @@ describe("resolveTurnModel", () => {
 // The agent the worker builds for a Fireworks turn passes the resolved gating
 // into buildOpenGeniAgent. These tests pin that the gating actually changes the
 // constructed agent the way the multi-provider contract requires.
-function webSearchHostedTools(agent: ReturnType<typeof buildOpenGeniAgent>): Array<Record<string, unknown>> {
-  return ((agent as { tools?: Array<Record<string, unknown>> }).tools ?? []).filter((tool) =>
-    tool.type === "hosted_tool"
-    && (tool.providerData as { type?: unknown } | undefined)?.type === "web_search");
+function webSearchHostedTools(
+  agent: ReturnType<typeof buildOpenGeniAgent>,
+): Array<Record<string, unknown>> {
+  return ((agent as { tools?: Array<Record<string, unknown>> }).tools ?? []).filter(
+    (tool) =>
+      tool.type === "hosted_tool" &&
+      (tool.providerData as { type?: unknown } | undefined)?.type === "web_search",
+  );
 }
 
 describe("multi-provider gating in buildOpenGeniAgent", () => {
@@ -149,14 +167,17 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       model: resolved.model,
       compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
-      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      encryptedReasoning:
+        resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
       contextWindowTokens: resolved.configured.contextWindowTokens,
     });
     // hostedWebSearch off → no web_search tool and no explicit tools field at all.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
     expect((agent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
     // encryptedReasoning off (chat wire API) → no providerData.include.
-    expect((agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData).toBeUndefined();
+    expect(
+      (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
+    ).toBeUndefined();
     // compactionMode "client" → store is NOT forced false.
     expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBeUndefined();
     // The provider-bound Model instance is the one passed in (chat routing).
@@ -170,11 +191,14 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       model: resolved.model,
       compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
-      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      encryptedReasoning:
+        resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
       contextWindowTokens: resolved.configured.contextWindowTokens,
     });
     expect(webSearchHostedTools(agent)).toHaveLength(1);
-    expect((agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData).toEqual({ include: ["reasoning.encrypted_content"] });
+    expect(
+      (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
+    ).toEqual({ include: ["reasoning.encrypted_content"] });
     expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBe(false);
   });
 
@@ -185,11 +209,14 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       model: resolved.model,
       compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
-      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      encryptedReasoning:
+        resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
       contextWindowTokens: resolved.configured.contextWindowTokens,
       promptCacheKey: "session-123",
     });
-    expect((agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData).toEqual({
+    expect(
+      (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
+    ).toEqual({
       include: ["reasoning.encrypted_content"],
       prompt_cache_key: "session-123",
     });
@@ -202,10 +229,14 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       model: resolved.model,
       compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
-      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      encryptedReasoning:
+        resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
       contextWindowTokens: resolved.configured.contextWindowTokens,
     });
-    expect((agent as { modelSettings: { providerData?: Record<string, unknown> } }).modelSettings.providerData?.prompt_cache_key).toBeUndefined();
+    expect(
+      (agent as { modelSettings: { providerData?: Record<string, unknown> } }).modelSettings
+        .providerData?.prompt_cache_key,
+    ).toBeUndefined();
   });
 
   test("resolveModelProvider/configuredProviders agree on the registry provider's client gating", () => {
@@ -346,8 +377,9 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     });
     // With the config fix, codex/ is filtered from the built-in list, so the id
     // is unexposed and getModel throws via the no-resolution codex branch.
-    await expect(new MultiProviderModelProvider(settings).getModel(CODEX_TURN_MODEL))
-      .rejects.toBeInstanceOf(CodexSubscriptionUnavailableError);
+    await expect(
+      new MultiProviderModelProvider(settings).getModel(CODEX_TURN_MODEL),
+    ).rejects.toBeInstanceOf(CodexSubscriptionUnavailableError);
   });
 
   test("P0 regression: a codex-active run provider resolves codex/* even after the GLOBAL default is clobbered by a non-codex turn", async () => {
@@ -392,7 +424,9 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     // would throw on the very same name. The run-scoped provider's immunity is
     // exactly what the fix buys.
     const clobberedProvider = new MultiProviderModelProvider(nonCodexSettings);
-    await expect(clobberedProvider.getModel("codex/gpt-5.5")).rejects.toBeInstanceOf(CodexSubscriptionUnavailableError);
+    await expect(clobberedProvider.getModel("codex/gpt-5.5")).rejects.toBeInstanceOf(
+      CodexSubscriptionUnavailableError,
+    );
   });
 
   test("falls back to the built-in default provider for a model in no provider's allow-list", async () => {
@@ -421,11 +455,12 @@ describe("registry model shadowing is closed — the built-in never claims a nam
   // the model NAME. configuredModels now filters any `<provider>/<model>`-namespaced
   // id a registry owns (and any `codex/` id) out of the built-in allow-list, so
   // the registry provider wins even when its id is the turn's openaiModel.
-  const azure = () => multiProviderSettings({
-    openaiProvider: "azure",
-    azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
-    azureOpenaiApiKey: "az-test-key",
-  });
+  const azure = () =>
+    multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+    });
 
   test("against deployment-default settings, a registry model resolves to its registry provider with gating off", () => {
     const resolved = resolveTurnModel(azure(), FIREWORKS_MODEL)!;
@@ -435,7 +470,10 @@ describe("registry model shadowing is closed — the built-in never claims a nam
   });
 
   test("against turn-overridden settings (openaiModel = the registry id) the registry provider STILL wins — no Azure shadow", () => {
-    const resolved = resolveTurnModel({ ...azure(), openaiModel: FIREWORKS_MODEL }, FIREWORKS_MODEL)!;
+    const resolved = resolveTurnModel(
+      { ...azure(), openaiModel: FIREWORKS_MODEL },
+      FIREWORKS_MODEL,
+    )!;
     // Previously the built-in (Azure) shadowed this; the namespaced-id filter
     // keeps it bound to its registry provider and a chat-completions Model.
     expect(resolved.provider.builtin).toBe(false);

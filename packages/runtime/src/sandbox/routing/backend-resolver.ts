@@ -129,11 +129,15 @@ export function makeActiveBackendResolver(
     // to a fresh build fenced under the CURRENT epoch (the stale pinned instance is
     // fenced at the old epoch and must not be reused).
     if (
-      deps.pinnedSelfhosted
-      && pointer.activeSandboxId === deps.pinnedSelfhosted.sandboxId
-      && pointer.activeEpoch === deps.pinnedSelfhosted.epoch
+      deps.pinnedSelfhosted &&
+      pointer.activeSandboxId === deps.pinnedSelfhosted.sandboxId &&
+      pointer.activeEpoch === deps.pinnedSelfhosted.epoch
     ) {
-      return { session: deps.pinnedSelfhosted.session, sandboxId: pointer.activeSandboxId, kind: "selfhosted" };
+      return {
+        session: deps.pinnedSelfhosted.session,
+        sandboxId: pointer.activeSandboxId,
+        kind: "selfhosted",
+      };
     }
 
     const sandbox = await deps.getSandbox(pointer.activeSandboxId);
@@ -169,7 +173,11 @@ export function makeActiveBackendResolver(
         // for this selfhosted backend. Absent/empty ⇒ the default workspace_root.
         ...(pointer.workingDir ? { workingDir: pointer.workingDir } : {}),
       });
-      return { session: session as RoutableBackendSession, sandboxId: sandbox.id, kind: "selfhosted" };
+      return {
+        session: session as RoutableBackendSession,
+        sandboxId: sandbox.id,
+        kind: "selfhosted",
+      };
     }
 
     if (sandbox.kind === "modal") {

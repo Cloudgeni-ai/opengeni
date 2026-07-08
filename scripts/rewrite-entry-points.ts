@@ -53,7 +53,9 @@ function srcToDist(value: string, kind: "runtime" | "types"): string {
   if (!value.startsWith("./src/")) {
     return value;
   }
-  const withoutSourceRoot = value.slice("./src/".length).replace(/\.ts$/, kind === "types" ? ".d.ts" : ".js");
+  const withoutSourceRoot = value
+    .slice("./src/".length)
+    .replace(/\.ts$/, kind === "types" ? ".d.ts" : ".js");
   return `./dist/${withoutSourceRoot}`;
 }
 
@@ -61,7 +63,10 @@ function distToSrc(value: string): string {
   if (!value.startsWith("./dist/")) {
     return value;
   }
-  const withoutDistRoot = value.slice("./dist/".length).replace(/\.d\.ts$/, ".ts").replace(/\.js$/, ".ts");
+  const withoutDistRoot = value
+    .slice("./dist/".length)
+    .replace(/\.d\.ts$/, ".ts")
+    .replace(/\.js$/, ".ts");
   return `./src/${withoutDistRoot}`;
 }
 
@@ -170,9 +175,15 @@ for (const { dir: pkgDir } of publishableWorkspacePackages()) {
 }
 
 if (restore) {
-  process.stdout.write(`rewrite-entry-points: restored ${changed} package(s) to src entry points.\n`);
+  process.stdout.write(
+    `rewrite-entry-points: restored ${changed} package(s) to src entry points.\n`,
+  );
 } else if (changed === 0) {
-  process.stdout.write("rewrite-entry-points: no packages to rewrite (already dist entry points).\n");
+  process.stdout.write(
+    "rewrite-entry-points: no packages to rewrite (already dist entry points).\n",
+  );
 } else {
-  process.stdout.write(`rewrite-entry-points: rewrote ${changed} package(s) to dist entry points.\n`);
+  process.stdout.write(
+    `rewrite-entry-points: rewrote ${changed} package(s) to dist entry points.\n`,
+  );
 }

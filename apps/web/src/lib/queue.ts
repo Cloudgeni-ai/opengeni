@@ -8,7 +8,11 @@ import type { SessionStatus, SessionTurn } from "@opengeni/sdk";
 import type { ComposerMode } from "@opengeni/react";
 
 /** New queued-turn id order after moving one turn up or down a step. */
-export function moveTurnInQueue(queueIds: string[], turnId: string, direction: "up" | "down"): string[] | null {
+export function moveTurnInQueue(
+  queueIds: string[],
+  turnId: string,
+  direction: "up" | "down",
+): string[] | null {
   const from = queueIds.indexOf(turnId);
   if (from === -1) {
     return null;
@@ -24,7 +28,11 @@ export function moveTurnInQueue(queueIds: string[], turnId: string, direction: "
 }
 
 /** New queued-turn id order after dropping `draggedId` onto `targetId`'s slot. */
-export function reorderQueueByDrag(queueIds: string[], draggedId: string, targetId: string): string[] | null {
+export function reorderQueueByDrag(
+  queueIds: string[],
+  draggedId: string,
+  targetId: string,
+): string[] | null {
   if (draggedId === targetId) {
     return null;
   }
@@ -69,7 +77,10 @@ export function editedTurnFate(turns: SessionTurn[], editingTurnId: string): Que
 }
 
 /** Seconds the active turn has been running (0 before it starts). */
-export function turnElapsedSeconds(turn: Pick<SessionTurn, "startedAt">, now: Date = new Date()): number {
+export function turnElapsedSeconds(
+  turn: Pick<SessionTurn, "startedAt">,
+  now: Date = new Date(),
+): number {
   if (!turn.startedAt) {
     return 0;
   }
@@ -100,7 +111,10 @@ export function turnSourceLabel(source: SessionTurn["source"]): string {
  * `reason: "steer"` and the worker keeps an active goal running through it
  * (redirection, not a stop), so the hints stay silent about goals.
  */
-export function deliveryModeExplanation(mode: ComposerMode, status: SessionStatus | null | undefined): string {
+export function deliveryModeExplanation(
+  mode: ComposerMode,
+  status: SessionStatus | null | undefined,
+): string {
   if (mode === "steer") {
     switch (status) {
       case "running":
@@ -128,6 +142,9 @@ export function deliveryModeExplanation(mode: ComposerMode, status: SessionStatu
 /** Finished turns (newest first) for the history section of the rail. */
 export function finishedTurns(turns: SessionTurn[]): SessionTurn[] {
   return turns
-    .filter((turn) => turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled")
+    .filter(
+      (turn) =>
+        turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled",
+    )
     .sort((a, b) => (b.finishedAt ?? b.updatedAt).localeCompare(a.finishedAt ?? a.updatedAt));
 }

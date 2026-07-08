@@ -93,7 +93,18 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 beforeAll(async () => {
   try {
     removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
+    docker([
+      "run",
+      "--rm",
+      "-d",
+      "-e",
+      `POSTGRES_PASSWORD=${PASSWORD}`,
+      "-p",
+      `${PORT}:5432`,
+      "--name",
+      CONTAINER,
+      IMAGE,
+    ]);
   } catch (err) {
     available = false;
     console.warn(`[rls-dedicated] docker unavailable, skipping: ${String(err)}`);
@@ -126,25 +137,37 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   try {
     await admin?.end();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   removeContainer();
 });
 
 describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
   test("(A) tables + policies isolate to the dedicated schema, 0 in public", async () => {
     if (!available) return;
-    const tablesInSchema = (await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema = ${SCHEMA}`)[0]!.count;
-    const tablesInPublic = (await admin<{ count: number }[]>`
+    const tablesInSchema = (
+      await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema = ${SCHEMA}`
+    )[0]!.count;
+    const tablesInPublic = (
+      await admin<{ count: number }[]>`
       SELECT count(*)::int AS count FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name <> 'schema_migrations'`)[0]!.count;
-    const policiesInSchema = (await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = ${SCHEMA}`)[0]!.count;
-    const policiesInPublic = (await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'public'`)[0]!.count;
+      WHERE table_schema = 'public' AND table_name <> 'schema_migrations'`
+    )[0]!.count;
+    const policiesInSchema = (
+      await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = ${SCHEMA}`
+    )[0]!.count;
+    const policiesInPublic = (
+      await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM pg_policies WHERE schemaname = 'public'`
+    )[0]!.count;
     expect(tablesInSchema).toBeGreaterThan(30);
     expect(tablesInPublic).toBe(0);
     expect(policiesInSchema).toBeGreaterThan(20);
@@ -160,18 +183,25 @@ describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER r
     if (!available) return;
     const wsA = await freshWorkspace();
     await createApiKey(db, {
-      accountId: wsA.accountId, workspaceId: wsA.workspaceId,
-      name: "keyA", prefix: "pkA", keyHash: "hashA",
+      accountId: wsA.accountId,
+      workspaceId: wsA.workspaceId,
+      name: "keyA",
+      prefix: "pkA",
+      keyHash: "hashA",
       permissions: ["workspace:read"],
     });
     // Superuser read of the DEDICATED schema's table — the row must be HERE.
-    const inSchema = (await admin<{ count: number }[]>`
-      SELECT count(*)::int AS count FROM ${admin(SCHEMA)}.api_keys WHERE key_hash = 'hashA'`)[0]!.count;
+    const inSchema = (
+      await admin<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM ${admin(SCHEMA)}.api_keys WHERE key_hash = 'hashA'`
+    )[0]!.count;
     expect(inSchema).toBe(1);
     // And public.api_keys must NOT exist at all (proves no silent public fallback).
-    const publicApiKeysExists = (await admin<{ exists: boolean }[]>`
+    const publicApiKeysExists = (
+      await admin<{ exists: boolean }[]>`
       SELECT EXISTS(SELECT 1 FROM information_schema.tables
-        WHERE table_schema='public' AND table_name='api_keys') AS exists`)[0]!.exists;
+        WHERE table_schema='public' AND table_name='api_keys') AS exists`
+    )[0]!.exists;
     expect(publicApiKeysExists).toBe(false);
   });
 
@@ -180,13 +210,19 @@ describe("Step I Fork-6 — RLS isolation under a DEDICATED schema + NON-OWNER r
     const wsA = await freshWorkspace();
     const wsB = await freshWorkspace();
     await createApiKey(db, {
-      accountId: wsA.accountId, workspaceId: wsA.workspaceId,
-      name: "onlyA", prefix: "pA", keyHash: "iso-hash-A",
+      accountId: wsA.accountId,
+      workspaceId: wsA.workspaceId,
+      name: "onlyA",
+      prefix: "pA",
+      keyHash: "iso-hash-A",
       permissions: ["workspace:read"],
     });
     await createApiKey(db, {
-      accountId: wsB.accountId, workspaceId: wsB.workspaceId,
-      name: "onlyB", prefix: "pB", keyHash: "iso-hash-B",
+      accountId: wsB.accountId,
+      workspaceId: wsB.workspaceId,
+      name: "onlyB",
+      prefix: "pB",
+      keyHash: "iso-hash-B",
       permissions: ["workspace:read"],
     });
 

@@ -1,5 +1,9 @@
 import type { Settings } from "@opengeni/config";
-import type { ConnectionCredentialsPort, EntitlementsPort, ScheduledTaskTriggerType } from "@opengeni/contracts";
+import type {
+  ConnectionCredentialsPort,
+  EntitlementsPort,
+  ScheduledTaskTriggerType,
+} from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -15,7 +19,12 @@ import type { ObjectStorage } from "@opengeni/storage";
 // because the worker package owns only the worker runtime, not a client; an
 // undefined signaler degrades to "DB wake recorded, no workflow nudge" (the
 // turn is still claimed on the parent's next natural wake).
-export type WakeSessionWorkflowSignal = (input: { accountId: string; workspaceId: string; sessionId: string; workflowId: string }) => Promise<void>;
+export type WakeSessionWorkflowSignal = (input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+}) => Promise<void>;
 
 export type ActivityServices = {
   settings: Settings;

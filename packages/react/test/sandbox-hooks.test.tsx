@@ -93,7 +93,13 @@ describe("useSessionCapabilities", () => {
       },
     });
     const hook = await renderHook(
-      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, attachDesktop: true, warmingPollMs: 80 }),
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+          warmingPollMs: 80,
+        }),
       undefined,
     );
     await flush();
@@ -124,7 +130,8 @@ describe("useSessionCapabilities", () => {
 
   test("desktop attach 409 shared_acknowledgment maps to the shared consent", async () => {
     const client = fakeClient({
-      getStreamCapabilities: async () => fakeCapabilities({ DesktopStream: { ...fakeCapabilities().DesktopStream, shared: true } }),
+      getStreamCapabilities: async () =>
+        fakeCapabilities({ DesktopStream: { ...fakeCapabilities().DesktopStream, shared: true } }),
       attachViewer: async () => {
         throw new OpenGeniApiError(409, "shared_acknowledgment_required");
       },
@@ -156,7 +163,10 @@ describe("useSessionCapabilities", () => {
 
   test("a successful desktop attach folds the minted live address into the doc", async () => {
     const client = fakeClient({
-      getStreamCapabilities: async () => fakeCapabilities({ DesktopStream: { ...fakeCapabilities().DesktopStream, url: null, token: null } }),
+      getStreamCapabilities: async () =>
+        fakeCapabilities({
+          DesktopStream: { ...fakeCapabilities().DesktopStream, url: null, token: null },
+        }),
       attachViewer: async () => fakeAttachResponse(),
       heartbeatViewer: async () => ({ alive: true }),
       detachViewer: async () => {},
@@ -187,10 +197,13 @@ describe("useSessionCapabilities", () => {
   });
 
   test("a later stream.url.rotated folds a fresh url in, fencing stale epochs", async () => {
-    const client = fakeClient({ getStreamCapabilities: async () => fakeCapabilities({ leaseEpoch: 2 }) });
+    const client = fakeClient({
+      getStreamCapabilities: async () => fakeCapabilities({ leaseEpoch: 2 }),
+    });
     const events: SessionEvent[] = [];
     const hook = await renderHook(
-      (props: { events: SessionEvent[] }) => useSessionCapabilities(SESSION_ID, { ...ctx, client, events: props.events }),
+      (props: { events: SessionEvent[] }) =>
+        useSessionCapabilities(SESSION_ID, { ...ctx, client, events: props.events }),
       { events },
     );
     await flush();
@@ -198,10 +211,20 @@ describe("useSessionCapabilities", () => {
     // A stale rotation (epoch 1 < known 2) is dropped; a fresh one (epoch 3) wins.
     const rotated = [
       fakeEvent(10, "stream.url.rotated", {
-        url: "https://stale.example/vnc.html", token: "t", expiresAt: null, leaseEpoch: 1, transport: "vnc-ws", viewerId: null,
+        url: "https://stale.example/vnc.html",
+        token: "t",
+        expiresAt: null,
+        leaseEpoch: 1,
+        transport: "vnc-ws",
+        viewerId: null,
       }),
       fakeEvent(11, "stream.url.rotated", {
-        url: "https://fresh.example/vnc.html", token: "t2", expiresAt: null, leaseEpoch: 3, transport: "vnc-ws", viewerId: null,
+        url: "https://fresh.example/vnc.html",
+        token: "t2",
+        expiresAt: null,
+        leaseEpoch: 3,
+        transport: "vnc-ws",
+        viewerId: null,
       }),
     ];
     await hook.rerender({ events: rotated });
@@ -298,9 +321,25 @@ describe("useSandboxTerminal", () => {
   test("projects the agent firehose + pty output into ordered chunks", async () => {
     const events: SessionEvent[] = [
       fakeEvent(1, "sandbox.command.output.delta", { stream: "stdout", chunk: "hello\n" }),
-      fakeEvent(2, "terminal.pty.started", { ptyId: "p1", cols: 80, rows: 24, shell: "/bin/bash", cwd: "" }),
-      fakeEvent(3, "terminal.pty.output.delta", { ptyId: "p1", stream: "stdout", chunk: "$ ls\n", seq: 0 }),
-      fakeEvent(4, "terminal.pty.output.delta", { ptyId: "p1", stream: "stderr", chunk: "oops\n", seq: 1 }),
+      fakeEvent(2, "terminal.pty.started", {
+        ptyId: "p1",
+        cols: 80,
+        rows: 24,
+        shell: "/bin/bash",
+        cwd: "",
+      }),
+      fakeEvent(3, "terminal.pty.output.delta", {
+        ptyId: "p1",
+        stream: "stdout",
+        chunk: "$ ls\n",
+        seq: 0,
+      }),
+      fakeEvent(4, "terminal.pty.output.delta", {
+        ptyId: "p1",
+        stream: "stderr",
+        chunk: "oops\n",
+        seq: 1,
+      }),
     ];
     const client = fakeClient({});
     const hook = await renderHook(
@@ -325,13 +364,26 @@ describe("useSandboxTerminal", () => {
     const writes: { ptyId: string; data: string }[] = [];
     const closes: string[] = [];
     const client = fakeClient({
-      terminalPtyOpen: async () => { opens.push(true); return { ptyId: "opened-1", streamVia: "sse-events" as const, supportsInput: true }; },
-      terminalPtyWrite: async (_ws, _s, req) => { writes.push(req); },
-      terminalPtyClose: async (_ws, _s, req) => { closes.push(req.ptyId); },
+      terminalPtyOpen: async () => {
+        opens.push(true);
+        return { ptyId: "opened-1", streamVia: "sse-events" as const, supportsInput: true };
+      },
+      terminalPtyWrite: async (_ws, _s, req) => {
+        writes.push(req);
+      },
+      terminalPtyClose: async (_ws, _s, req) => {
+        closes.push(req.ptyId);
+      },
     });
     const hook = await renderHook(
       // No started event yet — write must still be live off the open's response.
-      () => useSandboxTerminal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [], interactive: true }),
+      () =>
+        useSandboxTerminal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          interactive: true,
+        }),
       undefined,
     );
     await flush();
@@ -348,7 +400,12 @@ describe("useSandboxTerminal", () => {
 
   test("non-interactive (default) NEVER opens a pty (projection-only)", async () => {
     let opened = false;
-    const client = fakeClient({ terminalPtyOpen: async () => { opened = true; return { ptyId: "x", streamVia: "sse-events" as const, supportsInput: true }; } });
+    const client = fakeClient({
+      terminalPtyOpen: async () => {
+        opened = true;
+        return { ptyId: "x", streamVia: "sse-events" as const, supportsInput: true };
+      },
+    });
     const hook = await renderHook(
       () => useSandboxTerminal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
       undefined,
@@ -361,11 +418,22 @@ describe("useSandboxTerminal", () => {
 
   test("a closed pty stops running and drops the write fn", async () => {
     const events: SessionEvent[] = [
-      fakeEvent(1, "terminal.pty.started", { ptyId: "p1", cols: 80, rows: 24, shell: "/bin/bash", cwd: "" }),
+      fakeEvent(1, "terminal.pty.started", {
+        ptyId: "p1",
+        cols: 80,
+        rows: 24,
+        shell: "/bin/bash",
+        cwd: "",
+      }),
       fakeEvent(2, "terminal.pty.exited", { ptyId: "p1", exitCode: 0, reason: "exit" }),
     ];
     const hook = await renderHook(
-      () => useSandboxTerminal(SESSION_ID, { client: fakeClient({}), workspaceId: WORKSPACE_ID, events }),
+      () =>
+        useSandboxTerminal(SESSION_ID, {
+          client: fakeClient({}),
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
       undefined,
     );
     await flush();
@@ -380,26 +448,83 @@ describe("useSandboxFiles", () => {
     const listCalls: string[] = [];
     const client = fakeClient({
       gitStatus: async () => ({
-        isRepo: true, head: "main", detached: false, upstream: null, ahead: 0, behind: 0,
-        files: [{ path: "src/app.ts", oldPath: null, index: null, worktree: "modified", isConflicted: false }],
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [
+          {
+            path: "src/app.ts",
+            oldPath: null,
+            index: null,
+            worktree: "modified",
+            isConflicted: false,
+          },
+        ],
         revision: 1,
       }),
       fsList: async (_ws, _s, req) => {
         listCalls.push(req?.path ?? "");
         if ((req?.path ?? "") === "src") {
           return {
-            root: { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-              { name: "app.ts", path: "src/app.ts", type: "file", sizeBytes: 100, mtimeMs: null, mode: null, truncated: false },
-            ] },
-            revision: 1, truncated: false,
+            root: {
+              name: "src",
+              path: "src",
+              type: "dir",
+              sizeBytes: null,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+              children: [
+                {
+                  name: "app.ts",
+                  path: "src/app.ts",
+                  type: "file",
+                  sizeBytes: 100,
+                  mtimeMs: null,
+                  mode: null,
+                  truncated: false,
+                },
+              ],
+            },
+            revision: 1,
+            truncated: false,
           };
         }
         return {
-          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-            { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
-            { name: "README.md", path: "README.md", type: "file", sizeBytes: 10, mtimeMs: null, mode: null, truncated: false },
-          ] },
-          revision: 1, truncated: false,
+          root: {
+            name: "",
+            path: "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [
+              {
+                name: "src",
+                path: "src",
+                type: "dir",
+                sizeBytes: null,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+              {
+                name: "README.md",
+                path: "README.md",
+                type: "file",
+                sizeBytes: 10,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+            ],
+          },
+          revision: 1,
+          truncated: false,
         };
       },
     });
@@ -427,14 +552,40 @@ describe("useSandboxFiles", () => {
     // clicking the folder does nothing. fsNodeToTree must map empty -> undefined.
     const client = fakeClient({
       gitStatus: async () => ({
-        isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0,
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
       }),
       fsList: async () => ({
-        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-          // The provider returns an EMPTY children array for the depth-boundary dir.
-          { name: ".config", path: ".config", type: "dir", sizeBytes: null, mtimeMs: 1, mode: 493, truncated: false, children: [] },
-        ] },
-        revision: 0, truncated: false,
+        root: {
+          name: "",
+          path: "",
+          type: "dir",
+          sizeBytes: null,
+          mtimeMs: null,
+          mode: null,
+          truncated: false,
+          children: [
+            // The provider returns an EMPTY children array for the depth-boundary dir.
+            {
+              name: ".config",
+              path: ".config",
+              type: "dir",
+              sizeBytes: null,
+              mtimeMs: 1,
+              mode: 493,
+              truncated: false,
+              children: [],
+            },
+          ],
+        },
+        revision: 0,
+        truncated: false,
       }),
     });
     const hook = await renderHook(
@@ -454,28 +605,81 @@ describe("useSandboxFiles", () => {
     let rootLists = 0;
     const writes: string[] = [];
     const client = fakeClient({
-      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
       fsList: async (_ws, _s, req) => {
         const path = req?.path ?? "";
         if (path === "") rootLists++;
         if (path === "src") {
           // After the create, a real server re-list of src includes the new file.
           const children = [
-            { name: "app.ts", path: "src/app.ts", type: "file" as const, sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
+            {
+              name: "app.ts",
+              path: "src/app.ts",
+              type: "file" as const,
+              sizeBytes: 1,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+            },
           ];
           if (writes.includes("src/new.ts")) {
-            children.push({ name: "new.ts", path: "src/new.ts", type: "file" as const, sizeBytes: 0, mtimeMs: null, mode: null, truncated: false });
+            children.push({
+              name: "new.ts",
+              path: "src/new.ts",
+              type: "file" as const,
+              sizeBytes: 0,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+            });
           }
           return {
-            root: { name: "src", path: "src", type: "dir" as const, sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children },
-            revision: 0, truncated: false,
+            root: {
+              name: "src",
+              path: "src",
+              type: "dir" as const,
+              sizeBytes: null,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+              children,
+            },
+            revision: 0,
+            truncated: false,
           };
         }
         return {
-          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-            { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
-          ] },
-          revision: 0, truncated: false,
+          root: {
+            name: "",
+            path: "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [
+              {
+                name: "src",
+                path: "src",
+                type: "dir",
+                sizeBytes: null,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+            ],
+          },
+          revision: 0,
+          truncated: false,
         };
       },
       fsWrite: async (_ws, _s, req) => {
@@ -509,22 +713,51 @@ describe("useSandboxFiles", () => {
   test("a failed optimistic mutation REVERTS the tree and reports via onMutationError", async () => {
     const errors: { op: string; message: string }[] = [];
     const client = fakeClient({
-      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
       fsList: async () => ({
-        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-          { name: "a.ts", path: "a.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
-        ] },
-        revision: 0, truncated: false,
+        root: {
+          name: "",
+          path: "",
+          type: "dir",
+          sizeBytes: null,
+          mtimeMs: null,
+          mode: null,
+          truncated: false,
+          children: [
+            {
+              name: "a.ts",
+              path: "a.ts",
+              type: "file",
+              sizeBytes: 1,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+            },
+          ],
+        },
+        revision: 0,
+        truncated: false,
       }),
       fsWrite: async () => {
         throw new OpenGeniApiError(409, "destination exists");
       },
     });
     const hook = await renderHook(
-      () => useSandboxFiles(SESSION_ID, {
-        client, workspaceId: WORKSPACE_ID,
-        onMutationError: (e, op) => errors.push({ op, message: e.message }),
-      }),
+      () =>
+        useSandboxFiles(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          onMutationError: (e, op) => errors.push({ op, message: e.message }),
+        }),
       undefined,
     );
     await flush();
@@ -541,27 +774,62 @@ describe("useSandboxFiles", () => {
   test("self-emitted fs.changed (source:write) is IGNORED — no re-list, no collapse", async () => {
     let listCalls = 0;
     const client = fakeClient({
-      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
       fsList: async () => {
         listCalls++;
         return {
-          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-            { name: "a.ts", path: "a.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
-          ] },
-          revision: 0, truncated: false,
+          root: {
+            name: "",
+            path: "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [
+              {
+                name: "a.ts",
+                path: "a.ts",
+                type: "file",
+                sizeBytes: 1,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+            ],
+          },
+          revision: 0,
+          truncated: false,
         };
       },
     });
     const hook = await renderHook(
-      (props: { events: SessionEvent[] }) => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      (props: { events: SessionEvent[] }) =>
+        useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
       { events: [] as SessionEvent[] },
     );
     await flush();
     const listsAfterInitial = listCalls;
     // A self-emitted write echo must NOT trigger any reconcile/list.
-    await hook.rerender({ events: [
-      fakeEvent(1, "fs.changed", { changes: [{ path: "a.ts", kind: "modified", isDir: false, sizeBytes: 2 }], source: "write", revision: 1, leaseEpoch: 0 }),
-    ] });
+    await hook.rerender({
+      events: [
+        fakeEvent(1, "fs.changed", {
+          changes: [{ path: "a.ts", kind: "modified", isDir: false, sizeBytes: 2 }],
+          source: "write",
+          revision: 1,
+          leaseEpoch: 0,
+        }),
+      ],
+    });
     await flush(220);
     expect(listCalls).toBe(listsAfterInitial);
     await hook.unmount();
@@ -570,29 +838,83 @@ describe("useSandboxFiles", () => {
   test("an EXTERNAL fs.changed reconciles ONLY the affected parent (targeted, not root collapse)", async () => {
     const listPaths: string[] = [];
     const client = fakeClient({
-      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
       fsList: async (_ws, _s, req) => {
         const path = req?.path ?? "";
         listPaths.push(path);
         if (path === "src") {
           return {
-            root: { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-              { name: "app.ts", path: "src/app.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
-              { name: "added.ts", path: "src/added.ts", type: "file", sizeBytes: 3, mtimeMs: null, mode: null, truncated: false },
-            ] },
-            revision: 0, truncated: false,
+            root: {
+              name: "src",
+              path: "src",
+              type: "dir",
+              sizeBytes: null,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+              children: [
+                {
+                  name: "app.ts",
+                  path: "src/app.ts",
+                  type: "file",
+                  sizeBytes: 1,
+                  mtimeMs: null,
+                  mode: null,
+                  truncated: false,
+                },
+                {
+                  name: "added.ts",
+                  path: "src/added.ts",
+                  type: "file",
+                  sizeBytes: 3,
+                  mtimeMs: null,
+                  mode: null,
+                  truncated: false,
+                },
+              ],
+            },
+            revision: 0,
+            truncated: false,
           };
         }
         return {
-          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-            { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
-          ] },
-          revision: 0, truncated: false,
+          root: {
+            name: "",
+            path: "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [
+              {
+                name: "src",
+                path: "src",
+                type: "dir",
+                sizeBytes: null,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+            ],
+          },
+          revision: 0,
+          truncated: false,
         };
       },
     });
     const hook = await renderHook(
-      (props: { events: SessionEvent[] }) => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      (props: { events: SessionEvent[] }) =>
+        useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
       { events: [] as SessionEvent[] },
     );
     await flush();
@@ -600,9 +922,16 @@ describe("useSandboxFiles", () => {
     await flush();
     listPaths.length = 0;
     // The AGENT writes src/added.ts → reconcile ONLY "src" (not a root re-list).
-    await hook.rerender({ events: [
-      fakeEvent(1, "fs.changed", { changes: [{ path: "src/added.ts", kind: "created", isDir: false, sizeBytes: 3 }], source: "agent", revision: 7, leaseEpoch: 0 }),
-    ] });
+    await hook.rerender({
+      events: [
+        fakeEvent(1, "fs.changed", {
+          changes: [{ path: "src/added.ts", kind: "created", isDir: false, sizeBytes: 3 }],
+          source: "agent",
+          revision: 7,
+          leaseEpoch: 0,
+        }),
+      ],
+    });
     await flush(220);
     expect(listPaths).toEqual(["src"]);
     const src = hook.result.current.tree.find((n) => n.path === "src");
@@ -613,16 +942,51 @@ describe("useSandboxFiles", () => {
   test("readFile proxies fs.read for the viewer pane (no repo required)", async () => {
     const reads: string[] = [];
     const client = fakeClient({
-      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
       fsList: async () => ({
-        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
-          { name: "main.ts", path: "main.ts", type: "file", sizeBytes: 12, mtimeMs: null, mode: null, truncated: false },
-        ] },
-        revision: 0, truncated: false,
+        root: {
+          name: "",
+          path: "",
+          type: "dir",
+          sizeBytes: null,
+          mtimeMs: null,
+          mode: null,
+          truncated: false,
+          children: [
+            {
+              name: "main.ts",
+              path: "main.ts",
+              type: "file",
+              sizeBytes: 12,
+              mtimeMs: null,
+              mode: null,
+              truncated: false,
+            },
+          ],
+        },
+        revision: 0,
+        truncated: false,
       }),
       fsRead: async (_ws, _s, req) => {
         reads.push(req.path);
-        return { path: req.path, encoding: "utf8" as const, content: "export {}\n", sizeBytes: 10, truncated: false, isBinary: false, revision: 0 };
+        return {
+          path: req.path,
+          encoding: "utf8" as const,
+          content: "export {}\n",
+          sizeBytes: 10,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
       },
     });
     const hook = await renderHook(
@@ -641,15 +1005,38 @@ describe("useSandboxGit", () => {
   test("projects status + diff into the Pierre hunk contract", async () => {
     const client = fakeClient({
       gitStatus: async () => ({
-        isRepo: true, head: "feature", detached: false, upstream: "origin/feature", ahead: 1, behind: 0,
-        files: [], revision: 1,
+        isRepo: true,
+        head: "feature",
+        detached: false,
+        upstream: "origin/feature",
+        ahead: 1,
+        behind: 0,
+        files: [],
+        revision: 1,
       }),
       gitDiff: async () => ({
-        files: [{
-          path: "a.ts", oldPath: null, status: "modified", isBinary: false, isImage: false,
-          additions: 1, deletions: 0, truncated: false,
-          hunks: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, header: "@@", lines: [{ type: "add", oldNo: null, newNo: 1, text: "x" }] }],
-        }],
+        files: [
+          {
+            path: "a.ts",
+            oldPath: null,
+            status: "modified",
+            isBinary: false,
+            isImage: false,
+            additions: 1,
+            deletions: 0,
+            truncated: false,
+            hunks: [
+              {
+                oldStart: 1,
+                oldLines: 0,
+                newStart: 1,
+                newLines: 1,
+                header: "@@",
+                lines: [{ type: "add", oldNo: null, newNo: 1, text: "x" }],
+              },
+            ],
+          },
+        ],
         revision: 1,
       }),
     });
@@ -668,7 +1055,14 @@ describe("useSandboxGit", () => {
   test("a non-repo box reports isRepo false with an empty diff (not an error)", async () => {
     const client = fakeClient({
       gitStatus: async () => ({
-        isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0,
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
       }),
     });
     const hook = await renderHook(

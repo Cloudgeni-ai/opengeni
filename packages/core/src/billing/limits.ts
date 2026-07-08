@@ -31,15 +31,25 @@ export async function requireLimit(deps: ApiRouteDeps, input: LimitCheckInput): 
   if (decision.allowed) {
     return;
   }
-  throw new HTTPException(decision.code === "insufficient_credits" ? 402 : 429, { message: decision.message });
+  throw new HTTPException(decision.code === "insufficient_credits" ? 402 : 429, {
+    message: decision.message,
+  });
 }
 
-export async function checkLimit(deps: ApiRouteDeps, input: LimitCheckInput): Promise<LimitDecision> {
+export async function checkLimit(
+  deps: ApiRouteDeps,
+  input: LimitCheckInput,
+): Promise<LimitDecision> {
   // Resolve the canonical codex-billed predicate ONCE. Returns false for any
   // action that carries no model (infra caps) or any codex/<slug> model without
   // an active credential — so the bypass never triggers on the prefix alone.
   const codexBilled = input.workspaceId
-    ? await isCodexBilledTurn({ db: deps.db, settings: deps.settings, workspaceId: input.workspaceId, model: input.model })
+    ? await isCodexBilledTurn({
+        db: deps.db,
+        settings: deps.settings,
+        workspaceId: input.workspaceId,
+        model: input.model,
+      })
     : false;
   const creditDecision = await checkCreditBalance(deps, input, codexBilled);
   if (!creditDecision.allowed) {
@@ -51,7 +61,11 @@ export async function checkLimit(deps: ApiRouteDeps, input: LimitCheckInput): Pr
   return await checkStaticCaps(deps, input, codexBilled);
 }
 
-async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput, codexBilled: boolean): Promise<LimitDecision> {
+async function checkCreditBalance(
+  deps: ApiRouteDeps,
+  input: LimitCheckInput,
+  codexBilled: boolean,
+): Promise<LimitDecision> {
   if (codexBilled) {
     return { allowed: true }; // paid by the user's ChatGPT/Codex plan — zero OpenGeni credits
   }
@@ -65,7 +79,11 @@ async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput, co
   return { allowed: false, code: "insufficient_credits", message: "insufficient OpenGeni credits" };
 }
 
-async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codexBilled: boolean): Promise<LimitDecision> {
+async function checkStaticCaps(
+  deps: ApiRouteDeps,
+  input: LimitCheckInput,
+  codexBilled: boolean,
+): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
   if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !codexBilled) {
     const used = await sumUsageQuantity(deps.db, {
@@ -74,7 +92,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       since: startOfUtcMonth(),
     });
     if (used >= limits.maxMonthlyCostMicrosPerAccount) {
-      return blocked("max_monthly_cost_micros_per_account", `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`);
+      return blocked(
+        "max_monthly_cost_micros_per_account",
+        `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+      );
     }
   }
   switch (input.action) {
@@ -85,7 +106,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const count = await countWorkspacesForAccount(deps.db, input.accountId);
       return count < limits.maxWorkspacesPerAccount
         ? { allowed: true }
-        : blocked("max_workspaces_per_account", `workspace limit reached (${limits.maxWorkspacesPerAccount})`);
+        : blocked(
+            "max_workspaces_per_account",
+            `workspace limit reached (${limits.maxWorkspacesPerAccount})`,
+          );
     }
     case "api_key:create": {
       if (!limits.maxApiKeysPerWorkspace || !input.workspaceId) {
@@ -94,7 +118,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const count = await countActiveApiKeysForWorkspace(deps.db, input.workspaceId);
       return count < limits.maxApiKeysPerWorkspace
         ? { allowed: true }
-        : blocked("max_api_keys_per_workspace", `API key limit reached (${limits.maxApiKeysPerWorkspace})`);
+        : blocked(
+            "max_api_keys_per_workspace",
+            `API key limit reached (${limits.maxApiKeysPerWorkspace})`,
+          );
     }
     case "schedule:create": {
       if (!limits.maxSchedulesPerWorkspace || !input.workspaceId) {
@@ -103,7 +130,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const count = await countScheduledTasksForWorkspace(deps.db, input.workspaceId);
       return count < limits.maxSchedulesPerWorkspace
         ? { allowed: true }
-        : blocked("max_schedules_per_workspace", `scheduled task limit reached (${limits.maxSchedulesPerWorkspace})`);
+        : blocked(
+            "max_schedules_per_workspace",
+            `scheduled task limit reached (${limits.maxSchedulesPerWorkspace})`,
+          );
     }
     case "file:upload": {
       if (!limits.maxFileUploadBytes || !input.quantity) {
@@ -111,7 +141,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       }
       return input.quantity <= limits.maxFileUploadBytes
         ? { allowed: true }
-        : blocked("max_file_upload_bytes", `file upload exceeds static limit of ${limits.maxFileUploadBytes} bytes`);
+        : blocked(
+            "max_file_upload_bytes",
+            `file upload exceeds static limit of ${limits.maxFileUploadBytes} bytes`,
+          );
     }
     case "agent_run:create": {
       if (!limits.maxMonthlyAgentRunsPerWorkspace || !input.workspaceId) {
@@ -125,7 +158,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const requested = input.quantity ?? 0;
       return used + requested <= limits.maxMonthlyAgentRunsPerWorkspace
         ? { allowed: true }
-        : blocked("max_monthly_agent_runs_per_workspace", `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
+        : blocked(
+            "max_monthly_agent_runs_per_workspace",
+            `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
+          );
     }
     case "tokens:consume": {
       if (codexBilled || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
@@ -139,7 +175,10 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const requested = input.quantity ?? 0;
       return used + requested <= limits.maxMonthlyTokensPerWorkspace
         ? { allowed: true }
-        : blocked("max_monthly_tokens_per_workspace", `monthly token limit reached (${limits.maxMonthlyTokensPerWorkspace})`);
+        : blocked(
+            "max_monthly_tokens_per_workspace",
+            `monthly token limit reached (${limits.maxMonthlyTokensPerWorkspace})`,
+          );
     }
     case "document:index": {
       if (!limits.maxDocumentIndexedChunksPerWorkspace || !input.workspaceId) {
@@ -153,26 +192,28 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codex
       const requested = input.quantity ?? 0;
       return used + requested <= limits.maxDocumentIndexedChunksPerWorkspace
         ? { allowed: true }
-        : blocked("max_document_indexed_chunks_per_workspace", `monthly document indexing limit reached (${limits.maxDocumentIndexedChunksPerWorkspace} chunks)`);
+        : blocked(
+            "max_document_indexed_chunks_per_workspace",
+            `monthly document indexing limit reached (${limits.maxDocumentIndexedChunksPerWorkspace} chunks)`,
+          );
     }
   }
 }
 
-export async function recordWorkspaceUsage(deps: ApiRouteDeps, input: {
-  accountId: string;
-  workspaceId: string;
-  subjectId?: string | null;
-  eventType:
-    | "agent_run.created"
-    | "file.uploaded"
-    | "document.indexed"
-    | "scheduled_task.fired";
-  quantity: number;
-  unit: string;
-  sourceResourceType: string;
-  sourceResourceId: string;
-  idempotencyKey: string;
-}): Promise<void> {
+export async function recordWorkspaceUsage(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId?: string | null;
+    eventType: "agent_run.created" | "file.uploaded" | "document.indexed" | "scheduled_task.fired";
+    quantity: number;
+    unit: string;
+    sourceResourceType: string;
+    sourceResourceId: string;
+    idempotencyKey: string;
+  },
+): Promise<void> {
   await recordUsageEvent(deps.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -191,10 +232,12 @@ function usesCreditLimits(deps: ApiRouteDeps): boolean {
 }
 
 function isCostlyAction(action: LimitAction): boolean {
-  return action === "agent_run:create"
-    || action === "tokens:consume"
-    || action === "file:upload"
-    || action === "document:index";
+  return (
+    action === "agent_run:create" ||
+    action === "tokens:consume" ||
+    action === "file:upload" ||
+    action === "document:index"
+  );
 }
 
 function blocked(code: string, message: string): LimitDecision {

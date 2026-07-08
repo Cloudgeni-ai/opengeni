@@ -31,7 +31,11 @@ import { HTTPException } from "hono/http-exception";
 import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { assertWorkspaceDeletable, assertWorkspaceMemberRemovable, resolveMemberSubjectId } from "@opengeni/core";
+import {
+  assertWorkspaceDeletable,
+  assertWorkspaceMemberRemovable,
+  resolveMemberSubjectId,
+} from "@opengeni/core";
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {
@@ -40,14 +44,24 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
-    const readableWorkspaceIds = [...new Set(context.workspaceGrants
-      .filter((grant) => hasPermission(grant.permissions, "workspace:read"))
-      .map((grant) => grant.workspaceId))];
+    const readableWorkspaceIds = [
+      ...new Set(
+        context.workspaceGrants
+          .filter((grant) => hasPermission(grant.permissions, "workspace:read"))
+          .map((grant) => grant.workspaceId),
+      ),
+    ];
     if (readableWorkspaceIds.length > 0) {
-      const workspaces = await Promise.all(readableWorkspaceIds.map((workspaceId) => requireWorkspace(deps.db, workspaceId)));
+      const workspaces = await Promise.all(
+        readableWorkspaceIds.map((workspaceId) => requireWorkspace(deps.db, workspaceId)),
+      );
       return c.json(workspaces.map((workspace) => Workspace.parse(workspace)));
     }
-    return c.json((await listWorkspacesForSubject(deps.db, context.subjectId)).map((workspace) => Workspace.parse(workspace)));
+    return c.json(
+      (await listWorkspacesForSubject(deps.db, context.subjectId)).map((workspace) =>
+        Workspace.parse(workspace),
+      ),
+    );
   });
 
   app.post("/v1/workspaces", async (c) => {
@@ -65,7 +79,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       slug: payload.slug?.trim() || null,
       externalSource: payload.externalSource ?? null,
       externalId: payload.externalId ?? null,
-      ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
+      ...(payload.agentInstructions !== undefined
+        ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+        : {}),
     });
     await grantWorkspaceAccess(deps.db, {
       accountId,
@@ -91,7 +107,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
-      ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
+      ...(payload.agentInstructions !== undefined
+        ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+        : {}),
     });
     return c.json(Workspace.parse(workspace));
   });
@@ -124,9 +142,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // Clean external Temporal state the FK cascade can't reach: every scheduled
     // task's schedule (best-effort, mirroring the scheduled-task delete path).
     const tasks = await listScheduledTasks(deps.db, workspaceId, 1000);
-    await Promise.all(tasks.map((task) =>
-      deps.workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId }).catch(() => undefined),
-    ));
+    await Promise.all(
+      tasks.map((task) =>
+        deps.workflowClient
+          .deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId })
+          .catch(() => undefined),
+      ),
+    );
     await deleteWorkspace(deps.db, workspaceId);
     return c.body(null, 204);
   });
@@ -213,9 +235,16 @@ function normalizeAgentInstructions(value: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function requireAccountPermission(context: AccessContext, accountId: string, permission: Permission): void {
+function requireAccountPermission(
+  context: AccessContext,
+  accountId: string,
+  permission: Permission,
+): void {
   const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
-  if (!grant || (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))) {
+  if (
+    !grant ||
+    (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
+  ) {
     throw new HTTPException(403, { message: `missing permission: ${permission}` });
   }
 }

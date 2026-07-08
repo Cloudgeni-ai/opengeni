@@ -8,7 +8,16 @@ import { azureCliLoginCommand, repositoryCloneCommand } from "../src/index";
 
 describe("lifecycle scripts — real sh execution semantics", () => {
   const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, statSync, readFileSync, readdirSync } = require("node:fs") as typeof import("node:fs");
+  const {
+    mkdtempSync,
+    mkdirSync,
+    writeFileSync,
+    existsSync,
+    rmSync,
+    statSync,
+    readFileSync,
+    readdirSync,
+  } = require("node:fs") as typeof import("node:fs");
   const { tmpdir } = require("node:os") as typeof import("node:os");
   const { join } = require("node:path") as typeof import("node:path");
 
@@ -26,7 +35,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     },
   ): string {
     const generated = repositoryCloneCommand([resource]);
-    const withoutInvocations = generated.split("\n").filter((line) => !line.startsWith("clone_repository '")).join("\n");
+    const withoutInvocations = generated
+      .split("\n")
+      .filter((line) => !line.startsWith("clone_repository '"))
+      .join("\n");
     return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
   }
 
@@ -37,7 +49,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     writeFileSync(join(origin, "README.md"), "hello\n");
     const gitEnv = {
       ...process.env,
-      GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@t",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@t",
     };
     execFileSync("git", ["-C", origin, "add", "."], { env: gitEnv });
     execFileSync("git", ["-C", origin, "commit", "-m", "init"], { env: gitEnv });
@@ -46,7 +61,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     return origin;
   }
 
-  function runScript(script: string, env: Record<string, string>): { status: number; output: string } {
+  function runScript(
+    script: string,
+    env: Record<string, string>,
+  ): { status: number; output: string } {
     try {
       // merge stderr into stdout so diagnostics like "Re-materializing..." are visible
       const output = execFileSync("sh", ["-c", `{\n${script}\n} 2>&1`], {
@@ -82,7 +100,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(readFileSync(tokenFile, "utf8")).toBe("tok-atomic-123");
       expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe("tok-atomic-123");
       expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe("glpat-atomic-456");
-      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe("azdo-atomic-789");
+      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe(
+        "azdo-atomic-789",
+      );
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
       expect(statSync(join(credentialDir, "github-token")).mode & 0o777).toBe(0o600);
       expect(statSync(join(credentialDir, "gitlab-token")).mode & 0o777).toBe(0o600);
@@ -94,13 +114,24 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       // atomic install: no pid temp files left behind
       expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
       expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
-      expect(readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(
+        readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp.")),
+      ).toEqual([]);
       // the askpass Password branch reads the token file
-      const askOut = execFileSync("sh", [askpass, "Password for host"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      const askOut = execFileSync("sh", [askpass, "Password for host"], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
       expect(askOut).toBe("tok-atomic-123");
-      const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
       expect(gitlabOut).toBe("glpat-atomic-456");
-      const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
       expect(azureOut).toBe("azdo-atomic-789");
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
@@ -131,8 +162,18 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       const askpass = join(home, ".opengeni", "askpass");
       const askEnv = { ...process.env, HOME: home };
-      expect(execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], { env: askEnv, encoding: "utf8" })).toBe("oauth2\n");
-      expect(execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], { env: askEnv, encoding: "utf8" })).toBe("glpat-custom-domain");
+      expect(
+        execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
+      ).toBe("oauth2\n");
+      expect(
+        execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
+      ).toBe("glpat-custom-domain");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -156,18 +197,40 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       };
       expect(runScript(script, env).status).toBe(0);
 
-      writeFileSync(join(realbin, "gh"), "#!/usr/bin/env sh\nprintf 'GH=%s\\n' \"${GH_TOKEN-unset}\"\n", { mode: 0o755 });
-      writeFileSync(join(realbin, "glab"), "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n", { mode: 0o755 });
-      writeFileSync(join(realbin, "az"), "#!/usr/bin/env sh\nprintf 'AZ=%s\\n' \"${AZURE_DEVOPS_EXT_PAT-unset}\"\n", { mode: 0o755 });
+      writeFileSync(
+        join(realbin, "gh"),
+        "#!/usr/bin/env sh\nprintf 'GH=%s\\n' \"${GH_TOKEN-unset}\"\n",
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(realbin, "glab"),
+        "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n",
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(realbin, "az"),
+        "#!/usr/bin/env sh\nprintf 'AZ=%s\\n' \"${AZURE_DEVOPS_EXT_PAT-unset}\"\n",
+        { mode: 0o755 },
+      );
 
       const wrapperPath = join(home, ".opengeni", "bin");
-      const wrapperEnv = { ...process.env, HOME: home, PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+      const wrapperEnv = {
+        ...process.env,
+        HOME: home,
+        PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      };
       delete wrapperEnv.GH_TOKEN;
       delete wrapperEnv.GITLAB_TOKEN;
       delete wrapperEnv.AZURE_DEVOPS_EXT_PAT;
-      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=ghs-wrapper-1\n");
-      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=glpat-wrapper-1\n");
-      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=azdo-wrapper-1\n");
+      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "GH=ghs-wrapper-1\n",
+      );
+      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "GL=glpat-wrapper-1\n",
+      );
+      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe(
+        "AZ=azdo-wrapper-1\n",
+      );
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
       rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), { force: true });
@@ -210,7 +273,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(existsSync(join(target, ".git"))).toBe(true);
       expect(existsSync(join(target, "README.md"))).toBe(true);
       // no tmp clone leaked beside the target
-      expect(readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(
+        readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+      ).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -222,12 +287,16 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const home = join(root, "home");
       mkdirSync(home, { recursive: true });
       const target = join(root, "ws", "repos", "acme", "private");
-      const run = runScript(cloneScriptWithTarget(target, `file://${join(root, "nonexistent")}`), { HOME: home });
+      const run = runScript(cloneScriptWithTarget(target, `file://${join(root, "nonexistent")}`), {
+        HOME: home,
+      });
       expect(run.status).not.toBe(0);
       expect(existsSync(target)).toBe(false);
       expect(existsSync(`${target}.tmp.`)).toBe(false);
       const parent = join(root, "ws", "repos", "acme");
-      expect(existsSync(parent) ? readdirSync(parent).filter((f) => f.includes(".tmp.")) : []).toEqual([]);
+      expect(
+        existsSync(parent) ? readdirSync(parent).filter((f) => f.includes(".tmp.")) : [],
+      ).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -246,13 +315,20 @@ describe("lifecycle scripts — real sh execution semantics", () => {
 
       // SP creds, NO subscription id: must exit 0 (az login passes --allow-no-subscriptions)
       const noSub = runScript(azureCliLoginCommand(), {
-        ...base, ARM_CLIENT_ID: "cid", ARM_CLIENT_SECRET: "sec", ARM_TENANT_ID: "tid",
+        ...base,
+        ARM_CLIENT_ID: "cid",
+        ARM_CLIENT_SECRET: "sec",
+        ARM_TENANT_ID: "tid",
       });
       expect(noSub.status).toBe(0);
 
       // with subscription id: still 0
       const withSub = runScript(azureCliLoginCommand(), {
-        ...base, ARM_CLIENT_ID: "cid", ARM_CLIENT_SECRET: "sec", ARM_TENANT_ID: "tid", ARM_SUBSCRIPTION_ID: "sub",
+        ...base,
+        ARM_CLIENT_ID: "cid",
+        ARM_CLIENT_SECRET: "sec",
+        ARM_TENANT_ID: "tid",
+        ARM_SUBSCRIPTION_ID: "sub",
       });
       expect(withSub.status).toBe(0);
 

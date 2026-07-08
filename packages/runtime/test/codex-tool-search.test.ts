@@ -17,18 +17,41 @@ function connectorTool(name: string, description: string, props: string[] = []):
     type: "function",
     name: `codex_apps__${name}`,
     description,
-    parameters: { type: "object", properties: Object.fromEntries(props.map((p) => [p, { type: "string" }])) },
+    parameters: {
+      type: "object",
+      properties: Object.fromEntries(props.map((p) => [p, { type: "string" }])),
+    },
   } as unknown as Tool;
 }
 function plainTool(name: string): Tool {
-  return { type: "function", name, description: name, parameters: { type: "object", properties: {} } } as unknown as Tool;
+  return {
+    type: "function",
+    name,
+    description: name,
+    parameters: { type: "object", properties: {} },
+  } as unknown as Tool;
 }
 
 const POOL: Tool[] = [
-  connectorTool("gmail_send_email", "Send an email message via Gmail to one or more recipients", ["to", "subject", "body"]),
-  connectorTool("gmail_search_emails", "Search the Gmail inbox for messages matching a query", ["query", "label_ids"]),
-  connectorTool("calendar_create_event", "Create a Google Calendar event with a title, start and end time", ["title", "start_time", "end_time"]),
-  connectorTool("github_create_issue", "Open a new issue on a GitHub repository", ["repo", "title", "body"]),
+  connectorTool("gmail_send_email", "Send an email message via Gmail to one or more recipients", [
+    "to",
+    "subject",
+    "body",
+  ]),
+  connectorTool("gmail_search_emails", "Search the Gmail inbox for messages matching a query", [
+    "query",
+    "label_ids",
+  ]),
+  connectorTool(
+    "calendar_create_event",
+    "Create a Google Calendar event with a title, start and end time",
+    ["title", "start_time", "end_time"],
+  ),
+  connectorTool("github_create_issue", "Open a new issue on a GitHub repository", [
+    "repo",
+    "title",
+    "body",
+  ]),
   connectorTool("slack_post_message", "Post a message to a Slack channel", ["channel", "text"]),
   connectorTool("drive_upload_file", "Upload a file to Google Drive", ["path", "folder"]),
 ];
@@ -72,7 +95,9 @@ describe("bm25RankTools", () => {
 
 describe("renderSearchToolDescription", () => {
   test("lists the account's live connector sources, sorted (codex-rs parity)", () => {
-    const description = renderSearchToolDescription(new Set(["linear", "gmail", "google_calendar"]));
+    const description = renderSearchToolDescription(
+      new Set(["linear", "gmail", "google_calendar"]),
+    );
     expect(description).toContain("You have access to tools from the following sources:");
     const gmailAt = description.indexOf("- gmail");
     const calendarAt = description.indexOf("- google_calendar");
@@ -92,7 +117,10 @@ describe("renderSearchToolDescription", () => {
 
 describe("applyCodexToolSearch", () => {
   test("tags codex_apps tools deferLoading + appends exactly one tool_search tool", () => {
-    const tools: Tool[] = [...POOL.map((t) => ({ ...t })) as Tool[], plainTool("opengeni__set_session_title")];
+    const tools: Tool[] = [
+      ...(POOL.map((t) => ({ ...t })) as Tool[]),
+      plainTool("opengeni__set_session_title"),
+    ];
     const out = applyCodexToolSearch(tools);
     const connectors = out.filter(isCodexAppsFunctionTool);
     expect(connectors.length).toBe(POOL.length);
@@ -121,7 +149,9 @@ describe("applyCodexToolSearch", () => {
 
   test("the search tool description reflects the passed namespaces", () => {
     const out = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["gmail"]));
-    const search = out.find((t) => (t as { name?: string }).name === "tool_search") as { providerData?: { description?: string } };
+    const search = out.find((t) => (t as { name?: string }).name === "tool_search") as {
+      providerData?: { description?: string };
+    };
     expect(search.providerData?.description).toContain("- gmail");
   });
 });
@@ -137,9 +167,14 @@ describe("tool_search tool wiring", () => {
       availableTools: [...POOL, plainTool("web_search")] as never,
       loadDefault: (() => []) as never,
       runContext: {} as never,
-      toolCall: { type: "tool_search_call", arguments: JSON.stringify({ query: "open a github issue", limit: 2 }) } as never,
+      toolCall: {
+        type: "tool_search_call",
+        arguments: JSON.stringify({ query: "open a github issue", limit: 2 }),
+      } as never,
     });
-    const matched = (Array.isArray(result) ? result : result ? [result] : []) as Array<{ name: string }>;
+    const matched = (Array.isArray(result) ? result : result ? [result] : []) as Array<{
+      name: string;
+    }>;
     expect(matched.length).toBeGreaterThan(0);
     expect(matched.length).toBeLessThanOrEqual(2);
     expect(matched[0]!.name).toBe("codex_apps__github_create_issue");
@@ -178,7 +213,11 @@ describe("clone survival (the SandboxAgent path — the REAL staging path)", () 
   test("a clone's getAllTools still defers codex_apps tools + appends the search tool", async () => {
     const agent = buildSandboxAgent();
     installCodexToolSearch(agent as never, new Set(["gmail"]));
-    const cloned = (agent as unknown as { clone: (c: unknown) => { getAllTools: (rc: unknown) => Promise<Tool[]> } }).clone({});
+    const cloned = (
+      agent as unknown as {
+        clone: (c: unknown) => { getAllTools: (rc: unknown) => Promise<Tool[]> };
+      }
+    ).clone({});
     const tools = await cloned.getAllTools({} as never);
     const connectors = tools.filter(isCodexAppsFunctionTool);
     expect(connectors.length).toBe(POOL.length);
@@ -193,15 +232,27 @@ describe("clone survival (the SandboxAgent path — the REAL staging path)", () 
     const c2 = c1.clone({});
     const tools: Tool[] = await c2.getAllTools({} as never);
     expect(tools.some((t) => (t as { name?: string }).name === "tool_search")).toBe(true);
-    expect(tools.filter(isCodexAppsFunctionTool).every((t) => (t as { deferLoading?: boolean }).deferLoading === true)).toBe(true);
+    expect(
+      tools
+        .filter(isCodexAppsFunctionTool)
+        .every((t) => (t as { deferLoading?: boolean }).deferLoading === true),
+    ).toBe(true);
   });
 
   test("an uninstalled SandboxAgent clone is untouched (flag-off baseline)", async () => {
     const agent = buildSandboxAgent();
-    const cloned = (agent as unknown as { clone: (c: unknown) => { getAllTools: (rc: unknown) => Promise<Tool[]> } }).clone({});
+    const cloned = (
+      agent as unknown as {
+        clone: (c: unknown) => { getAllTools: (rc: unknown) => Promise<Tool[]> };
+      }
+    ).clone({});
     const tools = await cloned.getAllTools({} as never);
     expect(tools.some((t) => (t as { name?: string }).name === "tool_search")).toBe(false);
-    expect(tools.filter(isCodexAppsFunctionTool).some((t) => (t as { deferLoading?: boolean }).deferLoading === true)).toBe(false);
+    expect(
+      tools
+        .filter(isCodexAppsFunctionTool)
+        .some((t) => (t as { deferLoading?: boolean }).deferLoading === true),
+    ).toBe(false);
   });
 });
 
@@ -211,13 +262,27 @@ describe("neutralizeToolSearchItemsInSerializedRunState", () => {
       originalInput: [
         { type: "message", role: "user", content: "hi" },
         { type: "tool_search_call", call_id: "c1", execution: "client", arguments: { query: "x" } },
-        { type: "tool_search_output", call_id: "c1", execution: "client", tools: [{ type: "function", name: "codex_apps__gmail_send_email" }] },
+        {
+          type: "tool_search_output",
+          call_id: "c1",
+          execution: "client",
+          tools: [{ type: "function", name: "codex_apps__gmail_send_email" }],
+        },
       ],
       generatedItems: [
-        { type: "tool_search_call_item", rawItem: { type: "tool_search_call", call_id: "c2", execution: "client", arguments: {} } },
+        {
+          type: "tool_search_call_item",
+          rawItem: { type: "tool_search_call", call_id: "c2", execution: "client", arguments: {} },
+        },
       ],
-      modelResponses: [{ output: [{ type: "tool_search_call", call_id: "c3", execution: "client", arguments: {} }] }],
-      lastModelResponse: { output: [{ type: "tool_search_output", call_id: "c3", execution: "client", tools: [] }] },
+      modelResponses: [
+        {
+          output: [{ type: "tool_search_call", call_id: "c3", execution: "client", arguments: {} }],
+        },
+      ],
+      lastModelResponse: {
+        output: [{ type: "tool_search_output", call_id: "c3", execution: "client", tools: [] }],
+      },
     });
     const out = JSON.parse(neutralizeToolSearchItemsInSerializedRunState(blob));
     // counts preserved everywhere (HOLE E)
@@ -237,7 +302,10 @@ describe("neutralizeToolSearchItemsInSerializedRunState", () => {
   });
 
   test("a blob with no tool_search items comes back by reference (unchanged)", () => {
-    const blob = JSON.stringify({ originalInput: [{ type: "message", role: "user", content: "hi" }], generatedItems: [] });
+    const blob = JSON.stringify({
+      originalInput: [{ type: "message", role: "user", content: "hi" }],
+      generatedItems: [],
+    });
     expect(neutralizeToolSearchItemsInSerializedRunState(blob)).toBe(blob);
   });
 

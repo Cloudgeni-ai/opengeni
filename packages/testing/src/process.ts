@@ -8,11 +8,14 @@ export type CommandResult = {
   exitCode: number;
 };
 
-export async function runCommand(args: string[], options: {
-  cwd?: string;
-  env?: Record<string, string | undefined>;
-  timeoutMs?: number;
-} = {}): Promise<CommandResult> {
+export async function runCommand(
+  args: string[],
+  options: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    timeoutMs?: number;
+  } = {},
+): Promise<CommandResult> {
   const proc = Bun.spawn(args, {
     env: compactEnv({ ...process.env, ...options.env }),
     stdout: "pipe",
@@ -39,12 +42,15 @@ export type StartedProcess = {
   stop: () => Promise<void>;
 };
 
-export async function startProcess(args: string[], options: {
-  cwd?: string;
-  env?: Record<string, string | undefined>;
-  ready?: () => Promise<boolean>;
-  timeoutMs?: number;
-} = {}): Promise<StartedProcess> {
+export async function startProcess(
+  args: string[],
+  options: {
+    cwd?: string;
+    env?: Record<string, string | undefined>;
+    ready?: () => Promise<boolean>;
+    timeoutMs?: number;
+  } = {},
+): Promise<StartedProcess> {
   let output = "";
   const proc = Bun.spawn(args, {
     env: compactEnv({ ...process.env, ...options.env }),
@@ -82,11 +88,14 @@ export async function startProcess(args: string[], options: {
   return started;
 }
 
-export async function waitFor(predicate: () => Promise<boolean> | boolean, options: {
-  timeoutMs?: number;
-  intervalMs?: number;
-  describe?: () => string;
-} = {}): Promise<void> {
+export async function waitFor(
+  predicate: () => Promise<boolean> | boolean,
+  options: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    describe?: () => string;
+  } = {},
+): Promise<void> {
   const deadline = Date.now() + (options.timeoutMs ?? 30_000);
   const intervalMs = options.intervalMs ?? 100;
   let lastError: unknown;
@@ -101,7 +110,9 @@ export async function waitFor(predicate: () => Promise<boolean> | boolean, optio
     await Bun.sleep(intervalMs);
   }
   const detail = options.describe?.();
-  throw new Error(`Timed out waiting for condition${lastError ? `: ${String(lastError)}` : ""}${detail ? `\n${detail}` : ""}`);
+  throw new Error(
+    `Timed out waiting for condition${lastError ? `: ${String(lastError)}` : ""}${detail ? `\n${detail}` : ""}`,
+  );
 }
 
 export async function makeTempDir(prefix = "opengeni-test-"): Promise<string> {
@@ -115,7 +126,9 @@ export async function removeTempDir(path: string): Promise<void> {
 }
 
 function compactEnv(env: Record<string, string | undefined>): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
 }
 
 function collect(stream: ReadableStream<Uint8Array>, onChunk: (chunk: string) => void): void {

@@ -12,7 +12,10 @@ import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
-import { observabilityEventLogger, runtimeMetricsHooksForObservability } from "./observability-metrics";
+import {
+  observabilityEventLogger,
+  runtimeMetricsHooksForObservability,
+} from "./observability-metrics";
 
 export type {
   ActivityDependencies,
@@ -34,16 +37,19 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
   async function services(): Promise<ActivityServices> {
     servicesPromise ??= (async () => {
       const settings = dependencies.settings ?? getSettings();
-      const observability = dependencies.observability ?? createObservability(settings, { component: "worker" });
+      const observability =
+        dependencies.observability ?? createObservability(settings, { component: "worker" });
       // Step I: when not injected, build the standalone handle — searchPath
       // undefined for standalone (public), scoped to the dedicated schema +
       // host RLS strategy when embedded config is set. An embedded host injects
       // `dependencies.db` directly and this branch is skipped.
       const searchPath = dbSearchPath(settings);
-      const dbClient = dependencies.db ? null : createDb(settings.databaseUrl, {
-        ...(searchPath ? { searchPath } : {}),
-        rlsStrategy: settings.rlsStrategy,
-      });
+      const dbClient = dependencies.db
+        ? null
+        : createDb(settings.databaseUrl, {
+            ...(searchPath ? { searchPath } : {}),
+            rlsStrategy: settings.rlsStrategy,
+          });
       // The PRIVILEGED control-plane NATS login (M-AUTH): the worker resolves the
       // SAME static account user the API uses to request `agent.*.rpc`. Null in
       // local dev → anonymous connect (the bus default).
@@ -68,12 +74,16 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
           dependencies.bus ??
           (await createNatsEventBus(
             settings.natsUrl,
-            controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+            controlPlaneAuth
+              ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+              : undefined,
             { logger: observabilityEventLogger(observability) },
           )),
-        runtime: dependencies.runtime ?? createProductionAgentRuntime({
-          metrics: runtimeMetricsHooksForObservability(observability),
-        }),
+        runtime:
+          dependencies.runtime ??
+          createProductionAgentRuntime({
+            metrics: runtimeMetricsHooksForObservability(observability),
+          }),
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability,

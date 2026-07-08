@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  applyTurnEdit,
-  applyTurnRemoval,
-  applyTurnReorder,
-  queueFromTurns,
-} from "@opengeni/react";
+import { applyTurnEdit, applyTurnRemoval, applyTurnReorder, queueFromTurns } from "@opengeni/react";
 import type { SessionTurn } from "@opengeni/sdk";
 
 import {
@@ -49,7 +44,10 @@ describe("optimistic queue ops + event reconciliation", () => {
     const edited = applyTurnEdit(turns, "t2", { prompt: "rewritten" });
     expect(edited.find((candidate) => candidate.id === "t2")?.prompt).toBe("rewritten");
     // Editing the running turn is impossible: the projection refuses it too.
-    expect(applyTurnEdit(turns, "t1", { prompt: "nope" }).find((candidate) => candidate.id === "t1")?.prompt).toBe("prompt t1");
+    expect(
+      applyTurnEdit(turns, "t1", { prompt: "nope" }).find((candidate) => candidate.id === "t1")
+        ?.prompt,
+    ).toBe("prompt t1");
   });
 
   test("a reorder renumbers exactly the listed queued turns and the queue re-sorts", () => {

@@ -38,7 +38,10 @@ export type UsePacksResult = {
 export function usePacks(options: UsePacksOptions = {}): UsePacksResult {
   const { client, workspaceId } = useOpenGeni(options);
   const load = useCallback(async () => await client.listPacks(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const register = useCallback(

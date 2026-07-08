@@ -77,13 +77,22 @@ function DockParity() {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       <div className="overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1">
-        <p className="px-2.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">Modal box</p>
+        <p className="px-2.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          Modal box
+        </p>
         <MachineDockBar name="Session sandbox (Modal)" kind="modal" state="online" />
         <SurfaceStub />
       </div>
       <div className="overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1">
-        <p className="px-2.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">Selfhosted machine</p>
-        <MachineDockBar name="jorgen-desktop" kind="selfhosted" state="online" sharedSessionCount={2} />
+        <p className="px-2.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          Selfhosted machine
+        </p>
+        <MachineDockBar
+          name="jorgen-desktop"
+          kind="selfhosted"
+          state="online"
+          sharedSessionCount={2}
+        />
         <SharedMachineDisclosure sharedSessionCount={2} />
         <SurfaceStub />
       </div>
@@ -118,11 +127,15 @@ function SwapTransition() {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <div>
-        <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">Before · Modal active</p>
+        <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          Before · Modal active
+        </p>
         <Dashboard data={fullMachinesResponse} />
       </div>
       <div>
-        <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">After · swapped to machine</p>
+        <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">
+          After · swapped to machine
+        </p>
         <Dashboard data={swappedMachinesResponse} />
       </div>
     </div>
@@ -133,7 +146,14 @@ type ViewDef = { id: string; node: ReactNode; padded?: boolean };
 
 const VIEWS: Record<string, ViewDef> = {
   // --- IA / flow (pass 1) ---
-  "flow-device": { id: "flow-device", node: <div className="mx-auto max-w-md"><EnrollmentDeviceFlow {...deviceFlowSeed} phase="pending" onCopyCode={() => {}} /></div> },
+  "flow-device": {
+    id: "flow-device",
+    node: (
+      <div className="mx-auto max-w-md">
+        <EnrollmentDeviceFlow {...deviceFlowSeed} phase="pending" onCopyCode={() => {}} />
+      </div>
+    ),
+  },
   "flow-list": { id: "flow-list", node: <Dashboard data={fullMachinesResponse} /> },
   "flow-swap": { id: "flow-swap", node: <SwapTransition /> },
   // --- dock parity (pass 2) ---
@@ -142,22 +162,69 @@ const VIEWS: Record<string, ViewDef> = {
   "state-empty": { id: "state-empty", node: <Dashboard data={emptyMachinesResponse} /> },
   "state-enrolling": { id: "state-enrolling", node: <CardCell machine={enrollingMachine} /> },
   "state-online": { id: "state-online", node: <CardCell machine={onlineMachine} /> },
-  "state-reconnecting": { id: "state-reconnecting", node: <CardCell machine={reconnectingMachine} /> },
+  "state-reconnecting": {
+    id: "state-reconnecting",
+    node: <CardCell machine={reconnectingMachine} />,
+  },
   "state-offline": { id: "state-offline", node: <CardCell machine={offlineMachine} /> },
-  "state-consent_required": { id: "state-consent_required", node: <CardCell machine={consentRequiredMachine} /> },
-  "state-display_unavailable": { id: "state-display_unavailable", node: <CardCell machine={displayUnavailableMachine} /> },
+  "state-consent_required": {
+    id: "state-consent_required",
+    node: <CardCell machine={consentRequiredMachine} />,
+  },
+  "state-display_unavailable": {
+    id: "state-display_unavailable",
+    node: <CardCell machine={displayUnavailableMachine} />,
+  },
   "state-shared": { id: "state-shared", node: <CardCell machine={sharedMachine} /> },
   // The full grid (all states at once) — the headline dashboard shot.
   "dashboard-full": { id: "dashboard-full", node: <Dashboard data={fullMachinesResponse} /> },
-  "dashboard-contended": { id: "dashboard-contended", node: <CardCell machine={contendedMachine} /> },
+  "dashboard-contended": {
+    id: "dashboard-contended",
+    node: <CardCell machine={contendedMachine} />,
+  },
   "dashboard-modal": { id: "dashboard-modal", node: <CardCell machine={modalBox} /> },
   // --- polish (pass 5) ---
   "status-pills": { id: "status-pills", node: <StatusPills /> },
-  "shared-disclosure": { id: "shared-disclosure", node: <div className="mx-auto max-w-md"><SharedMachineDisclosure sharedSessionCount={2} density="full" /></div> },
-  "consent-whole-machine": { id: "consent-whole-machine", node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentMachine} phase="review" onApprove={() => {}} onDeny={() => {}} /> },
-  "consent-headless": { id: "consent-headless", node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentHeadlessMachine} phase="review" onApprove={() => {}} onDeny={() => {}} /> },
-  "consent-approved": { id: "consent-approved", node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentMachine} phase="approved" /> },
-  "consent-denied": { id: "consent-denied", node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentMachine} phase="denied" /> },
+  "shared-disclosure": {
+    id: "shared-disclosure",
+    node: (
+      <div className="mx-auto max-w-md">
+        <SharedMachineDisclosure sharedSessionCount={2} density="full" />
+      </div>
+    ),
+  },
+  "consent-whole-machine": {
+    id: "consent-whole-machine",
+    node: (
+      <EnrollmentConsent
+        userCode="WXYZ-4821"
+        machine={consentMachine}
+        phase="review"
+        onApprove={() => {}}
+        onDeny={() => {}}
+      />
+    ),
+  },
+  "consent-headless": {
+    id: "consent-headless",
+    node: (
+      <EnrollmentConsent
+        userCode="WXYZ-4821"
+        machine={consentHeadlessMachine}
+        phase="review"
+        onApprove={() => {}}
+        onDeny={() => {}}
+      />
+    ),
+  },
+  "consent-approved": {
+    id: "consent-approved",
+    node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentMachine} phase="approved" />,
+  },
+  "consent-denied": {
+    id: "consent-denied",
+    node: <EnrollmentConsent userCode="WXYZ-4821" machine={consentMachine} phase="denied" />,
+  },
 };
 
 function Harness() {

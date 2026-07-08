@@ -2,7 +2,15 @@
 // overlay-drawer toggle, and the workspace-scoped navigation helpers every rail
 // section reuses (open a workspace, start a new session, switch org/workspace).
 import { useNavigate } from "@tanstack/react-router";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { useAppContext } from "@/context";
 
@@ -80,7 +88,13 @@ function readStoredWidth(): number {
   }
 }
 
-export function RailProvider({ workspaceId, children }: { workspaceId: string; children: ReactNode }) {
+export function RailProvider({
+  workspaceId,
+  children,
+}: {
+  workspaceId: string;
+  children: ReactNode;
+}) {
   const navigate = useNavigate();
   const appContext = useAppContext();
   const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
@@ -122,26 +136,44 @@ export function RailProvider({ workspaceId, children }: { workspaceId: string; c
     }
   }, []);
 
-  const openWorkspace = useCallback((nextWorkspaceId: string) => {
-    appContext.resetSessionView();
-    setDrawerOpen(false);
-    void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId: nextWorkspaceId } });
-  }, [appContext, navigate]);
+  const openWorkspace = useCallback(
+    (nextWorkspaceId: string) => {
+      appContext.resetSessionView();
+      setDrawerOpen(false);
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: nextWorkspaceId },
+      });
+    },
+    [appContext, navigate],
+  );
 
-  const openOrg = useCallback((accountId: string) => {
-    const target = appContext.workspaces.find((workspace) => workspace.accountId === accountId);
-    if (!target) {
-      return;
-    }
-    appContext.resetSessionView();
-    setDrawerOpen(false);
-    void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId: target.id } });
-  }, [appContext, navigate]);
+  const openOrg = useCallback(
+    (accountId: string) => {
+      const target = appContext.workspaces.find((workspace) => workspace.accountId === accountId);
+      if (!target) {
+        return;
+      }
+      appContext.resetSessionView();
+      setDrawerOpen(false);
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: target.id },
+      });
+    },
+    [appContext, navigate],
+  );
 
-  const openSession = useCallback((sessionId: string) => {
-    setDrawerOpen(false);
-    void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId } });
-  }, [navigate, workspaceId]);
+  const openSession = useCallback(
+    (sessionId: string) => {
+      setDrawerOpen(false);
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      });
+    },
+    [navigate, workspaceId],
+  );
 
   const startNewSession = useCallback(() => {
     appContext.resetSessionView();
@@ -149,23 +181,39 @@ export function RailProvider({ workspaceId, children }: { workspaceId: string; c
     void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
   }, [appContext, navigate, workspaceId]);
 
-  const value = useMemo<RailContextValue>(() => ({
-    workspaceId,
-    // The drawer always renders expanded content; collapse only applies to the
-    // fixed desktop column.
-    collapsed: isMobile ? false : collapsed,
-    setCollapsed,
-    toggleCollapsed,
-    width,
-    setWidth,
-    isMobile,
-    drawerOpen,
-    setDrawerOpen,
-    openWorkspace,
-    openOrg,
-    openSession,
-    startNewSession,
-  }), [workspaceId, collapsed, width, setWidth, isMobile, drawerOpen, setCollapsed, toggleCollapsed, openWorkspace, openOrg, openSession, startNewSession]);
+  const value = useMemo<RailContextValue>(
+    () => ({
+      workspaceId,
+      // The drawer always renders expanded content; collapse only applies to the
+      // fixed desktop column.
+      collapsed: isMobile ? false : collapsed,
+      setCollapsed,
+      toggleCollapsed,
+      width,
+      setWidth,
+      isMobile,
+      drawerOpen,
+      setDrawerOpen,
+      openWorkspace,
+      openOrg,
+      openSession,
+      startNewSession,
+    }),
+    [
+      workspaceId,
+      collapsed,
+      width,
+      setWidth,
+      isMobile,
+      drawerOpen,
+      setCollapsed,
+      toggleCollapsed,
+      openWorkspace,
+      openOrg,
+      openSession,
+      startNewSession,
+    ],
+  );
 
   return <RailContext.Provider value={value}>{children}</RailContext.Provider>;
 }

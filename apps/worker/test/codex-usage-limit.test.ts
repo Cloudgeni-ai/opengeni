@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { agentRunFailurePayload, codexUsageLimitFailurePayload, humanizeResetWindow } from "../src/activities/agent-turn";
+import {
+  agentRunFailurePayload,
+  codexUsageLimitFailurePayload,
+  humanizeResetWindow,
+} from "../src/activities/agent-turn";
 
 // P1-d: a ChatGPT/Codex usage cap (429 usage_limit_reached) must surface as a
 // precise, NON-retryable error with the reset window — not the generic retryable
@@ -27,7 +31,9 @@ describe("codexUsageLimitFailurePayload", () => {
   });
 
   test("P3 all-accounts variant names the earliest reset across subscriptions", () => {
-    const payload = codexUsageLimitFailurePayload({ resetsInSeconds: 2 * 3600 }, "all capped", { allAccounts: true });
+    const payload = codexUsageLimitFailurePayload({ resetsInSeconds: 2 * 3600 }, "all capped", {
+      allAccounts: true,
+    });
     expect(payload.code).toBe("codex_usage_limit_reached");
     expect(payload.retryable).toBe(false);
     expect(payload.error).toContain("All connected");
@@ -56,7 +62,10 @@ describe("agentRunFailurePayload — codex usage limit", () => {
   });
 
   test("a plain 429 rate-limit (no usage cap) is still the generic retryable payload", () => {
-    const err = Object.assign(new Error("429 Too Many Requests"), { status: 429, code: "rate_limit_exceeded" });
+    const err = Object.assign(new Error("429 Too Many Requests"), {
+      status: 429,
+      code: "rate_limit_exceeded",
+    });
     const payload = agentRunFailurePayload(err);
     expect(payload.code).toBe("provider_rate_limited");
     expect(payload.retryable).toBe(true);

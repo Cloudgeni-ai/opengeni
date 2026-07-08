@@ -37,14 +37,18 @@ class FakeModalSandboxClient {
   async create(args: { manifest?: unknown; snapshot?: unknown }) {
     createArgs.push(args);
     if (args && "snapshot" in args && args.snapshot !== undefined) {
-      throw new Error("assertCoreSnapshotUnsupported: ModalSandboxClient.create({ snapshot }) is unsupported");
+      throw new Error(
+        "assertCoreSnapshotUnsupported: ModalSandboxClient.create({ snapshot }) is unsupported",
+      );
     }
     return {
       state: { sandboxId: "sb-fresh" },
       async hydrateWorkspace(data: Uint8Array) {
         if (hydrateWorkspaceFailuresRemaining > 0) {
           hydrateWorkspaceFailuresRemaining -= 1;
-          throw new Error("hydrateWorkspace: snapshot GC'd or provider timeout (test-injected failure)");
+          throw new Error(
+            "hydrateWorkspace: snapshot GC'd or provider timeout (test-injected failure)",
+          );
         }
         hydrateCalls.push(data);
       },
@@ -72,11 +76,15 @@ afterAll(() => {
   mock.restore();
 });
 
-const SNAPSHOT_REF = 'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-abc","workspace_persistence":"snapshot_filesystem"}';
+const SNAPSHOT_REF =
+  'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-abc","workspace_persistence":"snapshot_filesystem"}';
 const SNAPSHOT_BYTES = new TextEncoder().encode(SNAPSHOT_REF);
 const SNAPSHOT_B64 = Buffer.from(SNAPSHOT_BYTES).toString("base64");
-const SNAPSHOT_PREV_REF = 'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-prev","workspace_persistence":"snapshot_filesystem"}';
-const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString("base64");
+const SNAPSHOT_PREV_REF =
+  'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-prev","workspace_persistence":"snapshot_filesystem"}';
+const SNAPSHOT_PREV_B64 = Buffer.from(new TextEncoder().encode(SNAPSHOT_PREV_REF)).toString(
+  "base64",
+);
 
 function envelopeWithArchive(archiveB64: string | undefined) {
   const sessionState: Record<string, unknown> = {

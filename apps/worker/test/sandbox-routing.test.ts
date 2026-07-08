@@ -14,11 +14,13 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings, MemoryEventBus } from "@opengeni/testing";
 import {
-  ControlRequest,
-  ControlResponse,
-} from "@opengeni/agent-proto";
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+  MemoryEventBus,
+} from "@opengeni/testing";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
 import {
   createEnrollment,
   createSandbox,
@@ -29,7 +31,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { buildManifest, subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
-import { wrapLazyTurnBoxWithRouting, wrapTurnBoxWithRouting, routingEnabled } from "../src/sandbox-routing";
+import {
+  wrapLazyTurnBoxWithRouting,
+  wrapTurnBoxWithRouting,
+  routingEnabled,
+} from "../src/sandbox-routing";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -53,11 +59,38 @@ function busWithAgent(workspaceId: string, agentId: string, hostname: string): M
     const op = req.op;
     let res: ControlResponse;
     if (op?.$case === "ping") {
-      res = { requestId: req.requestId, result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } } };
+      res = {
+        requestId: req.requestId,
+        result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+      };
     } else if (op?.$case === "exec") {
-      res = { requestId: req.requestId, result: { $case: "exec", exec: { exitCode: 0, stdout: enc.encode(`${hostname}\n`), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" } } };
+      res = {
+        requestId: req.requestId,
+        result: {
+          $case: "exec",
+          exec: {
+            exitCode: 0,
+            stdout: enc.encode(`${hostname}\n`),
+            stderr: new Uint8Array(0),
+            timedOut: false,
+            durationMs: "1",
+          },
+        },
+      };
     } else {
-      res = { requestId: req.requestId, result: { $case: "exec", exec: { exitCode: 1, stdout: new Uint8Array(0), stderr: enc.encode("unsupported"), timedOut: false, durationMs: "0" } } };
+      res = {
+        requestId: req.requestId,
+        result: {
+          $case: "exec",
+          exec: {
+            exitCode: 1,
+            stdout: new Uint8Array(0),
+            stderr: enc.encode("unsupported"),
+            timedOut: false,
+            durationMs: "0",
+          },
+        },
+      };
     }
     return ControlResponse.encode(res).finish();
   });
@@ -92,7 +125,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -101,21 +136,40 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     if (!available) return;
     expect(routingEnabled(settings)).toBe(true);
 
-    const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-    const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
     const accountId = a!.id;
     const workspaceId = w!.id;
 
     const session = await createSession(db, {
-      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
-      model: "gpt-test", sandboxBackend: "modal",
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
     });
     const enrollment = await createEnrollment(db, {
-      accountId, workspaceId, pubkey: `ed25519:${crypto.randomUUID()}`,
-      exposure: "whole-machine", hasDisplay: true, allowScreenControl: true, os: "linux", arch: "x86_64",
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
     });
     const sandbox = await createSandbox(db, {
-      accountId, workspaceId, kind: "selfhosted", name: "laptop", enrollmentId: enrollment.id,
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
     });
 
     const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
@@ -133,7 +187,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
 
     // SWAP mid-turn: repoint the session to the enrolled machine (epoch-bumped CAS).
     const swap = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: sandbox.id, expectedEpoch: 0,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: sandbox.id,
+      expectedEpoch: 0,
     });
     expect(swap.swapped).toBe(true);
 
@@ -143,7 +201,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
 
     // Swap BACK to the group box (target null) → the op routes there again.
     const back = await setActiveSandbox(db, {
-      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: swap.pointer!.activeEpoch,
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: null,
+      expectedEpoch: swap.pointer!.activeEpoch,
     });
     expect(back.swapped).toBe(true);
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
@@ -156,13 +218,22 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
 
   test("lazy wrapper seeds synthetic manifest and default-pointer ops single-flight through the provisioner", async () => {
     if (!available) return;
-    const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct-lazy') returning id`;
-    const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy') returning id`;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-lazy') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy') returning id`;
     const accountId = a!.id;
     const workspaceId = w!.id;
     const session = await createSession(db, {
-      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
-      model: "gpt-test", sandboxBackend: "modal",
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
     });
     const manifest = buildManifest(settings, [], { HOME: "/workspace", LAZY: "1" });
     let provisions = 0;
@@ -182,7 +253,10 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         },
       },
     );
-    const proxy = lazy.session as { state: { manifest: unknown }; exec: (a: unknown) => Promise<{ stdout: string }> };
+    const proxy = lazy.session as {
+      state: { manifest: unknown };
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
 
     expect(proxy.state.manifest).toBe(manifest);
     expect((await proxy.exec({ cmd: "echo hi" })).stdout).toBe("lazy-real");

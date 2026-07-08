@@ -1,10 +1,6 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { AccessGrant, WorkspaceEnvironment } from "@opengeni/contracts";
-import {
-  getWorkspaceEnvironment,
-  recordAuditEvent,
-  type Database,
-} from "@opengeni/db";
+import { getWorkspaceEnvironment, recordAuditEvent, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { requirePermission } from "../access";
 
@@ -56,12 +52,18 @@ export function assertAllowedEnvironmentVariableName(name: string): void {
 export function requireEnvironmentEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new HTTPException(503, { message: "workspace environments require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
+    throw new HTTPException(503, {
+      message: "workspace environments require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    });
   }
   return key;
 }
 
-export async function requireEnvironmentForApi(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment> {
+export async function requireEnvironmentForApi(
+  db: Database,
+  workspaceId: string,
+  environmentId: string,
+): Promise<WorkspaceEnvironment> {
   const environment = await getWorkspaceEnvironment(db, workspaceId, environmentId);
   if (!environment) {
     throw new HTTPException(404, { message: "environment not found" });
@@ -96,12 +98,20 @@ export async function validateEnvironmentAttachment(
   return environment;
 }
 
-export async function recordEnvironmentAuditEvent(db: Database, input: {
-  grant: AccessGrant;
-  action: "environment.created" | "environment.updated" | "environment.deleted" | "environment.variable.set" | "environment.variable.deleted";
-  environmentId: string;
-  variableName?: string;
-}): Promise<void> {
+export async function recordEnvironmentAuditEvent(
+  db: Database,
+  input: {
+    grant: AccessGrant;
+    action:
+      | "environment.created"
+      | "environment.updated"
+      | "environment.deleted"
+      | "environment.variable.set"
+      | "environment.variable.deleted";
+    environmentId: string;
+    variableName?: string;
+  },
+): Promise<void> {
   await recordAuditEvent(db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,

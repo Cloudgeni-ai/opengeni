@@ -56,13 +56,20 @@ describe("isCreditExhaustion", () => {
     expect(isCreditExhaustion("insufficient OpenGeni credits")).toBe(true);
     expect(isCreditExhaustion("Activity task failed: insufficient OpenGeni credits")).toBe(true);
     expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);
-    expect(isCreditExhaustion({ error: "Activity task failed: insufficient OpenGeni credits" })).toBe(true);
+    expect(
+      isCreditExhaustion({ error: "Activity task failed: insufficient OpenGeni credits" }),
+    ).toBe(true);
     expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits" })).toBe(true);
   });
 
   test("matches the budget_exhausted segment limit on its own", () => {
     expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
-    expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" })).toBe(true);
+    expect(
+      isCreditExhaustion({
+        detail: "insufficient OpenGeni credits",
+        segmentLimit: "budget_exhausted",
+      }),
+    ).toBe(true);
   });
 
   test("rejects unrelated failures and limits", () => {
@@ -76,7 +83,9 @@ describe("isCreditExhaustion", () => {
 describe("humanizeFailureReason", () => {
   test("maps credit exhaustion to the canonical sentence", () => {
     expect(humanizeFailureReason("insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
-    expect(humanizeFailureReason("Activity task failed: insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
+    expect(humanizeFailureReason("Activity task failed: insufficient OpenGeni credits")).toBe(
+      CREDIT_EXHAUSTION_MESSAGE,
+    );
   });
 
   test("keeps auth/quota mappings and passes other reasons through", () => {

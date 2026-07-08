@@ -7,11 +7,15 @@ describe("workspace environment secret redaction", () => {
       { name: "API_TOKEN", value: "tok-1234567890" },
       { name: "DB_PASSWORD", value: "p4ssw0rd!" },
     ]);
-    expect(redact("output: tok-1234567890 and p4ssw0rd!")).toBe("output: [redacted:API_TOKEN] and [redacted:DB_PASSWORD]");
-    expect(redact({
-      text: "value=tok-1234567890",
-      nested: { items: ["clean", "p4ssw0rd!"], count: 2 },
-    })).toEqual({
+    expect(redact("output: tok-1234567890 and p4ssw0rd!")).toBe(
+      "output: [redacted:API_TOKEN] and [redacted:DB_PASSWORD]",
+    );
+    expect(
+      redact({
+        text: "value=tok-1234567890",
+        nested: { items: ["clean", "p4ssw0rd!"], count: 2 },
+      }),
+    ).toEqual({
       text: "value=[redacted:API_TOKEN]",
       nested: { items: ["clean", "[redacted:DB_PASSWORD]"], count: 2 },
     });

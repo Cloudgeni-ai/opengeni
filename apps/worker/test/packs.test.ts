@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
-import { settingsWithPackSandboxImage, workspacePackRuntimeFromPacks } from "../src/activities/packs";
+import {
+  settingsWithPackSandboxImage,
+  workspacePackRuntimeFromPacks,
+} from "../src/activities/packs";
 
 function pack(overrides: Record<string, unknown>): CapabilityPack {
   return CapabilityPack.parse({
@@ -18,7 +21,11 @@ function pack(overrides: Record<string, unknown>): CapabilityPack {
 const infraSkill = {
   name: "infra-ops",
   files: [
-    { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate infrastructure safely.\n---\n# Infra ops\n" },
+    {
+      path: "SKILL.md",
+      content:
+        "---\nname: infra-ops\ndescription: Operate infrastructure safely.\n---\n# Infra ops\n",
+    },
     { path: "references/runbook.md", content: "Runbook." },
   ],
 };
@@ -26,7 +33,10 @@ const infraSkill = {
 describe("workspace pack runtime resolution", () => {
   test("resolves to the global-image fallback when no pack declares a runtime", () => {
     expect(workspacePackRuntimeFromPacks([])).toEqual({ sandboxImage: null, skills: [] });
-    expect(workspacePackRuntimeFromPacks([pack({ id: "plain" })])).toEqual({ sandboxImage: null, skills: [] });
+    expect(workspacePackRuntimeFromPacks([pack({ id: "plain" })])).toEqual({
+      sandboxImage: null,
+      skills: [],
+    });
   });
 
   test("selects the single declared sandbox image and collects pack skills", () => {
@@ -34,11 +44,14 @@ describe("workspace pack runtime resolution", () => {
       pack({ id: "plain" }),
       pack({
         id: "infra-runtime",
-        sandboxImage: "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        sandboxImage:
+          "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         skills: [infraSkill],
       }),
     ]);
-    expect(runtime.sandboxImage).toBe("ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    expect(runtime.sandboxImage).toBe(
+      "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
     expect(runtime.skills).toEqual([
       {
         name: "infra-ops",
@@ -68,15 +81,20 @@ describe("workspace pack runtime resolution", () => {
     );
     // Cross-pack uniqueness is case-insensitive, matching the per-pack
     // contract rule.
-    expect(() => workspacePackRuntimeFromPacks([
-      pack({ id: "pack-a", skills: [infraSkill] }),
-      pack({ id: "pack-b", skills: [{ ...infraSkill, name: "Infra-Ops" }] }),
-    ])).toThrow("both declare a skill named");
+    expect(() =>
+      workspacePackRuntimeFromPacks([
+        pack({ id: "pack-a", skills: [infraSkill] }),
+        pack({ id: "pack-b", skills: [{ ...infraSkill, name: "Infra-Ops" }] }),
+      ]),
+    ).toThrow("both declare a skill named");
   });
 
   test("keeps explicit skill descriptions", () => {
     const runtime = workspacePackRuntimeFromPacks([
-      pack({ id: "infra-runtime", skills: [{ ...infraSkill, description: "Operate workspace infrastructure." }] }),
+      pack({
+        id: "infra-runtime",
+        skills: [{ ...infraSkill, description: "Operate workspace infrastructure." }],
+      }),
     ]);
     expect(runtime.skills[0]?.description).toBe("Operate workspace infrastructure.");
   });
@@ -93,7 +111,10 @@ describe("pack sandbox image settings", () => {
   });
 
   test("overrides docker and modal image refs with the pack image", () => {
-    const derived = settingsWithPackSandboxImage(settings, "ghcr.io/example/infra-sandbox@sha256:abc");
+    const derived = settingsWithPackSandboxImage(
+      settings,
+      "ghcr.io/example/infra-sandbox@sha256:abc",
+    );
     expect(derived.dockerImage).toBe("ghcr.io/example/infra-sandbox@sha256:abc");
     expect(derived.modalImageRef).toBe("ghcr.io/example/infra-sandbox@sha256:abc");
     // The original settings object is never mutated.

@@ -3,7 +3,11 @@ import { useState } from "react";
 import { defaultCommands } from "../src/commands/registry";
 import type { Notice, SlashCommand } from "../src/commands/types";
 import type { KeyboardEvent } from "react";
-import { useSlashCommands, type SlashCommandContext, type SlashCommandHandlers } from "../src/hooks/use-slash-commands";
+import {
+  useSlashCommands,
+  type SlashCommandContext,
+  type SlashCommandHandlers,
+} from "../src/hooks/use-slash-commands";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { flush, registerDom, renderHook } from "./render-hook";
 
@@ -45,7 +49,10 @@ function setup(options: {
     const handlers: SlashCommandHandlers = {
       notice: (n) => setNotices((cur) => [...cur, n]),
       openHelp: () => setHelpOpened((n) => n + 1),
-      clearView: () => { setViewCleared((n) => n + 1); return true; },
+      clearView: () => {
+        setViewCleared((n) => n + 1);
+        return true;
+      },
       confirm: async () => options.confirmAnswer ?? true,
     };
     const command = useSlashCommands({
@@ -55,7 +62,15 @@ function setup(options: {
       value,
       setValue,
     });
-    return { value, setValue, notices, helpOpened, viewCleared, confirmAnswer: options.confirmAnswer ?? true, command };
+    return {
+      value,
+      setValue,
+      notices,
+      helpOpened,
+      viewCleared,
+      confirmAnswer: options.confirmAnswer ?? true,
+      command,
+    };
   }, undefined);
 }
 
@@ -63,7 +78,10 @@ const sessionCtx: SlashCommandContext = {
   client: fakeClient({
     updateGoal: async () => ({}) as never,
     clearSessionContext: async () => {},
-    compactSessionContext: async () => ({ status: "queued", message: "Compaction will run before the next turn." }),
+    compactSessionContext: async () => ({
+      status: "queued",
+      message: "Compaction will run before the next turn.",
+    }),
   }),
   workspaceId: WORKSPACE_ID,
   sessionId: SESSION_ID,
@@ -75,7 +93,9 @@ describe("useSlashCommands", () => {
   test("opens and filters as a slash token is typed", async () => {
     const h = await setup({ initialValue: "/cl", context: sessionCtx });
     expect(h.result.current.command.open).toBe(true);
-    expect(h.result.current.command.items.map((c) => c.name)).toEqual(expect.arrayContaining(["clear", "clear-view"]));
+    expect(h.result.current.command.items.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["clear", "clear-view"]),
+    );
     await h.unmount();
   });
 
@@ -160,7 +180,14 @@ describe("useSlashCommands", () => {
 
   test("danger command runs only after confirm resolves true", async () => {
     let cleared = false;
-    const ctx: SlashCommandContext = { ...sessionCtx, client: fakeClient({ clearSessionContext: async () => { cleared = true; } }) };
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
+    };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
     h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
     for (let i = 0; i < 5; i += 1) {
@@ -180,7 +207,11 @@ describe("useSlashCommands", () => {
     let viewClears = 0;
     const ctx: SlashCommandContext = {
       ...sessionCtx,
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
     };
     const h = await renderHook<Harness, void>(() => {
       const [value, setValue] = useState("/clear");
@@ -188,11 +219,28 @@ describe("useSlashCommands", () => {
       const handlers: SlashCommandHandlers = {
         notice: (n) => setNotices((cur) => [...cur, n]),
         openHelp: () => {},
-        clearView: () => { viewClears += 1; return true; },
+        clearView: () => {
+          viewClears += 1;
+          return true;
+        },
         confirm: async () => true,
       };
-      const command = useSlashCommands({ commands: defaultCommands, context: ctx, handlers, value, setValue });
-      return { value, setValue, notices, helpOpened: 0, viewCleared: 0, confirmAnswer: true, command };
+      const command = useSlashCommands({
+        commands: defaultCommands,
+        context: ctx,
+        handlers,
+        value,
+        setValue,
+      });
+      return {
+        value,
+        setValue,
+        notices,
+        helpOpened: 0,
+        viewCleared: 0,
+        confirmAnswer: true,
+        command,
+      };
     }, undefined);
 
     const items = h.result.current.command.items;
@@ -222,7 +270,11 @@ describe("useSlashCommands", () => {
     let viewClears = 0;
     const ctx: SlashCommandContext = {
       ...sessionCtx,
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
     };
     const h = await renderHook<Harness, void>(() => {
       const [value, setValue] = useState("/clear");
@@ -230,11 +282,28 @@ describe("useSlashCommands", () => {
       const handlers: SlashCommandHandlers = {
         notice: (n) => setNotices((cur) => [...cur, n]),
         openHelp: () => {},
-        clearView: () => { viewClears += 1; return true; },
+        clearView: () => {
+          viewClears += 1;
+          return true;
+        },
         confirm: async () => true,
       };
-      const command = useSlashCommands({ commands: defaultCommands, context: ctx, handlers, value, setValue });
-      return { value, setValue, notices, helpOpened: 0, viewCleared: 0, confirmAnswer: true, command };
+      const command = useSlashCommands({
+        commands: defaultCommands,
+        context: ctx,
+        handlers,
+        value,
+        setValue,
+      });
+      return {
+        value,
+        setValue,
+        notices,
+        helpOpened: 0,
+        viewCleared: 0,
+        confirmAnswer: true,
+        command,
+      };
     }, undefined);
 
     // clear-view sorts first, so highlight 0 is already clear-view; arrow-navigate
@@ -265,7 +334,11 @@ describe("useSlashCommands", () => {
     let cleared = false;
     const ctx: SlashCommandContext = {
       ...sessionCtx,
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
     };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
     // No arrow keys — straight Enter.
@@ -286,7 +359,11 @@ describe("useSlashCommands", () => {
     let cleared = false;
     const ctx: SlashCommandContext = {
       ...sessionCtx,
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
     };
     const h = await setup({ initialValue: "/Clear", context: ctx, confirmAnswer: true });
     h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
@@ -302,7 +379,11 @@ describe("useSlashCommands", () => {
     let cleared = false;
     const ctx: SlashCommandContext = {
       ...sessionCtx,
-      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+      client: fakeClient({
+        clearSessionContext: async () => {
+          cleared = true;
+        },
+      }),
     };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: false });
     h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));

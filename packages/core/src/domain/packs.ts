@@ -3,7 +3,12 @@ import {
   type ScheduledTaskAgentConfig,
   type SocialConnection,
 } from "@opengeni/contracts";
-import { getWorkspacePack, listPackInstallations, listWorkspacePacks, type Database } from "@opengeni/db";
+import {
+  getWorkspacePack,
+  listPackInstallations,
+  listWorkspacePacks,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
@@ -11,7 +16,8 @@ export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 const marketingSocialPack: CapabilityPack = {
   id: MARKETING_SOCIAL_PACK_ID,
   name: "Marketing social daily analysis",
-  description: "Connect social accounts, attach marketing knowledge, and schedule agents to produce daily media performance analysis.",
+  description:
+    "Connect social accounts, attach marketing knowledge, and schedule agents to produce daily media performance analysis.",
   role: "marketing",
   category: "social-media",
   version: "0.1.0",
@@ -54,7 +60,12 @@ const marketingSocialPack: CapabilityPack = {
       category: "social-media",
       authModel: "oauth2_authorization_code",
       providers: ["instagram", "facebook"],
-      scopes: ["instagram_basic", "instagram_manage_insights", "pages_read_engagement", "pages_show_list"],
+      scopes: [
+        "instagram_basic",
+        "instagram_manage_insights",
+        "pages_read_engagement",
+        "pages_show_list",
+      ],
       required: false,
       metadata: {
         docs: "https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/",
@@ -78,7 +89,10 @@ const marketingSocialPack: CapabilityPack = {
       category: "social-media",
       authModel: "oauth2_authorization_code",
       providers: ["youtube"],
-      scopes: ["https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly"],
+      scopes: [
+        "https://www.googleapis.com/auth/youtube.readonly",
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+      ],
       required: false,
       metadata: {
         docs: "https://developers.google.com/youtube/v3",
@@ -90,7 +104,8 @@ const marketingSocialPack: CapabilityPack = {
       type: "document_base",
       id: "marketing-playbook",
       name: "Marketing playbook",
-      description: "Optional workspace document base with brand voice, campaign calendars, audience research, and reporting rules.",
+      description:
+        "Optional workspace document base with brand voice, campaign calendars, audience research, and reporting rules.",
       required: false,
     },
   ],
@@ -139,7 +154,10 @@ export function isBuiltInCapabilityPack(packId: string): boolean {
  * (for example after a contract tightening) are skipped instead of breaking
  * the whole catalog.
  */
-export async function listWorkspaceCapabilityPacks(db: Database, workspaceId: string): Promise<CapabilityPack[]> {
+export async function listWorkspaceCapabilityPacks(
+  db: Database,
+  workspaceId: string,
+): Promise<CapabilityPack[]> {
   const registered = await listWorkspacePacks(db, workspaceId);
   const builtInIds = new Set(packs.map((pack) => pack.id));
   const registeredPacks = registered
@@ -151,7 +169,11 @@ export async function listWorkspaceCapabilityPacks(db: Database, workspaceId: st
   return [...packs, ...registeredPacks];
 }
 
-export async function resolveCapabilityPack(db: Database, workspaceId: string, packId: string): Promise<CapabilityPack | null> {
+export async function resolveCapabilityPack(
+  db: Database,
+  workspaceId: string,
+  packId: string,
+): Promise<CapabilityPack | null> {
   const builtIn = getCapabilityPack(packId);
   if (builtIn) {
     return builtIn;
@@ -171,7 +193,11 @@ export async function resolveCapabilityPack(db: Database, workspaceId: string, p
  * generic capability enable path) and re-checked at session start by the
  * worker, which also covers manifests re-registered after enablement.
  */
-export async function assertPackSandboxImageCompatible(db: Database, workspaceId: string, pack: CapabilityPack): Promise<void> {
+export async function assertPackSandboxImageCompatible(
+  db: Database,
+  workspaceId: string,
+  pack: CapabilityPack,
+): Promise<void> {
   if (!pack.sandboxImage) {
     return;
   }
@@ -218,13 +244,18 @@ function marketingDailyAnalysisPrompt(input: {
   documentBaseIds: string[];
   promptInstructions?: string;
 }): string {
-  const connectionLines = input.connections.map((connection) => {
-    return `- ${connection.provider}: ${connection.accountHandle} (${connection.id})`;
-  }).join("\n");
-  const knowledgeLine = input.documentBaseIds.length > 0
-    ? `Use these document base IDs for brand/campaign knowledge through the docs MCP: ${input.documentBaseIds.join(", ")}.`
-    : "No document base IDs were selected; rely only on social context returned by tools.";
-  const extra = input.promptInstructions ? `\nAdditional operator instructions:\n${input.promptInstructions.trim()}\n` : "";
+  const connectionLines = input.connections
+    .map((connection) => {
+      return `- ${connection.provider}: ${connection.accountHandle} (${connection.id})`;
+    })
+    .join("\n");
+  const knowledgeLine =
+    input.documentBaseIds.length > 0
+      ? `Use these document base IDs for brand/campaign knowledge through the docs MCP: ${input.documentBaseIds.join(", ")}.`
+      : "No document base IDs were selected; rely only on social context returned by tools.";
+  const extra = input.promptInstructions
+    ? `\nAdditional operator instructions:\n${input.promptInstructions.trim()}\n`
+    : "";
 
   return [
     "Run the daily social media analysis for the selected accounts.",
@@ -237,5 +268,7 @@ function marketingDailyAnalysisPrompt(input: {
     extra,
     "Produce a concise report with these sections: executive summary, notable account changes, winning posts, underperforming posts, audience and content signals, recommended actions for the next 24 hours, and data gaps.",
     "Use only metrics and posts returned by tools or document search. Do not invent metrics, posts, or account capabilities.",
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

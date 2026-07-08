@@ -40,7 +40,10 @@ export function parseCommandLine(value: string): ParsedCommandLine | null {
 const PERMISSION_SUPERUSER: Permission = "workspace:admin";
 
 /** Whether the operator's permission set satisfies a command's gate. */
-export function hasPermission(required: Permission | undefined, permissions: Permission[]): boolean {
+export function hasPermission(
+  required: Permission | undefined,
+  permissions: Permission[],
+): boolean {
   if (!required) {
     return true;
   }
@@ -48,13 +51,18 @@ export function hasPermission(required: Permission | undefined, permissions: Per
 }
 
 /** Match a command (by name or alias) against the value. */
-export function matchCommand(commands: readonly SlashCommand[], value: string): SlashCommand | null {
+export function matchCommand(
+  commands: readonly SlashCommand[],
+  value: string,
+): SlashCommand | null {
   const parsed = parseCommandLine(value);
   if (!parsed) {
     return null;
   }
   const token = parsed.name.toLowerCase();
-  return commands.find((command) => command.name === token || command.aliases?.includes(token)) ?? null;
+  return (
+    commands.find((command) => command.name === token || command.aliases?.includes(token)) ?? null
+  );
 }
 
 type FilterCtx = Pick<CommandContext, "sessionId" | "status" | "permissions">;
@@ -64,7 +72,11 @@ type FilterCtx = Pick<CommandContext, "sessionId" | "status" | "permissions">;
  * `available()===false` commands are dropped entirely (a gated command is never
  * shown, not shown-disabled). Filtering is a prefix match on name/alias.
  */
-export function filterCommands(commands: readonly SlashCommand[], token: string, ctx: FilterCtx): SlashCommand[] {
+export function filterCommands(
+  commands: readonly SlashCommand[],
+  token: string,
+  ctx: FilterCtx,
+): SlashCommand[] {
   const needle = token.toLowerCase();
   return commands.filter((command) => {
     if (!hasPermission(command.permission, ctx.permissions)) {
@@ -76,7 +88,10 @@ export function filterCommands(commands: readonly SlashCommand[], token: string,
     if (needle.length === 0) {
       return true;
     }
-    return command.name.startsWith(needle) || (command.aliases?.some((alias) => alias.startsWith(needle)) ?? false);
+    return (
+      command.name.startsWith(needle) ||
+      (command.aliases?.some((alias) => alias.startsWith(needle)) ?? false)
+    );
   });
 }
 
@@ -139,7 +154,10 @@ export const defaultCommands: readonly SlashCommand[] = [
       // instead so the operator isn't told something happened when nothing did.
       const cleared = ctx.clearView();
       if (!cleared) {
-        return { status: "error", message: "This view can't be cleared here (no local timeline to reset)." };
+        return {
+          status: "error",
+          message: "This view can't be cleared here (no local timeline to reset).",
+        };
       }
       return { status: "ok", message: "Local view cleared." };
     },
@@ -149,7 +167,9 @@ export const defaultCommands: readonly SlashCommand[] = [
     description: "Pause or resume the session's goal loop.",
     permission: "sessions:control",
     available: hasSession,
-    args: [{ name: "action", required: true, oneOf: ["pause", "resume"], description: "pause | resume" }],
+    args: [
+      { name: "action", required: true, oneOf: ["pause", "resume"], description: "pause | resume" },
+    ],
     run: async (args, ctx) => {
       const sessionId = requireSession(ctx);
       const action = args[0];
@@ -157,7 +177,9 @@ export const defaultCommands: readonly SlashCommand[] = [
         return { status: "error", message: "Usage: /goal pause | /goal resume" };
       }
       try {
-        await ctx.client.updateGoal(ctx.workspaceId, sessionId, { status: action === "pause" ? "paused" : "active" });
+        await ctx.client.updateGoal(ctx.workspaceId, sessionId, {
+          status: action === "pause" ? "paused" : "active",
+        });
         return { status: "ok", message: action === "pause" ? "Goal paused." : "Goal resumed." };
       } catch (cause) {
         return { status: "error", message: goalErrorMessage(cause, action) };
@@ -204,14 +226,24 @@ export const defaultCommands: readonly SlashCommand[] = [
 ];
 
 function errorMessage(cause: unknown): string | undefined {
-  if (cause && typeof cause === "object" && "message" in cause && typeof (cause as { message?: unknown }).message === "string") {
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "message" in cause &&
+    typeof (cause as { message?: unknown }).message === "string"
+  ) {
     return (cause as { message: string }).message;
   }
   return undefined;
 }
 
 function statusCode(cause: unknown): number | undefined {
-  if (cause && typeof cause === "object" && "status" in cause && typeof (cause as { status?: unknown }).status === "number") {
+  if (
+    cause &&
+    typeof cause === "object" &&
+    "status" in cause &&
+    typeof (cause as { status?: unknown }).status === "number"
+  ) {
     return (cause as { status: number }).status;
   }
   return undefined;
@@ -223,7 +255,9 @@ function goalErrorMessage(cause: unknown, action: "pause" | "resume"): string {
     return "This session has no goal to control.";
   }
   if (code === 409) {
-    return action === "resume" ? "Only a paused goal can be resumed." : "Goal is already in a terminal state.";
+    return action === "resume"
+      ? "Only a paused goal can be resumed."
+      : "Goal is already in a terminal state.";
   }
   return errorMessage(cause) ?? `Could not ${action} the goal.`;
 }

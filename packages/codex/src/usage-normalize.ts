@@ -50,7 +50,9 @@ export type CodexUsagePayload = {
   reason?: "needs_relogin" | undefined;
   // forward-compat, populated but unused in P2:
   additionalLimits?: CodexAdditionalLimit[] | undefined;
-  credits?: { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string } | undefined;
+  credits?:
+    | { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string }
+    | undefined;
 };
 
 /**
@@ -71,9 +73,10 @@ export function buildCodexUsageWindowFromCache(
   const percent = clampPercent(usedPercent);
   const resetDate = resetAt ? new Date(resetAt) : null;
   const resetIso = resetDate && !Number.isNaN(resetDate.getTime()) ? resetDate.toISOString() : null;
-  const resetAfterSeconds = resetDate && !Number.isNaN(resetDate.getTime())
-    ? Math.max(0, Math.round((resetDate.getTime() - Date.now()) / 1000))
-    : null;
+  const resetAfterSeconds =
+    resetDate && !Number.isNaN(resetDate.getTime())
+      ? Math.max(0, Math.round((resetDate.getTime() - Date.now()) / 1000))
+      : null;
   return {
     used: percent,
     limit: 100,
@@ -139,7 +142,10 @@ function normalizeWindow(w: RawWindow): CodexUsageWindow | null {
     return null;
   }
   const percent = clampPercent(w.used_percent);
-  const resetAfterSeconds = typeof w.reset_after_seconds === "number" ? Math.max(0, Math.round(w.reset_after_seconds)) : null;
+  const resetAfterSeconds =
+    typeof w.reset_after_seconds === "number"
+      ? Math.max(0, Math.round(w.reset_after_seconds))
+      : null;
   let resetAt: string | null = null;
   if (typeof w.reset_at === "number") {
     resetAt = new Date(w.reset_at * 1000).toISOString(); // epoch SECONDS → ms
@@ -162,14 +168,20 @@ function normalizeWindow(w: RawWindow): CodexUsageWindow | null {
  * (18000 vs 604800), NEVER by position; fall back to position (primary ⇒ 5h,
  * secondary ⇒ weekly) only for a window whose limit_window_seconds is absent.
  */
-function pickWindows(primary: RawWindow, secondary: RawWindow): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } {
+function pickWindows(
+  primary: RawWindow,
+  secondary: RawWindow,
+): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } {
   let fiveHour: CodexUsageWindow | null = null;
   let weekly: CodexUsageWindow | null = null;
   // Track each unplaced window with the slot it came from, so the positional
   // fallback can place it (re-normalizing produces a fresh object that would
   // never match by reference — the bug this replaces).
   const unplaced: Array<{ slot: "primary" | "secondary"; window: CodexUsageWindow }> = [];
-  for (const [slot, raw] of [["primary", primary], ["secondary", secondary]] as const) {
+  for (const [slot, raw] of [
+    ["primary", primary],
+    ["secondary", secondary],
+  ] as const) {
     const nw = normalizeWindow(raw);
     if (!nw) continue;
     if (nw.limitWindowSeconds === CODEX_WEEKLY_WINDOW_SECONDS) {
@@ -215,9 +227,14 @@ export function normalizeCodexUsage(httpStatus: number, rawPayload: unknown): Co
   }
 
   const rate = body.rate_limit ?? null;
-  const { fiveHour, weekly } = pickWindows(rate?.primary_window ?? null, rate?.secondary_window ?? null);
+  const { fiveHour, weekly } = pickWindows(
+    rate?.primary_window ?? null,
+    rate?.secondary_window ?? null,
+  );
   const limitReached =
-    !!(rate?.limit_reached || rate?.allowed === false) || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
+    !!(rate?.limit_reached || rate?.allowed === false) ||
+    (fiveHour?.percent ?? 0) >= 100 ||
+    (weekly?.percent ?? 0) >= 100;
 
   const additionalLimits: CodexAdditionalLimit[] | undefined = body.additional_limits
     ? body.additional_limits.map((al) => {

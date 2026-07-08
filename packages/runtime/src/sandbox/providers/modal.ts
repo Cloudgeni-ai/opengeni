@@ -31,7 +31,9 @@ export type ModalOrphanSweepResult = {
   skipped: number;
 };
 
-export function modalSandboxAttributionEnvironment(input: ModalSandboxAttribution): Record<string, string> {
+export function modalSandboxAttributionEnvironment(
+  input: ModalSandboxAttribution,
+): Record<string, string> {
   return {
     OPENGENI_SANDBOX_LEASE_ID: input.leaseId,
     OPENGENI_SANDBOX_GROUP_ID: input.sandboxGroupId,
@@ -39,7 +41,9 @@ export function modalSandboxAttributionEnvironment(input: ModalSandboxAttributio
   };
 }
 
-export function modalSandboxAttributionTags(input: ModalSandboxAttribution): Record<string, string> {
+export function modalSandboxAttributionTags(
+  input: ModalSandboxAttribution,
+): Record<string, string> {
   return {
     opengeni: "true",
     opengeni_lease_id: input.leaseId,
@@ -206,7 +210,9 @@ export function resolveModalImageSelector(settings: Settings): ModalImageSelecto
   }
   const registryImage = cachedModalRegistryImage(settings);
   return registryImage
-    ? ModalImageSelector.fromImage(registryImage as Parameters<typeof ModalImageSelector.fromImage>[0])
+    ? ModalImageSelector.fromImage(
+        registryImage as Parameters<typeof ModalImageSelector.fromImage>[0],
+      )
     : ModalImageSelector.fromTag(settings.modalImageRef);
 }
 
@@ -216,7 +222,9 @@ export function __resetModalRegistryImageCacheForTest(): void {
   inFlightRegistryImages.clear();
 }
 
-function modalClientOptions(settings: Settings): ConstructorParameters<ModalModule["ModalClient"]>[0] {
+function modalClientOptions(
+  settings: Settings,
+): ConstructorParameters<ModalModule["ModalClient"]>[0] {
   return {
     ...(settings.modalTokenId ? { tokenId: settings.modalTokenId } : {}),
     ...(settings.modalTokenSecret ? { tokenSecret: settings.modalTokenSecret } : {}),
@@ -248,7 +256,10 @@ export async function tagModalSandbox(
   }
 }
 
-export async function terminateModalSandboxById(settings: Settings, sandboxId: string): Promise<boolean> {
+export async function terminateModalSandboxById(
+  settings: Settings,
+  sandboxId: string,
+): Promise<boolean> {
   if (!sandboxId) {
     return true;
   }
@@ -291,14 +302,22 @@ function tagsFromInfo(info: ModalSandboxInfo): Record<string, string> {
 }
 
 function sandboxCreatedAtMs(info: ModalSandboxInfo): number | null {
-  if (typeof info.createdAt !== "number" || !Number.isFinite(info.createdAt) || info.createdAt <= 0) {
+  if (
+    typeof info.createdAt !== "number" ||
+    !Number.isFinite(info.createdAt) ||
+    info.createdAt <= 0
+  ) {
     return null;
   }
   // Modal protobuf timestamps in this SDK are seconds as doubles.
-  return info.createdAt < 10_000_000_000 ? Math.floor(info.createdAt * 1000) : Math.floor(info.createdAt);
+  return info.createdAt < 10_000_000_000
+    ? Math.floor(info.createdAt * 1000)
+    : Math.floor(info.createdAt);
 }
 
-function attributionKey(input: Pick<ModalSandboxAttribution, "leaseId" | "workspaceId" | "sandboxGroupId">): string {
+function attributionKey(
+  input: Pick<ModalSandboxAttribution, "leaseId" | "workspaceId" | "sandboxGroupId">,
+): string {
   return `${input.workspaceId}:${input.sandboxGroupId}:${input.leaseId}`;
 }
 
@@ -324,7 +343,9 @@ export async function sweepModalOrphanSandboxes(
   // e644e8a8, 2026-07-06) — the box's unpushed work was unrecoverable because
   // nothing outside the reaper drain persists /workspace.
   const liveByInstanceId = new Map(
-    liveLeases.filter((lease) => lease.instanceId).map((lease) => [lease.instanceId as string, lease]),
+    liveLeases
+      .filter((lease) => lease.instanceId)
+      .map((lease) => [lease.instanceId as string, lease]),
   );
   const ownedClient = options.client ? null : await createModalClient(settings);
   const modal = (options.client ?? ownedClient)! as ModalCpListClient;
@@ -368,17 +389,19 @@ export async function sweepModalOrphanSandboxes(
           // failed re-tag must never fail the sweep (the guard, not the tags,
           // is what protects the box now).
           if (
-            leaseId !== liveByInstance.leaseId
-            || workspaceId !== liveByInstance.workspaceId
-            || sandboxGroupId !== liveByInstance.sandboxGroupId
+            leaseId !== liveByInstance.leaseId ||
+            workspaceId !== liveByInstance.workspaceId ||
+            sandboxGroupId !== liveByInstance.sandboxGroupId
           ) {
             try {
               const sandbox = await modal.sandboxes.fromId(info.id);
-              await sandbox.setTags(modalSandboxAttributionTags({
-                leaseId: liveByInstance.leaseId,
-                workspaceId: liveByInstance.workspaceId,
-                sandboxGroupId: liveByInstance.sandboxGroupId,
-              }));
+              await sandbox.setTags(
+                modalSandboxAttributionTags({
+                  leaseId: liveByInstance.leaseId,
+                  workspaceId: liveByInstance.workspaceId,
+                  sandboxGroupId: liveByInstance.sandboxGroupId,
+                }),
+              );
             } catch {
               // Tag healing is opportunistic; the instance guard already
               // protects this box on every future sweep pass.
@@ -389,7 +412,9 @@ export async function sweepModalOrphanSandboxes(
         }
         let reason: ModalOrphanSweepTermination["reason"] | null = null;
         if (leaseId && workspaceId && sandboxGroupId) {
-          const live = liveByAttribution.get(attributionKey({ leaseId, workspaceId, sandboxGroupId }));
+          const live = liveByAttribution.get(
+            attributionKey({ leaseId, workspaceId, sandboxGroupId }),
+          );
           if (!live || (live.instanceId && live.instanceId !== info.id)) {
             reason = "stale_attribution";
           }

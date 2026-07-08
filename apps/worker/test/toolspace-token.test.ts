@@ -37,18 +37,30 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       toolspaceEnabled: true,
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(settings, [], {}, {
-      scope: { accountId, workspaceId },
-      sessionId,
-      runId: "run-1",
-    });
+    const result = await sandboxEnvironmentForRun(
+      settings,
+      [],
+      {},
+      {
+        scope: { accountId, workspaceId },
+        sessionId,
+        runId: "run-1",
+      },
+    );
 
     expect(result.toolspaceToken).toMatch(/^ogd_/);
-    expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
-    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(`http://127.0.0.1:8000/v1/workspaces/${workspaceId}/mcp`);
+    expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe(
+      "/workspace/.opengeni/toolspace-token",
+    );
+    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(
+      `http://127.0.0.1:8000/v1/workspaces/${workspaceId}/mcp`,
+    );
     expect(Object.values(result.environment)).not.toContain(result.toolspaceToken);
 
-    const payload = await verifyDelegatedAccessToken(settings.delegationSecret!, result.toolspaceToken!);
+    const payload = await verifyDelegatedAccessToken(
+      settings.delegationSecret!,
+      result.toolspaceToken!,
+    );
     expect(payload).toMatchObject({
       accountId,
       workspaceId,
@@ -72,14 +84,21 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       toolspaceEnabled: true,
       apiPort: 8000,
     });
-    const result = await sandboxEnvironmentForRun(settings, [], {}, {
-      scope: { accountId, workspaceId },
-      sessionId,
-      runId: "run-1",
-    });
+    const result = await sandboxEnvironmentForRun(
+      settings,
+      [],
+      {},
+      {
+        scope: { accountId, workspaceId },
+        sessionId,
+        runId: "run-1",
+      },
+    );
 
     expect(result.toolspaceToken).toMatch(/^ogd_/);
-    expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
+    expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe(
+      "/workspace/.opengeni/toolspace-token",
+    );
     // The token VALUE stays off-manifest (delivered via the exec-channel seed).
     expect(Object.values(result.environment)).not.toContain(result.toolspaceToken);
   });
@@ -96,13 +115,20 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       apiPort: 8000,
       opengeniMcpUrl: "https://app.opengeni.example/v1/workspaces/{workspaceId}/mcp",
     });
-    const result = await sandboxEnvironmentForRun(settings, [], {}, {
-      scope: { accountId, workspaceId },
-      sessionId,
-      runId: "run-1",
-    });
+    const result = await sandboxEnvironmentForRun(
+      settings,
+      [],
+      {},
+      {
+        scope: { accountId, workspaceId },
+        sessionId,
+        runId: "run-1",
+      },
+    );
 
-    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(`https://app.opengeni.example/v1/workspaces/${workspaceId}/mcp`);
+    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(
+      `https://app.opengeni.example/v1/workspaces/${workspaceId}/mcp`,
+    );
     expect(result.environment.OPENGENI_TOOLSPACE_URL).not.toContain("127.0.0.1");
   });
 });

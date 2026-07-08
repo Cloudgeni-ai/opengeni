@@ -82,9 +82,7 @@ export function PierreFile({
 
   if (failed) {
     return (
-      <div className={className}>
-        {fallback ?? <PlainFile name={name} contents={contents} />}
-      </div>
+      <div className={className}>{fallback ?? <PlainFile name={name} contents={contents} />}</div>
     );
   }
 
@@ -134,9 +132,5 @@ function PlainFile({ name, contents }: { name: string; contents: string }) {
 }
 
 function FileSkeleton() {
-  return (
-    <div className="p-3 text-og-sm text-og-fg-subtle">
-      Loading file…
-    </div>
-  );
+  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading file…</div>;
 }

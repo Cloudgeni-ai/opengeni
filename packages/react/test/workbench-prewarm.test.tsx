@@ -100,13 +100,46 @@ function fakeManifest(fileCount: number): WorkspaceCaptureManifest {
       mtimeMs: null,
       mode: null,
       truncated: false,
-      children: [{ name: "app.py", path: "app.py", type: "file", sizeBytes: 10, mtimeMs: null, mode: null, truncated: false }],
+      children: [
+        {
+          name: "app.py",
+          path: "app.py",
+          type: "file",
+          sizeBytes: 10,
+          mtimeMs: null,
+          mode: null,
+          truncated: false,
+        },
+      ],
     },
     treeTruncated: false,
-    repos: [{ root: "", head: "main", detached: false, upstream: null, ahead: 0, behind: 0, status: [], diff }],
+    repos: [
+      {
+        root: "",
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        status: [],
+        diff,
+      },
+    ],
     files:
       fileCount > 0
-        ? [{ path: "app.py", status: "modified", hash: "h1", baseHash: null, contentRef: "blob/h1", sizeBytes: 10, isBinary: false, tooLarge: false, deleted: false }]
+        ? [
+            {
+              path: "app.py",
+              status: "modified",
+              hash: "h1",
+              baseHash: null,
+              contentRef: "blob/h1",
+              sizeBytes: 10,
+              isBinary: false,
+              tooLarge: false,
+              deleted: false,
+            },
+          ]
         : [],
     stats: {
       repoCount: 1,
@@ -182,7 +215,8 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     expect(spy.attachCalls).toBe(0);
     // Reach the Files tab's onEditIntent (the editor's first-keystroke signal).
     const filesTab = hook.result.current.tabs.find((t) => t.id === WORKBENCH_TAB_FILES);
-    const onEditIntent = (filesTab?.content as ReactElement<{ onEditIntent: () => void }>).props.onEditIntent;
+    const onEditIntent = (filesTab?.content as ReactElement<{ onEditIntent: () => void }>).props
+      .onEditIntent;
     expect(typeof onEditIntent).toBe("function");
     await act(async () => {
       onEditIntent();
@@ -201,7 +235,9 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     const terminalTab = hook.result.current.tabs.find((t) => t.id === "terminal");
     expect(terminalTab).toBeDefined();
     // content = <div><SandboxTerminal onActivate=… /></div>
-    const inner = (terminalTab!.content as ReactElement<{ children: ReactElement<{ onActivate: () => void }> }>).props.children;
+    const inner = (
+      terminalTab!.content as ReactElement<{ children: ReactElement<{ onActivate: () => void }> }>
+    ).props.children;
     const onActivate = inner.props.onActivate;
     await act(async () => {
       onActivate();
@@ -216,13 +252,20 @@ describe("workbench prewarm gating (Refinement 1)", () => {
 
 describe("capture-driven default tab (Refinement 2)", () => {
   test("changes present → default Changes; empty → default Files", async () => {
-    const withChanges = coldClient({ getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)) });
-    const changesHook = await renderTabsHook(withChanges.client, { sessionId: SESSION_ID, events: [] });
+    const withChanges = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(2)),
+    });
+    const changesHook = await renderTabsHook(withChanges.client, {
+      sessionId: SESSION_ID,
+      events: [],
+    });
     await flush();
     expect(changesHook.result.current.defaultTab).toBe(WORKBENCH_TAB_CHANGES);
     await changesHook.unmount();
 
-    const empty = coldClient({ getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)) });
+    const empty = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)),
+    });
     const emptyHook = await renderTabsHook(empty.client, { sessionId: SESSION_ID, events: [] });
     await flush();
     expect(emptyHook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
@@ -238,8 +281,14 @@ describe("capture-driven default tab (Refinement 2)", () => {
   });
 
   test("a host initialTab overrides the capture-driven default", async () => {
-    const { client } = coldClient({ getWorkspaceCapture: async () => captureAvailable(fakeManifest(5)) });
-    const hook = await renderTabsHook(client, { sessionId: SESSION_ID, events: [], initialTab: "run" });
+    const { client } = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(5)),
+    });
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      initialTab: "run",
+    });
     await flush();
     // Even though the capture has changes, the host landing tab wins.
     expect(hook.result.current.defaultTab).toBe("run");
@@ -303,7 +352,9 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
   });
 
   test("pure embedder, empty capture: the default resolves to Files", async () => {
-    const { client } = coldClient({ getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)) });
+    const { client } = coldClient({
+      getWorkspaceCapture: async () => captureAvailable(fakeManifest(0)),
+    });
     const rendered = await renderComponent(
       withProvider(
         client,

@@ -14,11 +14,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -86,7 +82,9 @@ export function RepositoryContextPicker(props: {
       </p>
       <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <div className="min-w-0">
-          <Label htmlFor="github-org-menu" className="text-2xs text-fg-subtle">Organization</Label>
+          <Label htmlFor="github-org-menu" className="text-2xs text-fg-subtle">
+            Organization
+          </Label>
           <Input
             id="github-org-menu"
             value={props.org}
@@ -105,8 +103,18 @@ export function RepositoryContextPicker(props: {
               </a>
             </Button>
           ) : null}
-          <Button type="button" size="sm" onClick={props.onStartGitHubApp} disabled={props.githubAppBusy} className="h-8 text-xs">
-            {props.githubAppBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : <GitPullRequestIcon className="size-3.5" />}
+          <Button
+            type="button"
+            size="sm"
+            onClick={props.onStartGitHubApp}
+            disabled={props.githubAppBusy}
+            className="h-8 text-xs"
+          >
+            {props.githubAppBusy ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <GitPullRequestIcon className="size-3.5" />
+            )}
             {props.configured ? "Create another" : "Create app"}
           </Button>
         </div>
@@ -125,7 +133,12 @@ export function RepositoryContextPicker(props: {
             type="button"
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-fg transition-colors hover:bg-surface-2/60"
           >
-            <ChevronDownIcon className={cn("size-3.5 shrink-0 text-fg-subtle transition-transform", props.githubAppOpen && "rotate-180")} />
+            <ChevronDownIcon
+              className={cn(
+                "size-3.5 shrink-0 text-fg-subtle transition-transform",
+                props.githubAppOpen && "rotate-180",
+              )}
+            />
             <span className="truncate">GitHub app settings</span>
           </button>
         </CollapsibleTrigger>
@@ -135,7 +148,6 @@ export function RepositoryContextPicker(props: {
       </div>
     </Collapsible>
   );
-
 
   return (
     <DropdownMenu>
@@ -153,7 +165,9 @@ export function RepositoryContextPicker(props: {
           )}
         >
           <GitBranchIcon className="size-3.5" />
-          <span className="truncate">{selectedCount > 0 ? repoCountLabel(selectedCount) : "Repos"}</span>
+          <span className="truncate">
+            {selectedCount > 0 ? repoCountLabel(selectedCount) : "Repos"}
+          </span>
           <span
             className={cn(
               "size-1.5 shrink-0 rounded-full",
@@ -176,7 +190,9 @@ export function RepositoryContextPicker(props: {
             <div className="min-w-0">
               <div className="truncate text-sm font-medium text-fg">Repository context</div>
               <div className="mt-0.5 truncate text-2xs text-fg-subtle">
-                {selectedCount > 0 ? `${repoCountLabel(selectedCount)} selected for this session` : "Optional repositories for the sandbox"}
+                {selectedCount > 0
+                  ? `${repoCountLabel(selectedCount)} selected for this session`
+                  : "Optional repositories for the sandbox"}
               </div>
             </div>
             <Button
@@ -216,7 +232,13 @@ export function RepositoryContextPicker(props: {
                     description="The connected GitHub app isn't sharing any repositories with this workspace — if some are missing, the app may have been removed on GitHub. Reinstall it."
                     action={
                       props.installUrl ? (
-                        <Button asChild type="button" variant="outline" size="sm" className="h-8 text-xs">
+                        <Button
+                          asChild
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 text-xs"
+                        >
                           <a href={props.installUrl}>
                             <GitPullRequestIcon className="size-3.5" />
                             Reinstall on GitHub
@@ -231,9 +253,16 @@ export function RepositoryContextPicker(props: {
                 <>
                   <div className="flex items-center justify-between gap-2 px-1 py-0.5">
                     <div className="flex min-w-0 items-center gap-2">
-                      <MetaChip dot="idle" rounded="full">GitHub app</MetaChip>
+                      <MetaChip dot="idle" rounded="full">
+                        GitHub app
+                      </MetaChip>
                       {props.org ? (
-                        <span className="min-w-0 truncate text-2xs text-fg-subtle" title={props.org}>{props.org}</span>
+                        <span
+                          className="min-w-0 truncate text-2xs text-fg-subtle"
+                          title={props.org}
+                        >
+                          {props.org}
+                        </span>
                       ) : null}
                     </div>
                     {props.installUrl ? (
@@ -248,22 +277,42 @@ export function RepositoryContextPicker(props: {
 
                   <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
                     <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
-                      <div className="min-w-0 truncate text-xs font-medium text-fg">Repositories</div>
-                      <div className="shrink-0 text-2xs text-fg-subtle">{props.repositories.length} available</div>
+                      <div className="min-w-0 truncate text-xs font-medium text-fg">
+                        Repositories
+                      </div>
+                      <div className="shrink-0 text-2xs text-fg-subtle">
+                        {props.repositories.length} available
+                      </div>
                     </div>
                     <div>
                       {props.groups.map((group) => (
-                        <div key={group.installationId} className="border-b border-border last:border-b-0">
+                        <div
+                          key={group.installationId}
+                          className="border-b border-border last:border-b-0"
+                        >
                           <div className="flex items-center justify-between gap-3 bg-surface/45 px-3 py-1.5">
-                            <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">{group.label}</div>
-                            <div className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">{group.repositories.length} repos</div>
+                            <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">
+                              {group.label}
+                            </div>
+                            <div className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">
+                              {group.repositories.length} repos
+                            </div>
                           </div>
                           <div className="divide-y divide-border/70">
                             {group.repositories.map((repo) => {
                               const checked = props.selectedRepoIds.has(repo.id);
-                              const blocked = props.selectedInstallationId !== null && props.selectedInstallationId !== repo.installationId && !checked;
+                              const blocked =
+                                props.selectedInstallationId !== null &&
+                                props.selectedInstallationId !== repo.installationId &&
+                                !checked;
                               return (
-                                <div key={`${repo.installationId}:${repo.id}`} className={cn("px-2 py-2 transition-colors hover:bg-surface-2/45", blocked && "opacity-55")}>
+                                <div
+                                  key={`${repo.installationId}:${repo.id}`}
+                                  className={cn(
+                                    "px-2 py-2 transition-colors hover:bg-surface-2/45",
+                                    blocked && "opacity-55",
+                                  )}
+                                >
                                   <button
                                     type="button"
                                     onClick={() => props.onToggleRepo(repo)}
@@ -284,25 +333,37 @@ export function RepositoryContextPicker(props: {
                                     </span>
                                     <span className="min-w-0">
                                       <span className="flex min-w-0 items-center gap-1.5">
-                                        <span className="truncate text-xs font-medium text-fg">{repo.fullName}</span>
-                                        {repo.private ? <LockIcon className="size-3 shrink-0 text-fg-subtle" /> : null}
+                                        <span className="truncate text-xs font-medium text-fg">
+                                          {repo.fullName}
+                                        </span>
+                                        {repo.private ? (
+                                          <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                                        ) : null}
                                       </span>
                                       <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
                                         default {repo.defaultBranch}
                                       </span>
                                     </span>
                                     {blocked ? (
-                                      <MetaChip dot="waiting" rounded="full">Other app</MetaChip>
+                                      <MetaChip dot="waiting" rounded="full">
+                                        Other app
+                                      </MetaChip>
                                     ) : checked ? (
-                                      <MetaChip dot="idle" rounded="full">Selected</MetaChip>
+                                      <MetaChip dot="idle" rounded="full">
+                                        Selected
+                                      </MetaChip>
                                     ) : null}
                                   </button>
                                   {checked ? (
                                     <div className="mt-2 flex items-center gap-2 pl-6">
                                       <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
                                       <Input
-                                        value={props.selectedRepoRefs[repo.id] ?? repo.defaultBranch}
-                                        onChange={(event) => props.onRefChange(repo.id, event.target.value)}
+                                        value={
+                                          props.selectedRepoRefs[repo.id] ?? repo.defaultBranch
+                                        }
+                                        onChange={(event) =>
+                                          props.onRefChange(repo.id, event.target.value)
+                                        }
                                         onClick={(event) => event.stopPropagation()}
                                         disabled={props.pending}
                                         placeholder={repo.defaultBranch}
@@ -328,13 +389,28 @@ export function RepositoryContextPicker(props: {
                 <div className="border-t border-border/60 pt-1">
                   <div className="flex items-center justify-between gap-2 px-3 py-2">
                     <CollapsibleTrigger asChild>
-                      <button type="button" className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg">
-                        <ChevronDownIcon className={cn("size-3.5 shrink-0 text-fg-subtle transition-transform", props.manualOpen && "rotate-180")} />
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
+                      >
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-3.5 shrink-0 text-fg-subtle transition-transform",
+                            props.manualOpen && "rotate-180",
+                          )}
+                        />
                         <span className="truncate">Add by URL</span>
                         {manualCount > 0 ? <MetaChip rounded="full">{manualCount}</MetaChip> : null}
                       </button>
                     </CollapsibleTrigger>
-                    <Button type="button" variant="ghost" size="xs" onClick={props.onManualAdd} disabled={props.pending} className="h-7 text-xs">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      onClick={props.onManualAdd}
+                      disabled={props.pending}
+                      className="h-7 text-xs"
+                    >
                       <PlusIcon className="size-3" />
                       Add
                     </Button>
@@ -348,10 +424,15 @@ export function RepositoryContextPicker(props: {
                         </p>
                       ) : (
                         props.manualRepos.map((repo) => (
-                          <div key={repo.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]">
+                          <div
+                            key={repo.id}
+                            className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
+                          >
                             <Input
                               value={repo.url}
-                              onChange={(event) => props.onManualUpdate(repo.id, { url: event.target.value })}
+                              onChange={(event) =>
+                                props.onManualUpdate(repo.id, { url: event.target.value })
+                              }
                               disabled={props.pending}
                               placeholder="https://github.com/org/repo"
                               className="h-8 text-xs"
@@ -360,7 +441,9 @@ export function RepositoryContextPicker(props: {
                               <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
                               <Input
                                 value={repo.ref}
-                                onChange={(event) => props.onManualUpdate(repo.id, { ref: event.target.value })}
+                                onChange={(event) =>
+                                  props.onManualUpdate(repo.id, { ref: event.target.value })
+                                }
                                 disabled={props.pending}
                                 placeholder="main"
                                 className="h-8 pl-7 text-xs"
@@ -396,7 +479,16 @@ export function RepositoryContextPicker(props: {
                                 </Button>
                               </div>
                             ) : (
-                              <Button type="button" variant="ghost" size="icon-sm" onClick={() => setConfirmRemoveId(repo.id)} disabled={props.pending} aria-label="Remove repository" title="Remove" className="size-8">
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => setConfirmRemoveId(repo.id)}
+                                disabled={props.pending}
+                                aria-label="Remove repository"
+                                title="Remove"
+                                className="size-8"
+                              >
                                 <Trash2Icon className="size-3.5" />
                               </Button>
                             )}
@@ -425,13 +517,24 @@ export function ScheduledTaskRepositoryPicker(props: {
   onRefresh: () => Promise<void>;
   onResourcesChange: (resources: ResourceRef[]) => void;
 }) {
-  const repositoryResources = props.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
+  const repositoryResources = props.resources.filter(
+    (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
+      resource.kind === "repository",
+  );
   const fileResources = props.resources.filter((resource) => resource.kind === "file");
-  const preservedRepositoryResources = repositoryResources.filter((resource) => !props.repositories.some((repo) => isRepositoryResourceForGitHubRepo(resource, repo)));
-  const selectedInstallationId = repositoryResources.find((resource) => typeof resource.githubInstallationId === "number")?.githubInstallationId ?? null;
+  const preservedRepositoryResources = repositoryResources.filter(
+    (resource) =>
+      !props.repositories.some((repo) => isRepositoryResourceForGitHubRepo(resource, repo)),
+  );
+  const selectedInstallationId =
+    repositoryResources.find((resource) => typeof resource.githubInstallationId === "number")
+      ?.githubInstallationId ?? null;
 
   function toggleRepo(repo: GitHubRepository) {
-    const existing = props.resources.find((resource) => resource.kind === "repository" && isRepositoryResourceForGitHubRepo(resource, repo));
+    const existing = props.resources.find(
+      (resource) =>
+        resource.kind === "repository" && isRepositoryResourceForGitHubRepo(resource, repo),
+    );
     if (existing) {
       props.onResourcesChange(props.resources.filter((resource) => resource !== existing));
       return;
@@ -449,17 +552,21 @@ export function ScheduledTaskRepositoryPicker(props: {
         nextResource,
       ]);
     } catch (error) {
-      toast.error("Couldn't select the repository", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Couldn't select the repository", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   function updateRef(repo: GitHubRepository, ref: string) {
-    props.onResourcesChange(props.resources.map((resource) => {
-      if (resource.kind !== "repository" || !isRepositoryResourceForGitHubRepo(resource, repo)) {
-        return resource;
-      }
-      return { ...resource, ref };
-    }));
+    props.onResourcesChange(
+      props.resources.map((resource) => {
+        if (resource.kind !== "repository" || !isRepositoryResourceForGitHubRepo(resource, repo)) {
+          return resource;
+        }
+        return { ...resource, ref };
+      }),
+    );
   }
 
   return (
@@ -467,16 +574,26 @@ export function ScheduledTaskRepositoryPicker(props: {
       <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
         <div>
           <div className="text-xs font-medium text-fg">Repositories</div>
-          <div className="mt-0.5 text-2xs text-fg-subtle">{repoCountLabel(repositoryResources.length)} attached to this task</div>
+          <div className="mt-0.5 text-2xs text-fg-subtle">
+            {repoCountLabel(repositoryResources.length)} attached to this task
+          </div>
         </div>
-        <Button type="button" variant="ghost" size="xs" onClick={() => void props.onRefresh()} disabled={!props.configured || props.repoBusy || props.busy}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          onClick={() => void props.onRefresh()}
+          disabled={!props.configured || props.repoBusy || props.busy}
+        >
           <RefreshCwIcon className={cn("size-3", props.repoBusy && "animate-spin")} />
           Refresh
         </Button>
       </div>
 
       {!props.configured ? (
-        <div className="p-3 text-xs leading-5 text-fg-muted">Configure the GitHub App to select repositories for scheduled runs.</div>
+        <div className="p-3 text-xs leading-5 text-fg-muted">
+          Configure the GitHub App to select repositories for scheduled runs.
+        </div>
       ) : props.repoBusy ? (
         <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
@@ -489,16 +606,31 @@ export function ScheduledTaskRepositoryPicker(props: {
           {props.groups.map((group) => (
             <div key={group.installationId} className="border-b border-border last:border-b-0">
               <div className="flex items-center justify-between gap-3 bg-surface/45 px-3 py-1.5">
-                <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">{group.label}</div>
-                <div className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">{group.repositories.length} repos</div>
+                <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">
+                  {group.label}
+                </div>
+                <div className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">
+                  {group.repositories.length} repos
+                </div>
               </div>
               <div className="divide-y divide-border/70">
                 {group.repositories.map((repo) => {
-                  const resource = repositoryResources.find((item) => isRepositoryResourceForGitHubRepo(item, repo));
+                  const resource = repositoryResources.find((item) =>
+                    isRepositoryResourceForGitHubRepo(item, repo),
+                  );
                   const checked = Boolean(resource);
-                  const blocked = selectedInstallationId !== null && selectedInstallationId !== repo.installationId && !checked;
+                  const blocked =
+                    selectedInstallationId !== null &&
+                    selectedInstallationId !== repo.installationId &&
+                    !checked;
                   return (
-                    <div key={`${repo.installationId}:${repo.id}`} className={cn("px-2 py-2 transition-colors hover:bg-surface-2/45", blocked && "opacity-55")}>
+                    <div
+                      key={`${repo.installationId}:${repo.id}`}
+                      className={cn(
+                        "px-2 py-2 transition-colors hover:bg-surface-2/45",
+                        blocked && "opacity-55",
+                      )}
+                    >
                       <button
                         type="button"
                         onClick={() => toggleRepo(repo)}
@@ -519,15 +651,25 @@ export function ScheduledTaskRepositoryPicker(props: {
                         </span>
                         <span className="min-w-0">
                           <span className="flex min-w-0 items-center gap-1.5">
-                            <span className="truncate text-xs font-medium text-fg">{repo.fullName}</span>
-                            {repo.private ? <LockIcon className="size-3 shrink-0 text-fg-subtle" /> : null}
+                            <span className="truncate text-xs font-medium text-fg">
+                              {repo.fullName}
+                            </span>
+                            {repo.private ? (
+                              <LockIcon className="size-3 shrink-0 text-fg-subtle" />
+                            ) : null}
                           </span>
-                          <span className="mt-0.5 block truncate text-2xs text-fg-subtle">default {repo.defaultBranch}</span>
+                          <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                            default {repo.defaultBranch}
+                          </span>
                         </span>
                         {blocked ? (
-                          <MetaChip dot="waiting" rounded="full">Other app</MetaChip>
+                          <MetaChip dot="waiting" rounded="full">
+                            Other app
+                          </MetaChip>
                         ) : checked ? (
-                          <MetaChip dot="idle" rounded="full">Selected</MetaChip>
+                          <MetaChip dot="idle" rounded="full">
+                            Selected
+                          </MetaChip>
                         ) : null}
                       </button>
                       {resource ? (
@@ -555,8 +697,12 @@ export function ScheduledTaskRepositoryPicker(props: {
 
       {preservedRepositoryResources.length > 0 || fileResources.length > 0 ? (
         <div className="border-t border-border px-3 py-2 text-2xs text-fg-subtle">
-          Preserving {preservedRepositoryResources.length} manual repository resource{preservedRepositoryResources.length === 1 ? "" : "s"}
-          {fileResources.length > 0 ? ` and ${fileResources.length} file resource${fileResources.length === 1 ? "" : "s"}` : ""}.
+          Preserving {preservedRepositoryResources.length} manual repository resource
+          {preservedRepositoryResources.length === 1 ? "" : "s"}
+          {fileResources.length > 0
+            ? ` and ${fileResources.length} file resource${fileResources.length === 1 ? "" : "s"}`
+            : ""}
+          .
         </div>
       ) : null}
     </section>

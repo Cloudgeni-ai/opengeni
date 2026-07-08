@@ -1,7 +1,4 @@
-import {
-  CreateSocialConnectionRequest,
-  CreateSocialPostRequest,
-} from "@opengeni/contracts";
+import { CreateSocialConnectionRequest, CreateSocialPostRequest } from "@opengeni/contracts";
 import {
   createSocialConnection,
   createSocialPost,
@@ -29,19 +26,22 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = CreateSocialConnectionRequest.parse(await c.req.json());
     try {
-      return c.json(await createSocialConnection(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        provider: payload.provider,
-        accountHandle: payload.accountHandle,
-        accountName: payload.accountName ?? null,
-        externalAccountId: payload.externalAccountId ?? null,
-        status: payload.status,
-        scopes: payload.scopes,
-        credentialRef: payload.credentialRef ?? null,
-        tokenMetadata: payload.tokenMetadata,
-        metadata: payload.metadata,
-      }), 201);
+      return c.json(
+        await createSocialConnection(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          provider: payload.provider,
+          accountHandle: payload.accountHandle,
+          accountName: payload.accountName ?? null,
+          externalAccountId: payload.externalAccountId ?? null,
+          status: payload.status,
+          scopes: payload.scopes,
+          credentialRef: payload.credentialRef ?? null,
+          tokenMetadata: payload.tokenMetadata,
+          metadata: payload.metadata,
+        }),
+        201,
+      );
     } catch (error) {
       throw socialHttpException(error);
     }
@@ -51,13 +51,17 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const since = parseSince(c.req.query("since"));
-    const connectionIds = parseConnectionIds(c.req.query("connectionIds") ?? c.req.query("connectionId"));
-    return c.json(await listSocialPosts(db, {
-      workspaceId,
-      ...(connectionIds?.length ? { connectionIds } : {}),
-      ...(since ? { since } : {}),
-      limit: boundedLimit(c.req.query("limit")),
-    }));
+    const connectionIds = parseConnectionIds(
+      c.req.query("connectionIds") ?? c.req.query("connectionId"),
+    );
+    return c.json(
+      await listSocialPosts(db, {
+        workspaceId,
+        ...(connectionIds?.length ? { connectionIds } : {}),
+        ...(since ? { since } : {}),
+        limit: boundedLimit(c.req.query("limit")),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/social/posts", async (c) => {
@@ -65,18 +69,21 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const payload = CreateSocialPostRequest.parse(await c.req.json());
     try {
-      return c.json(await createSocialPost(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        connectionId: payload.connectionId,
-        externalPostId: payload.externalPostId ?? null,
-        url: payload.url ?? null,
-        authorHandle: payload.authorHandle ?? null,
-        text: payload.text,
-        publishedAt: new Date(payload.publishedAt),
-        metrics: payload.metrics,
-        raw: payload.raw,
-      }), 201);
+      return c.json(
+        await createSocialPost(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          connectionId: payload.connectionId,
+          externalPostId: payload.externalPostId ?? null,
+          url: payload.url ?? null,
+          authorHandle: payload.authorHandle ?? null,
+          text: payload.text,
+          publishedAt: new Date(payload.publishedAt),
+          metrics: payload.metrics,
+          raw: payload.raw,
+        }),
+        201,
+      );
     } catch (error) {
       throw socialHttpException(error);
     }
@@ -98,10 +105,15 @@ function parseConnectionIds(raw: string | undefined): string[] | undefined {
   if (!raw) {
     return undefined;
   }
-  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
   const parsed = z.array(z.string().uuid()).safeParse(values);
   if (!parsed.success) {
-    throw new HTTPException(422, { message: "connectionIds must be a comma-separated list of UUIDs" });
+    throw new HTTPException(422, {
+      message: "connectionIds must be a comma-separated list of UUIDs",
+    });
   }
   const ids = parsed.data;
   return [...new Set(ids)];

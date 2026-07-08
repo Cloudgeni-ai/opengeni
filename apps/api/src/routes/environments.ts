@@ -46,18 +46,24 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateWorkspaceEnvironmentRequest.parse(await c.req.json());
     const name = trimmedEnvironmentName(payload.name);
     if (payload.variables.length > MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new HTTPException(422, { message: `an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
+      throw new HTTPException(422, {
+        message: `an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`,
+      });
     }
     const variableNames = new Set<string>();
     for (const variable of payload.variables) {
       assertAllowedEnvironmentVariableName(variable.name);
       if (variableNames.has(variable.name)) {
-        throw new HTTPException(422, { message: `duplicate environment variable name: ${variable.name}` });
+        throw new HTTPException(422, {
+          message: `duplicate environment variable name: ${variable.name}`,
+        });
       }
       variableNames.add(variable.name);
     }
-    if (await countWorkspaceEnvironments(db, workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
-      throw new HTTPException(422, { message: `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} environments` });
+    if ((await countWorkspaceEnvironments(db, workspaceId)) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+      throw new HTTPException(422, {
+        message: `a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} environments`,
+      });
     }
     if (await getWorkspaceEnvironmentByName(db, workspaceId, name)) {
       throw new HTTPException(409, { message: `environment name is already in use: ${name}` });
@@ -74,7 +80,11 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         valueEncrypted: encryptEnvironmentValue(key, variable.value),
       })),
     });
-    await recordEnvironmentAuditEvent(db, { grant, action: "environment.created", environmentId: created.id });
+    await recordEnvironmentAuditEvent(db, {
+      grant,
+      action: "environment.created",
+      environmentId: created.id,
+    });
     return c.json(created, 201);
   });
 
@@ -87,7 +97,11 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/environments/:environmentId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "environments:manage");
-    const environment = await requireEnvironmentForApi(db, workspaceId, c.req.param("environmentId"));
+    const environment = await requireEnvironmentForApi(
+      db,
+      workspaceId,
+      c.req.param("environmentId"),
+    );
     const payload = UpdateWorkspaceEnvironmentRequest.parse(await c.req.json());
     const name = payload.name !== undefined ? trimmedEnvironmentName(payload.name) : undefined;
     if (name !== undefined && name !== environment.name) {
@@ -100,24 +114,48 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(name !== undefined ? { name } : {}),
       ...(payload.description !== undefined ? { description: payload.description } : {}),
     });
-    await recordEnvironmentAuditEvent(db, { grant, action: "environment.updated", environmentId: environment.id });
+    await recordEnvironmentAuditEvent(db, {
+      grant,
+      action: "environment.updated",
+      environmentId: environment.id,
+    });
     return c.json(updated);
   });
 
   app.delete("/v1/workspaces/:workspaceId/environments/:environmentId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "environments:manage");
-    const environment = await requireEnvironmentForApi(db, workspaceId, c.req.param("environmentId"));
-    const attachedTasks = await countScheduledTasksUsingEnvironment(db, workspaceId, environment.id);
+    const environment = await requireEnvironmentForApi(
+      db,
+      workspaceId,
+      c.req.param("environmentId"),
+    );
+    const attachedTasks = await countScheduledTasksUsingEnvironment(
+      db,
+      workspaceId,
+      environment.id,
+    );
     if (attachedTasks > 0) {
-      throw new HTTPException(409, { message: `environment is attached to ${attachedTasks} scheduled task(s); detach first` });
+      throw new HTTPException(409, {
+        message: `environment is attached to ${attachedTasks} scheduled task(s); detach first`,
+      });
     }
-    const activeSessions = await countActiveSessionsUsingEnvironment(db, workspaceId, environment.id);
+    const activeSessions = await countActiveSessionsUsingEnvironment(
+      db,
+      workspaceId,
+      environment.id,
+    );
     if (activeSessions > 0) {
-      throw new HTTPException(409, { message: `environment is attached to ${activeSessions} active session(s); wait for them to finish or cancel them first` });
+      throw new HTTPException(409, {
+        message: `environment is attached to ${activeSessions} active session(s); wait for them to finish or cancel them first`,
+      });
     }
     await deleteWorkspaceEnvironment(db, workspaceId, environment.id);
-    await recordEnvironmentAuditEvent(db, { grant, action: "environment.deleted", environmentId: environment.id });
+    await recordEnvironmentAuditEvent(db, {
+      grant,
+      action: "environment.deleted",
+      environmentId: environment.id,
+    });
     return c.json({ ok: true });
   });
 
@@ -126,11 +164,17 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "environments:manage");
     const key = requireEnvironmentEncryption(settings);
     const name = parseVariableName(c.req.param("name"));
-    const environment = await requireEnvironmentForApi(db, workspaceId, c.req.param("environmentId"));
+    const environment = await requireEnvironmentForApi(
+      db,
+      workspaceId,
+      c.req.param("environmentId"),
+    );
     const payload = SetWorkspaceEnvironmentVariableRequest.parse(await c.req.json());
     const exists = environment.variables.some((variable) => variable.name === name);
     if (!exists && environment.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-      throw new HTTPException(422, { message: `an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables` });
+      throw new HTTPException(422, {
+        message: `an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`,
+      });
     }
     const metadata = await setWorkspaceEnvironmentVariable(db, {
       accountId: grant.accountId,
@@ -139,28 +183,52 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       name,
       valueEncrypted: encryptEnvironmentValue(key, payload.value),
     });
-    await recordEnvironmentAuditEvent(db, { grant, action: "environment.variable.set", environmentId: environment.id, variableName: name });
+    await recordEnvironmentAuditEvent(db, {
+      grant,
+      action: "environment.variable.set",
+      environmentId: environment.id,
+      variableName: name,
+    });
     return c.json(metadata);
   });
 
-  app.delete("/v1/workspaces/:workspaceId/environments/:environmentId/variables/:name", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "environments:manage");
-    const name = parseVariableName(c.req.param("name"));
-    const environment = await requireEnvironmentForApi(db, workspaceId, c.req.param("environmentId"));
-    const deleted = await deleteWorkspaceEnvironmentVariable(db, workspaceId, environment.id, name);
-    if (!deleted) {
-      throw new HTTPException(404, { message: "environment variable not found" });
-    }
-    await recordEnvironmentAuditEvent(db, { grant, action: "environment.variable.deleted", environmentId: environment.id, variableName: name });
-    return c.json({ ok: true });
-  });
+  app.delete(
+    "/v1/workspaces/:workspaceId/environments/:environmentId/variables/:name",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "environments:manage");
+      const name = parseVariableName(c.req.param("name"));
+      const environment = await requireEnvironmentForApi(
+        db,
+        workspaceId,
+        c.req.param("environmentId"),
+      );
+      const deleted = await deleteWorkspaceEnvironmentVariable(
+        db,
+        workspaceId,
+        environment.id,
+        name,
+      );
+      if (!deleted) {
+        throw new HTTPException(404, { message: "environment variable not found" });
+      }
+      await recordEnvironmentAuditEvent(db, {
+        grant,
+        action: "environment.variable.deleted",
+        environmentId: environment.id,
+        variableName: name,
+      });
+      return c.json({ ok: true });
+    },
+  );
 }
 
 function parseVariableName(raw: string): string {
   const parsed = WorkspaceEnvironmentVariableName.safeParse(raw);
   if (!parsed.success) {
-    throw new HTTPException(422, { message: "environment variable names must match ^[A-Z][A-Z0-9_]*$" });
+    throw new HTTPException(422, {
+      message: "environment variable names must match ^[A-Z][A-Z0-9_]*$",
+    });
   }
   assertAllowedEnvironmentVariableName(parsed.data);
   return parsed.data;

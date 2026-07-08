@@ -4,7 +4,11 @@ import { fileURLToPath } from "node:url";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-export const PUBLISHED_DEP_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
+export const PUBLISHED_DEP_FIELDS = [
+  "dependencies",
+  "peerDependencies",
+  "optionalDependencies",
+] as const;
 export const ALL_DEP_FIELDS = [...PUBLISHED_DEP_FIELDS, "devDependencies"] as const;
 
 type DepField = (typeof ALL_DEP_FIELDS)[number];
@@ -83,10 +87,11 @@ export function workspaceVersionMap(): Map<string, string> {
 
 export function publishableWorkspacePackages(): WorkspacePackage[] {
   const ignored = changesetIgnoreSet();
-  return workspacePackages().filter((pkg) =>
-    pkg.name.startsWith("@opengeni/")
-    && pkg.packageJson.private !== true
-    && !ignored.has(pkg.name)
+  return workspacePackages().filter(
+    (pkg) =>
+      pkg.name.startsWith("@opengeni/") &&
+      pkg.packageJson.private !== true &&
+      !ignored.has(pkg.name),
   );
 }
 

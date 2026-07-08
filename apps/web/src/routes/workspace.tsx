@@ -15,7 +15,8 @@ import { isAbortError } from "@/lib/session-tools";
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
-  const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const previousWorkspaceId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -31,12 +32,11 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
     context.setSelectedRepoIds(new Set());
     context.setSelectedRepoRefs({});
     void context.refreshGitHub(workspaceId, abortController.signal);
-    void context.refreshWorkspaceMcpServers(workspaceId, abortController.signal)
-      .catch((error) => {
-        if (!isAbortError(error)) {
-          toast.error("Failed to load workspace MCP tools", { description: String(error) });
-        }
-      });
+    void context.refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
+      if (!isAbortError(error)) {
+        toast.error("Failed to load workspace MCP tools", { description: String(error) });
+      }
+    });
     return () => abortController.abort();
   }, [workspaceId, context.accessKeyVersion, activeWorkspace?.id]);
 
@@ -47,7 +47,11 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
           <ProblemPanel
             title="Workspace unavailable"
             description="You don't have access to this workspace."
-            action={<Button asChild type="button" variant="secondary"><Link to="/">Open default workspace</Link></Button>}
+            action={
+              <Button asChild type="button" variant="secondary">
+                <Link to="/">Open default workspace</Link>
+              </Button>
+            }
           />
         </RailShell>
       </RailProvider>

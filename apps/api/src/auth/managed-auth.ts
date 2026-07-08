@@ -27,12 +27,14 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
     trustedOrigins: betterAuthTrustedOrigins(settings),
     advanced: {
       useSecureCookies: settings.publicBaseUrl?.startsWith("https://") ?? false,
-      ...(settings.betterAuthCookieDomain ? {
-        crossSubDomainCookies: {
-          enabled: true,
-          domain: settings.betterAuthCookieDomain,
-        },
-      } : {}),
+      ...(settings.betterAuthCookieDomain
+        ? {
+            crossSubDomainCookies: {
+              enabled: true,
+              domain: settings.betterAuthCookieDomain,
+            },
+          }
+        : {}),
       database: {
         generateId: () => crypto.randomUUID(),
       },
@@ -149,7 +151,11 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
   }) as ManagedAuth;
 }
 
-export async function managedSessionAccessContext(auth: ManagedAuth, db: Database, headers: Headers) {
+export async function managedSessionAccessContext(
+  auth: ManagedAuth,
+  db: Database,
+  headers: Headers,
+) {
   const session = await auth.api.getSession({ headers });
   if (!session?.user) {
     return null;
@@ -184,15 +190,20 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
   return [...origins];
 }
 
-async function sendEmail(settings: Settings, input: {
-  to: string;
-  subject: string;
-  text: string;
-  html: string;
-}): Promise<void> {
+async function sendEmail(
+  settings: Settings,
+  input: {
+    to: string;
+    subject: string;
+    text: string;
+    html: string;
+  },
+): Promise<void> {
   if (!settings.resendApiKey) {
     if (settings.environment === "local" || settings.environment === "test") {
-      console.warn(`[opengeni] Skipping email to ${input.to}: OPENGENI_RESEND_API_KEY is not configured`);
+      console.warn(
+        `[opengeni] Skipping email to ${input.to}: OPENGENI_RESEND_API_KEY is not configured`,
+      );
       return;
     }
     throw new Error("OPENGENI_RESEND_API_KEY is required to send managed auth email");
@@ -212,7 +223,9 @@ async function sendEmail(settings: Settings, input: {
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {
   if (!settings.betterAuthSecret) {
-    throw new Error("OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email");
+    throw new Error(
+      "OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email",
+    );
   }
   if (!settings.publicBaseUrl) {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required to send managed auth verification email");
@@ -225,7 +238,10 @@ async function verificationUrl(settings: Settings, email: string): Promise<strin
 }
 
 function splitCsv(raw: string): string[] {
-  return raw.split(",").map((value) => value.trim()).filter(Boolean);
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 }
 
 function escapeHtml(value: string): string {

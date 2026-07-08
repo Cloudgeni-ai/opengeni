@@ -16,16 +16,26 @@ function baseRecorder(statuses: number[] = [200]): { base: FetchLike; captures: 
   const captures: Capture[] = [];
   let i = 0;
   const base: FetchLike = async (input, init) => {
-    captures.push({ url: typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url, init });
+    captures.push({
+      url: typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
+      init,
+    });
     const status = statuses[Math.min(i, statuses.length - 1)] ?? 200;
     i += 1;
-    return new Response("data: {}\n\n", { status, headers: { "content-type": "text/event-stream" } });
+    return new Response("data: {}\n\n", {
+      status,
+      headers: { "content-type": "text/event-stream" },
+    });
   };
   return { base, captures };
 }
 
 function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext {
-  const token: CodexTokenSnapshot = { accessToken: "AC1", chatgptAccountId: "acct_1", isFedramp: false };
+  const token: CodexTokenSnapshot = {
+    accessToken: "AC1",
+    chatgptAccountId: "acct_1",
+    isFedramp: false,
+  };
   return {
     clientVersion: "1.2.3",
     getToken: async () => token,
@@ -42,8 +52,17 @@ describe("codexSubscriptionFetch", () => {
     await codexRequestStorage.run(ctx(), () =>
       fetchImpl("https://chatgpt.com/backend-api/responses", {
         method: "POST",
-        headers: { "OpenAI-Beta": "responses=experimental", "x-api-key": "secret", "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-5.5", store: true, max_output_tokens: 50, input: [{ type: "message", id: "m1", role: "user", content: [] }] }),
+        headers: {
+          "OpenAI-Beta": "responses=experimental",
+          "x-api-key": "secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          store: true,
+          max_output_tokens: 50,
+          input: [{ type: "message", id: "m1", role: "user", content: [] }],
+        }),
       }),
     );
     const cap = captures[0];
@@ -76,7 +95,12 @@ describe("codexSubscriptionFetch", () => {
     let refreshed = 0;
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(
-      ctx({ refresh: async () => { refreshed += 1; return { accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false }; } }),
+      ctx({
+        refresh: async () => {
+          refreshed += 1;
+          return { accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false };
+        },
+      }),
       () => fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
     );
     expect(refreshed).toBe(1);
@@ -98,10 +122,13 @@ describe("codexSubscriptionFetch", () => {
   test("non-streaming caller: SSE collapses to one JSON Response with output assembled from item events", async () => {
     const fetchImpl = codexSubscriptionFetch(codexBase);
     const res = await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", input: [] }) }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.5", input: [] }),
+      }),
     );
     expect(res.headers.get("content-type")).toContain("application/json");
-    const json = await res.json() as { status: string; output: Array<{ type: string }> };
+    const json = (await res.json()) as { status: string; output: Array<{ type: string }> };
     expect(json.status).toBe("completed");
     expect(json.output).toHaveLength(1); // assembled from output_item.done, not the empty terminal output
     expect(json.output[0]?.type).toBe("message");
@@ -110,11 +137,23 @@ describe("codexSubscriptionFetch", () => {
   test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
     const fetchImpl = codexSubscriptionFetch(codexBase);
     const res = await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }),
+      }),
     );
     const text = await res.text();
-    const terminal = text.split("\n\n").map((b) => b.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n"))
-      .filter(Boolean).map((d) => JSON.parse(d) as { type?: string; response?: { output?: unknown[] } })
+    const terminal = text
+      .split("\n\n")
+      .map((b) =>
+        b
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim())
+          .join("\n"),
+      )
+      .filter(Boolean)
+      .map((d) => JSON.parse(d) as { type?: string; response?: { output?: unknown[] } })
       .find((e) => e.type === "response.completed");
     expect(terminal?.response?.output).toHaveLength(1); // injected; the SDK parser now sees the message
     expect(text).toContain("response.output_item.done"); // intermediate events still pass through for incremental UI
@@ -123,38 +162,59 @@ describe("codexSubscriptionFetch", () => {
   test("passes through untouched when there is no codex context", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
-    await fetchImpl("https://api.openai.com/v1/responses", { method: "POST", headers: { "OpenAI-Beta": "x" }, body: '{"model":"gpt-5.5"}' });
+    await fetchImpl("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "OpenAI-Beta": "x" },
+      body: '{"model":"gpt-5.5"}',
+    });
     expect(captures[0]?.url).toBe("https://api.openai.com/v1/responses"); // not rewritten
     expect(new Headers(captures[0]?.init?.headers).get("openai-beta")).toBe("x"); // not stripped
     expect(captures[0]?.init?.body).toBe('{"model":"gpt-5.5"}'); // not normalized
   });
 
   test("P1-d: a 429 usage_limit_reached is re-emitted as JSON with x-should-retry:false (preserving the body)", async () => {
-    const body = JSON.stringify({ error: { type: "usage_limit_reached", message: "limit hit", resets_in_seconds: 3600 } });
-    const base: FetchLike = async () => new Response(body, { status: 429, headers: { "content-type": "application/json" } });
+    const body = JSON.stringify({
+      error: { type: "usage_limit_reached", message: "limit hit", resets_in_seconds: 3600 },
+    });
+    const base: FetchLike = async () =>
+      new Response(body, { status: 429, headers: { "content-type": "application/json" } });
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }),
+      }),
     );
     expect(res.status).toBe(429);
     expect(res.headers.get("content-type")).toContain("application/json");
     expect(res.headers.get("x-should-retry")).toBe("false");
     // The JSON error body survives so the SDK can reconstruct error.error (no
     // "429 status code (no body)").
-    const parsed = JSON.parse(await res.text()) as { error?: { type?: string; resets_in_seconds?: number } };
+    const parsed = JSON.parse(await res.text()) as {
+      error?: { type?: string; resets_in_seconds?: number };
+    };
     expect(parsed.error?.type).toBe("usage_limit_reached");
     expect(parsed.error?.resets_in_seconds).toBe(3600);
   });
 
   test("P1-d: a generic 5xx error body is preserved WITHOUT forcing x-should-retry", async () => {
-    const base: FetchLike = async () => new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), { status: 500, headers: { "content-type": "application/json" } });
+    const base: FetchLike = async () =>
+      new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }),
+      }),
     );
     expect(res.status).toBe(500);
     expect(res.headers.get("x-should-retry")).toBeNull(); // only usage caps are pinned non-retryable
-    expect(JSON.parse(await res.text())).toEqual({ error: { type: "server_error", message: "boom" } });
+    expect(JSON.parse(await res.text())).toEqual({
+      error: { type: "server_error", message: "boom" },
+    });
   });
 
   test("the 401-refresh retry still fires; the final non-OK error is buffered", async () => {
@@ -163,11 +223,17 @@ describe("codexSubscriptionFetch", () => {
       call += 1;
       return call === 1
         ? new Response("unauth", { status: 401, headers: { "content-type": "text/plain" } })
-        : new Response(JSON.stringify({ error: { type: "usage_limit_reached" } }), { status: 429, headers: { "content-type": "application/json" } });
+        : new Response(JSON.stringify({ error: { type: "usage_limit_reached" } }), {
+            status: 429,
+            headers: { "content-type": "application/json" },
+          });
     };
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }),
+      }),
     );
     expect(call).toBe(2); // 401 → refresh → retry
     expect(res.status).toBe(429);
@@ -177,23 +243,36 @@ describe("codexSubscriptionFetch", () => {
 
 describe("classifyCodexUsageLimitError", () => {
   test("detects an OpenAI-shaped 429 usage_limit_reached and extracts the reset window", () => {
-    const err = Object.assign(new Error("429 limit"), { status: 429, type: "usage_limit_reached", error: { type: "usage_limit_reached", resets_in_seconds: 1800 } });
+    const err = Object.assign(new Error("429 limit"), {
+      status: 429,
+      type: "usage_limit_reached",
+      error: { type: "usage_limit_reached", resets_in_seconds: 1800 },
+    });
     expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: 1800 });
   });
 
   test("detects via the error body type when the top-level type is absent", () => {
-    const err = Object.assign(new Error("boom"), { status: 429, error: { type: "usage_limit_reached" } });
+    const err = Object.assign(new Error("boom"), {
+      status: 429,
+      error: { type: "usage_limit_reached" },
+    });
     expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: null });
   });
 
   test("walks the cause chain (SDK re-wrap)", () => {
-    const inner = Object.assign(new Error("inner"), { status: 429, error: { type: "usage_limit_reached", resets_in_seconds: 60 } });
+    const inner = Object.assign(new Error("inner"), {
+      status: 429,
+      error: { type: "usage_limit_reached", resets_in_seconds: 60 },
+    });
     const outer = Object.assign(new Error("wrapped"), { cause: inner });
     expect(classifyCodexUsageLimitError(outer)).toEqual({ resetsInSeconds: 60 });
   });
 
   test("returns null for a plain rate-limit (no usage cap)", () => {
-    const err = Object.assign(new Error("429 Too Many Requests"), { status: 429, code: "rate_limit_exceeded" });
+    const err = Object.assign(new Error("429 Too Many Requests"), {
+      status: 429,
+      code: "rate_limit_exceeded",
+    });
     expect(classifyCodexUsageLimitError(err)).toBeNull();
   });
 
@@ -209,12 +288,14 @@ describe("parseCodexUsageHeaders", () => {
   test("both windows present → full 5-column snapshot (epoch seconds → ms)", () => {
     const resetPrimary = 1782700000;
     const resetSecondary = 1783200000;
-    const snap = parseCodexUsageHeaders(new Headers({
-      "x-codex-primary-used-percent": "42",
-      "x-codex-primary-reset-at": String(resetPrimary),
-      "x-codex-secondary-used-percent": "7",
-      "x-codex-secondary-reset-at": String(resetSecondary),
-    }));
+    const snap = parseCodexUsageHeaders(
+      new Headers({
+        "x-codex-primary-used-percent": "42",
+        "x-codex-primary-reset-at": String(resetPrimary),
+        "x-codex-secondary-used-percent": "7",
+        "x-codex-secondary-reset-at": String(resetSecondary),
+      }),
+    );
     expect(snap).not.toBeNull();
     expect(snap!.primaryUsedPercent).toBe(42);
     expect(snap!.secondaryUsedPercent).toBe(7);
@@ -224,28 +305,38 @@ describe("parseCodexUsageHeaders", () => {
   });
 
   test("primary-only (missing secondary) → null (NO partial-window clobber)", () => {
-    expect(parseCodexUsageHeaders(new Headers({
-      "x-codex-primary-used-percent": "42",
-      "x-codex-primary-reset-at": "1782700000",
-    }))).toBeNull();
+    expect(
+      parseCodexUsageHeaders(
+        new Headers({
+          "x-codex-primary-used-percent": "42",
+          "x-codex-primary-reset-at": "1782700000",
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("absent / non-integer used-percent → null (safe no-op)", () => {
     expect(parseCodexUsageHeaders(new Headers({}))).toBeNull();
-    expect(parseCodexUsageHeaders(new Headers({
-      "x-codex-primary-used-percent": "n/a",
-      "x-codex-secondary-used-percent": "3",
-    }))).toBeNull();
+    expect(
+      parseCodexUsageHeaders(
+        new Headers({
+          "x-codex-primary-used-percent": "n/a",
+          "x-codex-secondary-used-percent": "3",
+        }),
+      ),
+    ).toBeNull();
   });
 
   test("reset-after-seconds fallback when no absolute reset-at", () => {
     const before = Date.now();
-    const snap = parseCodexUsageHeaders(new Headers({
-      "x-codex-primary-used-percent": "10",
-      "x-codex-primary-reset-after-seconds": "3600",
-      "x-codex-secondary-used-percent": "20",
-      "x-codex-secondary-reset-after-seconds": "7200",
-    }));
+    const snap = parseCodexUsageHeaders(
+      new Headers({
+        "x-codex-primary-used-percent": "10",
+        "x-codex-primary-reset-after-seconds": "3600",
+        "x-codex-secondary-used-percent": "20",
+        "x-codex-secondary-reset-after-seconds": "7200",
+      }),
+    );
     expect(snap).not.toBeNull();
     expect(snap!.primaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
     expect(snap!.secondaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
@@ -254,22 +345,29 @@ describe("parseCodexUsageHeaders", () => {
 
 describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
   function usageBase(status: number, headers: Record<string, string>): FetchLike {
-    return async () => new Response("data: {}\n\n", {
-      status,
-      headers: { "content-type": "text/event-stream", ...headers },
-    });
+    return async () =>
+      new Response("data: {}\n\n", {
+        status,
+        headers: { "content-type": "text/event-stream", ...headers },
+      });
   }
 
   test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];
-    const fetchImpl = codexSubscriptionFetch(usageBase(200, {
-      "x-codex-primary-used-percent": "55",
-      "x-codex-primary-reset-at": "1782700000",
-      "x-codex-secondary-used-percent": "12",
-      "x-codex-secondary-reset-at": "1783200000",
-    }));
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(200, {
+        "x-codex-primary-used-percent": "55",
+        "x-codex-primary-reset-at": "1782700000",
+        "x-codex-secondary-used-percent": "12",
+        "x-codex-secondary-reset-at": "1783200000",
+      }),
+    );
     await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      }),
+    );
     expect(seen).toHaveLength(1);
     expect(seen[0]!.primaryUsedPercent).toBe(55);
     expect(seen[0]!.secondaryUsedPercent).toBe(12);
@@ -277,21 +375,33 @@ describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
 
   test("fires on the 429 hard-cap path too (an exhausted account stamps its own usage)", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];
-    const fetchImpl = codexSubscriptionFetch(usageBase(429, {
-      "x-codex-primary-used-percent": "100",
-      "x-codex-secondary-used-percent": "100",
-    }));
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(429, {
+        "x-codex-primary-used-percent": "100",
+        "x-codex-secondary-used-percent": "100",
+      }),
+    );
     await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      }),
+    );
     expect(seen).toHaveLength(1);
     expect(seen[0]!.primaryUsedPercent).toBe(100);
   });
 
   test("does NOT fire when headers are absent/partial (safe no-op)", async () => {
     const seen: CodexUsageHeaderSnapshot[] = [];
-    const fetchImpl = codexSubscriptionFetch(usageBase(200, { "x-codex-primary-used-percent": "55" }));
+    const fetchImpl = codexSubscriptionFetch(
+      usageBase(200, { "x-codex-primary-used-percent": "55" }),
+    );
     await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: true }),
+      }),
+    );
     expect(seen).toHaveLength(0);
   });
 });

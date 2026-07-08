@@ -1,14 +1,40 @@
 import type { ClientModel, SessionStatus } from "@opengeni/sdk";
-import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, RotateCwIcon, SquareIcon, XIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  FileIcon,
+  ImageIcon,
+  LoaderCircleIcon,
+  PaperclipIcon,
+  RotateCwIcon,
+  SquareIcon,
+  XIcon,
+} from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSubmitOnKey } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import { defaultCommands } from "../commands/registry";
-import { useSlashCommands, type ConfirmState, type SlashCommandContext } from "../hooks/use-slash-commands";
+import {
+  useSlashCommands,
+  type ConfirmState,
+  type SlashCommandContext,
+} from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { CommandPalette } from "./command-palette";
@@ -255,7 +281,11 @@ export function ChatComposer({
       if (commandDraftBlocked) {
         // Dismissed palette + a "/command" draft: don't send it as chat. Nudge
         // the operator to re-open the palette (any edit re-opens it) or clear it.
-        setNotice({ tone: "error", message: "That's a slash command — press Enter in the command list to run it, or edit the line to send a message." });
+        setNotice({
+          tone: "error",
+          message:
+            "That's a slash command — press Enter in the command list to run it, or edit the line to send a message.",
+        });
         return;
       }
       if (blockedByUpload) {
@@ -300,12 +330,23 @@ export function ChatComposer({
     [commands, commandContext],
   );
 
-  const activeNotice = notice ?? (composer.error ? { tone: "error" as const, message: composer.error.message || "Sending failed — your draft is still here. Try again." } : null);
+  const activeNotice =
+    notice ??
+    (composer.error
+      ? {
+          tone: "error" as const,
+          message:
+            composer.error.message || "Sending failed — your draft is still here. Try again.",
+        }
+      : null);
 
   return (
     // Respect the iOS home-indicator inset so the sticky composer never sits
     // under it (0 on non-notch devices and desktop, so it's inert there).
-    <div className={cn("og-root", className)} style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
+    <div
+      className={cn("og-root", className)}
+      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+    >
       <div className="relative">
         {paletteEnabled ? (
           <CommandPalette
@@ -377,7 +418,11 @@ export function ChatComposer({
             role={paletteEnabled && palette.open ? "combobox" : undefined}
             aria-expanded={paletteEnabled ? palette.open : undefined}
             aria-controls={paletteEnabled && palette.open ? listboxId : undefined}
-            aria-activedescendant={paletteEnabled && palette.open ? `${listboxId}-option-${palette.highlight}` : undefined}
+            aria-activedescendant={
+              paletteEnabled && palette.open
+                ? `${listboxId}-option-${palette.highlight}`
+                : undefined
+            }
             className={cn(
               // Font size steps up to 16px below `md` so iOS never zooms the
               // viewport on focus; desktop keeps the 15px og-md rhythm.
@@ -495,7 +540,11 @@ export function ChatComposer({
                     "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
                   )}
                 >
-                  {composer.sending ? <LoaderCircleIcon className="size-4 animate-og-spin" /> : <ArrowUpIcon className="size-4" />}
+                  {composer.sending ? (
+                    <LoaderCircleIcon className="size-4 animate-og-spin" />
+                  ) : (
+                    <ArrowUpIcon className="size-4" />
+                  )}
                 </button>
               </span>
             </div>
@@ -503,9 +552,7 @@ export function ChatComposer({
         </div>
       </div>
       <AnimatePresence>
-        {helpOpen ? (
-          <HelpPanel commands={helpCommands} onClose={() => setHelpOpen(false)} />
-        ) : null}
+        {helpOpen ? <HelpPanel commands={helpCommands} onClose={() => setHelpOpen(false)} /> : null}
       </AnimatePresence>
       <AnimatePresence>
         {activeNotice ? (
@@ -521,7 +568,10 @@ export function ChatComposer({
             onAnimationComplete={() => {
               if (activeNotice.tone === "ok") {
                 // Auto-dismiss success notices after a beat.
-                window.setTimeout(() => setNotice((current) => (current === activeNotice ? null : current)), 2400);
+                window.setTimeout(
+                  () => setNotice((current) => (current === activeNotice ? null : current)),
+                  2400,
+                );
               }
             }}
           >
@@ -608,7 +658,11 @@ function ConfirmBar({
  * in-progress upload does), and removing it clears the way. Styled with the
  * package's og-* tokens so it themes in any consumer.
  */
-function AttachmentChips({ attachments, onRemove, onRetry }: {
+function AttachmentChips({
+  attachments,
+  onRemove,
+  onRetry,
+}: {
   attachments: UseFileAttachmentsResult["attachments"];
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
@@ -617,21 +671,28 @@ function AttachmentChips({ attachments, onRemove, onRetry }: {
     <div className="flex flex-wrap gap-2 border-b border-og-border px-3 py-2">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
-        const statusText = attachment.status === "uploading"
-          ? "Uploading"
-          : failed
-            ? attachment.error || "Upload failed"
-            : formatBytes(attachment.sizeBytes);
+        const statusText =
+          attachment.status === "uploading"
+            ? "Uploading"
+            : failed
+              ? attachment.error || "Upload failed"
+              : formatBytes(attachment.sizeBytes);
         return (
           <div
             key={attachment.id}
             className={cn(
               "flex min-w-0 max-w-[240px] items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
-              failed ? "border-og-status-failed/40 bg-og-status-failed/10" : "border-og-border bg-og-surface-2",
+              failed
+                ? "border-og-status-failed/40 bg-og-status-failed/10"
+                : "border-og-border bg-og-surface-2",
             )}
           >
             {attachment.previewUrl ? (
-              <img src={attachment.previewUrl} alt="" className="size-8 shrink-0 rounded object-cover" />
+              <img
+                src={attachment.previewUrl}
+                alt=""
+                className="size-8 shrink-0 rounded object-cover"
+              />
             ) : attachment.contentType.startsWith("image/") ? (
               <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
             ) : (
@@ -640,13 +701,18 @@ function AttachmentChips({ attachments, onRemove, onRetry }: {
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium text-og-fg">{attachment.name}</div>
               <div
-                className={cn("truncate text-og-xs", failed ? "text-og-status-failed" : "text-og-fg-subtle")}
+                className={cn(
+                  "truncate text-og-xs",
+                  failed ? "text-og-status-failed" : "text-og-fg-subtle",
+                )}
                 title={failed ? statusText : undefined}
               >
                 {statusText}
               </div>
             </div>
-            {attachment.status === "uploading" ? <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" /> : null}
+            {attachment.status === "uploading" ? (
+              <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
+            ) : null}
             {failed && onRetry ? (
               <button
                 type="button"
@@ -674,7 +740,13 @@ function AttachmentChips({ attachments, onRemove, onRetry }: {
 }
 
 /** The in-composer /help panel, rendered entirely from the registry. */
-function HelpPanel({ commands, onClose }: { commands: readonly SlashCommand[]; onClose: () => void }) {
+function HelpPanel({
+  commands,
+  onClose,
+}: {
+  commands: readonly SlashCommand[];
+  onClose: () => void;
+}) {
   return (
     <motion.div
       initial={{ opacity: 0, height: 0 }}
@@ -684,7 +756,11 @@ function HelpPanel({ commands, onClose }: { commands: readonly SlashCommand[]; o
     >
       <div className="flex items-center justify-between border-b border-og-border px-3 py-1.5">
         <span className="text-og-sm font-medium text-og-fg">Commands</span>
-        <button type="button" onClick={onClose} className="text-og-xs text-og-fg-subtle hover:text-og-fg">
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-og-xs text-og-fg-subtle hover:text-og-fg"
+        >
           Close
         </button>
       </div>

@@ -1,4 +1,9 @@
-import type { GitFileDiff, SessionEvent, WorkspaceCaptureManifest, WorkspaceCaptureRepo } from "@opengeni/sdk";
+import type {
+  GitFileDiff,
+  SessionEvent,
+  WorkspaceCaptureManifest,
+  WorkspaceCaptureRepo,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
@@ -44,7 +49,10 @@ function normalizeRoot(root: string): string {
 }
 
 /** Find the capture repo matching `repoPath` (default workspace root). */
-function repoForPath(manifest: WorkspaceCaptureManifest, repoPath: string): WorkspaceCaptureRepo | null {
+function repoForPath(
+  manifest: WorkspaceCaptureManifest,
+  repoPath: string,
+): WorkspaceCaptureRepo | null {
   const want = normalizeRoot(repoPath);
   const exact = manifest.repos.find((r) => normalizeRoot(r.root) === want);
   if (exact) return exact;

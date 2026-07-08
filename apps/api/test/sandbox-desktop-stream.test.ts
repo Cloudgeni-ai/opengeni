@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { resolveStreamTokenSecret } from "@opengeni/config";
-import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+  testSettings,
+} from "@opengeni/testing";
 import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
@@ -17,7 +21,11 @@ import {
 } from "@opengeni/db";
 import { join } from "node:path";
 import { createRequire } from "node:module";
-import { buildStreamUrl, verifyStreamToken, type EstablishedSandboxSession } from "@opengeni/runtime/sandbox";
+import {
+  buildStreamUrl,
+  verifyStreamToken,
+  type EstablishedSandboxSession,
+} from "@opengeni/runtime/sandbox";
 import { mintDesktopStream } from "../src/sandbox/viewer";
 
 // P4.2 — the pixel DATA PLANE against a REAL lease (pgvector throwaway DB). Drives
@@ -82,28 +90,52 @@ function fakeEstablish(epoch: number): () => Promise<EstablishedSandboxSession> 
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
 // Seed a WARM modal lease (no live box; resume_state is a stub the fake establish
 // ignores). Returns the warm lease snapshot + the session.
-async function seedWarmModalBox(accountId: string, workspaceId: string): Promise<{ session: Awaited<ReturnType<typeof getSession>>; lease: LeaseSnapshot }> {
+async function seedWarmModalBox(
+  accountId: string,
+  workspaceId: string,
+): Promise<{ session: Awaited<ReturnType<typeof getSession>>; lease: LeaseSnapshot }> {
   const created = await createSession(db, {
-    accountId, workspaceId, initialMessage: "desk", resources: [], metadata: {},
-    model: "m", sandboxBackend: "modal",
+    accountId,
+    workspaceId,
+    initialMessage: "desk",
+    resources: [],
+    metadata: {},
+    model: "m",
+    sandboxBackend: "modal",
   });
   const sandboxGroupId = created.sandboxGroupId;
   const acquired = await acquireLease(db, {
-    accountId, workspaceId, sandboxGroupId, kind: "turn", holderId: "seed-turn",
-    subjectId: created.id, backend: "modal", leaseTtlMs: 5_000,
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    kind: "turn",
+    holderId: "seed-turn",
+    subjectId: created.id,
+    backend: "modal",
+    leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
   const committed = await commitWarmingToWarm(db, {
-    accountId, workspaceId, sandboxGroupId, expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm", dataPlaneUrl: null, resumeBackendId: "modal",
-    resumeState: { backendId: "modal", sessionState: {} }, leaseTtlMs: 5_000,
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    expectedEpoch: acquired.lease.leaseEpoch,
+    instanceId: "inst-warm",
+    dataPlaneUrl: null,
+    resumeBackendId: "modal",
+    resumeState: { backendId: "modal", sessionState: {} },
+    leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
   // Drop the seed turn holder so the box is warm with refcount accounting intact.
@@ -133,7 +165,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -145,10 +179,17 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     const bus = new MemoryEventBus();
     const viewerId = crypto.randomUUID();
 
-    const mint = await mintDesktopStream({ db, settings, bus }, {
-      accountId, workspaceId, session: session!, viewerId, lease,
-      establish: fakeEstablish(lease.leaseEpoch),
-    });
+    const mint = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId,
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
 
     expect(mint).not.toBeNull();
     expect(mint!.url).toBe(`wss://box-epoch-${lease.leaseEpoch}.modal.host/`);
@@ -171,19 +212,43 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const created = await createSession(db, {
-      accountId, workspaceId, initialMessage: "x", resources: [], metadata: {}, model: "m", sandboxBackend: "modal",
+      accountId,
+      workspaceId,
+      initialMessage: "x",
+      resources: [],
+      metadata: {},
+      model: "m",
+      sandboxBackend: "modal",
     });
     const session = await getSession(db, workspaceId, created.id);
     // A synthetic cold lease snapshot (no box).
     const coldLease: LeaseSnapshot = {
-      id: crypto.randomUUID(), sandboxGroupId: created.sandboxGroupId, liveness: "cold",
-      refcount: 0, turnHolders: 0, viewerHolders: 0, instanceId: null, backend: "modal", os: "linux",
-      dataPlaneUrl: null, leaseEpoch: 0, resumeBackendId: null, resumeState: null, expiresAt: new Date(),
+      id: crypto.randomUUID(),
+      sandboxGroupId: created.sandboxGroupId,
+      liveness: "cold",
+      refcount: 0,
+      turnHolders: 0,
+      viewerHolders: 0,
+      instanceId: null,
+      backend: "modal",
+      os: "linux",
+      dataPlaneUrl: null,
+      leaseEpoch: 0,
+      resumeBackendId: null,
+      resumeState: null,
+      expiresAt: new Date(),
     };
-    const mint = await mintDesktopStream({ db, settings }, {
-      accountId, workspaceId, session: session!, viewerId: crypto.randomUUID(), lease: coldLease,
-      establish: fakeEstablish(0),
-    });
+    const mint = await mintDesktopStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease: coldLease,
+        establish: fakeEstablish(0),
+      },
+    );
     expect(mint).toBeNull();
   }, 60_000);
 
@@ -192,13 +257,22 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
     const offSettings = testSettings({
-      sandboxBackend: "modal", sandboxOwnershipEnabled: true, sandboxDesktopEnabled: false,
+      sandboxBackend: "modal",
+      sandboxOwnershipEnabled: true,
+      sandboxDesktopEnabled: false,
       delegationSecret: "p42-test-secret",
     });
-    const mint = await mintDesktopStream({ db, settings: offSettings }, {
-      accountId, workspaceId, session: session!, viewerId: crypto.randomUUID(), lease,
-      establish: fakeEstablish(lease.leaseEpoch),
-    });
+    const mint = await mintDesktopStream(
+      { db, settings: offSettings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
     expect(mint).toBeNull();
   }, 60_000);
 
@@ -207,13 +281,23 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     const { accountId, workspaceId } = await freshWorkspace();
     const { session, lease } = await seedWarmModalBox(accountId, workspaceId);
     const noSecret = testSettings({
-      sandboxBackend: "modal", sandboxOwnershipEnabled: true, sandboxDesktopEnabled: true,
-      delegationSecret: undefined, streamTokenSecret: undefined,
+      sandboxBackend: "modal",
+      sandboxOwnershipEnabled: true,
+      sandboxDesktopEnabled: true,
+      delegationSecret: undefined,
+      streamTokenSecret: undefined,
     });
-    const mint = await mintDesktopStream({ db, settings: noSecret }, {
-      accountId, workspaceId, session: session!, viewerId: crypto.randomUUID(), lease,
-      establish: fakeEstablish(lease.leaseEpoch),
-    });
+    const mint = await mintDesktopStream(
+      { db, settings: noSecret },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
     expect(mint).toBeNull();
   }, 60_000);
 
@@ -225,10 +309,17 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     const viewerId = crypto.randomUUID();
 
     // First mint under the original epoch (records the URL; no rotation event).
-    const first = await mintDesktopStream({ db, settings, bus }, {
-      accountId, workspaceId, session: session!, viewerId, lease,
-      establish: fakeEstablish(lease.leaseEpoch),
-    });
+    const first = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId,
+        lease,
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
     expect(first).not.toBeNull();
 
     // FORCE a box rollover: the recovery primitive re-established the box under a
@@ -241,11 +332,18 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
 
     // The next mint, with previousEpoch = the old epoch, re-resolves under the new
     // epoch (fresh host) AND emits stream.url.rotated.
-    const second = await mintDesktopStream({ db, settings, bus }, {
-      accountId, workspaceId, session: session!, viewerId, lease: rolled!,
-      previousEpoch: lease.leaseEpoch,
-      establish: fakeEstablish(newEpoch),
-    });
+    const second = await mintDesktopStream(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId,
+        lease: rolled!,
+        previousEpoch: lease.leaseEpoch,
+        establish: fakeEstablish(newEpoch),
+      },
+    );
     expect(second).not.toBeNull();
     expect(second!.url).toBe(`wss://box-epoch-${newEpoch}.modal.host/`);
     expect(second!.url).not.toBe(first!.url); // a genuinely fresh URL
@@ -254,7 +352,13 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     // The rotation event fired with the fresh cell.
     const rotated = bus.published.flat().filter((e) => e.type === "stream.url.rotated");
     expect(rotated.length).toBe(1);
-    const payload = rotated[0]!.payload as { url: string; token: string; leaseEpoch: number; transport: string; viewerId: string };
+    const payload = rotated[0]!.payload as {
+      url: string;
+      token: string;
+      leaseEpoch: number;
+      transport: string;
+      viewerId: string;
+    };
     expect(payload.url).toBe(second!.url);
     expect(payload.leaseEpoch).toBe(newEpoch);
     expect(payload.transport).toBe("vnc-ws");
@@ -278,11 +382,17 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     // A STALE caller still holding the OLD lease snapshot tries to mint. exposeStreamPort
     // succeeds (it just resolves a port), but recordLeaseDataPlaneUrl is epoch-fenced:
     // the stale write matches ZERO rows, so the live URL is untouched.
-    const staleMint = await mintDesktopStream({ db, settings }, {
-      accountId, workspaceId, session: session!, viewerId: crypto.randomUUID(),
-      lease, // the OLD snapshot (old epoch)
-      establish: fakeEstablish(lease.leaseEpoch),
-    });
+    const staleMint = await mintDesktopStream(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: session!,
+        viewerId: crypto.randomUUID(),
+        lease, // the OLD snapshot (old epoch)
+        establish: fakeEstablish(lease.leaseEpoch),
+      },
+    );
     // The stale mint returns a cell (for its own dead epoch), but the LIVE row is
     // never overwritten — the fence held.
     expect(staleMint).not.toBeNull();
@@ -300,8 +410,12 @@ describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
     // No acknowledgment recorded → the negotiation read reports acknowledged:false,
     // so the handshake would never fold a minted cell in. Record then re-read.
     const before = await recordStreamAcknowledgment(db, {
-      accountId, workspaceId, sandboxGroupId: session!.sandboxGroupId, subjectId: "subject",
-      acknowledgeUnredacted: true, acknowledgeShared: false,
+      accountId,
+      workspaceId,
+      sandboxGroupId: session!.sandboxGroupId,
+      subjectId: "subject",
+      acknowledgeUnredacted: true,
+      acknowledgeShared: false,
     });
     expect(before.acknowledgedUnredacted).toBe(true);
   }, 60_000);
@@ -325,13 +439,20 @@ const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 
 // Open the wss tunnel with the 'binary' subprotocol and require the RFB server
 // banner (the noVNC WS upgrade returns 101 then the VNC ProtocolVersion bytes).
-async function probeRfbBanner(url: string, timeoutMs = 15_000): Promise<{ ok: boolean; banner: string }> {
+async function probeRfbBanner(
+  url: string,
+  timeoutMs = 15_000,
+): Promise<{ ok: boolean; banner: string }> {
   return await new Promise((resolve) => {
     let settled = false;
     const finish = (ok: boolean, banner: string) => {
       if (settled) return;
       settled = true;
-      try { ws.close(); } catch { /* noop */ }
+      try {
+        ws.close();
+      } catch {
+        /* noop */
+      }
       resolve({ ok, banner });
     };
     const ws = new WebSocket(url, ["binary"]);
@@ -345,113 +466,132 @@ async function probeRfbBanner(url: string, timeoutMs = 15_000): Promise<{ ok: bo
         finish(true, head);
       }
     });
-    ws.addEventListener("error", () => { clearTimeout(timer); finish(false, ""); });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      finish(false, "");
+    });
   });
 }
 
 describe.if(LIVE)("P4.2 GATED live-Modal — RFB pixels through the real Modal tunnel (D3)", () => {
-  test("build desktop image → boot → ensureDisplayStack → exposeStreamPort URL → WS client → RFB banner", async () => {
-    const require = createRequire(join(REPO_ROOT, "spikes/provider-credentialed/desktop-on-gvisor/x.cjs"));
-    const { ModalClient } = require("modal") as typeof import("modal");
+  test(
+    "build desktop image → boot → ensureDisplayStack → exposeStreamPort URL → WS client → RFB banner",
+    async () => {
+      const require = createRequire(
+        join(REPO_ROOT, "spikes/provider-credentialed/desktop-on-gvisor/x.cjs"),
+      );
+      const { ModalClient } = require("modal") as typeof import("modal");
 
-    const APP_NAME = process.env.SPIKE_APP_NAME || "ogtest-p42-pixel-plane";
-    const STREAM_PORT = 6080;
-    const BUILD_TIMEOUT_MS = 25 * 60 * 1000;
-    const BOX_TIMEOUT_MS = 12 * 60 * 1000;
+      const APP_NAME = process.env.SPIKE_APP_NAME || "ogtest-p42-pixel-plane";
+      const STREAM_PORT = 6080;
+      const BUILD_TIMEOUT_MS = 25 * 60 * 1000;
+      const BOX_TIMEOUT_MS = 12 * 60 * 1000;
 
-    const modal = new ModalClient({ logLevel: "info" });
-    const app = await modal.apps.fromName(APP_NAME, { createIfMissing: true });
+      const modal = new ModalClient({ logLevel: "info" });
+      const app = await modal.apps.fromName(APP_NAME, { createIfMissing: true });
 
-    const aptRetry = (pkgs: string) =>
-      `export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; set -eux; for attempt in 1 2 3; do ` +
-      `rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; ` +
-      `apt-get update && apt-get install -y --no-install-recommends ${pkgs} && break; ` +
-      `if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); done; rm -rf /var/lib/apt/lists/*`;
+      const aptRetry = (pkgs: string) =>
+        `export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; set -eux; for attempt in 1 2 3; do ` +
+        `rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; ` +
+        `apt-get update && apt-get install -y --no-install-recommends ${pkgs} && break; ` +
+        `if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); done; rm -rf /var/lib/apt/lists/*`;
 
-    const upScript = await Bun.file(join(REPO_ROOT, "docker/desktop/opengeni-desktop-up.sh")).text();
-    const upOpenbox = upScript.replace("dbus-launch --exit-with-session startxfce4", "dbus-launch --exit-with-session openbox");
-    const upB64 = Buffer.from(upOpenbox, "utf8").toString("base64");
+      const upScript = await Bun.file(
+        join(REPO_ROOT, "docker/desktop/opengeni-desktop-up.sh"),
+      ).text();
+      const upOpenbox = upScript.replace(
+        "dbus-launch --exit-with-session startxfce4",
+        "dbus-launch --exit-with-session openbox",
+      );
+      const upB64 = Buffer.from(upOpenbox, "utf8").toString("base64");
 
-    const layers = [
-      `RUN ${aptRetry(
-        "bash ca-certificates coreutils curl git net-tools netcat-openbsd wget gnupg xxd file " +
-          "xvfb x11-utils x11-xserver-utils xauth dbus-x11 openbox " +
-          "libgl1-mesa-dri fonts-liberation python3 xterm x11vnc xdotool scrot",
-      )}`,
-      `RUN set -eux; git clone --depth 1 -b v1.5.0 https://github.com/novnc/noVNC.git /opt/noVNC; ` +
-        `git clone --depth 1 -b v0.12.0 https://github.com/novnc/websockify.git /opt/noVNC/utils/websockify; ` +
-        `ln -sf /opt/noVNC/vnc.html /opt/noVNC/index.html`,
-      `RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; ln -sf /var/lib/dbus/machine-id /etc/machine-id`,
-      `RUN set -eux; mkdir -p /usr/local/bin; echo ${upB64} | base64 -d > /usr/local/bin/opengeni-desktop-up; ` +
-        `chmod 0755 /usr/local/bin/opengeni-desktop-up; bash -n /usr/local/bin/opengeni-desktop-up`,
-      `ENV HOME=/workspace DISPLAY=:0 OPENGENI_DESKTOP_STREAM_PORT=${STREAM_PORT}`,
-      `WORKDIR /workspace`,
-    ];
+      const layers = [
+        `RUN ${aptRetry(
+          "bash ca-certificates coreutils curl git net-tools netcat-openbsd wget gnupg xxd file " +
+            "xvfb x11-utils x11-xserver-utils xauth dbus-x11 openbox " +
+            "libgl1-mesa-dri fonts-liberation python3 xterm x11vnc xdotool scrot",
+        )}`,
+        `RUN set -eux; git clone --depth 1 -b v1.5.0 https://github.com/novnc/noVNC.git /opt/noVNC; ` +
+          `git clone --depth 1 -b v0.12.0 https://github.com/novnc/websockify.git /opt/noVNC/utils/websockify; ` +
+          `ln -sf /opt/noVNC/vnc.html /opt/noVNC/index.html`,
+        `RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; ln -sf /var/lib/dbus/machine-id /etc/machine-id`,
+        `RUN set -eux; mkdir -p /usr/local/bin; echo ${upB64} | base64 -d > /usr/local/bin/opengeni-desktop-up; ` +
+          `chmod 0755 /usr/local/bin/opengeni-desktop-up; bash -n /usr/local/bin/opengeni-desktop-up`,
+        `ENV HOME=/workspace DISPLAY=:0 OPENGENI_DESKTOP_STREAM_PORT=${STREAM_PORT}`,
+        `WORKDIR /workspace`,
+      ];
 
-    let image = modal.images.fromRegistry("ubuntu:22.04");
-    const buildStart = Date.now();
-    for (const layer of layers) {
-      if (Date.now() - buildStart > BUILD_TIMEOUT_MS) throw new Error("build budget exhausted");
-      image = await image.dockerfileCommands(layer.split("\n")).build(app);
-    }
+      let image = modal.images.fromRegistry("ubuntu:22.04");
+      const buildStart = Date.now();
+      for (const layer of layers) {
+        if (Date.now() - buildStart > BUILD_TIMEOUT_MS) throw new Error("build budget exhausted");
+        image = await image.dockerfileCommands(layer.split("\n")).build(app);
+      }
 
-    const sandbox = await modal.sandboxes.create(app, image, {
-      timeoutMs: BOX_TIMEOUT_MS,
-      encryptedPorts: [STREAM_PORT],
-      command: ["sleep", "infinity"],
-    });
+      const sandbox = await modal.sandboxes.create(app, image, {
+        timeoutMs: BOX_TIMEOUT_MS,
+        encryptedPorts: [STREAM_PORT],
+        command: ["sleep", "infinity"],
+      });
 
-    const drain = async (stream: ReadableStream<string>) => {
-      let out = "";
-      const reader = stream.getReader();
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          out += value;
+      const drain = async (stream: ReadableStream<string>) => {
+        let out = "";
+        const reader = stream.getReader();
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            out += value;
+          }
+        } catch {
+          /* noop */
         }
-      } catch { /* noop */ }
-      return out;
-    };
-    const run = async (command: string) => {
-      const proc = await sandbox.exec(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
-      const [o, e] = await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
-      const exitCode = await proc.wait();
-      return { exitCode, output: `${o}\n${e}` };
-    };
-
-    try {
-      // ensureDisplayStack equiv: bring the Xvfb→openbox→x11vnc→websockify:6080 chain up.
-      const up = await run(`STREAM_PORT=${STREAM_PORT} opengeni-desktop-up`);
-      expect(up.exitCode).toBe(0);
-      expect(up.output).toContain("OPENGENI_DESKTOP_UP");
-
-      // exposeStreamPort equiv: resolve the REAL Modal provider tunnel for 6080.
-      // (The raw Modal SDK sandbox exposes tunnels(); our ModalSandboxClient wraps
-      // exactly this in resolveExposedPort. We assemble the URL with the SAME
-      // buildStreamUrl the data plane uses — proving end-to-end addressing.)
-      const tunnels = await sandbox.tunnels(30_000);
-      const tunnel = tunnels[STREAM_PORT];
-      expect(tunnel?.host).toBeTruthy();
-      const endpoint = {
-        host: tunnel.host as string,
-        port: (tunnel.port as number) ?? 443,
-        tls: true,
-        query: "",
+        return out;
       };
-      const wssUrl = buildStreamUrl(endpoint);
-      expect(wssUrl.startsWith("wss://")).toBe(true);
+      const run = async (command: string) => {
+        const proc = await sandbox.exec(["bash", "-lc", command], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [o, e] = await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+        const exitCode = await proc.wait();
+        return { exitCode, output: `${o}\n${e}` };
+      };
 
-      // THE PROOF: a WS client connects to the DIRECT Modal tunnel and receives
-      // the RFB ProtocolVersion banner (101 upgrade + "RFB 003.00x") — pixels
-      // streaming straight from Modal, no OpenGeni in the pixel path.
-      const rfb = await probeRfbBanner(wssUrl, 20_000);
-      expect(rfb.ok).toBe(true);
-      expect(rfb.banner).toMatch(/^RFB \d{3}\.\d{3}/);
-    } finally {
-      await sandbox.terminate().catch(() => undefined);
-    }
-  }, 40 * 60 * 1000);
+      try {
+        // ensureDisplayStack equiv: bring the Xvfb→openbox→x11vnc→websockify:6080 chain up.
+        const up = await run(`STREAM_PORT=${STREAM_PORT} opengeni-desktop-up`);
+        expect(up.exitCode).toBe(0);
+        expect(up.output).toContain("OPENGENI_DESKTOP_UP");
+
+        // exposeStreamPort equiv: resolve the REAL Modal provider tunnel for 6080.
+        // (The raw Modal SDK sandbox exposes tunnels(); our ModalSandboxClient wraps
+        // exactly this in resolveExposedPort. We assemble the URL with the SAME
+        // buildStreamUrl the data plane uses — proving end-to-end addressing.)
+        const tunnels = await sandbox.tunnels(30_000);
+        const tunnel = tunnels[STREAM_PORT];
+        expect(tunnel?.host).toBeTruthy();
+        const endpoint = {
+          host: tunnel.host as string,
+          port: (tunnel.port as number) ?? 443,
+          tls: true,
+          query: "",
+        };
+        const wssUrl = buildStreamUrl(endpoint);
+        expect(wssUrl.startsWith("wss://")).toBe(true);
+
+        // THE PROOF: a WS client connects to the DIRECT Modal tunnel and receives
+        // the RFB ProtocolVersion banner (101 upgrade + "RFB 003.00x") — pixels
+        // streaming straight from Modal, no OpenGeni in the pixel path.
+        const rfb = await probeRfbBanner(wssUrl, 20_000);
+        expect(rfb.ok).toBe(true);
+        expect(rfb.banner).toMatch(/^RFB \d{3}\.\d{3}/);
+      } finally {
+        await sandbox.terminate().catch(() => undefined);
+      }
+    },
+    40 * 60 * 1000,
+  );
 });
 
 describe.if(!LIVE)("P4.2 live-Modal RFB proof (skipped without OPENGENI_P42_LIVE_MODAL=1)", () => {

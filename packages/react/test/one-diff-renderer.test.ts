@@ -8,7 +8,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const src = (rel: string) => readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
+const src = (rel: string) =>
+  readFileSync(fileURLToPath(new URL(`../src/${rel}`, import.meta.url)), "utf8");
 
 describe("D3: one diff renderer", () => {
   test("diff-view.tsx is a deprecated alias with NO hand-rolled hunk renderer", () => {
@@ -16,7 +17,12 @@ describe("D3: one diff renderer", () => {
     expect(code).toContain("@deprecated");
     expect(code).toContain("PierreDiff");
     // The removed hand-rolled renderer's building blocks must be gone.
-    for (const gone of ["function FileDiffBlock", "function UnifiedHunks", "function SplitHunks", "data-opengeni-diff"]) {
+    for (const gone of [
+      "function FileDiffBlock",
+      "function UnifiedHunks",
+      "function SplitHunks",
+      "data-opengeni-diff",
+    ]) {
       expect(code).not.toContain(gone);
     }
   });

@@ -37,9 +37,20 @@ function deps(overrides: Partial<CodexAuthDeps> = {}): { deps: CodexAuthDeps; co
   const counts: Counts = { refresh: 0, record: 0, status: 0, recordArgs: [], statusArgs: [] };
   const base: CodexAuthDeps = {
     loadCredential: async () => makeCred(),
-    refresh: async () => { counts.refresh += 1; return { accessToken: "AC2", refreshToken: "RF2", idToken: "ID2" }; },
-    recordRefresh: async (_db, input) => { counts.record += 1; counts.recordArgs.push({ id: input.id, version: input.version }); return true; },
-    setStatus: async (_db, _ws, status, _err, expected) => { counts.status += 1; counts.statusArgs.push({ status, expected }); return true; },
+    refresh: async () => {
+      counts.refresh += 1;
+      return { accessToken: "AC2", refreshToken: "RF2", idToken: "ID2" };
+    },
+    recordRefresh: async (_db, input) => {
+      counts.record += 1;
+      counts.recordArgs.push({ id: input.id, version: input.version });
+      return true;
+    },
+    setStatus: async (_db, _ws, status, _err, expected) => {
+      counts.status += 1;
+      counts.statusArgs.push({ status, expected });
+      return true;
+    },
     encrypt: () => "v1:enc",
     keyBytes: () => new Uint8Array(32),
     ...overrides,
@@ -57,7 +68,9 @@ describe("buildCodexTokenResolver", () => {
   });
 
   test("refreshes and persists when the token is within the expiry window", async () => {
-    const { deps: d, counts } = deps({ loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }) });
+    const { deps: d, counts } = deps({
+      loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
+    });
     const resolver = buildCodexTokenResolver(db, settings, "ws_stale", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("AC2");
@@ -67,10 +80,16 @@ describe("buildCodexTokenResolver", () => {
 
   test("single-flight: two concurrent getToken() trigger exactly one refresh", async () => {
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const { deps: d, counts } = deps({
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
-      refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
+      refresh: async () => {
+        counts.refresh += 1;
+        await gate;
+        return { accessToken: "AC2" };
+      },
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_concurrent", "cred_1", d);
     const both = Promise.all([resolver.getToken(), resolver.getToken()]);
@@ -83,10 +102,16 @@ describe("buildCodexTokenResolver", () => {
 
   test("single-flight: a forced refresh concurrent with another refresh does not double-spend the token", async () => {
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const { deps: d, counts } = deps({
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
-      refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
+      refresh: async () => {
+        counts.refresh += 1;
+        await gate;
+        return { accessToken: "AC2" };
+      },
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_force_concurrent", "cred_1", d);
     const both = Promise.all([resolver.refresh(), resolver.refresh()]); // two 401 retries at once
@@ -98,7 +123,10 @@ describe("buildCodexTokenResolver", () => {
   test("a permanent refresh failure marks needs_relogin and rethrows", async () => {
     const { deps: d, counts } = deps({
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
-      refresh: async () => { counts.refresh += 1; throw new CodexReloginRequired("expired"); },
+      refresh: async () => {
+        counts.refresh += 1;
+        throw new CodexReloginRequired("expired");
+      },
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_relogin", "cred_1", d);
     await expect(resolver.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
@@ -113,7 +141,8 @@ describe("buildCodexTokenResolver", () => {
 
   test("P1-c: the refresh write is compare-and-set on the loaded id+version", async () => {
     const { deps: d, counts } = deps({
-      loadCredential: async () => makeCred({ id: "cred_A", version: 7, expiresAt: new Date(Date.now() - 1000) }),
+      loadCredential: async () =>
+        makeCred({ id: "cred_A", version: 7, expiresAt: new Date(Date.now() - 1000) }),
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_cas", "cred_1", d);
     await resolver.getToken();
@@ -129,9 +158,17 @@ describe("buildCodexTokenResolver", () => {
         load += 1;
         return load === 1
           ? makeCred({ id: "cred_old", version: 1, expiresAt: new Date(Date.now() - 1000) })
-          : makeCred({ id: "cred_new", version: 1, tokens: { accessToken: "NEW", refreshToken: "RFn", idToken: "IDn" }, status: "active" });
+          : makeCred({
+              id: "cred_new",
+              version: 1,
+              tokens: { accessToken: "NEW", refreshToken: "RFn", idToken: "IDn" },
+              status: "active",
+            });
       },
-      recordRefresh: async () => { counts.record += 1; return false; }, // CAS miss
+      recordRefresh: async () => {
+        counts.record += 1;
+        return false;
+      }, // CAS miss
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect", "cred_1", d);
     const token = await resolver.getToken();
@@ -148,26 +185,41 @@ describe("buildCodexTokenResolver", () => {
           ? makeCred({ id: "cred_old", version: 3, expiresAt: new Date(Date.now() - 1000) })
           : null; // disconnected; nothing to fall back to
       },
-      recordRefresh: async () => { counts.record += 1; return false; }, // CAS miss
+      recordRefresh: async () => {
+        counts.record += 1;
+        return false;
+      }, // CAS miss
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_gone", "cred_1", d);
     await expect(resolver.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
     // The needs_relogin stamp is compare-and-set on the OLD id+version, so it
     // can never clobber a credential that replaced it.
-    expect(counts.statusArgs).toEqual([{ status: "needs_relogin", expected: { id: "cred_old", version: 3 } }]);
+    expect(counts.statusArgs).toEqual([
+      { status: "needs_relogin", expected: { id: "cred_old", version: 3 } },
+    ]);
   });
 
   test("P1-b: a reconnect's new row does NOT coalesce onto the old in-flight refresh", async () => {
     let release: () => void = () => {};
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let load = 0;
     const { deps: d, counts } = deps({
       loadCredential: async () => {
         load += 1;
         // first caller loads the old row; the second (post-reconnect) loads a new row id
-        return makeCred({ id: load === 1 ? "cred_old" : "cred_new", version: 1, expiresAt: new Date(Date.now() - 1000) });
+        return makeCred({
+          id: load === 1 ? "cred_old" : "cred_new",
+          version: 1,
+          expiresAt: new Date(Date.now() - 1000),
+        });
       },
-      refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
+      refresh: async () => {
+        counts.refresh += 1;
+        await gate;
+        return { accessToken: "AC2" };
+      },
     });
     const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_inflight", "cred_1", d);
     const both = Promise.all([resolver.refresh(), resolver.refresh()]);

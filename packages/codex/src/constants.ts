@@ -47,10 +47,10 @@ export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when
 // ── Apps / connectors MCP (spec §1.10, §E) ───────────────────────────────────
 // One server-side MCP exposes ALL the user's ChatGPT/Codex connectors
 // (gmail/github/linear/slack/sentry/drive/calendar/…). Streamable HTTP, always.
-export const CODEX_APPS_MCP_SERVER_ID = "codex_apps";        // tools surface as mcp__codex_apps__<tool>
-export const CODEX_APPS_MCP_SERVER_NAME = "codex_apps";      // MCP `name` — MUST equal the id so the SDK namespaces tools as mcp__codex_apps__*
+export const CODEX_APPS_MCP_SERVER_ID = "codex_apps"; // tools surface as mcp__codex_apps__<tool>
+export const CODEX_APPS_MCP_SERVER_NAME = "codex_apps"; // MCP `name` — MUST equal the id so the SDK namespaces tools as mcp__codex_apps__*
 export const CODEX_APPS_MCP_URL = "https://chatgpt.com/backend-api/ps/mcp"; // live URL (NOT /codex, NOT the legacy /wham/apps)
-export const CODEX_APPS_STARTUP_TIMEOUT_MS = 30_000;         // startup_timeout 30s (spec §1.10) — maps to timeoutMs on this server only
+export const CODEX_APPS_STARTUP_TIMEOUT_MS = 30_000; // startup_timeout 30s (spec §1.10) — maps to timeoutMs on this server only
 // Connector scopes that the apps MCP requires. Present ONLY when granted at
 // browser-authorize time; the device-code path CANNOT be confirmed to grant
 // them, so treat connector availability as runtime-discovered (spec §1.10 / §E).

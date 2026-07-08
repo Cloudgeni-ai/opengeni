@@ -10,13 +10,7 @@ import { cn } from "@/lib/utils";
    comes from the og status tokens and nowhere else.
    -------------------------------------------------------------------------- */
 
-export type StatusTone =
-  | "queued"
-  | "running"
-  | "waiting"
-  | "idle"
-  | "failed"
-  | "cancelled";
+export type StatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
 
 export const STATUS_META: Record<StatusTone, { dot: string; text: string; label: string }> = {
   queued: { dot: "bg-status-queued", text: "text-status-queued", label: "Queued" },

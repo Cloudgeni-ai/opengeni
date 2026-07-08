@@ -33,13 +33,22 @@ export type PendingApproval = {
 
 /** The approvals carried by one `session.requiresAction` payload. */
 export function approvalsFromRequiresAction(payload: unknown): PendingApproval[] {
-  const approvals = payload && typeof payload === "object" ? (payload as { approvals?: unknown }).approvals : undefined;
+  const approvals =
+    payload && typeof payload === "object"
+      ? (payload as { approvals?: unknown }).approvals
+      : undefined;
   if (!Array.isArray(approvals)) {
     return [];
   }
   return approvals.map((approval, index) => {
-    const raw = (approval && typeof approval === "object" ? approval : {}) as Record<string, unknown>;
-    const rawItem = raw.rawItem && typeof raw.rawItem === "object" ? raw.rawItem as Record<string, unknown> : {};
+    const raw = (approval && typeof approval === "object" ? approval : {}) as Record<
+      string,
+      unknown
+    >;
+    const rawItem =
+      raw.rawItem && typeof raw.rawItem === "object"
+        ? (raw.rawItem as Record<string, unknown>)
+        : {};
     return {
       id: String(raw.id ?? raw.callId ?? rawItem.callId ?? index),
       name: String(raw.name ?? "approval"),
@@ -61,7 +70,10 @@ export function projectPendingApprovals(events: SessionEvent[]): PendingApproval
         break;
       }
       case "user.approvalDecision": {
-        const payload = event.payload && typeof event.payload === "object" ? event.payload as { approvalId?: unknown } : {};
+        const payload =
+          event.payload && typeof event.payload === "object"
+            ? (event.payload as { approvalId?: unknown })
+            : {};
         if (typeof payload.approvalId === "string") {
           pending = pending.filter((approval) => approval.id !== payload.approvalId);
         }

@@ -24,6 +24,14 @@ export function useScheduledTasks(options: UseScheduledTasksOptions = {}): UseSc
     async () => await client.listScheduledTasks(workspaceId, limit !== undefined ? { limit } : {}),
     [client, workspaceId, limit],
   );
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
-  return { tasks: state.data ?? [], loading: state.loading, error: state.error, refresh: state.refresh };
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
+  return {
+    tasks: state.data ?? [],
+    loading: state.loading,
+    error: state.error,
+    refresh: state.refresh,
+  };
 }

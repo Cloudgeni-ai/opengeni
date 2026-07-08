@@ -1,12 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import {
-  createDb,
-  listCreditBalancesByAccount,
-  type Database,
-  type DbClient,
-} from "../src/index";
+import { createDb, listCreditBalancesByAccount, type Database, type DbClient } from "../src/index";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -30,7 +25,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -54,7 +51,9 @@ describe("observability count helpers", () => {
     `;
 
     const balances = await listCreditBalancesByAccount(db);
-    const byAccount = new Map(balances.map((balance) => [balance.accountId, balance.balanceMicros]));
+    const byAccount = new Map(
+      balances.map((balance) => [balance.accountId, balance.balanceMicros]),
+    );
 
     expect(byAccount.get(accountA!.id)).toBe(750);
     expect(byAccount.get(accountB!.id)).toBe(-250);

@@ -41,7 +41,11 @@ let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -58,19 +62,32 @@ async function warmGroup(
 ): Promise<number> {
   for (const h of holders) {
     await acquireLease(db, {
-      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-      kind: h.kind, holderId: h.holderId, backend: "modal", leaseTtlMs: 90_000,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      kind: h.kind,
+      holderId: h.holderId,
+      backend: "modal",
+      leaseTtlMs: 90_000,
     });
   }
   const committed = await commitWarmingToWarm(db, {
-    accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
-    expectedEpoch: 0, instanceId: "box", leaseTtlMs: 90_000,
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sandboxGroupId: ids.groupId,
+    expectedEpoch: 0,
+    instanceId: "box",
+    leaseTtlMs: 90_000,
   });
   return committed.lease!.leaseEpoch;
 }
 
 // Force the meter cursor back by `secondsAgo` so the next accrue sees elapsed time.
-async function backdateMeterCursor(workspaceId: string, groupId: string, secondsAgo: number): Promise<void> {
+async function backdateMeterCursor(
+  workspaceId: string,
+  groupId: string,
+  secondsAgo: number,
+): Promise<void> {
   await admin`
     update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
@@ -83,7 +100,10 @@ async function readMeterRow(workspaceId: string, groupId: string) {
   return r as { last_meter_tick: number; last_meter_at: Date | null } | undefined;
 }
 
-async function warmSecondsEvents(workspaceId: string, groupId: string): Promise<{ quantity: number; idempotency_key: string }[]> {
+async function warmSecondsEvents(
+  workspaceId: string,
+  groupId: string,
+): Promise<{ quantity: number; idempotency_key: string }[]> {
   const rows = await admin<{ quantity: number; idempotency_key: string }[]>`
     select quantity, idempotency_key from usage_events
     where workspace_id = ${workspaceId}
@@ -129,7 +149,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -141,8 +163,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
 
     // commitWarmingToWarm leaves last_meter_at null → the first tick only seeds.
     const seed = await accrueWarmSeconds(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      expectedEpoch: epoch, warmRateMicrosPerSecond: 0,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
     });
     expect(seed.accrued).toBe(false);
     const afterSeed = await readMeterRow(ws.workspaceId, ws.groupId);
@@ -153,8 +178,11 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     // Backdate the cursor 5s and tick again → 5 warm-seconds accrue at tick 1.
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 5);
     const accrue = await accrueWarmSeconds(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      expectedEpoch: epoch, warmRateMicrosPerSecond: 0,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
     });
     expect(accrue.accrued).toBe(true);
     expect(accrue.seconds).toBeGreaterThanOrEqual(5);
@@ -171,9 +199,21 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const ws = await freshWorkspace();
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
     // Seed + one real accrual at tick 1.
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 10);
-    const first = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    const first = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     expect(first.tick).toBe(1);
     const afterFirst = await warmSecondsEvents(ws.workspaceId, ws.groupId);
     expect(afterFirst).toHaveLength(1);
@@ -185,12 +225,20 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
       update sandbox_leases set last_meter_tick = 0,
         last_meter_at = now() - interval '10 seconds'
       where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
-    const replay = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
-    expect(replay.tick).toBe(1);   // same tick index as `first`
+    const replay = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
+    expect(replay.tick).toBe(1); // same tick index as `first`
     const afterReplay = await warmSecondsEvents(ws.workspaceId, ws.groupId);
     // STILL exactly one event for (group, epoch, tick=1) — onConflictDoNothing.
     expect(afterReplay).toHaveLength(1);
-    expect(afterReplay[0]!.idempotency_key).toBe(`usage:sandbox.warm_seconds:${ws.groupId}:${epoch}:1`);
+    expect(afterReplay[0]!.idempotency_key).toBe(
+      `usage:sandbox.warm_seconds:${ws.groupId}:${epoch}:1`,
+    );
   }, 60_000);
 
   test("(3) SHARED-ONCE: 2 viewer sessions on one shared box → EXACTLY ONE warm-seconds stream (not 2x)", async () => {
@@ -203,13 +251,25 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     ]);
     // Seed + accrue once at the group key. Even with 2 holders, the meter is keyed
     // on the GROUP, so there is one stream.
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 7);
-    const accrue = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    const accrue = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     expect(accrue.accrued).toBe(true);
 
     const events = await warmSecondsEvents(ws.workspaceId, ws.groupId);
-    expect(events).toHaveLength(1);                 // ONE stream, not two
+    expect(events).toHaveLength(1); // ONE stream, not two
     expect(events[0]!.quantity).toBeGreaterThanOrEqual(7);
 
     // listMeterableWarmLeases returns ONE row for the group (not one per session).
@@ -222,29 +282,50 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 5);
     const before = await readMeterRow(ws.workspaceId, ws.groupId);
 
     // A tick at a STALE epoch (epoch - 1) must no-op: wrong fence token.
     const stale = await accrueWarmSeconds(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      expectedEpoch: epoch - 1, warmRateMicrosPerSecond: 0,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch - 1,
+      warmRateMicrosPerSecond: 0,
     });
     expect(stale.accrued).toBe(false);
     expect(await warmSecondsEvents(ws.workspaceId, ws.groupId)).toHaveLength(0);
     const after = await readMeterRow(ws.workspaceId, ws.groupId);
-    expect(after?.last_meter_tick).toBe(before?.last_meter_tick);  // cursor untouched
+    expect(after?.last_meter_tick).toBe(before?.last_meter_tick); // cursor untouched
   }, 60_000);
 
   test("(5) the meter cursor advances one tick per accrual (monotonic last_meter_tick)", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     for (let i = 1; i <= 3; i++) {
       await backdateMeterCursor(ws.workspaceId, ws.groupId, 3);
-      const r = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+      const r = await accrueWarmSeconds(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: epoch,
+        warmRateMicrosPerSecond: 0,
+      });
       expect(r.tick).toBe(i);
     }
     const row = await readMeterRow(ws.workspaceId, ws.groupId);
@@ -280,7 +361,7 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     expect(result.drained.map((d) => d.sandboxGroupId)).not.toContain(turnHeld.groupId);
 
     expect(await readLiveness(ws.workspaceId, viewerOnly.groupId)).toBe("draining"); // drained
-    expect(await readLiveness(ws.workspaceId, turnHeld.groupId)).toBe("warm");       // SPARED
+    expect(await readLiveness(ws.workspaceId, turnHeld.groupId)).toBe("warm"); // SPARED
   }, 60_000);
 
   test("(6b) FORCE-DRAIN by warm-cap: a workspace over its warm-second cap drains viewer-only boxes", async () => {
@@ -289,9 +370,21 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const viewerOnly = { ...ws, groupId: crypto.randomUUID() };
     const epoch = await warmGroup(viewerOnly, [{ kind: "viewer", holderId: "v1" }]);
     // Accrue >= 10 warm-seconds so the cap (5) is exceeded.
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: viewerOnly.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: viewerOnly.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     await backdateMeterCursor(ws.workspaceId, viewerOnly.groupId, 12);
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: viewerOnly.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: viewerOnly.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
 
     // Balance enforcement OFF, but the warm cap (5) is exceeded → force-drain.
     const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
@@ -312,11 +405,20 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const ws = await freshWorkspace();
     await seedBalance(ws.accountId, 1_000_000);
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
-    await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 100 });
+    await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 100,
+    });
     await backdateMeterCursor(ws.workspaceId, ws.groupId, 4);
     const accrue = await accrueWarmSeconds(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
-      expectedEpoch: epoch, warmRateMicrosPerSecond: 100,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 100,
     });
     expect(accrue.accrued).toBe(true);
     expect(accrue.costMicros).toBe(accrue.seconds * 100);
@@ -333,11 +435,17 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     await admin`
       update sandbox_leases set last_meter_tick = 0, last_meter_at = now() - interval '4 seconds'
       where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
-    const replay = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 100 });
+    const replay = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 100,
+    });
     expect(replay.tick).toBe(1);
     const [bal2] = await admin<{ b: number }[]>`
       select coalesce(sum(amount_micros), 0)::bigint as b from credit_ledger_entries where account_id = ${ws.accountId}`;
-    expect(Number(bal2!.b)).toBe(1_000_000 - accrue.costMicros);   // unchanged — no double-debit
+    expect(Number(bal2!.b)).toBe(1_000_000 - accrue.costMicros); // unchanged — no double-debit
   }, 60_000);
 
   test("(8) a NON-warm (draining) lease does not meter and is not listed as meterable", async () => {
@@ -346,7 +454,13 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "t1" }]);
     await admin`update sandbox_leases set liveness='draining'
                 where workspace_id=${ws.workspaceId} and sandbox_group_id=${ws.groupId}`;
-    const accrue = await accrueWarmSeconds(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: epoch, warmRateMicrosPerSecond: 0 });
+    const accrue = await accrueWarmSeconds(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      warmRateMicrosPerSecond: 0,
+    });
     expect(accrue.accrued).toBe(false);
     const meterable = await listMeterableWarmLeases(db);
     expect(meterable.map((m) => m.sandboxGroupId)).not.toContain(ws.groupId);

@@ -6,13 +6,7 @@ import {
   PanelRightCloseIcon,
   XIcon,
 } from "lucide-react";
-import {
-  Group,
-  Panel,
-  Separator,
-  useDefaultLayout,
-  usePanelRef,
-} from "react-resizable-panels";
+import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from "react-resizable-panels";
 import { cn } from "../lib/cn";
 
 export type WorkspaceTab = {
@@ -234,7 +228,11 @@ export function WorkspaceDock({
             title={maximized ? "Restore (Esc)" : "Maximize"}
             label={maximized ? "Restore dock" : "Maximize dock"}
           >
-            {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
+            {maximized ? (
+              <Minimize2Icon className="size-3.5" />
+            ) : (
+              <Maximize2Icon className="size-3.5" />
+            )}
           </ChromeButton>
           {hostControlled ? null : (
             <ChromeButton onClick={collapse} title="Collapse" label="Collapse dock">
@@ -306,11 +304,7 @@ export function WorkspaceDock({
       )}
 
       {/* Maximize overlay: full-workspace surface above everything. */}
-      {maximized && (
-        <div className="fixed inset-0 z-40 flex flex-col bg-og-bg">
-          {dockChrome}
-        </div>
-      )}
+      {maximized && <div className="fixed inset-0 z-40 flex flex-col bg-og-bg">{dockChrome}</div>}
     </div>
   );
 }

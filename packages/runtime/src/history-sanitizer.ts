@@ -84,7 +84,10 @@ function callIdOf(item: unknown): string | undefined {
   // (mirrors the SDK's getToolSearchProviderCallId: providerData.call_id ??
   // providerData.callId ?? call_id ?? callId). Harmless for other item kinds —
   // their ids never live there.
-  const provider = record.providerData as { call_id?: unknown; callId?: unknown } | null | undefined;
+  const provider = record.providerData as
+    | { call_id?: unknown; callId?: unknown }
+    | null
+    | undefined;
   if (provider && typeof provider === "object") {
     if (typeof provider.call_id === "string" && provider.call_id.length > 0) {
       return provider.call_id;
@@ -263,9 +266,11 @@ export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): 
   }
   const record = item as Record<string, unknown>;
   const providerData = record.providerData;
-  const providerHasBlob = !!providerData && typeof providerData === "object"
-    && ("encryptedContent" in (providerData as Record<string, unknown>)
-      || "encrypted_content" in (providerData as Record<string, unknown>));
+  const providerHasBlob =
+    !!providerData &&
+    typeof providerData === "object" &&
+    ("encryptedContent" in (providerData as Record<string, unknown>) ||
+      "encrypted_content" in (providerData as Record<string, unknown>));
   const topLevelHasBlob = "encrypted_content" in record;
   if (!providerHasBlob && !topLevelHasBlob) {
     // Nothing encrypted to strip — return the same reference (byte-identical).
@@ -368,7 +373,11 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
   //    protocol reasoning shape under `rawItem`.
   if (Array.isArray(root.generatedItems)) {
     for (const wrapper of root.generatedItems) {
-      if (wrapper && typeof wrapper === "object" && "rawItem" in (wrapper as Record<string, unknown>)) {
+      if (
+        wrapper &&
+        typeof wrapper === "object" &&
+        "rawItem" in (wrapper as Record<string, unknown>)
+      ) {
         scrubReasoning((wrapper as Record<string, unknown>).rawItem);
       }
     }
@@ -452,7 +461,11 @@ export function neutralizeToolSearchItemsInSerializedRunState(serialized: string
   neutralizeArray(root.originalInput);
   if (Array.isArray(root.generatedItems)) {
     for (const wrapper of root.generatedItems) {
-      if (wrapper && typeof wrapper === "object" && "rawItem" in (wrapper as Record<string, unknown>)) {
+      if (
+        wrapper &&
+        typeof wrapper === "object" &&
+        "rawItem" in (wrapper as Record<string, unknown>)
+      ) {
         neutralize((wrapper as Record<string, unknown>).rawItem);
       }
     }
@@ -573,12 +586,13 @@ export function rewriteComputerCallsToActionsOnly(body: unknown): boolean {
     if (record.type !== "computer_call") {
       continue;
     }
-    const existingActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0
-      ? (record.actions as unknown[])
-      : undefined;
-    const actions = existingActions ?? (
-      record.action !== undefined && record.action !== null ? [record.action] : undefined
-    );
+    const existingActions =
+      Array.isArray(record.actions) && (record.actions as unknown[]).length > 0
+        ? (record.actions as unknown[])
+        : undefined;
+    const actions =
+      existingActions ??
+      (record.action !== undefined && record.action !== null ? [record.action] : undefined);
     if (actions === undefined) {
       // Neither action nor actions present: nothing to normalize.
       continue;
@@ -700,7 +714,7 @@ export function computerCallNormalizingFetch(base: FetchLike): FetchLike {
     // Match any request that mentions either `computer_call` (the action call) or
     // `computer_call_output` (the output/result item). Both strings begin with
     // `"computer_call` so a single prefix-substring check covers both.
-    if (init && typeof init.body === "string" && init.body.includes("\"computer_call")) {
+    if (init && typeof init.body === "string" && init.body.includes('"computer_call')) {
       try {
         const parsed = JSON.parse(init.body) as unknown;
         const changed1 = rewriteComputerCallsToActionsOnly(parsed);

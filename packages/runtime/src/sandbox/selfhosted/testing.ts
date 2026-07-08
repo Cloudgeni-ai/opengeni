@@ -72,7 +72,10 @@ export class MockAgentResponder implements ControlRpc {
     this.hostname = opts.hostname ?? "mock-machine";
     this.execHandler = opts.exec ?? ((req) => defaultEcho(req, this.hostname));
     for (const [path, content] of Object.entries(opts.files ?? {})) {
-      this.files.set(normalize(path), typeof content === "string" ? encoder.encode(content) : content);
+      this.files.set(
+        normalize(path),
+        typeof content === "string" ? encoder.encode(content) : content,
+      );
     }
   }
 
@@ -87,13 +90,27 @@ export class MockAgentResponder implements ControlRpc {
     return bytes ? decoder.decode(bytes) : undefined;
   }
 
-  async request(subject: string, req: ControlRequest, _opts: { timeoutMs: number }): Promise<ControlResponse> {
+  async request(
+    subject: string,
+    req: ControlRequest,
+    _opts: { timeoutMs: number },
+  ): Promise<ControlResponse> {
     this.requests.push({ subject, req });
     if (!this.online) {
-      return errorResponse(req.requestId, ErrorCode.ERROR_CODE_AGENT_OFFLINE, "the enrolled agent is offline", false);
+      return errorResponse(
+        req.requestId,
+        ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+        "the enrolled agent is offline",
+        false,
+      );
     }
     if (this.draining) {
-      return errorResponse(req.requestId, ErrorCode.ERROR_CODE_DRAINING, "the agent is draining", true);
+      return errorResponse(
+        req.requestId,
+        ErrorCode.ERROR_CODE_DRAINING,
+        "the agent is draining",
+        true,
+      );
     }
     const op = req.op;
     if (!op) {
@@ -101,7 +118,10 @@ export class MockAgentResponder implements ControlRpc {
     }
     switch (op.$case) {
       case "ping":
-        return ok(req.requestId, { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } });
+        return ok(req.requestId, {
+          $case: "ping",
+          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+        });
       case "exec": {
         const res = await this.execHandler(op.exec);
         return ok(req.requestId, { $case: "exec", exec: res });
@@ -109,7 +129,12 @@ export class MockAgentResponder implements ControlRpc {
       case "fsRead": {
         const bytes = this.files.get(normalize(op.fsRead.path));
         if (!bytes) {
-          return errorResponse(req.requestId, ErrorCode.ERROR_CODE_NOT_FOUND, `no such file: ${op.fsRead.path}`, false);
+          return errorResponse(
+            req.requestId,
+            ErrorCode.ERROR_CODE_NOT_FOUND,
+            `no such file: ${op.fsRead.path}`,
+            false,
+          );
         }
         const res: FsReadResponse = { content: bytes, totalSize: String(bytes.length) };
         return ok(req.requestId, { $case: "fsRead", fsRead: res });
@@ -147,16 +172,16 @@ export class MockAgentResponder implements ControlRpc {
         const bytes = this.files.get(normalize(op.fsStat.path));
         const res: FsStatResponse = bytes
           ? {
-            exists: true,
-            entry: {
-              name: normalize(op.fsStat.path).split("/").pop() ?? "",
-              path: op.fsStat.path,
-              kind: FsEntryKind.FS_ENTRY_KIND_FILE,
-              size: String(bytes.length),
-              modifiedMs: "0",
-              mode: 0o644,
-            },
-          }
+              exists: true,
+              entry: {
+                name: normalize(op.fsStat.path).split("/").pop() ?? "",
+                path: op.fsStat.path,
+                kind: FsEntryKind.FS_ENTRY_KIND_FILE,
+                size: String(bytes.length),
+                modifiedMs: "0",
+                mode: 0o644,
+              },
+            }
           : { exists: false, entry: undefined };
         return ok(req.requestId, { $case: "fsStat", fsStat: res });
       }
@@ -170,7 +195,13 @@ export class MockAgentResponder implements ControlRpc {
         return ok(req.requestId, {
           $case: "desktopEnsure",
           desktopEnsure: {
-            channel: { channelId: "mock-desktop", workspaceId: "", agentId: "", kind: 1, port: 6080 },
+            channel: {
+              channelId: "mock-desktop",
+              workspaceId: "",
+              agentId: "",
+              kind: 1,
+              port: 6080,
+            },
             display: { id: ":99", width: 1024, height: 768, virtual: true },
           },
         });
@@ -188,7 +219,12 @@ export class MockAgentResponder implements ControlRpc {
         });
       }
       default:
-        return errorResponse(req.requestId, ErrorCode.ERROR_CODE_UNSUPPORTED, `mock does not implement ${op.$case}`, false);
+        return errorResponse(
+          req.requestId,
+          ErrorCode.ERROR_CODE_UNSUPPORTED,
+          `mock does not implement ${op.$case}`,
+          false,
+        );
     }
   }
 }
@@ -211,7 +247,12 @@ function ok(requestId: string, result: NonNullable<ControlResponse["result"]>): 
   return { requestId, error: undefined, result };
 }
 
-function errorResponse(requestId: string, code: ErrorCode, message: string, retryable: boolean): ControlResponse {
+function errorResponse(
+  requestId: string,
+  code: ErrorCode,
+  message: string,
+  retryable: boolean,
+): ControlResponse {
   const error: AgentError = { code, message, retryable, detail: {} };
   return { requestId, error, result: undefined };
 }

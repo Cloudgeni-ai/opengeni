@@ -35,7 +35,9 @@ function normalizeUserCode(raw: string): string {
 /** Coalesce the wire machine (machineName is `string | null`, os is the
  * EnrollmentOs union) into the consent component's prop shape (machineName is a
  * non-null string, os is a plain string). */
-function toConsentMachine(machine: DeviceEnrollmentLookupResponse["machine"]): EnrollmentConsentMachine {
+function toConsentMachine(
+  machine: DeviceEnrollmentLookupResponse["machine"],
+): EnrollmentConsentMachine {
   return {
     machineName: machine.machineName ?? "This machine",
     os: machine.os,
@@ -106,7 +108,11 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
   // preserving the code so they return straight to this page. Mirrors the app's
   // own auth gate (RootRouteComponent renders the sign-in panel at "/").
   if (clientConfig.auth.mode === "managedSession" && !authSession) {
-    return <SignInPrompt userCode={userCode || (userCodeFromUrl ? normalizeUserCode(userCodeFromUrl) : "")} />;
+    return (
+      <SignInPrompt
+        userCode={userCode || (userCodeFromUrl ? normalizeUserCode(userCodeFromUrl) : "")}
+      />
+    );
   }
 
   // No code yet (the user opened the bare /device URL): let them paste it.
@@ -139,7 +145,9 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("approved");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(error instanceof Error ? error.message : "Could not approve this machine. Try again.");
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not approve this machine. Try again.",
+      );
     }
   }
 
@@ -152,7 +160,9 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
       setPhase("denied");
     } catch (error) {
       setPhase("error");
-      setErrorMessage(error instanceof Error ? error.message : "Could not deny this machine. Try again.");
+      setErrorMessage(
+        error instanceof Error ? error.message : "Could not deny this machine. Try again.",
+      );
     }
   }
 
@@ -214,8 +224,8 @@ function SignInPrompt({ userCode }: { userCode: string }) {
         </span>
         <h1 className="text-base font-semibold">Sign in to approve this machine</h1>
         <p className="mx-auto mt-2 max-w-sm text-sm leading-5 text-fg-muted">
-          You need to be signed in to the workspace that owns this machine before you can grant it access. Sign in, then
-          you'll return here to review the request.
+          You need to be signed in to the workspace that owns this machine before you can grant it
+          access. Sign in, then you'll return here to review the request.
         </p>
         <div className="mt-4 flex justify-center">
           <Button asChild>

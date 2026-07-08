@@ -108,7 +108,9 @@ export function useSandboxTerminal(
       .then((res) => {
         if (cancelled) {
           // Raced past unmount — close the orphan we just opened.
-          void client.terminalPtyClose(workspaceId, sessionId, { ptyId: res.ptyId }).catch(() => {});
+          void client
+            .terminalPtyClose(workspaceId, sessionId, { ptyId: res.ptyId })
+            .catch(() => {});
           return;
         }
         openedId = res.ptyId;
@@ -194,19 +196,21 @@ export function useSandboxTerminal(
   const write = useMemo(() => {
     if (!activePtyId || !canWrite || !sessionId) return null;
     return (data: string) => {
-      void client.terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data }).catch((cause) => {
-        // The PTY exec-session was lost on the live box (409/404 — the box rolled
-        // over since the open). Self-heal: drop the stale id and re-open a fresh
-        // PTY against the current box rather than silently swallowing keystrokes.
-        if (
-          cause instanceof OpenGeniApiError &&
-          (cause.status === 409 || cause.status === 404) &&
-          activePtyId === openedPtyId
-        ) {
-          setOpenedPtyId(null);
-          setReopenNonce((n) => n + 1);
-        }
-      });
+      void client
+        .terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data })
+        .catch((cause) => {
+          // The PTY exec-session was lost on the live box (409/404 — the box rolled
+          // over since the open). Self-heal: drop the stale id and re-open a fresh
+          // PTY against the current box rather than silently swallowing keystrokes.
+          if (
+            cause instanceof OpenGeniApiError &&
+            (cause.status === 409 || cause.status === 404) &&
+            activePtyId === openedPtyId
+          ) {
+            setOpenedPtyId(null);
+            setReopenNonce((n) => n + 1);
+          }
+        });
     };
   }, [client, workspaceId, sessionId, activePtyId, canWrite, openedPtyId]);
 

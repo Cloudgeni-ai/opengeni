@@ -17,7 +17,9 @@ function fakeModal() {
   const fromRegistry = mock((_tag: string, _secret: unknown) => fakeImage);
   // The Secret is resolved via the AUTHENTICATED client (client.secrets.fromName),
   // never the static modal.Secret.fromName (which uses getDefaultClient).
-  const secretFromName = mock(async (_name: string, _params?: unknown) => ({ secretId: "sec-fake" }));
+  const secretFromName = mock(async (_name: string, _params?: unknown) => ({
+    secretId: "sec-fake",
+  }));
   const loadModal: ModalModuleLoader = async () =>
     ({
       ModalClient: class {

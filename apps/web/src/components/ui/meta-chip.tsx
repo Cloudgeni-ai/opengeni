@@ -35,7 +35,9 @@ export function MetaChip({
         className,
       )}
     >
-      {dot ? <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", STATUS_META[dot].dot)} /> : null}
+      {dot ? (
+        <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", STATUS_META[dot].dot)} />
+      ) : null}
       <span className="min-w-0 truncate">{children}</span>
     </span>
   );

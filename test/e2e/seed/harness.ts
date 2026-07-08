@@ -39,7 +39,8 @@ export async function resolveWorkspaceId(): Promise<string> {
     );
   }
   const ctx = (await res.json()) as { defaultWorkspaceId?: string };
-  if (!ctx.defaultWorkspaceId) throw new Error("access/me returned no defaultWorkspaceId; set OPENGENI_SEED_WORKSPACE_ID.");
+  if (!ctx.defaultWorkspaceId)
+    throw new Error("access/me returned no defaultWorkspaceId; set OPENGENI_SEED_WORKSPACE_ID.");
   return ctx.defaultWorkspaceId;
 }
 
@@ -59,7 +60,9 @@ export async function waitForSettled(
     if (SETTLED.has(last.status)) return last;
     await new Promise((r) => setTimeout(r, pollMs));
   }
-  throw new Error(`Timed out after ${timeoutMs}ms waiting for session ${sessionId} to settle (last=${last?.status}).`);
+  throw new Error(
+    `Timed out after ${timeoutMs}ms waiting for session ${sessionId} to settle (last=${last?.status}).`,
+  );
 }
 
 /**
@@ -78,9 +81,16 @@ export async function seedSessionWithBash(
     sandboxBackend: "docker",
     metadata: { origin: opts.origin ?? "workbench-seed", seedTitle: opts.title },
   });
-  const settled = await waitForSettled(client, workspaceId, session.id, opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {});
+  const settled = await waitForSettled(
+    client,
+    workspaceId,
+    session.id,
+    opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {},
+  );
   if (settled.status !== "idle") {
-    throw new Error(`Seed "${opts.title}" turn did not reach idle (status=${settled.status}, session=${session.id}).`);
+    throw new Error(
+      `Seed "${opts.title}" turn did not reach idle (status=${settled.status}, session=${session.id}).`,
+    );
   }
   return settled;
 }
@@ -96,7 +106,9 @@ export async function driveBashTurn(
   await client.sendMessage(workspaceId, sessionId, bashTurnPrompt(bashScript));
   const settled = await waitForSettled(client, workspaceId, sessionId, opts);
   if (settled.status !== "idle") {
-    throw new Error(`Follow-up bash turn did not reach idle (status=${settled.status}, session=${sessionId}).`);
+    throw new Error(
+      `Follow-up bash turn did not reach idle (status=${settled.status}, session=${sessionId}).`,
+    );
   }
   return settled;
 }

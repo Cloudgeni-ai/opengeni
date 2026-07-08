@@ -33,13 +33,15 @@ const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;
 
 /** True for a materialized codex_apps connector function tool. */
-export function isCodexAppsFunctionTool(tool: unknown): tool is Tool & { name: string; deferLoading?: boolean } {
+export function isCodexAppsFunctionTool(
+  tool: unknown,
+): tool is Tool & { name: string; deferLoading?: boolean } {
   return (
-    !!tool
-    && typeof tool === "object"
-    && (tool as { type?: unknown }).type === "function"
-    && typeof (tool as { name?: unknown }).name === "string"
-    && (tool as { name: string }).name.startsWith(CODEX_APPS_TOOL_PREFIX)
+    !!tool &&
+    typeof tool === "object" &&
+    (tool as { type?: unknown }).type === "function" &&
+    typeof (tool as { name?: unknown }).name === "string" &&
+    (tool as { name: string }).name.startsWith(CODEX_APPS_TOOL_PREFIX)
   );
 }
 
@@ -47,10 +49,48 @@ export function isCodexAppsFunctionTool(tool: unknown): tool is Tool & { name: s
 // should match on capability words, not drown in glue words (parity with
 // codex-rs, whose search normalizes tokens server-side).
 const STOPWORDS = new Set([
-  "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "by", "at",
-  "is", "are", "be", "do", "does", "my", "me", "your", "you", "it", "its", "this",
-  "that", "from", "as", "up", "out", "all", "some", "any", "can", "will", "would",
-  "should", "want", "need", "please", "user", "users",
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "of",
+  "to",
+  "in",
+  "on",
+  "for",
+  "with",
+  "by",
+  "at",
+  "is",
+  "are",
+  "be",
+  "do",
+  "does",
+  "my",
+  "me",
+  "your",
+  "you",
+  "it",
+  "its",
+  "this",
+  "that",
+  "from",
+  "as",
+  "up",
+  "out",
+  "all",
+  "some",
+  "any",
+  "can",
+  "will",
+  "would",
+  "should",
+  "want",
+  "need",
+  "please",
+  "user",
+  "users",
 ]);
 
 /** Light suffix stemmer so "emails"/"email", "creating"/"create" co-match (min-stem guards, no over-stripping). */
@@ -75,9 +115,15 @@ function tokenize(text: string): string[] {
 /** The searchable text of a connector tool: name (weighted ×2) + description + param names. */
 function toolSearchText(tool: Tool): string {
   const raw = (tool as { name?: string }).name ?? "";
-  const name = raw.startsWith(CODEX_APPS_TOOL_PREFIX) ? raw.slice(CODEX_APPS_TOOL_PREFIX.length) : raw;
-  const description = typeof (tool as { description?: unknown }).description === "string" ? (tool as { description: string }).description : "";
-  const params = (tool as { parameters?: { properties?: Record<string, unknown> } }).parameters?.properties;
+  const name = raw.startsWith(CODEX_APPS_TOOL_PREFIX)
+    ? raw.slice(CODEX_APPS_TOOL_PREFIX.length)
+    : raw;
+  const description =
+    typeof (tool as { description?: unknown }).description === "string"
+      ? (tool as { description: string }).description
+      : "";
+  const params = (tool as { parameters?: { properties?: Record<string, unknown> } }).parameters
+    ?.properties;
   const paramNames = params && typeof params === "object" ? Object.keys(params).join(" ") : "";
   return `${name} ${name} ${description} ${paramNames}`;
 }
@@ -127,12 +173,20 @@ export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool
 function parseSearchArgs(raw: unknown): { query: string; limit: number } {
   let obj: Record<string, unknown> = {};
   try {
-    obj = typeof raw === "string" ? (raw.length ? JSON.parse(raw) : {}) : (raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {});
+    obj =
+      typeof raw === "string"
+        ? raw.length
+          ? JSON.parse(raw)
+          : {}
+        : raw && typeof raw === "object"
+          ? (raw as Record<string, unknown>)
+          : {};
   } catch {
     obj = {};
   }
   const query = typeof obj.query === "string" ? obj.query : "";
-  const limitRaw = typeof obj.limit === "number" && Number.isFinite(obj.limit) ? obj.limit : DEFAULT_SEARCH_LIMIT;
+  const limitRaw =
+    typeof obj.limit === "number" && Number.isFinite(obj.limit) ? obj.limit : DEFAULT_SEARCH_LIMIT;
   return { query, limit: Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.round(limitRaw))) };
 }
 
@@ -147,10 +201,12 @@ function parseSearchArgs(raw: unknown): { query: string; limit: number } {
  */
 export function renderSearchToolDescription(connectorNamespaces: ReadonlySet<string>): string {
   const base =
-    "Search the user's connected app tools by capability. "
-    + "Describe in plain language WHAT you need to do (for example: \"send an email\", \"create a calendar event\") "
-    + "rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
-  const sources = Array.from(connectorNamespaces).filter((n) => typeof n === "string" && n.length > 0).sort();
+    "Search the user's connected app tools by capability. " +
+    'Describe in plain language WHAT you need to do (for example: "send an email", "create a calendar event") ' +
+    "rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
+  const sources = Array.from(connectorNamespaces)
+    .filter((n) => typeof n === "string" && n.length > 0)
+    .sort();
   if (sources.length === 0) {
     return `${base}\nConnected sources: none currently available.`;
   }
@@ -160,7 +216,10 @@ export function renderSearchToolDescription(connectorNamespaces: ReadonlySet<str
 const SEARCH_TOOL_PARAMETERS = {
   type: "object",
   properties: {
-    query: { type: "string", description: "Plain-language description of the capability you need." },
+    query: {
+      type: "string",
+      description: "Plain-language description of the capability you need.",
+    },
     limit: { type: "number", description: "Maximum number of tools to return (default 8)." },
   },
   required: ["query"],
@@ -173,7 +232,10 @@ const SEARCH_TOOL_PARAMETERS = {
  * return — the SDK emits the disclosing `tool_search_output` and flips the loaded
  * gate; returning copies would throw). Stateless — reads the pool per call.
  */
-function codexToolSearchExecutor(args: { availableTools?: Tool[]; toolCall?: { arguments?: unknown } }): Tool[] {
+function codexToolSearchExecutor(args: {
+  availableTools?: Tool[];
+  toolCall?: { arguments?: unknown };
+}): Tool[] {
   const deferred = (args.availableTools ?? []).filter(isCodexAppsFunctionTool);
   if (deferred.length === 0) return [];
   const { query, limit } = parseSearchArgs(args.toolCall?.arguments);
@@ -183,7 +245,9 @@ function codexToolSearchExecutor(args: { availableTools?: Tool[]; toolCall?: { a
 const NO_NAMESPACES: ReadonlySet<string> = new Set();
 
 /** Build the client-executed tool_search tool that discloses codex_apps connectors on demand. */
-export function buildCodexToolSearchTool(connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): Tool {
+export function buildCodexToolSearchTool(
+  connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+): Tool {
   return toolSearchTool({
     execution: "client",
     description: renderSearchToolDescription(connectorNamespaces),
@@ -214,9 +278,15 @@ function isToolSearchTool(tool: unknown): boolean {
  * reflects the LIVE connector namespaces, so an empty turn reads
  * "none currently available".
  */
-export function applyCodexToolSearch(tools: Tool[], connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): Tool[] {
+export function applyCodexToolSearch(
+  tools: Tool[],
+  connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+): Tool[] {
   for (const tool of tools) {
-    if (isCodexAppsFunctionTool(tool) && (tool as { deferLoading?: boolean }).deferLoading !== true) {
+    if (
+      isCodexAppsFunctionTool(tool) &&
+      (tool as { deferLoading?: boolean }).deferLoading !== true
+    ) {
       (tool as { deferLoading?: boolean }).deferLoading = true;
     }
   }
@@ -251,10 +321,16 @@ type CloneCapableAgent = {
  * (prepareAgentTools), so by the time the wrapper post-processes getAllTools the
  * current turn's connector sources are known.
  */
-export function installCodexToolSearch(agent: CloneCapableAgent, connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): void {
+export function installCodexToolSearch(
+  agent: CloneCapableAgent,
+  connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+): void {
   const originalGetAllTools = agent.getAllTools.bind(agent);
   agent.getAllTools = (async (runContext: unknown) =>
-    applyCodexToolSearch(await originalGetAllTools(runContext), connectorNamespaces)) as typeof agent.getAllTools;
+    applyCodexToolSearch(
+      await originalGetAllTools(runContext),
+      connectorNamespaces,
+    )) as typeof agent.getAllTools;
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     const cloneWithToolSearch: NonNullable<CloneCapableAgent["clone"]> = (config: unknown) => {

@@ -19,10 +19,17 @@ export type UseEnvironmentsResult = {
   error: Error | null;
   refresh: () => Promise<void>;
   create: (request: CreateWorkspaceEnvironmentRequest) => Promise<WorkspaceEnvironment | null>;
-  update: (environmentId: string, request: UpdateWorkspaceEnvironmentRequest) => Promise<WorkspaceEnvironment | null>;
+  update: (
+    environmentId: string,
+    request: UpdateWorkspaceEnvironmentRequest,
+  ) => Promise<WorkspaceEnvironment | null>;
   remove: (environmentId: string) => Promise<boolean>;
   /** Set/rotate a variable. Values are write-only — reads expose metadata only. */
-  setVariable: (environmentId: string, name: string, value: string) => Promise<WorkspaceEnvironmentVariableMetadata | null>;
+  setVariable: (
+    environmentId: string,
+    name: string,
+    value: string,
+  ) => Promise<WorkspaceEnvironmentVariableMetadata | null>;
   deleteVariable: (environmentId: string, name: string) => Promise<boolean>;
   mutating: boolean;
   mutationError: Error | null;
@@ -36,8 +43,14 @@ export type UseEnvironmentsResult = {
  */
 export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnvironmentsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listEnvironments(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
+  const load = useCallback(
+    async () => await client.listEnvironments(workspaceId),
+    [client, workspaceId],
+  );
+  const state = usePolledValue(load, {
+    pollIntervalMs: options.pollIntervalMs,
+    enabled: options.enabled,
+  });
   const mutation = useMutationRunner();
 
   const create = useCallback(
@@ -52,8 +65,13 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const update = useCallback(
-    async (environmentId: string, request: UpdateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment | null> => {
-      const result = await mutation.run(() => client.updateEnvironment(workspaceId, environmentId, request));
+    async (
+      environmentId: string,
+      request: UpdateWorkspaceEnvironmentRequest,
+    ): Promise<WorkspaceEnvironment | null> => {
+      const result = await mutation.run(() =>
+        client.updateEnvironment(workspaceId, environmentId, request),
+      );
       if (result) {
         await state.refresh();
       }
@@ -77,8 +95,14 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const setVariable = useCallback(
-    async (environmentId: string, name: string, value: string): Promise<WorkspaceEnvironmentVariableMetadata | null> => {
-      const result = await mutation.run(() => client.setEnvironmentVariable(workspaceId, environmentId, name, value));
+    async (
+      environmentId: string,
+      name: string,
+      value: string,
+    ): Promise<WorkspaceEnvironmentVariableMetadata | null> => {
+      const result = await mutation.run(() =>
+        client.setEnvironmentVariable(workspaceId, environmentId, name, value),
+      );
       if (result) {
         await state.refresh();
       }

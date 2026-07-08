@@ -83,7 +83,7 @@ export function catalogAssetKeyFromPath(pathname: string): string | null {
 function contentTypeForKey(key: string): string | null {
   const match = /\.([a-zA-Z0-9]+)$/.exec(key);
   const ext = match?.[1]?.toLowerCase();
-  return ext ? CONTENT_TYPE_BY_EXTENSION[ext] ?? null : null;
+  return ext ? (CONTENT_TYPE_BY_EXTENSION[ext] ?? null) : null;
 }
 
 /** Digest-keyed filenames (`{domain}/{digest24}.{ext}`) make the basename itself a stable ETag. */
@@ -101,5 +101,8 @@ function ifNoneMatchSatisfied(header: string | undefined, etag: string): boolean
   if (header.trim() === "*") {
     return true;
   }
-  return header.split(",").map((value) => value.trim()).includes(etag);
+  return header
+    .split(",")
+    .map((value) => value.trim())
+    .includes(etag);
 }

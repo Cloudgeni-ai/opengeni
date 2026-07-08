@@ -58,32 +58,56 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const context = useAppContext();
   const client = context.client;
   const navigate = useNavigate();
-  const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
-  const organizationLabel = accountId ? orgLabel(accountId, context.accessContext.accountGrants) : "Organization";
+  const organizationLabel = accountId
+    ? orgLabel(accountId, context.accessContext.accountGrants)
+    : "Organization";
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
   const [renaming, setRenaming] = useState(false);
-  const canRename = activeWorkspace !== null && hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canRename =
+    activeWorkspace !== null &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
 
-  const canManageMembers = hasWorkspacePermission(context.accessContext, workspaceId, "members:manage");
-  const canDeleteWorkspace = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
+  const canManageMembers = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "members:manage",
+  );
+  const canDeleteWorkspace = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "workspace:admin",
+  );
   // Deleting the account's only workspace is refused server-side; disable the
   // affordance when this is the only workspace in the active account.
-  const isOnlyWorkspaceInAccount = context.workspaces.filter((workspace) => workspace.accountId === accountId).length <= 1;
+  const isOnlyWorkspaceInAccount =
+    context.workspaces.filter((workspace) => workspace.accountId === accountId).length <= 1;
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
   const [apiKeysLoaded, setApiKeysLoaded] = useState(false);
   const [apiKeyName, setApiKeyName] = useState("Default API key");
-  const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(() => new Set(defaultApiKeyPermissions));
+  const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(
+    () => new Set(defaultApiKeyPermissions),
+  );
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
-  const canManageApiKeys = hasWorkspacePermission(context.accessContext, workspaceId, "api_keys:manage");
-  const workspaceGrant = context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ?? null;
+  const canManageApiKeys = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "api_keys:manage",
+  );
+  const workspaceGrant =
+    context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ??
+    null;
   const delegablePermissions = delegableApiKeyPermissions(workspaceGrant?.permissions ?? []);
-  const requestedPermissions = [...selectedPermissions].filter((permission) => delegablePermissions.has(permission));
+  const requestedPermissions = [...selectedPermissions].filter((permission) =>
+    delegablePermissions.has(permission),
+  );
 
   useEffect(() => {
     setNameDraft(activeWorkspace?.name ?? "");
@@ -145,7 +169,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       setApiKeys((current) => [result.apiKey, ...current]);
       toast.success("API key created");
     } catch (error) {
-      toast.error("Failed to create API key", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to create API key", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -164,11 +190,13 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     setBusy(true);
     try {
       const revoked = await client.deleteApiKey(workspaceId, apiKeyId);
-      setApiKeys((current) => current.map((key) => key.id === revoked.id ? revoked : key));
+      setApiKeys((current) => current.map((key) => (key.id === revoked.id ? revoked : key)));
       toast.success("API key revoked");
       return true;
     } catch (error) {
-      toast.error("Failed to revoke API key", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to revoke API key", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return false;
     } finally {
       setBusy(false);
@@ -190,14 +218,19 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   async function deleteWorkspace(): Promise<boolean> {
     // Pick where to land BEFORE the cache drops this workspace.
     const remaining = context.workspaces.filter((workspace) => workspace.id !== workspaceId);
-    const next = remaining.find((workspace) => workspace.accountId === accountId) ?? remaining[0] ?? null;
+    const next =
+      remaining.find((workspace) => workspace.accountId === accountId) ?? remaining[0] ?? null;
     const deleted = await context.deleteWorkspace(workspaceId);
     if (!deleted) {
       return false;
     }
     context.resetSessionView();
     if (next) {
-      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId: next.id }, replace: true });
+      await navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: next.id },
+        replace: true,
+      });
     } else {
       await navigate({ to: "/", replace: true });
     }
@@ -210,7 +243,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         <PageHeader
           icon={<SettingsIcon className="size-4" />}
           title="Workspace settings"
-          description={activeWorkspace ? `${activeWorkspace.name} · ${organizationLabel}` : organizationLabel}
+          description={
+            activeWorkspace ? `${activeWorkspace.name} · ${organizationLabel}` : organizationLabel
+          }
         />
 
         {/* Workspace name / rename */}
@@ -220,7 +255,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               <PencilIcon className="size-3.5 text-brand" />
               Workspace name
             </h2>
-            <p className="mt-1 text-xs text-fg-muted">The name shows everywhere this workspace appears.</p>
+            <p className="mt-1 text-xs text-fg-muted">
+              The name shows everywhere this workspace appears.
+            </p>
           </div>
           {canRename ? (
             <form
@@ -230,14 +267,30 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 void submitRename();
               }}
             >
-              <Input value={nameDraft} onChange={(event) => setNameDraft(event.target.value)} className="h-9" placeholder="production" />
-              <Button type="submit" disabled={renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name}>
-                {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+              <Input
+                value={nameDraft}
+                onChange={(event) => setNameDraft(event.target.value)}
+                className="h-9"
+                placeholder="production"
+              />
+              <Button
+                type="submit"
+                disabled={
+                  renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
+                }
+              >
+                {renaming ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <CheckIcon className="size-3.5" />
+                )}
                 Save
               </Button>
             </form>
           ) : (
-            <p className="text-xs text-fg-subtle">Only workspace admins can rename this workspace.</p>
+            <p className="text-xs text-fg-subtle">
+              Only workspace admins can rename this workspace.
+            </p>
           )}
         </section>
 
@@ -251,7 +304,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               <BoxIcon className="size-3.5 text-brand" />
               Environments
             </h2>
-            <p className="mt-1 text-xs text-fg-muted">Variable sets injected into sandboxes at session start.</p>
+            <p className="mt-1 text-xs text-fg-muted">
+              Variable sets injected into sandboxes at session start.
+            </p>
           </div>
           <Button asChild type="button" variant="secondary" size="sm">
             <Link to="/workspaces/$workspaceId/environments" params={{ workspaceId }}>
@@ -273,12 +328,16 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               <KeyRoundIcon className="size-3.5 text-brand" />
               API keys
             </h2>
-            <p className="mt-1 text-xs text-fg-muted">Workspace-scoped keys for calling OpenGeni from another product.</p>
+            <p className="mt-1 text-xs text-fg-muted">
+              Workspace-scoped keys for calling OpenGeni from another product.
+            </p>
           </div>
           {createdToken ? (
             <Notice tone="success" title="Copy this token now — it won't be shown again.">
               <div className="mt-2 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">{createdToken}</code>
+                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">
+                  {createdToken}
+                </code>
                 <Button
                   type="button"
                   variant="ghost"
@@ -294,15 +353,31 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           {canManageApiKeys ? (
             <>
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                <Input value={apiKeyName} onChange={(event) => setApiKeyName(event.target.value)} className="h-9" />
+                <Input
+                  value={apiKeyName}
+                  onChange={(event) => setApiKeyName(event.target.value)}
+                  className="h-9"
+                />
                 <Button type="button" disabled={busy} onClick={() => void createKey()}>
-                  {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+                  {busy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlusIcon className="size-3.5" />
+                  )}
                   Create
                 </Button>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-fg-subtle">A key can only carry permissions your own grant can delegate.</p>
-                <Button type="button" variant="ghost" size="sm" disabled={delegablePermissions.size === 0} onClick={() => setSelectedPermissions(new Set(delegablePermissions))}>
+                <p className="text-xs text-fg-subtle">
+                  A key can only carry permissions your own grant can delegate.
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={delegablePermissions.size === 0}
+                  onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                >
                   Select all delegable
                 </Button>
               </div>
@@ -314,15 +389,24 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               />
             </>
           ) : (
-            <p className="text-xs text-fg-subtle">You don't have permission to manage API keys here.</p>
+            <p className="text-xs text-fg-subtle">
+              You don't have permission to manage API keys here.
+            </p>
           )}
           <div className="grid gap-2">
             {apiKeysError ? (
-              <LoadErrorState title="Couldn't load API keys" error={apiKeysError} onRetry={() => void refreshApiKeys()} />
+              <LoadErrorState
+                title="Couldn't load API keys"
+                error={apiKeysError}
+                onRetry={() => void refreshApiKeys()}
+              />
             ) : !apiKeysLoaded ? (
               <>
                 {[0, 1].map((key) => (
-                  <div key={key} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2"
+                  >
                     <div className="min-w-0 space-y-1.5">
                       <Skeleton className="h-4 w-32" />
                       <Skeleton className="h-3 w-24" />
@@ -334,20 +418,37 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             ) : apiKeys.length === 0 ? (
               <EmptyState
                 title="No API keys yet"
-                description={canManageApiKeys ? "Create one above to call OpenGeni from another product." : "Keys created here call OpenGeni from another product."}
+                description={
+                  canManageApiKeys
+                    ? "Create one above to call OpenGeni from another product."
+                    : "Keys created here call OpenGeni from another product."
+                }
               />
-            ) : apiKeys.map((apiKey) => (
-              <div key={apiKey.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                  <div className="mt-1 truncate text-xs text-fg-subtle">{apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}</div>
+            ) : (
+              apiKeys.map((apiKey) => (
+                <div
+                  key={apiKey.id}
+                  className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                    <div className="mt-1 truncate text-xs text-fg-subtle">
+                      {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    disabled={busy || Boolean(apiKey.revokedAt)}
+                    onClick={() => setRevokingKey(apiKey)}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                    Revoke
+                  </Button>
                 </div>
-                <Button type="button" variant="ghost" size="sm" disabled={busy || Boolean(apiKey.revokedAt)} onClick={() => setRevokingKey(apiKey)}>
-                  <Trash2Icon className="size-3.5" />
-                  Revoke
-                </Button>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </section>
 
@@ -418,7 +519,10 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
         email: trimmed,
         permissions: [...defaultWorkspaceMemberPermissions],
       });
-      setMembers((current) => [...current.filter((existing) => existing.subjectId !== member.subjectId), member]);
+      setMembers((current) => [
+        ...current.filter((existing) => existing.subjectId !== member.subjectId),
+        member,
+      ]);
       setEmail("");
       toast.success("Member added");
     } catch (caught) {
@@ -426,7 +530,9 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
       // The API returns 404 "user is not registered" — email invites for
       // not-yet-registered users are deferred. Surface that as a friendly hint.
       if (message.includes("not registered")) {
-        toast.error("No account for that email", { description: "Email invites are coming soon. Ask them to sign up first, then add them." });
+        toast.error("No account for that email", {
+          description: "Email invites are coming soon. Ask them to sign up first, then add them.",
+        });
       } else {
         toast.error("Failed to add member", { description: message });
       }
@@ -458,11 +564,15 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
       const updated = await client.updateWorkspaceMember(workspaceId, member.subjectId, {
         permissions: [...editPermissions],
       });
-      setMembers((current) => current.map((existing) => existing.subjectId === updated.subjectId ? updated : existing));
+      setMembers((current) =>
+        current.map((existing) => (existing.subjectId === updated.subjectId ? updated : existing)),
+      );
       setEditing(null);
       toast.success("Permissions updated");
     } catch (caught) {
-      toast.error("Failed to update member", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Failed to update member", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     } finally {
       setBusy(false);
     }
@@ -472,11 +582,15 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
     setBusy(true);
     try {
       await client.removeWorkspaceMember(workspaceId, member.subjectId);
-      setMembers((current) => current.filter((existing) => existing.subjectId !== member.subjectId));
+      setMembers((current) =>
+        current.filter((existing) => existing.subjectId !== member.subjectId),
+      );
       toast.success("Member removed");
       return true;
     } catch (caught) {
-      toast.error("Failed to remove member", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Failed to remove member", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
       return false;
     } finally {
       setBusy(false);
@@ -490,7 +604,9 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
           <UsersIcon className="size-3.5 text-brand" />
           People with access
         </h2>
-        <p className="mt-1 text-xs text-fg-muted">People who can act in this workspace, and what each one can do.</p>
+        <p className="mt-1 text-xs text-fg-muted">
+          People who can act in this workspace, and what each one can do.
+        </p>
       </div>
 
       {canManage ? (
@@ -510,17 +626,27 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             aria-label="Add member by email"
           />
           <Button type="submit" disabled={busy || !email.trim()}>
-            {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <UserPlusIcon className="size-3.5" />}
+            {busy ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <UserPlusIcon className="size-3.5" />
+            )}
             Add member
           </Button>
         </form>
       ) : (
-        <p className="text-xs text-fg-subtle">Only members who can manage people can add or remove access.</p>
+        <p className="text-xs text-fg-subtle">
+          Only members who can manage people can add or remove access.
+        </p>
       )}
 
       <div className="grid gap-2">
         {error ? (
-          <LoadErrorState title="Couldn't load members" error={error} onRetry={() => void refresh()} />
+          <LoadErrorState
+            title="Couldn't load members"
+            error={error}
+            onRetry={() => void refresh()}
+          />
         ) : !loaded ? (
           <div className="flex items-center gap-2 text-xs text-fg-muted">
             <Loader2Icon className="size-3.5 animate-spin" />
@@ -529,51 +655,94 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
         ) : userMembers.length === 0 ? (
           <EmptyState
             title="Only you have access"
-            description={canManage ? "Add a teammate by email above to share this workspace." : undefined}
+            description={
+              canManage ? "Add a teammate by email above to share this workspace." : undefined
+            }
           />
-        ) : userMembers.map((member) => (
-          <div key={member.subjectId} className="grid gap-2 rounded-lg border border-border bg-bg/35 px-3 py-2">
-            <div className="flex min-w-0 items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">
-                  {member.subjectLabel ?? member.subjectId}
-                  {member.subjectId === callerSubjectId ? <span className="ml-1.5 text-fg-subtle">(you)</span> : null}
+        ) : (
+          userMembers.map((member) => (
+            <div
+              key={member.subjectId}
+              className="grid gap-2 rounded-lg border border-border bg-bg/35 px-3 py-2"
+            >
+              <div className="flex min-w-0 items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">
+                    {member.subjectLabel ?? member.subjectId}
+                    {member.subjectId === callerSubjectId ? (
+                      <span className="ml-1.5 text-fg-subtle">(you)</span>
+                    ) : null}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-fg-subtle">
+                    {member.role} · {member.permissions.length} permission
+                    {member.permissions.length === 1 ? "" : "s"}
+                  </div>
                 </div>
-                <div className="mt-1 truncate text-xs text-fg-subtle">
-                  {member.role} · {member.permissions.length} permission{member.permissions.length === 1 ? "" : "s"}
-                </div>
+                {canManage ? (
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() =>
+                        editing === member.subjectId ? setEditing(null) : startEditing(member)
+                      }
+                    >
+                      <ChevronDownIcon
+                        className={`size-3.5 transition-transform ${editing === member.subjectId ? "rotate-180" : ""}`}
+                      />
+                      Edit
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || member.subjectId === callerSubjectId}
+                      onClick={() => setRemovingMember(member)}
+                    >
+                      <Trash2Icon className="size-3.5" />
+                      Remove
+                    </Button>
+                  </div>
+                ) : null}
               </div>
-              {canManage ? (
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => editing === member.subjectId ? setEditing(null) : startEditing(member)}>
-                    <ChevronDownIcon className={`size-3.5 transition-transform ${editing === member.subjectId ? "rotate-180" : ""}`} />
-                    Edit
-                  </Button>
-                  <Button type="button" variant="ghost" size="sm" disabled={busy || member.subjectId === callerSubjectId} onClick={() => setRemovingMember(member)}>
-                    <Trash2Icon className="size-3.5" />
-                    Remove
-                  </Button>
+              {canManage && editing === member.subjectId ? (
+                <div className="grid gap-3 border-t border-border pt-3">
+                  <PermissionGroupPicker
+                    groups={workspaceMemberPermissionGroups}
+                    selected={editPermissions}
+                    onToggle={toggleEditPermission}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => setEditing(null)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => void saveEditing(member)}
+                    >
+                      {busy ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <CheckIcon className="size-3.5" />
+                      )}
+                      Save permissions
+                    </Button>
+                  </div>
                 </div>
               ) : null}
             </div>
-            {canManage && editing === member.subjectId ? (
-              <div className="grid gap-3 border-t border-border pt-3">
-                <PermissionGroupPicker
-                  groups={workspaceMemberPermissionGroups}
-                  selected={editPermissions}
-                  onToggle={toggleEditPermission}
-                />
-                <div className="flex justify-end gap-2">
-                  <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setEditing(null)}>Cancel</Button>
-                  <Button type="button" size="sm" disabled={busy} onClick={() => void saveEditing(member)}>
-                    {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
-                    Save permissions
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ))}
+          ))
+        )}
       </div>
 
       <ConfirmDialog
@@ -589,7 +758,13 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
 }
 
 /** Workspace memory: a per-workspace toggle for the long-lived agent memory. */
-function MemorySettingsSection({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+function MemorySettingsSection({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const enabled = workspace?.settings?.memoryEnabled === true;
@@ -616,8 +791,9 @@ function MemorySettingsSection({ workspaceId, canManage }: { workspaceId: string
             Workspace memory
           </h2>
           <p className="mt-1 text-xs text-fg-muted">
-            Lets agents remember durable facts — preferences, environment details, decisions — across sessions in this
-            workspace. Everything saved is visible and editable on the Documents page.
+            Lets agents remember durable facts — preferences, environment details, decisions —
+            across sessions in this workspace. Everything saved is visible and editable on the
+            Documents page.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
@@ -660,7 +836,8 @@ function DangerZone(props: {
   const [open, setOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [busy, setBusy] = useState(false);
-  const nameMatches = confirmName.trim() === props.workspaceName.trim() && props.workspaceName.trim().length > 0;
+  const nameMatches =
+    confirmName.trim() === props.workspaceName.trim() && props.workspaceName.trim().length > 0;
 
   const disabledReason = !props.canDelete
     ? "Only workspace admins can delete this workspace."
@@ -713,11 +890,18 @@ function DangerZone(props: {
         {disabledReason ? (
           <p className="mt-1.5 text-2xs text-fg-subtle">{disabledReason}</p>
         ) : (
-          <p className="mt-1.5 text-2xs text-fg-subtle">Stop any running sessions first; deletion is refused while one is live.</p>
+          <p className="mt-1.5 text-2xs text-fg-subtle">
+            Stop any running sessions first; deletion is refused while one is live.
+          </p>
         )}
       </div>
 
-      <Dialog open={open} onOpenChange={(next) => { if (!busy) setOpen(next); }}>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!busy) setOpen(next);
+        }}
+      >
         <DialogContent className="sm:max-w-sm">
           <form
             onSubmit={(event) => {
@@ -745,9 +929,15 @@ function DangerZone(props: {
               />
             </div>
             <DialogFooter className="mt-4">
-              <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>Cancel</Button>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
               <Button type="submit" variant="destructive" disabled={busy || !nameMatches}>
-                {busy ? <Loader2Icon className="size-4 animate-spin" /> : <Trash2Icon className="size-4" />}
+                {busy ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <Trash2Icon className="size-4" />
+                )}
                 Delete workspace
               </Button>
             </DialogFooter>

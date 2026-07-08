@@ -34,7 +34,13 @@ export function isAbortError(error: unknown): boolean {
  */
 export function isRetryableStreamError(error: unknown): boolean {
   if (error instanceof OpenGeniApiError) {
-    return error.status === 408 || error.status === 409 || error.status === 425 || error.status === 429 || error.status >= 500;
+    return (
+      error.status === 408 ||
+      error.status === 409 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
   }
   return error instanceof TypeError;
 }

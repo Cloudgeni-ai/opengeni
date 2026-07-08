@@ -80,7 +80,8 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER both mocks are installed so it binds them.
-const { createNatsEventBus, createResponderConnection, appendAndPublishEvents } = await import("../src/index");
+const { createNatsEventBus, createResponderConnection, appendAndPublishEvents } =
+  await import("../src/index");
 
 afterAll(() => {
   mock.restore();

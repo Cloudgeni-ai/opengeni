@@ -97,29 +97,48 @@ const CASES: Case[] = [
   {
     label: "ExecRenderer — failed + undefined output (NUL path)",
     kind: "tool",
-    item: toolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "npm test" }), output: undefined }),
+    item: toolItem({
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "npm test" }),
+      output: undefined,
+    }),
   },
   {
     label: "ExecRenderer — failed + empty output (generic path)",
     kind: "tool",
-    item: toolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "npm test" }), output: "" }),
+    item: toolItem({
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "npm test" }),
+      output: "",
+    }),
   },
   {
     label: "ExecRenderer — failed + non-empty output",
     kind: "tool",
-    item: toolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "npm test" }), output: "build failed" }),
+    item: toolItem({
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "npm test" }),
+      output: "build failed",
+    }),
   },
   {
     label: "WriteStdinRenderer — failed",
     kind: "tool",
-    item: toolItem({ name: "write_stdin", arguments: JSON.stringify({ session_id: "s1", chars: "ls\n" }), output: "" }),
+    item: toolItem({
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: "s1", chars: "ls\n" }),
+      output: "",
+    }),
   },
   {
     label: "ApplyPatchRenderer — failed (explicit failed branch)",
     kind: "tool",
     item: toolItem({
       name: "apply_patch_call",
-      raw: { type: "apply_patch_call", operations: [{ type: "update_file", path: "a.ts", diff: "@@ -1 +1 @@\n-old\n+new" }] },
+      raw: {
+        type: "apply_patch_call",
+        operations: [{ type: "update_file", path: "a.ts", diff: "@@ -1 +1 @@\n-old\n+new" }],
+      },
       output: "patch conflict",
     }),
   },
@@ -198,7 +217,11 @@ const CASES: Case[] = [
   {
     label: "GenericRenderer (fallback) — failed",
     kind: "tool",
-    item: toolItem({ name: "some_mcp_tool", arguments: JSON.stringify({ foo: "bar" }), output: "tool error" }),
+    item: toolItem({
+      name: "some_mcp_tool",
+      arguments: JSON.stringify({ foo: "bar" }),
+      output: "tool error",
+    }),
   },
   /* ---- non-tool rail rows ------------------------------------------------- */
   {
@@ -521,24 +544,39 @@ const CANCELLED_CASES: CancelledCase[] = [
   {
     label: "ExecRenderer — cancelled (no output)",
     kind: "tool",
-    item: cancelledToolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "make test" }), output: undefined }),
+    item: cancelledToolItem({
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "make test" }),
+      output: undefined,
+    }),
   },
   {
     label: "ExecRenderer — cancelled (with partial output)",
     kind: "tool",
-    item: cancelledToolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "npm run e2e" }), output: "Chunk ID: abc\nWall time: 1.0\nProcess exited with code 0\nOutput:\nRunning tests…" }),
+    item: cancelledToolItem({
+      name: "exec_command",
+      arguments: JSON.stringify({ cmd: "npm run e2e" }),
+      output: "Chunk ID: abc\nWall time: 1.0\nProcess exited with code 0\nOutput:\nRunning tests…",
+    }),
   },
   {
     label: "WriteStdinRenderer — cancelled",
     kind: "tool",
-    item: cancelledToolItem({ name: "write_stdin", arguments: JSON.stringify({ session_id: "s1", chars: "ls\n" }), output: "" }),
+    item: cancelledToolItem({
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: "s1", chars: "ls\n" }),
+      output: "",
+    }),
   },
   {
     label: "ApplyPatchRenderer — cancelled",
     kind: "tool",
     item: cancelledToolItem({
       name: "apply_patch_call",
-      raw: { type: "apply_patch_call", operations: [{ type: "update_file", path: "a.ts", diff: "@@ -1 +1 @@\n-old\n+new" }] },
+      raw: {
+        type: "apply_patch_call",
+        operations: [{ type: "update_file", path: "a.ts", diff: "@@ -1 +1 @@\n-old\n+new" }],
+      },
       output: undefined,
     }),
   },
@@ -581,7 +619,11 @@ const CANCELLED_CASES: CancelledCase[] = [
   {
     label: "GenericRenderer (fallback) — cancelled",
     kind: "tool",
-    item: cancelledToolItem({ name: "some_mcp_tool", arguments: JSON.stringify({ foo: "bar" }), output: undefined }),
+    item: cancelledToolItem({
+      name: "some_mcp_tool",
+      arguments: JSON.stringify({ foo: "bar" }),
+      output: undefined,
+    }),
   },
   {
     label: "WorkerRow — cancelled spawn",

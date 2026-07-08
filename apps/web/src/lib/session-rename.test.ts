@@ -51,10 +51,16 @@ function session(patch: Partial<Session> = {}): Session {
 
 describe("sessionDisplayTitle", () => {
   test("prefers the durable title, then the initial message, then a placeholder", () => {
-    expect(sessionDisplayTitle(session({ title: "  Ship the rename UI  " }))).toBe("Ship the rename UI");
+    expect(sessionDisplayTitle(session({ title: "  Ship the rename UI  " }))).toBe(
+      "Ship the rename UI",
+    );
     expect(sessionDisplayTitle(session({ title: null }))).toBe("Inspect the repo");
-    expect(sessionDisplayTitle(session({ title: null, initialMessage: "   " }))).toBe("Untitled session");
-    expect(sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string }))).toBe("Untitled session");
+    expect(sessionDisplayTitle(session({ title: null, initialMessage: "   " }))).toBe(
+      "Untitled session",
+    );
+    expect(
+      sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string })),
+    ).toBe("Untitled session");
   });
 });
 
@@ -64,7 +70,9 @@ describe("renameSeedValue", () => {
     // placeholder, and an empty session opens to an empty field.
     expect(renameSeedValue(session({ title: "Existing title" }))).toBe("Existing title");
     expect(renameSeedValue(session({ title: null }))).toBe("Inspect the repo");
-    expect(renameSeedValue(session({ title: null, initialMessage: null as unknown as string }))).toBe("");
+    expect(
+      renameSeedValue(session({ title: null, initialMessage: null as unknown as string })),
+    ).toBe("");
   });
 });
 
@@ -98,7 +106,11 @@ describe("performRename (the commit every rename surface runs)", () => {
   // sends through when a user submits a rename from any of the three surfaces.
   function recordingRename() {
     const calls: Array<{ workspaceId: string; sessionId: string; title: string }> = [];
-    const fn = async (workspaceId: string, sessionId: string, title: string): Promise<Session | null> => {
+    const fn = async (
+      workspaceId: string,
+      sessionId: string,
+      title: string,
+    ): Promise<Session | null> => {
       calls.push({ workspaceId, sessionId, title });
       return session({ title, titleSource: "user" });
     };
@@ -109,14 +121,18 @@ describe("performRename (the commit every rename surface runs)", () => {
     const rename = recordingRename();
     const result = await performRename(session({ title: "Old" }), "  Brand new title  ", rename.fn);
 
-    expect(rename.calls).toEqual([{ workspaceId: "workspace-1", sessionId: "session-1", title: "Brand new title" }]);
+    expect(rename.calls).toEqual([
+      { workspaceId: "workspace-1", sessionId: "session-1", title: "Brand new title" },
+    ]);
     expect(result?.title).toBe("Brand new title");
   });
 
   test("renames a still-untitled session to the typed value", async () => {
     const rename = recordingRename();
     await performRename(session({ title: null }), "First real name", rename.fn);
-    expect(rename.calls).toEqual([{ workspaceId: "workspace-1", sessionId: "session-1", title: "First real name" }]);
+    expect(rename.calls).toEqual([
+      { workspaceId: "workspace-1", sessionId: "session-1", title: "First real name" },
+    ]);
   });
 
   test("an empty or unchanged submission never calls updateSessionTitle (no-op cancel)", async () => {

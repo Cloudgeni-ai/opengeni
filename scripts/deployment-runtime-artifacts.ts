@@ -26,28 +26,41 @@ const artifacts = generateRuntimeArtifacts(contract, terraformOutputs, process.e
 await mkdir(args.outDir, { recursive: true });
 await Bun.write(`${args.outDir}/helm-values.generated.yaml`, artifacts.helmValuesYaml);
 await Bun.write(`${args.outDir}/runtime.env`, artifacts.runtimeEnv);
-await Bun.write(`${args.outDir}/summary.json`, `${JSON.stringify({
-  profile: artifacts.profile,
-  requiredEnvVars: artifacts.requiredEnvVars,
-  missingEnvVars: artifacts.missingEnvVars,
-  sensitiveTerraformOutputsUsed: artifacts.sensitiveTerraformOutputsUsed,
-  summary: artifacts.summary,
-}, null, 2)}\n`);
+await Bun.write(
+  `${args.outDir}/summary.json`,
+  `${JSON.stringify(
+    {
+      profile: artifacts.profile,
+      requiredEnvVars: artifacts.requiredEnvVars,
+      missingEnvVars: artifacts.missingEnvVars,
+      sensitiveTerraformOutputsUsed: artifacts.sensitiveTerraformOutputsUsed,
+      summary: artifacts.summary,
+    },
+    null,
+    2,
+  )}\n`,
+);
 
 if (args.json) {
-  console.log(JSON.stringify({
-    profile: artifacts.profile,
-    outDir: args.outDir,
-    files: [
-      `${args.outDir}/helm-values.generated.yaml`,
-      `${args.outDir}/runtime.env`,
-      `${args.outDir}/summary.json`,
-    ],
-    requiredEnvVars: artifacts.requiredEnvVars,
-    missingEnvVars: artifacts.missingEnvVars,
-    sensitiveTerraformOutputsUsed: artifacts.sensitiveTerraformOutputsUsed,
-    summary: artifacts.summary,
-  }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        profile: artifacts.profile,
+        outDir: args.outDir,
+        files: [
+          `${args.outDir}/helm-values.generated.yaml`,
+          `${args.outDir}/runtime.env`,
+          `${args.outDir}/summary.json`,
+        ],
+        requiredEnvVars: artifacts.requiredEnvVars,
+        missingEnvVars: artifacts.missingEnvVars,
+        sensitiveTerraformOutputsUsed: artifacts.sensitiveTerraformOutputsUsed,
+        summary: artifacts.summary,
+      },
+      null,
+      2,
+    ),
+  );
 } else {
   console.log(`Generated deployment runtime artifacts for ${artifacts.profile}`);
   console.log(`  - ${args.outDir}/helm-values.generated.yaml`);

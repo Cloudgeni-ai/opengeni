@@ -47,7 +47,8 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         "og-root group relative flex w-full flex-col gap-2.5 overflow-hidden rounded-og-lg border border-og-border",
         "bg-og-surface-1 p-4 text-left shadow-og-sm",
         "transition-[border-color,background-color,box-shadow,transform] duration-200 ease-og-out",
-        onOpen && "hover:-translate-y-px hover:border-og-border-strong hover:bg-og-surface-2 hover:shadow-og-md",
+        onOpen &&
+          "hover:-translate-y-px hover:border-og-border-strong hover:bg-og-surface-2 hover:shadow-og-md",
         "disabled:cursor-default",
         className,
       )}
@@ -56,14 +57,22 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         aria-hidden
         className={cn(
           "absolute inset-y-0 left-0 w-0.5 transition-opacity duration-300",
-          running ? "bg-og-accent opacity-100" : needsYou ? "bg-og-status-waiting opacity-100" : "opacity-0",
+          running
+            ? "bg-og-accent opacity-100"
+            : needsYou
+              ? "bg-og-status-waiting opacity-100"
+              : "opacity-0",
         )}
       />
       <span className="flex w-full items-start justify-between gap-3">
-        <span className="line-clamp-2 min-w-0 text-og-base font-medium leading-snug text-og-fg">{title ?? sessionDisplayTitle(session)}</span>
+        <span className="line-clamp-2 min-w-0 text-og-base font-medium leading-snug text-og-fg">
+          {title ?? sessionDisplayTitle(session)}
+        </span>
         <SessionStatus status={session.status} size="sm" className="mt-px" />
       </span>
-      {subtitle ? <span className="line-clamp-1 text-og-sm text-og-fg-muted">{subtitle}</span> : null}
+      {subtitle ? (
+        <span className="line-clamp-1 text-og-sm text-og-fg-muted">{subtitle}</span>
+      ) : null}
       <span className="mt-auto flex w-full items-center gap-2 text-og-xs text-og-fg-subtle">
         <span className="font-og-mono">{session.id.slice(0, 8)}</span>
         <span aria-hidden>·</span>

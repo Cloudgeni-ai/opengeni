@@ -153,7 +153,11 @@ function detectMode(el: Element, style: CSSStyleDeclaration): ThemeMode {
     const explicit = closest("[data-og-theme]");
     if (explicit) return explicit.getAttribute("data-og-theme") === "light" ? "light" : "dark";
   }
-  const scheme = (style.getPropertyValue("color-scheme").trim() || style.colorScheme || "").toLowerCase();
+  const scheme = (
+    style.getPropertyValue("color-scheme").trim() ||
+    style.colorScheme ||
+    ""
+  ).toLowerCase();
   if (scheme.includes("light") && !scheme.includes("dark")) return "light";
   return "dark";
 }
@@ -173,7 +177,8 @@ export function xtermThemeFromTokens(root?: HTMLElement | null): XtermTheme | un
   const el =
     root ??
     (typeof document !== "undefined"
-      ? ((document.querySelector("[data-og-theme]") as HTMLElement | null) ?? document.documentElement)
+      ? ((document.querySelector("[data-og-theme]") as HTMLElement | null) ??
+        document.documentElement)
       : null);
   if (!el) return undefined;
   const style = getComputedStyle(el);
@@ -200,9 +205,13 @@ export type FontOverrides = { fontFamily?: string | undefined; fontSize?: number
  * glyph. Here the family is a CONCRETE stack; a `var(` in the input is treated
  * as unresolved and replaced with the fallback. Pure over a token `read`.
  */
-export function resolveTerminalFontFromReader(read: TokenReader, overrides?: FontOverrides): ResolvedTerminalFont {
+export function resolveTerminalFontFromReader(
+  read: TokenReader,
+  overrides?: FontOverrides,
+): ResolvedTerminalFont {
   const rawFamily = overrides?.fontFamily ?? read("--og-font-mono");
-  const fontFamily = rawFamily && rawFamily.trim() && !rawFamily.includes("var(") ? rawFamily.trim() : FALLBACK_MONO;
+  const fontFamily =
+    rawFamily && rawFamily.trim() && !rawFamily.includes("var(") ? rawFamily.trim() : FALLBACK_MONO;
 
   let fontSize = overrides?.fontSize;
   if (fontSize == null) {
@@ -215,7 +224,10 @@ export function resolveTerminalFontFromReader(read: TokenReader, overrides?: Fon
 }
 
 /** DOM wrapper: resolve the terminal font from an element's computed tokens. */
-export function resolveTerminalFont(el: HTMLElement, overrides?: FontOverrides): ResolvedTerminalFont {
+export function resolveTerminalFont(
+  el: HTMLElement,
+  overrides?: FontOverrides,
+): ResolvedTerminalFont {
   const style = getComputedStyle(el);
   const read: TokenReader = (name) => {
     const value = style.getPropertyValue(name).trim();

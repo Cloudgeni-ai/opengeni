@@ -40,7 +40,7 @@ export function githubAppMissingSettings(settings: Settings): string[] {
     OPENGENI_GITHUB_APP_SLUG: settings.githubAppSlug,
     OPENGENI_GITHUB_APP_PRIVATE_KEY: settings.githubAppPrivateKey,
   };
-  return Object.entries(required).flatMap(([name, value]) => value && value.trim() ? [] : [name]);
+  return Object.entries(required).flatMap(([name, value]) => (value && value.trim() ? [] : [name]));
 }
 
 export function buildGitHubAppManifest(input: {
@@ -114,7 +114,11 @@ export function createSignedState(
   return `${encoded}.${signStatePayload(encoded, secret)}`;
 }
 
-export function readSignedState(state: string, secret: string, now = Math.floor(Date.now() / 1000)): GitHubSignedStatePayload | null {
+export function readSignedState(
+  state: string,
+  secret: string,
+  now = Math.floor(Date.now() / 1000),
+): GitHubSignedStatePayload | null {
   const [encoded, signature] = state.split(".", 2);
   if (!encoded || !signature) {
     return null;
@@ -129,14 +133,23 @@ export function readSignedState(state: string, secret: string, now = Math.floor(
   } catch {
     return null;
   }
-  if (!payload || typeof payload !== "object" || typeof (payload as { iat?: unknown }).iat !== "number" || typeof (payload as { nonce?: unknown }).nonce !== "string") {
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    typeof (payload as { iat?: unknown }).iat !== "number" ||
+    typeof (payload as { nonce?: unknown }).nonce !== "string"
+  ) {
     return null;
   }
   const age = now - (payload as { iat: number }).iat;
-  return age >= 0 && age <= stateMaxAgeSeconds ? payload as GitHubSignedStatePayload : null;
+  return age >= 0 && age <= stateMaxAgeSeconds ? (payload as GitHubSignedStatePayload) : null;
 }
 
-export function verifySignedState(state: string, secret: string, now = Math.floor(Date.now() / 1000)): boolean {
+export function verifySignedState(
+  state: string,
+  secret: string,
+  now = Math.floor(Date.now() / 1000),
+): boolean {
   return readSignedState(state, secret, now) !== null;
 }
 
@@ -167,7 +180,9 @@ export async function convertGitHubAppManifest(code: string): Promise<Record<str
   return payload as Record<string, unknown>;
 }
 
-export async function listGitHubAppInstallationSummaries(settings: Settings): Promise<GitHubAppInstallationSummary[]> {
+export async function listGitHubAppInstallationSummaries(
+  settings: Settings,
+): Promise<GitHubAppInstallationSummary[]> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -177,27 +192,40 @@ export async function listGitHubAppInstallationSummaries(settings: Settings): Pr
   return installations.map(installationSummaryFromPayload);
 }
 
-export async function getGitHubAppInstallationSummary(settings: Settings, installationId: number): Promise<GitHubAppInstallationSummary | null> {
+export async function getGitHubAppInstallationSummary(
+  settings: Settings,
+  installationId: number,
+): Promise<GitHubAppInstallationSummary | null> {
   const installations = await listGitHubAppInstallationSummaries(settings);
-  return installations.find((installation) => installation.installationId === installationId) ?? null;
+  return (
+    installations.find((installation) => installation.installationId === installationId) ?? null
+  );
 }
 
-export async function verifyGitHubInstallationAccessForUser(settings: Settings, input: {
-  code: string;
-  installationId: number;
-}): Promise<GitHubAppInstallationSummary> {
+export async function verifyGitHubInstallationAccessForUser(
+  settings: Settings,
+  input: {
+    code: string;
+    installationId: number;
+  },
+): Promise<GitHubAppInstallationSummary> {
   const token = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
   const installations = await listUserAccessibleInstallations(token);
-  const installation = installations.find((candidate) => candidate.installationId === input.installationId);
+  const installation = installations.find(
+    (candidate) => candidate.installationId === input.installationId,
+  );
   if (!installation) {
     throw new GitHubAppApiError("GitHub installation is not accessible to the installing user");
   }
   return installation;
 }
 
-export async function listGitHubAppRepositories(settings: Settings, input: {
-  installationIds?: number[];
-} = {}): Promise<GitHubRepository[]> {
+export async function listGitHubAppRepositories(
+  settings: Settings,
+  input: {
+    installationIds?: number[];
+  } = {},
+): Promise<GitHubRepository[]> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -220,18 +248,24 @@ export async function listGitHubAppRepositories(settings: Settings, input: {
     if (allowedInstallations && !allowedInstallations.has(installationId)) {
       continue;
     }
-    const account = typeof installation.account === "object" && installation.account ? installation.account as Record<string, unknown> : {};
+    const account =
+      typeof installation.account === "object" && installation.account
+        ? (installation.account as Record<string, unknown>)
+        : {};
     const token = await createInstallationToken(jwt, { installationId });
-    repositories.push(...await listInstallationRepositories(token, installationId, account));
+    repositories.push(...(await listInstallationRepositories(token, installationId, account)));
   }
   repositories.sort((left, right) => left.fullName.localeCompare(right.fullName));
   return repositories;
 }
 
-export async function createGitHubAppInstallationToken(settings: Settings, input: {
-  installationId: number;
-  repositoryIds?: number[];
-}): Promise<string> {
+export async function createGitHubAppInstallationToken(
+  settings: Settings,
+  input: {
+    installationId: number;
+    repositoryIds?: number[];
+  },
+): Promise<string> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -272,18 +306,28 @@ async function createGitHubAppJwt(settings: Settings): Promise<string> {
 async function listInstallations(token: string): Promise<Array<Record<string, unknown>>> {
   const out: Array<Record<string, unknown>> = [];
   for (let page = 1; ; page += 1) {
-    const payload = await githubGet("/app/installations", token, { per_page: "100", page: String(page) });
+    const payload = await githubGet("/app/installations", token, {
+      per_page: "100",
+      page: String(page),
+    });
     if (!Array.isArray(payload)) {
       throw new GitHubAppApiError("GitHub returned an invalid installations payload");
     }
-    out.push(...payload.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))));
+    out.push(
+      ...payload.filter((item): item is Record<string, unknown> =>
+        Boolean(item && typeof item === "object" && !Array.isArray(item)),
+      ),
+    );
     if (payload.length < 100) {
       return out;
     }
   }
 }
 
-async function exchangeGitHubOAuthCodeForUserToken(settings: Settings, code: string): Promise<string> {
+async function exchangeGitHubOAuthCodeForUserToken(
+  settings: Settings,
+  code: string,
+): Promise<string> {
   if (!settings.githubClientId || !settings.githubClientSecret) {
     throw new GitHubAppConfigurationError(githubAppMissingSettings(settings));
   }
@@ -309,38 +353,54 @@ async function exchangeGitHubOAuthCodeForUserToken(settings: Settings, code: str
   return payload.access_token;
 }
 
-async function listUserAccessibleInstallations(token: string): Promise<GitHubAppInstallationSummary[]> {
+async function listUserAccessibleInstallations(
+  token: string,
+): Promise<GitHubAppInstallationSummary[]> {
   const out: GitHubAppInstallationSummary[] = [];
   for (let page = 1; ; page += 1) {
-    const payload = await githubGet("/user/installations", token, { per_page: "100", page: String(page) });
-    const installations: unknown[] | null = payload && typeof payload === "object" && Array.isArray(payload.installations)
-      ? payload.installations as unknown[]
-      : null;
+    const payload = await githubGet("/user/installations", token, {
+      per_page: "100",
+      page: String(page),
+    });
+    const installations: unknown[] | null =
+      payload && typeof payload === "object" && Array.isArray(payload.installations)
+        ? (payload.installations as unknown[])
+        : null;
     if (!installations) {
       throw new GitHubAppApiError("GitHub returned an invalid user installations payload");
     }
-    out.push(...installations
-      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
-      .map(installationSummaryFromPayload));
+    out.push(
+      ...installations
+        .filter((item): item is Record<string, unknown> =>
+          Boolean(item && typeof item === "object" && !Array.isArray(item)),
+        )
+        .map(installationSummaryFromPayload),
+    );
     if (installations.length < 100) {
       return out;
     }
   }
 }
 
-async function createInstallationToken(appJwt: string, input: {
-  installationId: number;
-  repositoryIds?: number[];
-}): Promise<string> {
+async function createInstallationToken(
+  appJwt: string,
+  input: {
+    installationId: number;
+    repositoryIds?: number[];
+  },
+): Promise<string> {
   const scoped = input.repositoryIds && input.repositoryIds.length > 0;
-  const response = await fetch(`${githubApiBase}/app/installations/${input.installationId}/access_tokens`, {
-    method: "POST",
-    headers: {
-      ...githubHeaders(appJwt),
-      ...(scoped ? { "Content-Type": "application/json" } : {}),
+  const response = await fetch(
+    `${githubApiBase}/app/installations/${input.installationId}/access_tokens`,
+    {
+      method: "POST",
+      headers: {
+        ...githubHeaders(appJwt),
+        ...(scoped ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(scoped ? { body: JSON.stringify({ repository_ids: input.repositoryIds }) } : {}),
     },
-    ...(scoped ? { body: JSON.stringify({ repository_ids: input.repositoryIds }) } : {}),
-  });
+  );
   if (!response.ok) {
     throw new GitHubAppApiError(await githubErrorMessage(response));
   }
@@ -351,11 +411,23 @@ async function createInstallationToken(appJwt: string, input: {
   return payload.token;
 }
 
-async function listInstallationRepositories(token: string, installationId: number, account: Record<string, unknown>): Promise<GitHubRepository[]> {
+async function listInstallationRepositories(
+  token: string,
+  installationId: number,
+  account: Record<string, unknown>,
+): Promise<GitHubRepository[]> {
   const out: GitHubRepository[] = [];
   for (let page = 1; ; page += 1) {
-    const payload = await githubGet("/installation/repositories", token, { per_page: "100", page: String(page) });
-    if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.repositories)) {
+    const payload = await githubGet("/installation/repositories", token, {
+      per_page: "100",
+      page: String(page),
+    });
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !Array.isArray(payload.repositories)
+    ) {
       throw new GitHubAppApiError("GitHub returned an invalid repositories payload");
     }
     for (const repo of payload.repositories) {
@@ -369,12 +441,17 @@ async function listInstallationRepositories(token: string, installationId: numbe
   }
 }
 
-function installationSummaryFromPayload(payload: Record<string, unknown>): GitHubAppInstallationSummary {
+function installationSummaryFromPayload(
+  payload: Record<string, unknown>,
+): GitHubAppInstallationSummary {
   const installationId = asInt(payload.id);
   if (installationId === null) {
     throw new GitHubAppApiError("GitHub returned an installation without id");
   }
-  const account = typeof payload.account === "object" && payload.account ? payload.account as Record<string, unknown> : {};
+  const account =
+    typeof payload.account === "object" && payload.account
+      ? (payload.account as Record<string, unknown>)
+      : {};
   return {
     installationId,
     accountLogin: typeof account.login === "string" ? account.login : null,
@@ -383,7 +460,11 @@ function installationSummaryFromPayload(payload: Record<string, unknown>): GitHu
   };
 }
 
-async function githubGet(path: string, token: string, params: Record<string, string>): Promise<any> {
+async function githubGet(
+  path: string,
+  token: string,
+  params: Record<string, string>,
+): Promise<any> {
   const url = new URL(`${githubApiBase}${path}`);
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value);
@@ -395,7 +476,11 @@ async function githubGet(path: string, token: string, params: Record<string, str
   return await response.json();
 }
 
-function repositoryFromPayload(payload: Record<string, unknown>, installationId: number, account: Record<string, unknown>): GitHubRepository {
+function repositoryFromPayload(
+  payload: Record<string, unknown>,
+  installationId: number,
+  account: Record<string, unknown>,
+): GitHubRepository {
   const id = asInt(payload.id);
   const fullName = String(payload.full_name ?? "");
   if (id === null || !fullName) {

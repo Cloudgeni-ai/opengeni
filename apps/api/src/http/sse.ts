@@ -2,7 +2,14 @@ import type { SessionEvent } from "@opengeni/contracts";
 import { listSessionEvents, type Database } from "@opengeni/db";
 import { formatSse, type EventBus } from "@opengeni/events";
 
-export async function sseSessionStream(db: Database, bus: EventBus, workspaceId: string, sessionId: string, after: number, signal: AbortSignal): Promise<Response> {
+export async function sseSessionStream(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  after: number,
+  signal: AbortSignal,
+): Promise<Response> {
   const encoder = new TextEncoder();
   let controller: ReadableStreamDefaultController<Uint8Array>;
   let lastSent = after;
@@ -18,7 +25,13 @@ export async function sseSessionStream(db: Database, bus: EventBus, workspaceId:
           return;
         }
         if (event.sequence > lastSent + 1) {
-          const missing = await listSessionEvents(db, workspaceId, sessionId, lastSent, event.sequence - lastSent - 1);
+          const missing = await listSessionEvents(
+            db,
+            workspaceId,
+            sessionId,
+            lastSent,
+            event.sequence - lastSent - 1,
+          );
           for (const missed of missing) {
             if (missed.sequence > lastSent) {
               controller.enqueue(encoder.encode(formatSse(missed)));
@@ -40,7 +53,11 @@ export async function sseSessionStream(db: Database, bus: EventBus, workspaceId:
         }
       });
 
-      await replaySessionEvents((cursor, limit) => listSessionEvents(db, workspaceId, sessionId, cursor, limit), send, after);
+      await replaySessionEvents(
+        (cursor, limit) => listSessionEvents(db, workspaceId, sessionId, cursor, limit),
+        send,
+        after,
+      );
       replaying = false;
       for (const event of buffered.sort((a, b) => a.sequence - b.sequence)) {
         await send(event);
@@ -53,9 +70,13 @@ export async function sseSessionStream(db: Database, bus: EventBus, workspaceId:
     },
   });
 
-  signal.addEventListener("abort", () => {
-    unsubscribe?.();
-  }, { once: true });
+  signal.addEventListener(
+    "abort",
+    () => {
+      unsubscribe?.();
+    },
+    { once: true },
+  );
 
   return new Response(stream, {
     headers: {

@@ -121,7 +121,12 @@ export function wrapTurnBoxWithRouting(
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
       return sandbox
-        ? { id: sandbox.id, kind: sandbox.kind, name: sandbox.name, enrollmentId: sandbox.enrollmentId }
+        ? {
+            id: sandbox.id,
+            kind: sandbox.kind,
+            name: sandbox.name,
+            enrollmentId: sandbox.enrollmentId,
+          }
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),
@@ -137,12 +142,12 @@ export function wrapTurnBoxWithRouting(
     // bound to (sandboxId, epoch).
     ...(ids.pinnedSelfhosted
       ? {
-        pinnedSelfhosted: {
-          sandboxId: ids.pinnedSelfhosted.sandboxId,
-          epoch: ids.pinnedSelfhosted.epoch,
-          session: established.session as RoutableBackendSession,
-        },
-      }
+          pinnedSelfhosted: {
+            sandboxId: ids.pinnedSelfhosted.sandboxId,
+            epoch: ids.pinnedSelfhosted.epoch,
+            session: established.session as RoutableBackendSession,
+          },
+        }
       : {}),
     // A modal swap target in the turn path would need its own lease resume-by-id;
     // that is a future cross-group-box concern. Until then a modal swap target is
@@ -194,7 +199,12 @@ export function wrapLazyTurnBoxWithRouting(
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
       return sandbox
-        ? { id: sandbox.id, kind: sandbox.kind, name: sandbox.name, enrollmentId: sandbox.enrollmentId }
+        ? {
+            id: sandbox.id,
+            kind: sandbox.kind,
+            name: sandbox.name,
+            enrollmentId: sandbox.enrollmentId,
+          }
         : null;
     },
     controlRpcFactory: controlRpcFactory(bus),

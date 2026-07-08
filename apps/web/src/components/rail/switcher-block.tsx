@@ -40,28 +40,39 @@ function orgDisplayName(accountId: string | null, grants: AccountGrant[]): strin
     return null;
   }
   const grant = grants.find((candidate) => candidate.accountId === accountId);
-  const name = grant?.metadata && typeof grant.metadata.accountName === "string" ? grant.metadata.accountName : undefined;
+  const name =
+    grant?.metadata && typeof grant.metadata.accountName === "string"
+      ? grant.metadata.accountName
+      : undefined;
   return name?.trim() || null;
 }
 
 export function SwitcherBlock() {
   const context = useAppContext();
   const rail = useRail();
-  const activeWorkspace = context.workspaces.find((workspace) => workspace.id === rail.workspaceId) ?? null;
-  const activeAccountId = activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
+  const activeWorkspace =
+    context.workspaces.find((workspace) => workspace.id === rail.workspaceId) ?? null;
+  const activeAccountId =
+    activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
-  const currentOrgLabel = orgDisplayName(activeAccountId, context.accessContext.accountGrants) ?? "Organization";
-  const orgWorkspaces = activeAccountId ? workspacesInOrg(context.workspaces, activeAccountId) : context.workspaces;
+  const currentOrgLabel =
+    orgDisplayName(activeAccountId, context.accessContext.accountGrants) ?? "Organization";
+  const orgWorkspaces = activeAccountId
+    ? workspacesInOrg(context.workspaces, activeAccountId)
+    : context.workspaces;
 
-  const createAccountId = workspaceCreationAccountId(context.accessContext, activeWorkspace?.accountId ?? null);
+  const createAccountId = workspaceCreationAccountId(
+    context.accessContext,
+    activeWorkspace?.accountId ?? null,
+  );
 
   const [dialog, setDialog] = useState<"create" | "rename" | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [busy, setBusy] = useState(false);
 
   function openDialog(mode: "create" | "rename") {
-    setNameDraft(mode === "rename" ? activeWorkspace?.name ?? "" : "");
+    setNameDraft(mode === "rename" ? (activeWorkspace?.name ?? "") : "");
     setDialog(mode);
   }
 
@@ -73,7 +84,10 @@ export function SwitcherBlock() {
     setBusy(true);
     try {
       if (dialog === "create") {
-        const created = await context.createWorkspace({ name, ...(createAccountId ? { accountId: createAccountId } : {}) });
+        const created = await context.createWorkspace({
+          name,
+          ...(createAccountId ? { accountId: createAccountId } : {}),
+        });
         if (!created) {
           return;
         }
@@ -144,7 +158,10 @@ export function SwitcherBlock() {
               {workspaceInitial(activeWorkspace)}
             </AvatarFallback>
           </Avatar>
-          <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
+          <span
+            className="min-w-0 flex-1 truncate text-sm font-medium"
+            title={activeWorkspace?.name}
+          >
             {activeWorkspace?.name ?? "Select workspace"}
           </span>
           <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
@@ -173,7 +190,10 @@ function OrgLine(props: {
   // Exactly one org: a static muted label, no useless switcher.
   if (props.orgs.length <= 1) {
     return (
-      <span className="flex min-w-0 items-center gap-1 px-0.5 text-2xs font-medium text-fg-subtle" title={props.currentLabel}>
+      <span
+        className="flex min-w-0 items-center gap-1 px-0.5 text-2xs font-medium text-fg-subtle"
+        title={props.currentLabel}
+      >
         <BuildingIcon className="size-3 shrink-0" />
         <span className="min-w-0 truncate">{props.currentLabel}</span>
       </span>
@@ -204,15 +224,23 @@ function OrgLine(props: {
             }}
           >
             <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
-              {org.label.replace(/^Org\s+/, "").slice(0, 2).toUpperCase()}
+              {org.label
+                .replace(/^Org\s+/, "")
+                .slice(0, 2)
+                .toUpperCase()}
             </span>
             <span className="min-w-0 flex-1 truncate">{org.label}</span>
-            {org.accountId === props.activeAccountId ? <CheckIcon className="size-4 text-brand" /> : null}
+            {org.accountId === props.activeAccountId ? (
+              <CheckIcon className="size-4 text-brand" />
+            ) : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link to="/workspaces/$workspaceId/organization" params={{ workspaceId: rail.workspaceId }}>
+          <Link
+            to="/workspaces/$workspaceId/organization"
+            params={{ workspaceId: rail.workspaceId }}
+          >
             <SettingsIcon className="size-4" />
             Organization settings
           </Link>
@@ -240,18 +268,21 @@ function WorkspaceMenu(props: {
         </TooltipTrigger>
         {rail.collapsed ? <TooltipContent side="right">Switch workspace</TooltipContent> : null}
       </Tooltip>
-      <DropdownMenuContent align={props.align} className="min-w-60" side={rail.collapsed ? "right" : "bottom"}>
+      <DropdownMenuContent
+        align={props.align}
+        className="min-w-60"
+        side={rail.collapsed ? "right" : "bottom"}
+      >
         <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
         {props.workspaces.map((workspace) => (
-          <DropdownMenuItem
-            key={workspace.id}
-            onSelect={() => props.onSelect(workspace.id)}
-          >
+          <DropdownMenuItem key={workspace.id} onSelect={() => props.onSelect(workspace.id)}>
             <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
               {workspaceInitial(workspace)}
             </span>
             <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-            {workspace.id === props.activeWorkspaceId ? <CheckIcon className="size-4 text-brand" /> : null}
+            {workspace.id === props.activeWorkspaceId ? (
+              <CheckIcon className="size-4 text-brand" />
+            ) : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -267,7 +298,10 @@ function WorkspaceMenu(props: {
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem asChild>
-          <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId: props.activeWorkspaceId }}>
+          <Link
+            to="/workspaces/$workspaceId/settings"
+            params={{ workspaceId: props.activeWorkspaceId }}
+          >
             <SettingsIcon className="size-4" />
             Workspace settings
           </Link>

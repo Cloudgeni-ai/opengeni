@@ -85,7 +85,8 @@ for (let y = 0; y < H; y++) {
 
 // Blit a scaled font pixel as a SCALE×SCALE block.
 const blitBlock = (px, py, rgba) => {
-  for (let dy = 0; dy < SCALE; dy++) for (let dx = 0; dx < SCALE; dx++) setPx(px + dx, py + dy, rgba);
+  for (let dy = 0; dy < SCALE; dy++)
+    for (let dx = 0; dx < SCALE; dx++) setPx(px + dx, py + dy, rgba);
 };
 
 for (let li = 0; li < LINES.length; li++) {
@@ -143,7 +144,12 @@ for (let y = 0; y < H; y++) {
 const idat = deflateSync(raw, { level: 9 });
 
 const sig = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const png = Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", new Uint8Array(0))]);
+const png = Buffer.concat([
+  sig,
+  chunk("IHDR", ihdr),
+  chunk("IDAT", idat),
+  chunk("IEND", new Uint8Array(0)),
+]);
 
 const b64 = png.toString("base64");
 console.error(`# dimensions ${W}x${H}, png ${png.length} bytes, data-uri ${b64.length} b64 chars`);

@@ -106,7 +106,9 @@ export class DisplayStackError extends Error {
             : exitCode === 14
               ? "paint"
               : "unknown";
-    super(`desktop display stack failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`);
+    super(
+      `desktop display stack failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`,
+    );
     this.name = "DisplayStackError";
     this.exitCode = exitCode;
     this.stage = stage;
@@ -132,8 +134,16 @@ type ExecResultLike = {
   exitCode?: number | null;
 };
 type ExecCapableSession = {
-  exec?: (args: { cmd: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike>;
-  execCommand?: (args: { cmd: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
+  exec?: (args: {
+    cmd: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<ExecResultLike>;
+  execCommand?: (args: {
+    cmd: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<string>;
 };
 
 export type EnsureDisplayStackOptions = {
@@ -331,6 +341,10 @@ export async function tearDownDisplayStack(session: unknown): Promise<void> {
     return;
   }
   if (typeof s?.execCommand === "function") {
-    await s.execCommand({ cmd: "opengeni-desktop-down", yieldTimeMs: 10_000, maxOutputTokens: 4_000 });
+    await s.execCommand({
+      cmd: "opengeni-desktop-down",
+      yieldTimeMs: 10_000,
+      maxOutputTokens: 4_000,
+    });
   }
 }

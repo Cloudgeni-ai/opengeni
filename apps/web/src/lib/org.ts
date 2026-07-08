@@ -20,9 +20,10 @@ export function shortAccountId(accountId: string): string {
 /** Human label for an organization: the grant's subjectLabel, else a short id. */
 export function orgLabel(accountId: string, grants: AccountGrant[]): string {
   const grant = grants.find((candidate) => candidate.accountId === accountId);
-  const label = grant?.metadata && typeof grant.metadata.accountName === "string"
-    ? grant.metadata.accountName
-    : undefined;
+  const label =
+    grant?.metadata && typeof grant.metadata.accountName === "string"
+      ? grant.metadata.accountName
+      : undefined;
   return label?.trim() || `Org ${shortAccountId(accountId)}`;
 }
 
@@ -31,7 +32,10 @@ export function orgLabel(accountId: string, grants: AccountGrant[]): string {
  * first). Derived from account grants, unioned with the accounts that own the
  * accessible workspaces so an org always shows even without an explicit grant.
  */
-export function organizationsForSubject(context: AccessContext, workspaces: Workspace[]): OrgOption[] {
+export function organizationsForSubject(
+  context: AccessContext,
+  workspaces: Workspace[],
+): OrgOption[] {
   const ids = new Set<string>();
   for (const grant of context.accountGrants) {
     ids.add(grant.accountId);
@@ -51,8 +55,9 @@ export function organizationsForSubject(context: AccessContext, workspaces: Work
   return ordered.map((accountId) => ({
     accountId,
     label: orgLabel(accountId, context.accountGrants),
-    canManage: hasAccountPermission(context, accountId, "billing:read")
-      || hasAccountPermission(context, accountId, "account:read"),
+    canManage:
+      hasAccountPermission(context, accountId, "billing:read") ||
+      hasAccountPermission(context, accountId, "account:read"),
   }));
 }
 

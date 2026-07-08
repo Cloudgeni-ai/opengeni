@@ -1,4 +1,8 @@
-import { CreateScheduledTaskRequest, TriggerScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/contracts";
+import {
+  CreateScheduledTaskRequest,
+  TriggerScheduledTaskRequest,
+  UpdateScheduledTaskRequest,
+} from "@opengeni/contracts";
 import {
   deleteScheduledTask,
   listScheduledTaskRuns,
@@ -30,8 +34,20 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const rawPayload = await c.req.json();
     const payload = CreateScheduledTaskRequest.parse(rawPayload);
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "schedule:create", quantity: 1 });
-    const task = await createValidatedScheduledTask({ settings, db, objectStorage, grant, payload, toolsProvided: scheduledTaskToolsProvided(rawPayload) });
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "schedule:create",
+      quantity: 1,
+    });
+    const task = await createValidatedScheduledTask({
+      settings,
+      db,
+      objectStorage,
+      grant,
+      payload,
+      toolsProvided: scheduledTaskToolsProvided(rawPayload),
+    });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     return c.json(task, 201);
   });
@@ -55,7 +71,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
     const rawPayload = await c.req.json();
     const payload = UpdateScheduledTaskRequest.parse(rawPayload);
-    const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, grant, existing, payload, toolsProvided: scheduledTaskToolsProvided(rawPayload) });
+    const update = await validatedScheduledTaskUpdate({
+      settings,
+      db,
+      objectStorage,
+      grant,
+      existing,
+      payload,
+      toolsProvided: scheduledTaskToolsProvided(rawPayload),
+    });
     const task = await updateScheduledTask(db, workspaceId, taskId, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
@@ -85,15 +109,29 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // Load the task before the gate so a codex-model scheduled task can be
     // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model: task.agentConfig.model ?? deps.settings.openaiModel });
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "agent_run:create",
+      quantity: 1,
+      model: task.agentConfig.model ?? deps.settings.openaiModel,
+    });
     // Body is optional (a bare POST is still a valid trigger); only a present,
     // non-empty body must parse against the contract.
     const body = await c.req.json().catch(() => ({}));
     const { triggerId } = TriggerScheduledTaskRequest.parse(body ?? {});
     const triggerToken = scheduledTaskTriggerToken(triggerId);
-    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken);
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(
+      workspaceId,
+      task.id,
+      triggerToken,
+    );
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
-    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey, triggerWorkflowId });
+    await workflowClient.triggerScheduledTask({
+      task,
+      agentRunUsageIdempotencyKey,
+      triggerWorkflowId,
+    });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -112,7 +150,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    await workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId });
+    await workflowClient.deleteScheduledTaskSchedule({
+      temporalScheduleId: task.temporalScheduleId,
+    });
     await deleteScheduledTask(db, workspaceId, task.id);
     return c.json({ ok: true });
   });
@@ -121,6 +161,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    return c.json(await listScheduledTaskRuns(db, workspaceId, task.id, boundedLimit(c.req.query("limit"))));
+    return c.json(
+      await listScheduledTaskRuns(db, workspaceId, task.id, boundedLimit(c.req.query("limit"))),
+    );
   });
 }

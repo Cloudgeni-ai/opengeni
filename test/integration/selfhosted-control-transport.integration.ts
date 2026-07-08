@@ -132,29 +132,35 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     // Bounce: the responder goes away (a transient connection blip on the agent).
     unsub();
     // Allow the unsubscribe to propagate to the server so a request sees 503.
-    await waitFor(async () => {
-      try {
-        await session.exec({ cmd: "true" });
-        return false;
-      } catch (e) {
-        // While the subject has no subscriber the op surfaces agent_offline (the
-        // turn would pause + retry against the re-resolved active sandbox).
-        return (e as { agentOffline?: boolean }).agentOffline === true;
-      }
-    }, { timeoutMs: 5_000, intervalMs: 100 });
+    await waitFor(
+      async () => {
+        try {
+          await session.exec({ cmd: "true" });
+          return false;
+        } catch (e) {
+          // While the subject has no subscriber the op surfaces agent_offline (the
+          // turn would pause + retry against the re-resolved active sandbox).
+          return (e as { agentOffline?: boolean }).agentOffline === true;
+        }
+      },
+      { timeoutMs: 5_000, intervalMs: 100 },
+    );
 
     // Recover: the agent re-subscribes (reconnect) on the SAME bus connection.
     unsub = bus.subscribeRequests(subject, responderFor(mock));
     try {
       // The transport resumes with NO new session + NO new connection — the next
       // op lands on the re-elected responder.
-      await waitFor(async () => {
-        try {
-          return (await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim() === "reconnect-vm";
-        } catch {
-          return false;
-        }
-      }, { timeoutMs: 5_000, intervalMs: 100 });
+      await waitFor(
+        async () => {
+          try {
+            return (await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim() === "reconnect-vm";
+          } catch {
+            return false;
+          }
+        },
+        { timeoutMs: 5_000, intervalMs: 100 },
+      );
     } finally {
       unsub();
     }

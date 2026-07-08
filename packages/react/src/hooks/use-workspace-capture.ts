@@ -82,7 +82,10 @@ export function useWorkspaceCapture(
     setLoading(true);
     setError(null);
     try {
-      const res: GetWorkspaceCaptureResponse = await client.getWorkspaceCapture(workspaceId, sessionId);
+      const res: GetWorkspaceCaptureResponse = await client.getWorkspaceCapture(
+        workspaceId,
+        sessionId,
+      );
       if (generationRef.current !== generation) return;
       if (!res.available) {
         setCapture(null);
@@ -99,7 +102,8 @@ export function useWorkspaceCapture(
       if (!manifest && res.manifestUrl) {
         const response = await fetch(res.manifestUrl.url);
         if (generationRef.current !== generation) return;
-        if (!response.ok) throw new Error(`workspace capture manifest fetch failed: ${response.status}`);
+        if (!response.ok)
+          throw new Error(`workspace capture manifest fetch failed: ${response.status}`);
         manifest = (await response.json()) as WorkspaceCaptureManifest;
         if (generationRef.current !== generation) return;
       }
@@ -113,7 +117,9 @@ export function useWorkspaceCapture(
       setAvailable(true);
       // Fold the served revision into the announced high-water mark so a capture we
       // JUST loaded is never reported stale against an older announce.
-      setAnnouncedRevision((prev) => (prev === null || manifest.revision > prev ? manifest.revision : prev));
+      setAnnouncedRevision((prev) =>
+        prev === null || manifest.revision > prev ? manifest.revision : prev,
+      );
     } catch (cause) {
       if (generationRef.current !== generation) return;
       setError(cause instanceof Error ? cause : new Error(String(cause)));
@@ -152,7 +158,8 @@ export function useWorkspaceCapture(
         }
       }
     }
-    for (const event of events) if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
+    for (const event of events)
+      if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
     if (newest === null) return;
     setAnnouncedRevision((prev) => (prev === null || newest > prev ? newest : prev));
   }, [enabled, events]);
@@ -167,7 +174,8 @@ export function useWorkspaceCapture(
     void refresh();
   }, [enabled, announcedRevision, loadedRevision, refresh]);
 
-  const isStale = loadedRevision !== null && announcedRevision !== null && announcedRevision > loadedRevision;
+  const isStale =
+    loadedRevision !== null && announcedRevision !== null && announcedRevision > loadedRevision;
 
   return {
     capture,

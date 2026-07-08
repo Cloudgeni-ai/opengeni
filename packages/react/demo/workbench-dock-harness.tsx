@@ -30,16 +30,26 @@ function PrimaryPane() {
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-og-border px-4 py-3">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-medium text-og-fg">Security hardening</h2>
-          <p className="truncate font-og-mono text-[11px] text-og-fg-subtle">session · {DOCK_SESSION_ID.slice(0, 8)}</p>
+          <p className="truncate font-og-mono text-[11px] text-og-fg-subtle">
+            session · {DOCK_SESSION_ID.slice(0, 8)}
+          </p>
         </div>
-        <span className="rounded-og-xs bg-og-accent-soft px-1.5 py-0.5 text-2xs text-og-fg-muted">agent</span>
+        <span className="rounded-og-xs bg-og-accent-soft px-1.5 py-0.5 text-2xs text-og-fg-muted">
+          agent
+        </span>
       </div>
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
         <div className="ml-auto max-w-[80%] rounded-og-lg bg-og-accent-soft px-3.5 py-2 text-[13px] text-og-fg">
-          Harden the API: lock CORS to an allowlist, add helmet + rate limiting, and enable instance monitoring in Terraform.
+          Harden the API: lock CORS to an allowlist, add helmet + rate limiting, and enable instance
+          monitoring in Terraform.
         </div>
         <div className="max-w-[85%] space-y-2 text-[13px] text-og-fg-muted">
-          <p>Done. I tightened <span className="font-og-mono text-og-fg">createServer()</span> to pass an explicit origin allowlist and added the two middlewares, introduced <span className="font-og-mono text-og-fg">ALLOWED_ORIGINS</span>, and turned on monitoring + EBS optimization on the API instance.</p>
+          <p>
+            Done. I tightened <span className="font-og-mono text-og-fg">createServer()</span> to
+            pass an explicit origin allowlist and added the two middlewares, introduced{" "}
+            <span className="font-og-mono text-og-fg">ALLOWED_ORIGINS</span>, and turned on
+            monitoring + EBS optimization on the API instance.
+          </p>
           <p>The full diff is in the Changes tab.</p>
         </div>
       </div>

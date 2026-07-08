@@ -16,7 +16,12 @@ import {
   ScreenshotReadError,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
-import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
+import {
+  KeyAction,
+  PointerAction,
+  PointerButton,
+  type DesktopInputRequest,
+} from "@opengeni/agent-proto";
 
 // The SDK reads hosted-vs-function transport from the bound model instance's
 // constructor name (supportsStructuredToolOutputTransport): a name containing
@@ -33,18 +38,37 @@ const chatCompletionsModel = (): never => new OpenAIChatCompletionsModel() as ne
 // asserted without a real desktop. Cast to the SDK `Computer` at the call site.
 function makeFakeComputer(opts: { screenshotB64?: string } = {}) {
   const calls: Array<[string, ...unknown[]]> = [];
-  const defaultB64 = Buffer.from(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])).toString("base64");
+  const defaultB64 = Buffer.from(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])).toString(
+    "base64",
+  );
   const computer = {
     environment: "ubuntu" as const,
     dimensions: [1280, 800] as [number, number],
-    screenshot: async () => { calls.push(["screenshot"]); return opts.screenshotB64 ?? defaultB64; },
-    click: async (x: number, y: number, button: string) => { calls.push(["click", x, y, button]); },
-    doubleClick: async (x: number, y: number) => { calls.push(["doubleClick", x, y]); },
-    move: async (x: number, y: number) => { calls.push(["move", x, y]); },
-    scroll: async (x: number, y: number, sx: number, sy: number) => { calls.push(["scroll", x, y, sx, sy]); },
-    type: async (text: string) => { calls.push(["type", text]); },
-    keypress: async (keys: string[]) => { calls.push(["keypress", keys]); },
-    drag: async (path: [number, number][]) => { calls.push(["drag", path]); },
+    screenshot: async () => {
+      calls.push(["screenshot"]);
+      return opts.screenshotB64 ?? defaultB64;
+    },
+    click: async (x: number, y: number, button: string) => {
+      calls.push(["click", x, y, button]);
+    },
+    doubleClick: async (x: number, y: number) => {
+      calls.push(["doubleClick", x, y]);
+    },
+    move: async (x: number, y: number) => {
+      calls.push(["move", x, y]);
+    },
+    scroll: async (x: number, y: number, sx: number, sy: number) => {
+      calls.push(["scroll", x, y, sx, sy]);
+    },
+    type: async (text: string) => {
+      calls.push(["type", text]);
+    },
+    keypress: async (keys: string[]) => {
+      calls.push(["keypress", keys]);
+    },
+    drag: async (path: [number, number][]) => {
+      calls.push(["drag", path]);
+    },
     wait: async () => {},
   };
   return { computer, calls };
@@ -55,10 +79,19 @@ function makeFakeComputer(opts: { screenshotB64?: string } = {}) {
 const toolsByName = (tools: unknown[]): Record<string, unknown> =>
   Object.fromEntries((tools as Array<{ name: string }>).map((t) => [t.name, t]));
 const invokeTool = (t: unknown, args: unknown): Promise<unknown> =>
-  (t as { invoke: (ctx: never, input: string) => Promise<unknown> }).invoke({} as never, JSON.stringify(args));
+  (t as { invoke: (ctx: never, input: string) => Promise<unknown> }).invoke(
+    {} as never,
+    JSON.stringify(args),
+  );
 const FUNCTION_TOOL_NAMES = [
-  "computer_screenshot", "computer_click", "computer_double_click", "computer_move",
-  "computer_scroll", "computer_type", "computer_keypress", "computer_drag",
+  "computer_screenshot",
+  "computer_click",
+  "computer_double_click",
+  "computer_move",
+  "computer_scroll",
+  "computer_type",
+  "computer_keypress",
+  "computer_drag",
 ];
 
 // A mock provider session that records every command. By default it mimics
@@ -67,22 +100,24 @@ const FUNCTION_TOOL_NAMES = [
 // `base64 <path>` over execCommand (NOT readFile — Modal's readFile rejects the
 // /tmp scrot as "escapes the workspace root"), so the mock returns the PNG bytes
 // base64'd INSIDE the execCommand banner for `base64 …` commands.
-function makeMockSession(opts: {
-  withExec?: boolean; // if true, also implement the structured exec object path
-  pngBytes?: Uint8Array; // bytes the screenshot read returns (base64'd over exec)
-  failExit?: number; // non-zero exit for the next exec (F2 error detection)
-  stillRunning?: boolean; // simulate a yield-without-finish (F3)
-  // PNG bytes PER scrot attempt — models a cold :0 that paints on a later
-  // retry (e.g. [empty, empty, valid] self-heals on attempt 3). Overrides pngBytes.
-  pngBytesPerAttempt?: Uint8Array[];
-  // Simulate the Modal exec-output cap truncating EACH `dd … | base64` chunk to at most
-  // this many decoded bytes — the read then reconstructs short and must fail LOUD.
-  truncateChunkBytes?: number;
-  // Model the RoutingSandboxSession fronting a Modal box: it EXPOSES an `exec` method
-  // (so typeof session.exec === "function"), but for a Modal backend that method falls
-  // back to execCommand and returns the formatted banner STRING — NOT a {output} object.
-  proxyExecString?: boolean;
-} = {}) {
+function makeMockSession(
+  opts: {
+    withExec?: boolean; // if true, also implement the structured exec object path
+    pngBytes?: Uint8Array; // bytes the screenshot read returns (base64'd over exec)
+    failExit?: number; // non-zero exit for the next exec (F2 error detection)
+    stillRunning?: boolean; // simulate a yield-without-finish (F3)
+    // PNG bytes PER scrot attempt — models a cold :0 that paints on a later
+    // retry (e.g. [empty, empty, valid] self-heals on attempt 3). Overrides pngBytes.
+    pngBytesPerAttempt?: Uint8Array[];
+    // Simulate the Modal exec-output cap truncating EACH `dd … | base64` chunk to at most
+    // this many decoded bytes — the read then reconstructs short and must fail LOUD.
+    truncateChunkBytes?: number;
+    // Model the RoutingSandboxSession fronting a Modal box: it EXPOSES an `exec` method
+    // (so typeof session.exec === "function"), but for a Modal backend that method falls
+    // back to execCommand and returns the formatted banner STRING — NOT a {output} object.
+    proxyExecString?: boolean;
+  } = {},
+) {
   const execCalls: string[] = [];
   // The execCommand contract: a FORMATTED STRING with a metadata preamble (F2).
   const formatted = (body: string, exit = 0): string =>
@@ -112,7 +147,8 @@ function makeMockSession(opts: {
     }
     const cm = cmd.match(/dd if=(\/tmp\/og-shot-\S+?\.png) bs=(\d+) skip=(\d+)/);
     if (cm) {
-      const bs = Number(cm[2]!), skip = Number(cm[3]!);
+      const bs = Number(cm[2]!),
+        skip = Number(cm[3]!);
       let slice = attemptBytes.slice(skip * bs, (skip + 1) * bs);
       if (opts.truncateChunkBytes !== undefined) slice = slice.slice(0, opts.truncateChunkBytes);
       return Buffer.from(slice).toString("base64");
@@ -145,7 +181,13 @@ function makeMockSession(opts: {
         return { output: body, stdout: "", stderr: "", exitCode: 0 };
       }
       if (opts.stillRunning) return { output: "", stdout: "", stderr: "", sessionId: 7 };
-      return { output: "", stdout: "", stderr: "", exitCode: opts.failExit ?? 0, wallTimeSeconds: 0.01 };
+      return {
+        output: "",
+        stdout: "",
+        stderr: "",
+        exitCode: opts.failExit ?? 0,
+        wallTimeSeconds: 0.01,
+      };
     };
   }
   return { session, execCalls };
@@ -186,7 +228,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // chunked form that stays under Modal's exec-output cap (a single `base64 <file>`
     // silently empties a full-frame read).
     expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
-    const chunkReads = execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd));
+    const chunkReads = execCalls.filter((cmd) =>
+      /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd),
+    );
     expect(chunkReads.length).toBe(1); // a 6-byte PNG is a single chunk
     // The temp file is cleaned up.
     expect(execCalls.some((cmd) => cmd.includes("rm -f /tmp/og-shot-"))).toBe(true);
@@ -199,7 +243,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(png).toString("base64"));
     expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
-    expect(execCalls.some((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd))).toBe(true);
+    expect(execCalls.some((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd))).toBe(
+      true,
+    );
   });
 
   test("ROUTING-PROXY-FIX: a proxy exec() that returns the execCommand banner STRING is banner-stripped, not dropped to ''", async () => {
@@ -216,7 +262,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     expect(shot).toBe(Buffer.from(png).toString("base64")); // full frame, byte-exact — NOT empty
     // Drove the read through the exec() (proxy string) path, not execCommand directly.
     expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
-    expect(execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd)).length).toBeGreaterThanOrEqual(3);
+    expect(
+      execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd)).length,
+    ).toBeGreaterThanOrEqual(3);
   });
 
   // ── The exec-output-cap fix: a fully-painted 1280x800 desktop PNG (~222 KB) base64s
@@ -241,10 +289,17 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const png = new Uint8Array(250_000).fill(0x42);
     // Every chunk comes back truncated to 1000 bytes → the reconstruction is short.
     const { session } = makeMockSession({ pngBytes: png, truncateChunkBytes: 1000 });
-    const c = new SandboxComputer(session as never, { screenshotWarmupBudgetMs: 30, screenshotRetryDelayMs: 5 });
-    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    const c = new SandboxComputer(session as never, {
+      screenshotWarmupBudgetMs: 30,
+      screenshotRetryDelayMs: 5,
+    });
+    const result = await c.screenshot().then(
+      (s) => ({ ok: true as const, s }),
+      (e) => ({ ok: false as const, e }),
+    );
     expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("screenshot() resolved on a truncated read — a short frame must fail loud");
+    if (result.ok)
+      throw new Error("screenshot() resolved on a truncated read — a short frame must fail loud");
     expect(result.e).toBeInstanceOf(ScreenshotReadError);
     // The message carries BOTH byte counts for diagnosis.
     expect(String((result.e as Error).message)).toMatch(/of 250000B/);
@@ -259,12 +314,21 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const { session } = makeMockSession({ pngBytes: new Uint8Array() }); // empty PNG, every attempt
     // Shrink the warm-up budget so the "genuinely dead display" path fails fast in the
     // test instead of burning the full 30s cold-boot budget (behavior is identical).
-    const c = new SandboxComputer(session as never, { screenshotWarmupBudgetMs: 30, screenshotRetryDelayMs: 5 });
+    const c = new SandboxComputer(session as never, {
+      screenshotWarmupBudgetMs: 30,
+      screenshotRetryDelayMs: 5,
+    });
     // Failure-sensitive: it must reject (NOT resolve to ""), so an empty image_url
     // can never reach the model.
-    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    const result = await c.screenshot().then(
+      (s) => ({ ok: true as const, s }),
+      (e) => ({ ok: false as const, e }),
+    );
     expect(result.ok).toBe(false);
-    if (result.ok) throw new Error(`screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`);
+    if (result.ok)
+      throw new Error(
+        `screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`,
+      );
     expect(result.e).toBeInstanceOf(ComputerUnavailableError);
   });
 
@@ -339,7 +403,11 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
   test("drag builds a single mousedown→moves→mouseup line", async () => {
     const { session, execCalls } = makeMockSession();
     const c = new SandboxComputer(session as never);
-    await c.drag([[0, 0], [10, 10], [20, 20]]);
+    await c.drag([
+      [0, 0],
+      [10, 10],
+      [20, 20],
+    ]);
     expect(execCalls[0]).toContain("mousemove --sync 0 0 mousedown 1");
     expect(execCalls[0]).toContain("mousemove --sync 10 10");
     expect(execCalls[0]).toContain("mouseup 1");
@@ -390,7 +458,8 @@ function makeNativeSession(
   const width = opts.width ?? 1280;
   const height = opts.height ?? 800;
   let attempt = 0;
-  const at = <T>(arr: T[] | undefined, i: number): T | undefined => (arr ? (arr[Math.min(i, arr.length - 1)]) : undefined);
+  const at = <T>(arr: T[] | undefined, i: number): T | undefined =>
+    arr ? arr[Math.min(i, arr.length - 1)] : undefined;
   const session: NativeDesktopSession = {
     desktopInput: async (event) => {
       if (event) inputs.push(event);
@@ -400,7 +469,10 @@ function makeNativeSession(
       const toThrow = at(opts.throwPerAttempt, i);
       if (toThrow) throw toThrow;
       return {
-        png: at(opts.pngPerAttempt, i) ?? opts.png ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+        png:
+          at(opts.pngPerAttempt, i) ??
+          opts.png ??
+          new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
         width,
         height,
         // Default: native == encoded (no downscale). Tests that exercise the
@@ -438,8 +510,12 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     const c = new NativeDesktopComputer(session);
     await c.click(1, 1, "right");
     await c.click(2, 2, "wheel");
-    expect((inputs[0] as { pointer: { button: PointerButton } }).pointer.button).toBe(PointerButton.POINTER_BUTTON_RIGHT);
-    expect((inputs[1] as { pointer: { button: PointerButton } }).pointer.button).toBe(PointerButton.POINTER_BUTTON_MIDDLE);
+    expect((inputs[0] as { pointer: { button: PointerButton } }).pointer.button).toBe(
+      PointerButton.POINTER_BUTTON_RIGHT,
+    );
+    expect((inputs[1] as { pointer: { button: PointerButton } }).pointer.button).toBe(
+      PointerButton.POINTER_BUTTON_MIDDLE,
+    );
   });
 
   test("doubleClick emits a DOUBLE_CLICK pointer event (LEFT)", async () => {
@@ -459,7 +535,11 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     const ev = inputs[0]!;
     expect(ev.$case).toBe("key");
     if (ev.$case !== "key") throw new Error("expected key");
-    expect(ev.key).toEqual({ key: "it's a test", isText: true, action: KeyAction.KEY_ACTION_PRESS });
+    expect(ev.key).toEqual({
+      key: "it's a test",
+      isText: true,
+      action: KeyAction.KEY_ACTION_PRESS,
+    });
   });
 
   test("keypress emits ONE non-text chord KeyEvent (platform-independent names, PRESS)", async () => {
@@ -486,7 +566,11 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
   test("drag emits DOWN → MOVE(s) → UP pointer events along the path", async () => {
     const { session, inputs } = makeNativeSession();
     const c = new NativeDesktopComputer(session);
-    await c.drag([[0, 0], [10, 10], [20, 20]]);
+    await c.drag([
+      [0, 0],
+      [10, 10],
+      [20, 20],
+    ]);
     const actions = inputs.map((ev) => (ev.$case === "pointer" ? ev.pointer.action : -1));
     // DOWN at the start, a MOVE through EACH subsequent waypoint, UP at the last.
     expect(actions).toEqual([
@@ -551,9 +635,15 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
   test("REGRESSION: a persistently empty PNG THROWS (never an empty image_url / blank placeholder)", async () => {
     const { session, attempts } = makeNativeSession({ png: new Uint8Array() });
     const c = new NativeDesktopComputer(session, FAST_WARMUP);
-    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    const result = await c.screenshot().then(
+      (s) => ({ ok: true as const, s }),
+      (e) => ({ ok: false as const, e }),
+    );
     expect(result.ok).toBe(false);
-    if (result.ok) throw new Error(`screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`);
+    if (result.ok)
+      throw new Error(
+        `screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`,
+      );
     expect(result.e).toBeInstanceOf(ComputerUnavailableError);
     // It RETRIED across the warm-up budget before failing (not a single-shot throw).
     expect(attempts()).toBeGreaterThan(1);
@@ -563,7 +653,9 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     // The agent's ScreenCaptureKit can hand back an empty first frame right after
     // connect; the old single-shot path turned that into a blank the model misread.
     const real = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const { session, attempts } = makeNativeSession({ pngPerAttempt: [new Uint8Array(), new Uint8Array(), real] });
+    const { session, attempts } = makeNativeSession({
+      pngPerAttempt: [new Uint8Array(), new Uint8Array(), real],
+    });
     const c = new NativeDesktopComputer(session, FAST_WARMUP);
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(real).toString("base64"));
@@ -574,7 +666,10 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     const denial = new Error("Screen Recording permission is not granted");
     const { session, attempts } = makeNativeSession({ throwPerAttempt: [denial] });
     const c = new NativeDesktopComputer(session, FAST_WARMUP);
-    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    const result = await c.screenshot().then(
+      (s) => ({ ok: true as const, s }),
+      (e) => ({ ok: false as const, e }),
+    );
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("a denied capture must throw, never resolve to a blank");
     // The AGENT's reason is surfaced verbatim (operator sees "grant Screen Recording").
@@ -592,7 +687,12 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     await expect(c.scroll(1, 1, 0, 10)).rejects.toBeInstanceOf(ComputerReadOnlyError);
     await expect(c.type("x")).rejects.toBeInstanceOf(ComputerReadOnlyError);
     await expect(c.keypress(["a"])).rejects.toBeInstanceOf(ComputerReadOnlyError);
-    await expect(c.drag([[0, 0], [1, 1]])).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(
+      c.drag([
+        [0, 0],
+        [1, 1],
+      ]),
+    ).rejects.toBeInstanceOf(ComputerReadOnlyError);
     // No write ever reached the session.
     expect(inputs.length).toBe(0);
     // screenshot is a READ — never gated.
@@ -777,7 +877,12 @@ describe("computerFunctionTools (codex text-transport routing)", () => {
     await invokeTool(t.computer_scroll, { x: 7, y: 8, scroll_x: 0, scroll_y: 300 });
     await invokeTool(t.computer_type, { text: "hello" });
     await invokeTool(t.computer_keypress, { keys: ["ctrl", "c"] });
-    await invokeTool(t.computer_drag, { path: [{ x: 0, y: 0 }, { x: 9, y: 9 }] });
+    await invokeTool(t.computer_drag, {
+      path: [
+        { x: 0, y: 0 },
+        { x: 9, y: 9 },
+      ],
+    });
     expect(calls).toEqual([
       ["click", 10, 20, "left"],
       ["click", 1, 2, "right"],
@@ -786,7 +891,13 @@ describe("computerFunctionTools (codex text-transport routing)", () => {
       ["scroll", 7, 8, 0, 300],
       ["type", "hello"],
       ["keypress", ["ctrl", "c"]],
-      ["drag", [[0, 0], [9, 9]]],
+      [
+        "drag",
+        [
+          [0, 0],
+          [9, 9],
+        ],
+      ],
     ]);
   });
 
@@ -807,7 +918,12 @@ describe("computerFunctionTools (codex text-transport routing)", () => {
     const t = toolsByName(computerFunctionTools(computer as never, true));
     const clickOut = await invokeTool(t.computer_click, { x: 1, y: 1 });
     const typeOut = await invokeTool(t.computer_type, { text: "x" });
-    const dragOut = await invokeTool(t.computer_drag, { path: [{ x: 0, y: 0 }, { x: 1, y: 1 }] });
+    const dragOut = await invokeTool(t.computer_drag, {
+      path: [
+        { x: 0, y: 0 },
+        { x: 1, y: 1 },
+      ],
+    });
     expect(String(clickOut)).toContain("read-only");
     expect(String(typeOut)).toContain("read-only");
     expect(String(dragOut)).toContain("read-only");
@@ -862,7 +978,11 @@ describe("computerFunctionTools image delivery on the codex backend", () => {
     // (not exported from the package root, so resolve it through @openai/agents' own deps).
     const req = createRequire(import.meta.url);
     const agentsReq = createRequire(req.resolve("@openai/agents"));
-    const toolExecPath = join(dirname(agentsReq.resolve("@openai/agents-core")), "runner", "toolExecution.mjs");
+    const toolExecPath = join(
+      dirname(agentsReq.resolve("@openai/agents-core")),
+      "runner",
+      "toolExecution.mjs",
+    );
     const { getToolCallOutputItem } = (await import(toolExecPath)) as {
       getToolCallOutputItem: (
         toolCall: { name: string; callId: string },
@@ -871,7 +991,10 @@ describe("computerFunctionTools image delivery on the codex backend", () => {
     };
 
     // 1) The tool result becomes the persisted function_call_result raw item.
-    const rawItem = getToolCallOutputItem({ name: "computer_screenshot", callId: "call_1" }, toolResult);
+    const rawItem = getToolCallOutputItem(
+      { name: "computer_screenshot", callId: "call_1" },
+      toolResult,
+    );
     expect(Array.isArray(rawItem.output)).toBe(true);
     const persistedItem = (rawItem.output as Array<Record<string, unknown>>)[0]!;
     // Persisted as an input_image whose `image` is a data-URL STRING — no Uint8Array.
@@ -918,29 +1041,59 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     buildAgentCapabilities(s, []).map((c) => (c as { type?: string }).type);
 
   test("modal + desktop ON + computerUse ON → computer-use attached", () => {
-    const t = types(testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true }));
+    const t = types(
+      testSettings({
+        sandboxBackend: "modal",
+        sandboxDesktopEnabled: true,
+        computerUseEnabled: true,
+      }),
+    );
     expect(t).toContain("computer-use");
   });
 
   test("desktop OFF → no computer-use (the headless default is unchanged)", () => {
-    const t = types(testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false, computerUseEnabled: true }));
+    const t = types(
+      testSettings({
+        sandboxBackend: "modal",
+        sandboxDesktopEnabled: false,
+        computerUseEnabled: true,
+      }),
+    );
     expect(t).not.toContain("computer-use");
   });
 
   test("computerUse disabled → no computer-use even with desktop on", () => {
-    const t = types(testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: false }));
+    const t = types(
+      testSettings({
+        sandboxBackend: "modal",
+        sandboxDesktopEnabled: true,
+        computerUseEnabled: false,
+      }),
+    );
     expect(t).not.toContain("computer-use");
   });
 
   test("a non-desktop backend never gets computer-use (F18: honest gate)", () => {
-    const t = types(testSettings({ sandboxBackend: "none", sandboxDesktopEnabled: true, computerUseEnabled: true }));
+    const t = types(
+      testSettings({
+        sandboxBackend: "none",
+        sandboxDesktopEnabled: true,
+        computerUseEnabled: true,
+      }),
+    );
     expect(t).not.toContain("computer-use");
   });
 
   test("codex path (structuredToolTransport:false): computer-use ATTACHED and NEUTRALIZED to FUNCTION tools (no longer suppressed)", () => {
-    const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
+    const desktopOn = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: true,
+      computerUseEnabled: true,
+    });
     // Structured backend attaches computer-use (as before) — the hosted tool path.
-    expect(buildAgentCapabilities(desktopOn, []).map((c) => (c as { type?: string }).type)).toContain("computer-use");
+    expect(
+      buildAgentCapabilities(desktopOn, []).map((c) => (c as { type?: string }).type),
+    ).toContain("computer-use");
     // On the codex backend it is NO LONGER dropped: it is attached and neutralized so
     // its tools() emits the FUNCTION computer_* tools the codex backend accepts.
     const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
@@ -952,7 +1105,9 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     // Prove the attached capability emits the FUNCTION tools even when the SDK bind
     // chain hands it a STRUCTURED model instance: neutralize overrode bindModel to
     // drop the instance, so tools() falls to the function transport.
-    const computerCap = codexCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const computerCap = codexCaps.find(
+      (c) => (c as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
     const { session } = makeMockSession();
     computerCap.bind(session as never).bindModel("responses", structuredModel());
     const names = computerCap.tools().map((t) => (t as { name?: string }).name);
@@ -960,12 +1115,18 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
   });
 
   test("explicit computerToolMode is threaded to the capability and OVERRIDES the bound-model sniff", async () => {
-    const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
+    const desktopOn = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: true,
+      computerUseEnabled: true,
+    });
 
     // "hosted" → the attached capability emits the hosted tool EVEN with a
     // ChatCompletions model bound (the sniff alone would pick function tools).
     const hostedCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "hosted" });
-    const hostedCap = hostedCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const hostedCap = hostedCaps.find(
+      (c) => (c as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
     const { session: s1 } = makeMockSession();
     hostedCap.bind(s1 as never).bindModel("gpt", chatCompletionsModel());
     const hostedTools = hostedCap.tools();
@@ -975,35 +1136,57 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     // "function-text" → the FUNCTION tools EVEN with a structured model bound, and the
     // screenshot renders as a text data-URL (imageFunctionResults=false).
     const textCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-text" });
-    const textCap = textCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const textCap = textCaps.find(
+      (c) => (c as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const { session: s2 } = makeMockSession({ pngBytes: png });
     textCap.bind(s2 as never).bindModel("responses", structuredModel());
     const textTools = textCap.tools();
     expect(textTools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
     const shot = toolsByName(textTools).computer_screenshot;
-    expect(await invokeTool(shot, {})).toBe(`data:image/png;base64,${Buffer.from(png).toString("base64")}`);
+    expect(await invokeTool(shot, {})).toBe(
+      `data:image/png;base64,${Buffer.from(png).toString("base64")}`,
+    );
 
     // "function-image" → the FUNCTION tools with a STRUCTURED image screenshot.
     const imgCaps = buildAgentCapabilities(desktopOn, [], { computerToolMode: "function-image" });
-    const imgCap = imgCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const imgCap = imgCaps.find(
+      (c) => (c as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
     const { session: s3 } = makeMockSession({ pngBytes: png });
     imgCap.bind(s3 as never).bindModel("responses", structuredModel());
     const imgShot = toolsByName(imgCap.tools()).computer_screenshot;
-    const imgOut = (await invokeTool(imgShot, {})) as { type?: string; image?: { mediaType?: string } };
+    const imgOut = (await invokeTool(imgShot, {})) as {
+      type?: string;
+      image?: { mediaType?: string };
+    };
     expect(imgOut.type).toBe("image");
     expect(imgOut.image?.mediaType).toBe("image/png");
   });
 
   test("codex path threads imageFunctionResults:true → the emitted computer_screenshot returns a structured image", async () => {
-    const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
+    const desktopOn = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: true,
+      computerUseEnabled: true,
+    });
     const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
-    const computerCap = codexCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const computerCap = codexCaps.find(
+      (c) => (c as { type?: string }).type === "computer-use",
+    ) as unknown as ComputerUseCapability;
     // A MODAL mock session → SandboxComputer; its base64 screenshot read returns PNG bytes.
-    const { session } = makeMockSession({ pngBytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) });
+    const { session } = makeMockSession({
+      pngBytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    });
     computerCap.bind(session as never).bindModel("responses", structuredModel());
-    const screenshotTool = computerCap.tools().find((t) => (t as { name?: string }).name === "computer_screenshot");
-    const out = (await invokeTool(screenshotTool, {})) as { type?: string; image?: { mediaType?: string } };
+    const screenshotTool = computerCap
+      .tools()
+      .find((t) => (t as { name?: string }).name === "computer_screenshot");
+    const out = (await invokeTool(screenshotTool, {})) as {
+      type?: string;
+      image?: { mediaType?: string };
+    };
     // Structured image (codex sees it), NOT the text data-URL string.
     expect(out.type).toBe("image");
     expect(out.image?.mediaType).toBe("image/png");

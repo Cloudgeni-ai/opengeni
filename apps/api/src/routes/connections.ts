@@ -38,9 +38,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    return c.json(ListConnectionsResponse.parse({
-      connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
-    }));
+    return c.json(
+      ListConnectionsResponse.parse({
+        connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/connections", async (c) => {
@@ -67,7 +69,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
-    const connection = await getConnectionMetadata(db, workspaceId, c.req.param("connectionId"), grant.subjectId);
+    const connection = await getConnectionMetadata(
+      db,
+      workspaceId,
+      c.req.param("connectionId"),
+      grant.subjectId,
+    );
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
@@ -84,26 +91,39 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // could clear the broker's re-auth signal while stale tokens stay in place.
     if (payload.status !== undefined) {
       if (payload.status !== "active") {
-        throw new HTTPException(400, { message: "status can only be set to \"active\"; use DELETE to revoke" });
+        throw new HTTPException(400, {
+          message: 'status can only be set to "active"; use DELETE to revoke',
+        });
       }
       if (payload.credential === undefined) {
-        throw new HTTPException(400, { message: "reactivating a connection requires a new credential" });
+        throw new HTTPException(400, {
+          message: "reactivating a connection requires a new credential",
+        });
       }
     }
     const key = payload.credential === undefined ? null : requireEnvironmentEncryption(settings);
-    const subjectId = payload.subjectId === undefined ? undefined : writableSubjectId(payload.subjectId, grant.subjectId);
+    const subjectId =
+      payload.subjectId === undefined
+        ? undefined
+        : writableSubjectId(payload.subjectId, grant.subjectId);
     const connection = await updateConnection(db, {
       workspaceId,
       connectionId: c.req.param("connectionId"),
       visibleToSubjectId: grant.subjectId,
       updatedBySubjectId: grant.subjectId,
-      ...(payload.providerDomain !== undefined ? { providerDomain: canonicalProviderDomain(payload.providerDomain) } : {}),
+      ...(payload.providerDomain !== undefined
+        ? { providerDomain: canonicalProviderDomain(payload.providerDomain) }
+        : {}),
       ...(subjectId !== undefined ? { subjectId } : {}),
       ...(payload.kind !== undefined ? { kind: payload.kind } : {}),
       ...(payload.status !== undefined ? { status: payload.status } : {}),
-      ...(payload.credential !== undefined && key ? { credentialEncrypted: encryptCredentialBundle(key, payload.credential) } : {}),
+      ...(payload.credential !== undefined && key
+        ? { credentialEncrypted: encryptCredentialBundle(key, payload.credential) }
+        : {}),
       ...(payload.grantedScopes !== undefined ? { grantedScopes: payload.grantedScopes } : {}),
-      ...(payload.expiresAt !== undefined ? { expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null } : {}),
+      ...(payload.expiresAt !== undefined
+        ? { expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null }
+        : {}),
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
     if (!connection) {
@@ -115,7 +135,12 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const connection = await revokeConnection(db, workspaceId, c.req.param("connectionId"), grant.subjectId);
+    const connection = await revokeConnection(
+      db,
+      workspaceId,
+      c.req.param("connectionId"),
+      grant.subjectId,
+    );
     if (!connection) {
       throw new HTTPException(404, { message: "connection not found" });
     }
@@ -128,44 +153,57 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const parsed = OAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
-      throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "invalid OAuth start request" });
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid OAuth start request",
+      });
     }
     const payload = parsed.data;
-    const result = await startMcpOAuth({ db, settings, observability }, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      requestUrl: c.req.url,
-      payload,
-    });
+    const result = await startMcpOAuth(
+      { db, settings, observability },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        requestUrl: c.req.url,
+        payload,
+      },
+    );
     return c.json(OAuthStartResponse.parse(result));
   });
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeMcpOAuthCallback({ db, settings, observability }, {
-      code: c.req.query("code"),
-      state: c.req.query("state"),
-      requestUrl: c.req.url,
-    });
+    const result = await completeMcpOAuthCallback(
+      { db, settings, observability },
+      {
+        code: c.req.query("code"),
+        state: c.req.query("state"),
+        requestUrl: c.req.url,
+      },
+    );
     return c.redirect(result.redirectTo, 302);
   });
 
   app.get("/v1/integrations/oauth/client-metadata.json", (c) => {
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, c.req.url);
     const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
-    return c.json(IntegrationClientMetadata.parse({
-      client_id: metadataUrl,
-      client_name: "OpenGeni",
-      redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
-      token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"],
-      response_types: ["code"],
-    }));
+    return c.json(
+      IntegrationClientMetadata.parse({
+        client_id: metadataUrl,
+        client_name: "OpenGeni",
+        redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+      }),
+    );
   });
 }
 
-function writableSubjectId(requested: string | null | undefined, grantSubjectId: string): string | null {
+function writableSubjectId(
+  requested: string | null | undefined,
+  grantSubjectId: string,
+): string | null {
   if (requested == null) {
     return null;
   }

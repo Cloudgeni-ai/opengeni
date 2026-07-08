@@ -22,7 +22,9 @@ for (const file of files) {
   if (file === "scripts/check-workspace-billing-static.ts") {
     continue;
   }
-  const text = await Bun.file(file).text().catch(() => "");
+  const text = await Bun.file(file)
+    .text()
+    .catch(() => "");
   if (!text) {
     continue;
   }
@@ -63,7 +65,12 @@ async function runFileListCommand(command: string[]): Promise<string | null> {
       stderr: "pipe",
     });
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "ENOENT"
+    ) {
       return null;
     }
     throw error;
@@ -80,7 +87,10 @@ async function runFileListCommand(command: string[]): Promise<string | null> {
 }
 
 function normalizeFileList(stdout: string): string[] {
-  return stdout.split("\n").map((line) => line.trim()).filter((line) => line && !line.includes("/node_modules/"));
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.includes("/node_modules/"));
 }
 
 function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding[]): void {
@@ -97,13 +107,20 @@ function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding
     /["'`]\/v1\/github\/repositories(?:\/|["'`])/,
   ];
   if (forbidden.some((pattern) => pattern.test(text))) {
-    out.push({ file, message: "contains a deleted unscoped operational /v1 route; use /v1/workspaces/:workspaceId/..." });
+    out.push({
+      file,
+      message:
+        "contains a deleted unscoped operational /v1 route; use /v1/workspaces/:workspaceId/...",
+    });
   }
 }
 
 function checkForbiddenProviderImports(file: string, text: string, out: Finding[]): void {
   const normalized = file.replace(/\\/g, "/");
-  const betterAuthImport = /(?:from\s+["']better-auth["']|import\s+["']better-auth["']|require\(["']better-auth["']\)|["@]better-auth\/)/.test(text);
+  const betterAuthImport =
+    /(?:from\s+["']better-auth["']|import\s+["']better-auth["']|require\(["']better-auth["']\)|["@]better-auth\/)/.test(
+      text,
+    );
   // `@opengeni/core`'s ManagedAuth alias is a documented, deliberate exception: a
   // TYPE-ONLY `import type { Auth } from "better-auth"` that tsup fully erases at
   // build time, so it adds NO runtime dependency and NO pg driver to the published
@@ -111,7 +128,8 @@ function checkForbiddenProviderImports(file: string, text: string, out: Finding[
   // Auth CONSTRUCTION (which pulls pg) stays in apps/api/src/auth. This is the only
   // better-auth reference permitted outside the managed auth module.
   const isTypeOnlyManagedAuthAlias =
-    normalized === "packages/core/src/managed-auth-type.ts" && /import type \{[^}]*\} from ["']better-auth["']/.test(text);
+    normalized === "packages/core/src/managed-auth-type.ts" &&
+    /import type \{[^}]*\} from ["']better-auth["']/.test(text);
   if (
     betterAuthImport &&
     !normalized.startsWith("apps/api/src/auth/") &&
@@ -129,13 +147,22 @@ function checkForbiddenProviderImports(file: string, text: string, out: Finding[
 
 function checkDeletedBillingPortal(file: string, text: string, out: Finding[]): void {
   if (isSourceLike(file) && text.includes("/v1/billing/portal")) {
-    out.push({ file, message: "contains first-release-excluded /v1/billing/portal route or client call" });
+    out.push({
+      file,
+      message: "contains first-release-excluded /v1/billing/portal route or client call",
+    });
   }
 }
 
 function checkGithubWebhookAdvertising(file: string, text: string, out: Finding[]): void {
-  if (file === "packages/github/src/index.ts" && (text.includes("hook_attributes") || text.includes("/v1/github/webhook"))) {
-    out.push({ file, message: "advertises GitHub webhooks without a signed/idempotent /v1/github/webhook receiver" });
+  if (
+    file === "packages/github/src/index.ts" &&
+    (text.includes("hook_attributes") || text.includes("/v1/github/webhook"))
+  ) {
+    out.push({
+      file,
+      message: "advertises GitHub webhooks without a signed/idempotent /v1/github/webhook receiver",
+    });
   }
 }
 
@@ -145,9 +172,18 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   }
   // Third-party absolute URLs (registry/catalog data) may contain "/v1/mcp" in
   // their own vendor paths; this guard targets OUR first-party default route.
-  const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) => (url.includes("opengeni") ? url : ""));
-  if (withoutForeignUrls.includes("/v1/mcp") && !text.includes("/v1/workspaces/{workspaceId}/mcp") && !text.includes("/v1/workspaces/${workspaceId}/mcp")) {
-    out.push({ file, message: "contains unscoped first-party MCP default; use /v1/workspaces/{workspaceId}/mcp" });
+  const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) =>
+    url.includes("opengeni") ? url : "",
+  );
+  if (
+    withoutForeignUrls.includes("/v1/mcp") &&
+    !text.includes("/v1/workspaces/{workspaceId}/mcp") &&
+    !text.includes("/v1/workspaces/${workspaceId}/mcp")
+  ) {
+    out.push({
+      file,
+      message: "contains unscoped first-party MCP default; use /v1/workspaces/{workspaceId}/mcp",
+    });
   }
 }
 

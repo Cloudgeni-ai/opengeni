@@ -85,9 +85,10 @@ export class ToolNameMapper {
       let n = 2;
       do {
         const suffix = `_${n++}`;
-        candidate = (base.length + suffix.length > EFFECTIVE_MAX_TOOL_NAME_LEN
-          ? base.slice(0, EFFECTIVE_MAX_TOOL_NAME_LEN - suffix.length)
-          : base) + suffix;
+        candidate =
+          (base.length + suffix.length > EFFECTIVE_MAX_TOOL_NAME_LEN
+            ? base.slice(0, EFFECTIVE_MAX_TOOL_NAME_LEN - suffix.length)
+            : base) + suffix;
       } while (this.used.has(candidate));
     }
     this.used.add(candidate);
@@ -110,7 +111,11 @@ export class ToolNameMapper {
  * dotted name BEFORE mapper.sanitize rewrites the dot away. Only dotted names carry a
  * connector namespace; un-dotted (already-legal) names are not connectors and are skipped.
  */
-function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper, namespaceSink?: Set<string>): void {
+function sanitizeToolsInRpcMessage(
+  message: unknown,
+  mapper: ToolNameMapper,
+  namespaceSink?: Set<string>,
+): void {
   if (!message || typeof message !== "object") {
     return;
   }
@@ -190,7 +195,11 @@ function inlineStructuredContentInRpcMessage(message: unknown): void {
 }
 
 /** Sanitize a single JSON body (application/json MCP response). */
-export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new ToolNameMapper(), namespaceSink?: Set<string>): string {
+export function sanitizeMcpJsonBody(
+  text: string,
+  mapper: ToolNameMapper = new ToolNameMapper(),
+  namespaceSink?: Set<string>,
+): string {
   try {
     const parsed = JSON.parse(text);
     sanitizeToolsInRpcMessage(parsed, mapper, namespaceSink);
@@ -202,7 +211,11 @@ export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new T
 }
 
 /** Sanitize an SSE body: each JSON-RPC message rides on a `data:` line. */
-export function sanitizeMcpSseBody(text: string, mapper: ToolNameMapper = new ToolNameMapper(), namespaceSink?: Set<string>): string {
+export function sanitizeMcpSseBody(
+  text: string,
+  mapper: ToolNameMapper = new ToolNameMapper(),
+  namespaceSink?: Set<string>,
+): string {
   return text
     .split("\n")
     .map((line) => {
@@ -256,7 +269,10 @@ export function remapToolCallRequestBody(body: string, mapper: ToolNameMapper): 
  * dot is sanitized away). The worker reads the (live, by-reference) Set after the
  * turn to cache the serving account's connector set — packages/codex stays db-free.
  */
-export function codexAppsSanitizingFetch(base: FetchLike = globalThis.fetch, namespaceSink?: Set<string>): FetchLike {
+export function codexAppsSanitizingFetch(
+  base: FetchLike = globalThis.fetch,
+  namespaceSink?: Set<string>,
+): FetchLike {
   const mapper = new ToolNameMapper();
   return async (input, init) => {
     // Outgoing: reverse a sanitized tools/call name to the server's original.
@@ -268,7 +284,9 @@ export function codexAppsSanitizingFetch(base: FetchLike = globalThis.fetch, nam
       }
     }
     const res = await base(input, nextInit);
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     if (method !== "POST" || !res.ok || !res.body) {
       return res;
     }

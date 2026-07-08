@@ -49,16 +49,26 @@ function docker(args: string[]): string {
   return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 function removeContainer(): void {
-  try { docker(["rm", "-f", CONTAINER]); } catch { /* gone */ }
+  try {
+    docker(["rm", "-f", CONTAINER]);
+  } catch {
+    /* gone */
+  }
 }
 async function waitForReady(): Promise<void> {
   const deadline = Date.now() + 60_000;
   while (true) {
     try {
       const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try { await probe`SELECT 1`; return; } finally { await probe.end(); }
+      try {
+        await probe`SELECT 1`;
+        return;
+      } finally {
+        await probe.end();
+      }
     } catch (err) {
-      if (Date.now() > deadline) throw new Error(`postgres not ready: ${String(err)}`, { cause: err });
+      if (Date.now() > deadline)
+        throw new Error(`postgres not ready: ${String(err)}`, { cause: err });
       await new Promise((r) => setTimeout(r, 500));
     }
   }
@@ -71,8 +81,12 @@ let db: Database;
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   // Seeded as superuser (bypasses RLS) so the accessors below exercise RLS under codex_app.
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -85,10 +99,15 @@ async function connectAccount(
   opts: { activate?: boolean; planType?: string } = {},
 ): Promise<string> {
   const { id, isNew } = await upsertCodexSubscriptionCredential(db, {
-    accountId: ws.accountId, workspaceId: ws.workspaceId,
+    accountId: ws.accountId,
+    workspaceId: ws.workspaceId,
     credentialEncrypted: encTokens(tokens),
-    chatgptAccountId, scopes: null, planType: opts.planType ?? "pro", isFedramp: false,
-    expiresAt: null, lastRefreshAt: null,
+    chatgptAccountId,
+    scopes: null,
+    planType: opts.planType ?? "pro",
+    isFedramp: false,
+    expiresAt: null,
+    lastRefreshAt: null,
   });
   await ensureCodexRotationSettings(db, ws.accountId, ws.workspaceId);
   if (opts.activate ?? isNew) {
@@ -100,7 +119,18 @@ async function connectAccount(
 beforeAll(async () => {
   try {
     removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
+    docker([
+      "run",
+      "--rm",
+      "-d",
+      "-e",
+      `POSTGRES_PASSWORD=${PASSWORD}`,
+      "-p",
+      `${PORT}:5432`,
+      "--name",
+      CONTAINER,
+      IMAGE,
+    ]);
   } catch (err) {
     available = false;
     console.warn(`[codex-credentials] docker unavailable, skipping: ${String(err)}`);
@@ -123,8 +153,16 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
-  try { await admin?.end(); } catch { /* noop */ }
+  try {
+    await client?.close();
+  } catch {
+    /* noop */
+  }
+  try {
+    await admin?.end();
+  } catch {
+    /* noop */
+  }
   removeContainer();
 });
 
@@ -156,15 +194,23 @@ describe("codex_subscription_credentials accessors", () => {
     const id = await connectAccount(ws, "acct_x");
     const before = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
     const ok = await recordCodexTokenRefresh(db, {
-      id: before!.id, version: before!.version,
+      id: before!.id,
+      version: before!.version,
       workspaceId: ws.workspaceId,
-      credentialEncrypted: encTokens({ access_token: "AC2", refresh_token: "RF2", id_token: "ID2" }),
-      expiresAt: new Date(Date.now() + 3_600_000), lastRefreshAt: new Date(),
+      credentialEncrypted: encTokens({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        id_token: "ID2",
+      }),
+      expiresAt: new Date(Date.now() + 3_600_000),
+      lastRefreshAt: new Date(),
     });
     expect(ok).toBe(true);
     const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
     expect(loaded?.tokens.accessToken).toBe("AC2");
-    const [row] = await admin<{ version: number }[]>`select version from codex_subscription_credentials where id = ${id}`;
+    const [row] = await admin<
+      { version: number }[]
+    >`select version from codex_subscription_credentials where id = ${id}`;
     expect(row!.version).toBe(2);
   });
 
@@ -174,10 +220,12 @@ describe("codex_subscription_credentials accessors", () => {
     const id = await connectAccount(ws, "acct_x");
     const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
     const ok = await recordCodexTokenRefresh(db, {
-      id: loaded!.id, version: loaded!.version + 99,
+      id: loaded!.id,
+      version: loaded!.version + 99,
       workspaceId: ws.workspaceId,
       credentialEncrypted: encTokens({ access_token: "STALE", refresh_token: "x", id_token: "x" }),
-      expiresAt: null, lastRefreshAt: new Date(),
+      expiresAt: null,
+      lastRefreshAt: new Date(),
     });
     expect(ok).toBe(false);
     const after = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
@@ -190,10 +238,20 @@ describe("codex_subscription_credentials accessors", () => {
     const id = await connectAccount(ws, "acct_x");
     const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
     // Stale guard → no stamp.
-    expect(await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x", { id: loaded!.id, version: loaded!.version + 1 })).toBe(false);
+    expect(
+      await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x", {
+        id: loaded!.id,
+        version: loaded!.version + 1,
+      }),
+    ).toBe(false);
     expect((await getCodexCredentialStatus(db, ws.workspaceId))?.status).toBe("active");
     // Matching guard → stamps.
-    expect(await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "expired", { id: loaded!.id, version: loaded!.version })).toBe(true);
+    expect(
+      await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "expired", {
+        id: loaded!.id,
+        version: loaded!.version,
+      }),
+    ).toBe(true);
     expect((await getCodexCredentialStatus(db, ws.workspaceId))?.status).toBe("needs_relogin");
   });
 
@@ -203,10 +261,15 @@ describe("codex_subscription_credentials accessors", () => {
     const first = await connectAccount(ws, "acct_x");
     // Re-connect SAME ChatGPT account → updates in place (same id), not a new row.
     const { id: again, isNew } = await upsertCodexSubscriptionCredential(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
       credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
-      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
-      expiresAt: null, lastRefreshAt: null,
+      chatgptAccountId: "acct_x",
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
     });
     expect(again).toBe(first);
     expect(isNew).toBe(false);
@@ -224,10 +287,15 @@ describe("codex_subscription_credentials accessors", () => {
     // Second account does NOT auto-activate in P1 (route rule); connectAccount only
     // activates when isNew AND we opt in — here we pass activate:false explicitly.
     const b = await upsertCodexSubscriptionCredential(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
       credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
-      chatgptAccountId: "acct_b", scopes: null, planType: "team", isFedramp: false,
-      expiresAt: null, lastRefreshAt: null,
+      chatgptAccountId: "acct_b",
+      scopes: null,
+      planType: "team",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
     });
     expect(b.isNew).toBe(true);
     const list = await listCodexAccountStatuses(db, ws.workspaceId);
@@ -242,12 +310,19 @@ describe("codex_subscription_credentials accessors", () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const a = await connectAccount(ws, "acct_a");
-    const b = (await upsertCodexSubscriptionCredential(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId,
-      credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
-      chatgptAccountId: "acct_b", scopes: null, planType: "team", isFedramp: false,
-      expiresAt: null, lastRefreshAt: null,
-    })).id;
+    const b = (
+      await upsertCodexSubscriptionCredential(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
+        chatgptAccountId: "acct_b",
+        scopes: null,
+        planType: "team",
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      })
+    ).id;
     expect(await setActiveCodexCredential(db, ws.workspaceId, b)).toBe(true);
     expect((await getCodexCredentialStatus(db, ws.workspaceId))?.credentialId).toBe(b);
     expect(await setActiveCodexCredential(db, ws.workspaceId, crypto.randomUUID())).toBe(false);
@@ -269,12 +344,19 @@ describe("codex_subscription_credentials accessors", () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const a = await connectAccount(ws, "acct_a");
-    const b = (await upsertCodexSubscriptionCredential(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId,
-      credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
-      chatgptAccountId: "acct_b", scopes: null, planType: "team", isFedramp: false,
-      expiresAt: null, lastRefreshAt: null,
-    })).id;
+    const b = (
+      await upsertCodexSubscriptionCredential(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
+        chatgptAccountId: "acct_b",
+        scopes: null,
+        planType: "team",
+        isFedramp: false,
+        expiresAt: null,
+        lastRefreshAt: null,
+      })
+    ).id;
     // a is active; disconnect a → b becomes active (the only remaining account).
     const res = await disconnectCodexAccount(db, ws.workspaceId, a);
     expect(res.removed).toBe(true);
@@ -294,10 +376,15 @@ describe("codex_subscription_credentials accessors", () => {
     const ws = await freshWorkspace();
     await connectAccount(ws, "acct_a");
     await upsertCodexSubscriptionCredential(db, {
-      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
       credentialEncrypted: encTokens({ access_token: "BC", refresh_token: "BR", id_token: "BI" }),
-      chatgptAccountId: "acct_b", scopes: null, planType: "team", isFedramp: false,
-      expiresAt: null, lastRefreshAt: null,
+      chatgptAccountId: "acct_b",
+      scopes: null,
+      planType: "team",
+      isFedramp: false,
+      expiresAt: null,
+      lastRefreshAt: null,
     });
     expect(await disconnectAllCodexAccounts(db, ws.workspaceId)).toBe(2);
     expect(await getCodexCredentialStatus(db, ws.workspaceId)).toBeNull();
@@ -307,13 +394,24 @@ describe("codex_subscription_credentials accessors", () => {
   test("workspaceCodexSubscriptionActive reflects the ACTIVE account's status", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
-    const enabled = { codexSubscriptionEnabled: true } as Parameters<typeof workspaceCodexSubscriptionActive>[1];
+    const enabled = { codexSubscriptionEnabled: true } as Parameters<
+      typeof workspaceCodexSubscriptionActive
+    >[1];
     expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(false);
-    expect(await workspaceCodexSubscriptionActive(db, { codexSubscriptionEnabled: false } as typeof enabled, ws.workspaceId)).toBe(false);
+    expect(
+      await workspaceCodexSubscriptionActive(
+        db,
+        { codexSubscriptionEnabled: false } as typeof enabled,
+        ws.workspaceId,
+      ),
+    ).toBe(false);
     const id = await connectAccount(ws, "acct_x");
     expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(true);
     const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId, id);
-    await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x", { id: loaded!.id, version: loaded!.version });
+    await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x", {
+      id: loaded!.id,
+      version: loaded!.version,
+    });
     expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(false);
   });
 

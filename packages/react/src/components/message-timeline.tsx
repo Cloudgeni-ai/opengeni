@@ -19,7 +19,15 @@ import {
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Collapsible } from "radix-ui";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
 import { Markdown } from "./markdown";
@@ -52,7 +60,9 @@ export type MessageTimelineProps = {
   /** Current session status; drives the live "working" indicator. */
   status?: SessionStatus | null | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
-  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
   /**
@@ -158,11 +168,16 @@ export function MessageTimeline({
   // viewport expands or collapses (e.g. a turn folds when it settles).
   const anchorRef = useRef<{ el: Element; top: number } | null>(null);
   const lastItem = resolvedItems[resolvedItems.length - 1];
-  const streaming = lastItem !== undefined && (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") && lastItem.streaming;
+  const streaming =
+    lastItem !== undefined &&
+    (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") &&
+    lastItem.streaming;
   const working = status === "running" && !streaming;
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
-  const firstKeyChangedForBulk = previousBulkFirstKeyRef.current !== undefined && previousBulkFirstKeyRef.current !== firstGroupKey;
+  const firstKeyChangedForBulk =
+    previousBulkFirstKeyRef.current !== undefined &&
+    previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = groups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
@@ -230,14 +245,24 @@ export function MessageTimeline({
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
-    if (!root || !target || !hasOlder || loadingOlder || !onLoadOlder || typeof IntersectionObserver === "undefined") {
+    if (
+      !root ||
+      !target ||
+      !hasOlder ||
+      loadingOlder ||
+      !onLoadOlder ||
+      typeof IntersectionObserver === "undefined"
+    ) {
       return;
     }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) {
-        onLoadOlder();
-      }
-    }, { root, rootMargin: "1600px 0px 0px 0px" });
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onLoadOlder();
+        }
+      },
+      { root, rootMargin: "1600px 0px 0px 0px" },
+    );
     observer.observe(target);
     return () => observer.disconnect();
   }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
@@ -297,76 +322,86 @@ export function MessageTimeline({
 
   return (
     <LightboxProvider>
-    <EntranceAnimationProvider value={!bulkRender}>
-    <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
-      {/* overflow-anchor off: the browser's native scroll anchoring would fight
+      <EntranceAnimationProvider value={!bulkRender}>
+        <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+          {/* overflow-anchor off: the browser's native scroll anchoring would fight
           the ResizeObserver corrections above — one authority only. */}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
-      >
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
-          {groups.length === 0 && !working
-            ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)
-            : null}
-          {hasOlder ? <div ref={topSentinelRef} data-og-top-sentinel="" data-og-timeline-chrome="" aria-hidden="true" className="h-px w-full shrink-0" /> : null}
-          {loadingOlder ? (
-            <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
-              <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
-            </div>
-          ) : null}
-          {groups.map((group, index) => (
-            <TimelineGroupView
-              key={timelineGroupKey(group)}
-              group={group}
-              renderMessageText={renderMessageText}
-              onOpenSession={onOpenSession}
-              onMemoryClick={onMemoryClick}
-              onReconnect={onReconnect}
-              resolveProviderLogo={resolveProviderLogo}
-              toolRegistry={toolRegistry}
-              foldLiveCluster={isAgentProgress(groups[index + 1])}
-            />
-          ))}
-          {working ? (
-            <div className="flex items-center gap-2 text-sm">
-              <span className="og-shimmer-text font-medium">Working…</span>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <AnimatePresence>
-        {!pinned && autoFollow ? (
-          <motion.button
-            type="button"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.15, ease: "easeOut" }}
-            onClick={() => {
-              const node = scrollRef.current;
-              if (node) {
-                node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-              }
-              pinnedRef.current = true;
-              setPinned(true);
-            }}
-            className={cn(
-              "absolute bottom-4 left-1/2 -translate-x-1/2",
-              "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-              "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
-              "hover:border-og-border-strong",
-            )}
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
           >
-            <ArrowDownIcon className="size-3.5" />
-            Jump to latest
-          </motion.button>
-        ) : null}
-      </AnimatePresence>
-    </div>
-    </EntranceAnimationProvider>
+            <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+              {groups.length === 0 && !working
+                ? (emptyState ?? (
+                    <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
+                  ))
+                : null}
+              {hasOlder ? (
+                <div
+                  ref={topSentinelRef}
+                  data-og-top-sentinel=""
+                  data-og-timeline-chrome=""
+                  aria-hidden="true"
+                  className="h-px w-full shrink-0"
+                />
+              ) : null}
+              {loadingOlder ? (
+                <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
+                  <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
+                </div>
+              ) : null}
+              {groups.map((group, index) => (
+                <TimelineGroupView
+                  key={timelineGroupKey(group)}
+                  group={group}
+                  renderMessageText={renderMessageText}
+                  onOpenSession={onOpenSession}
+                  onMemoryClick={onMemoryClick}
+                  onReconnect={onReconnect}
+                  resolveProviderLogo={resolveProviderLogo}
+                  toolRegistry={toolRegistry}
+                  foldLiveCluster={isAgentProgress(groups[index + 1])}
+                />
+              ))}
+              {working ? (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="og-shimmer-text font-medium">Working…</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <AnimatePresence>
+            {!pinned && autoFollow ? (
+              <motion.button
+                type="button"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                transition={{ duration: 0.15, ease: "easeOut" }}
+                onClick={() => {
+                  const node = scrollRef.current;
+                  if (node) {
+                    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                  }
+                  pinnedRef.current = true;
+                  setPinned(true);
+                }}
+                className={cn(
+                  "absolute bottom-4 left-1/2 -translate-x-1/2",
+                  "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
+                  "text-xs font-medium text-og-fg shadow-og-md backdrop-blur",
+                  "hover:border-og-border-strong",
+                )}
+              >
+                <ArrowDownIcon className="size-3.5" />
+                Jump to latest
+              </motion.button>
+            ) : null}
+          </AnimatePresence>
+        </div>
+      </EntranceAnimationProvider>
     </LightboxProvider>
   );
 }
@@ -398,7 +433,9 @@ function TimelineGroupView({
   foldLiveCluster = false,
 }: {
   group: TimelineGroup;
-  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onMemoryClick?: ((memoryId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
@@ -423,12 +460,24 @@ function TimelineGroupView({
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
         >
-          <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
+          <ActivityRail
+            items={group.items}
+            onOpenSession={onOpenSession}
+            onMemoryClick={onMemoryClick}
+            toolRegistry={toolRegistry}
+            bare={insideTurn}
+          />
         </TurnSummary>
       ) : (
         // A nested live cluster hangs on the turn's rail (bare); a top-level one
         // owns its own rail.
-        <ActivityRail items={group.items} onOpenSession={onOpenSession} onMemoryClick={onMemoryClick} toolRegistry={toolRegistry} bare={insideTurn} />
+        <ActivityRail
+          items={group.items}
+          onOpenSession={onOpenSession}
+          onMemoryClick={onMemoryClick}
+          toolRegistry={toolRegistry}
+          bare={insideTurn}
+        />
       );
     case "turn": {
       const activityItems = flattenActivityItems(group.groups);
@@ -464,7 +513,9 @@ function TimelineGroupView({
           ) : (
             // The top-level turn draws THE rail: one thin continuous rule that
             // every nested node and step hangs off of.
-            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">{body}</div>
+            <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
+              {body}
+            </div>
           )}
         </TurnSummary>
       );
@@ -502,7 +553,11 @@ function isAgentProgress(next: TimelineGroup | undefined): boolean {
   if (!next) {
     return false;
   }
-  return next.kind === "activity" || next.kind === "turn" || (next.kind === "item" && next.item.kind === "agent-message");
+  return (
+    next.kind === "activity" ||
+    next.kind === "turn" ||
+    (next.kind === "item" && next.item.kind === "agent-message")
+  );
 }
 
 /** No item still running or streaming — the only state safe to fold live.
@@ -557,7 +612,9 @@ export function TimelineRow({
   onOpenSession,
 }: {
   item: TimelineItem;
-  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
@@ -576,7 +633,13 @@ export function TimelineRow({
     case "notice":
       return <NoticeRow item={item} />;
     case "auth-needed":
-      return <AuthNeededRow item={item} onReconnect={onReconnect} resolveProviderLogo={resolveProviderLogo} />;
+      return (
+        <AuthNeededRow
+          item={item}
+          onReconnect={onReconnect}
+          resolveProviderLogo={resolveProviderLogo}
+        />
+      );
     default:
       return null;
   }
@@ -587,7 +650,9 @@ function UserMessageRow({
   renderMessageText,
 }: {
   item: UserMessageItem;
-  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
 }) {
   const enter = useEntranceAnimation();
   return (
@@ -595,7 +660,11 @@ function UserMessageRow({
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         {item.pending ? <span className="px-1 text-og-xs text-og-fg-subtle">queued</span> : null}
         <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
-          {renderMessageText ? renderMessageText(item.text, item) : <Markdown>{item.text}</Markdown>}
+          {renderMessageText ? (
+            renderMessageText(item.text, item)
+          ) : (
+            <Markdown>{item.text}</Markdown>
+          )}
         </div>
       </div>
     </div>
@@ -607,11 +676,16 @@ function AgentMessageRow({
   renderMessageText,
 }: {
   item: AgentMessageItem;
-  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  renderMessageText?:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
 }) {
   const enter = useEntranceAnimation();
   const caret = item.streaming ? (
-    <span className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent" aria-hidden />
+    <span
+      className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent"
+      aria-hidden
+    />
   ) : null;
   return (
     <div className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}>
@@ -656,15 +730,35 @@ type WorkerCompletionMeta = {
 
 function workerCompletionMeta(item: WorkerCompletionItem): WorkerCompletionMeta {
   if (item.childStatus === "failed") {
-    return { label: "Worker failed", icon: XCircleIcon, iconClass: "text-og-status-failed", accentClass: "border-og-status-failed/60" };
+    return {
+      label: "Worker failed",
+      icon: XCircleIcon,
+      iconClass: "text-og-status-failed",
+      accentClass: "border-og-status-failed/60",
+    };
   }
   if (item.goalStatus === "paused") {
-    return { label: "Worker paused", icon: PauseCircleIcon, iconClass: "text-og-status-waiting", accentClass: "border-og-status-waiting/50" };
+    return {
+      label: "Worker paused",
+      icon: PauseCircleIcon,
+      iconClass: "text-og-status-waiting",
+      accentClass: "border-og-status-waiting/50",
+    };
   }
   if (item.goalStatus === "completed") {
-    return { label: "Worker completed", icon: CheckCircle2Icon, iconClass: "text-og-status-idle", accentClass: "border-og-status-idle/45" };
+    return {
+      label: "Worker completed",
+      icon: CheckCircle2Icon,
+      iconClass: "text-og-status-idle",
+      accentClass: "border-og-status-idle/45",
+    };
   }
-  return { label: "Worker reported back", icon: BotIcon, iconClass: "text-og-accent", accentClass: "border-og-border-strong" };
+  return {
+    label: "Worker reported back",
+    icon: BotIcon,
+    iconClass: "text-og-accent",
+    accentClass: "border-og-border-strong",
+  };
 }
 
 function WorkerCompletionRow({
@@ -683,11 +777,18 @@ function WorkerCompletionRow({
   // "Paused because" only when the outcome actually IS a pause — completion
   // payloads can carry a leftover pausedReason/rationale from earlier in the
   // worker's life, and a "Worker completed" card must not show a pause section.
-  const showPausedReason = item.childStatus !== "failed" && item.goalStatus === "paused" && Boolean(item.pausedReason?.trim());
+  const showPausedReason =
+    item.childStatus !== "failed" &&
+    item.goalStatus === "paused" &&
+    Boolean(item.pausedReason?.trim());
   const details: { label: string; value: string; muted?: boolean }[] = [
     ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
-    ...(item.evidence?.trim() ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }] : []),
-    ...(showPausedReason ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }] : []),
+    ...(item.evidence?.trim()
+      ? [{ label: "Evidence", value: item.evidence.trim(), muted: true }]
+      : []),
+    ...(showPausedReason
+      ? [{ label: "Paused because", value: item.pausedReason!.trim(), muted: true }]
+      : []),
   ];
   const hasDetails = details.length > 0;
   return (
@@ -702,7 +803,9 @@ function WorkerCompletionRow({
           <div className="min-w-0 flex-1">
             <p className="text-og-base leading-5 text-og-fg">
               <span className="font-medium">{meta.label}</span>
-              {item.goalText ? <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span> : null}
+              {item.goalText ? (
+                <span className="text-og-fg-muted"> · {truncate(item.goalText, 90)}</span>
+              ) : null}
             </p>
           </div>
           {item.childSessionId && onOpenSession ? (
@@ -738,7 +841,9 @@ function WorkerCompletionRow({
               <div className="ml-1 mt-1.5 flex flex-col gap-2.5">
                 {details.map((detail) => (
                   <div key={detail.label} className="min-w-0">
-                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{detail.label}</p>
+                    <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+                      {detail.label}
+                    </p>
                     <p
                       className={cn(
                         "whitespace-pre-wrap break-words text-og-sm leading-6",
@@ -762,7 +867,13 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
   const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
   return (
-    <div className={cn(enter && "animate-og-enter", "flex items-center gap-3 text-og-xs text-og-fg-subtle")} role="status">
+    <div
+      className={cn(
+        enter && "animate-og-enter",
+        "flex items-center gap-3 text-og-xs text-og-fg-subtle",
+      )}
+      role="status"
+    >
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
         <StatusDot status={item.status} className="size-1" />
@@ -795,10 +906,22 @@ type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?:
 const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
 const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
-  set: { label: "Goal set", pill: "border-og-accent/30 bg-og-accent/10 text-og-accent", icon: TargetIcon },
+  set: {
+    label: "Goal set",
+    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
+    icon: TargetIcon,
+  },
   updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
-  completed: { label: "Goal completed", pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle", icon: CheckIcon },
-  paused: { label: "Goal paused", pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting", icon: PauseIcon },
+  completed: {
+    label: "Goal completed",
+    pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
+    icon: CheckIcon,
+  },
+  paused: {
+    label: "Goal paused",
+    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    icon: PauseIcon,
+  },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
@@ -814,7 +937,12 @@ function GoalRow({ item }: { item: GoalItem }) {
   const { label, pill, icon: Icon } = GOAL_META[item.action];
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
-      <span className={cn("inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm", pill)}>
+      <span
+        className={cn(
+          "inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm",
+          pill,
+        )}
+      >
         <Icon className="size-3.5 shrink-0" />
         <span className="truncate">
           {label}
@@ -834,8 +962,17 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
-    <div className={cn(enter && "animate-og-enter", "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm", tone)} role="status">
-      <TriangleAlertIcon className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")} />
+    <div
+      className={cn(
+        enter && "animate-og-enter",
+        "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm",
+        tone,
+      )}
+      role="status"
+    >
+      <TriangleAlertIcon
+        className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+      />
       <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{item.text}</span>
       {item.action ? (
         <a
@@ -894,7 +1031,10 @@ function AuthNeededRow({
     <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <AuthProviderLogo src={resolveProviderLogo?.(item.providerDomain) ?? null} label={provider} />
+          <AuthProviderLogo
+            src={resolveProviderLogo?.(item.providerDomain) ?? null}
+            label={provider}
+          />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
@@ -929,7 +1069,9 @@ function AuthNeededRow({
         ) : null}
       </div>
       {failed ? (
-        <p className="px-1 text-og-xs text-og-status-failed">Couldn't start reconnecting {provider}. Try again.</p>
+        <p className="px-1 text-og-xs text-og-status-failed">
+          Couldn't start reconnecting {provider}. Try again.
+        </p>
       ) : null}
     </div>
   );
@@ -954,7 +1096,14 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
       aria-hidden
     >
       {showImage ? (
-        <img src={src} alt="" loading="lazy" decoding="async" className="size-full object-contain p-1.5" onError={() => setFailed(true)} />
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="size-full object-contain p-1.5"
+          onError={() => setFailed(true)}
+        />
       ) : (
         <span>{monogram(label)}</span>
       )}
@@ -978,7 +1127,12 @@ function monogram(label: string): string {
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
     name for the provider — never the raw domain shown as a label. */
 function providerLabel(domain: string): string {
-  const host = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
+  const host =
+    domain
+      .trim()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .split("/")[0] ?? "";
   const first = host.split(".")[0] ?? host;
   if (!first) {
     return "this service";

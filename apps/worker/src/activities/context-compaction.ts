@@ -65,10 +65,11 @@ export async function maybeCompactContext(
   scope: { accountId: string; workspaceId: string; sessionId: string; turnId?: string | null },
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
-  summarize: CompactionSummarizer = (s, m, o) => summarizeForCompaction(s, m, {
-    maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-    ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
-  }),
+  summarize: CompactionSummarizer = (s, m, o) =>
+    summarizeForCompaction(s, m, {
+      maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+      ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+    }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
   options: { force?: boolean; requireShrink?: boolean } = {},
@@ -102,7 +103,9 @@ export async function maybeCompactContext(
   let summarizerFailure = "summarizer returned no summary";
   let summaryBody: string | null = null;
 
-  const fullAttempt = await runSummarizerAttempt(summarize, settings, promptInput, { attempt: "full" });
+  const fullAttempt = await runSummarizerAttempt(summarize, settings, promptInput, {
+    attempt: "full",
+  });
   if (fullAttempt.summary) {
     summaryBody = fullAttempt.summary;
   } else {
@@ -149,7 +152,10 @@ export async function maybeCompactContext(
 
   const estimatedTokensAfter = estimateTokens(replacementHistory);
   if (requireShrink && estimatedTokensAfter >= shrinkBaselineTokens) {
-    return { compacted: false, reason: `compaction summarization failed: fallback did not reduce context signal (${estimatedTokensAfter} >= ${shrinkBaselineTokens})` };
+    return {
+      compacted: false,
+      reason: `compaction summarization failed: fallback did not reduce context signal (${estimatedTokensAfter} >= ${shrinkBaselineTokens})`,
+    };
   }
 
   const summaryItem = replacementHistory.at(-1);

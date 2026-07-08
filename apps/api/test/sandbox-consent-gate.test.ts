@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Hono } from "hono";
-import { testSettings, acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  testSettings,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
@@ -102,7 +106,7 @@ function deps(): ApiRouteDeps {
     githubStateSecret: "x",
     objectStorage: null,
     documentIndexer: { indexDocument: async () => {} },
-    getDocumentServices: () => ({} as never),
+    getDocumentServices: () => ({}) as never,
     resumeBoxById: async () => {
       throw new Error("resumeBoxById should not be called in these tests (backend=none)");
     },
@@ -134,16 +138,33 @@ function url(workspaceId: string, sessionId: string, suffix: string): string {
 // Seed a WARM lease row for a session's group (cold->warming CAS then commit
 // warm), dropping the seed turn holder so the box is warm with NO holder — the
 // viewer attaches via the ATTACHED path (no provider establish needed).
-async function seedWarmBox(accountId: string, workspaceId: string, sessionId: string, sandboxGroupId: string): Promise<void> {
+async function seedWarmBox(
+  accountId: string,
+  workspaceId: string,
+  sessionId: string,
+  sandboxGroupId: string,
+): Promise<void> {
   const acquired = await acquireLease(db, {
-    accountId, workspaceId, sandboxGroupId, kind: "turn", holderId: "seed-turn",
-    subjectId: sessionId, backend: "none", leaseTtlMs: 5_000,
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    kind: "turn",
+    holderId: "seed-turn",
+    subjectId: sessionId,
+    backend: "none",
+    leaseTtlMs: 5_000,
   });
   expect(acquired.role).toBe("spawner");
   const committed = await commitWarmingToWarm(db, {
-    accountId, workspaceId, sandboxGroupId, expectedEpoch: acquired.lease.leaseEpoch,
-    instanceId: "inst-warm", dataPlaneUrl: null, resumeBackendId: "none",
-    resumeState: { backendId: "none" }, leaseTtlMs: 5_000,
+    accountId,
+    workspaceId,
+    sandboxGroupId,
+    expectedEpoch: acquired.lease.leaseEpoch,
+    instanceId: "inst-warm",
+    dataPlaneUrl: null,
+    resumeBackendId: "none",
+    resumeState: { backendId: "none" },
+    leaseTtlMs: 5_000,
   });
   expect(committed.committed).toBe(true);
   await admin`delete from sandbox_lease_holders where lease_id = (
@@ -172,16 +193,28 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 }, 180_000);
 
 // A solo session (its own singleton group), warm-boxed and ready to attach.
-async function soloSession(): Promise<{ accountId: string; workspaceId: string; sessionId: string; sandboxGroupId: string }> {
+async function soloSession(): Promise<{
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  sandboxGroupId: string;
+}> {
   const { accountId, workspaceId } = await freshWorkspace();
   const session = await createSession(db, {
-    accountId, workspaceId, initialMessage: "solo", resources: [], metadata: {},
-    model: "m", sandboxBackend: BACKEND,
+    accountId,
+    workspaceId,
+    initialMessage: "solo",
+    resources: [],
+    metadata: {},
+    model: "m",
+    sandboxBackend: BACKEND,
   });
   await seedWarmBox(accountId, workspaceId, session.id, session.sandboxGroupId);
   return { accountId, workspaceId, sessionId: session.id, sandboxGroupId: session.sandboxGroupId };
@@ -191,13 +224,19 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
   test("the desktop-stream path returns 409 stream_acknowledgment_required until acknowledged, then attaches", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId } = await soloSession();
-    const auth = await bearer({ accountId, workspaceId, subjectId: "viewer-1", permissions: ["stream:view", "stream:acknowledge"] });
+    const auth = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "viewer-1",
+      permissions: ["stream:view", "stream:acknowledge"],
+    });
 
     // (1) Un-acknowledged → 409 stream_acknowledgment_required. The consent gate
     // is scoped to the DESKTOP pixel plane, so the attach declares `desktop:true`
     // (a terminal-only attach is ungated by design).
     const blocked = await app.request(url(workspaceId, sessionId, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
     expect(blocked.status).toBe(409);
@@ -207,16 +246,21 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
     expect(await blocked.text()).toContain("stream_acknowledgment_required");
 
     // (2) Acknowledge the un-redacted plane (stream:acknowledge).
-    const acked = await app.request(url(workspaceId, sessionId, "/stream-capabilities/acknowledge"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true }),
-    });
+    const acked = await app.request(
+      url(workspaceId, sessionId, "/stream-capabilities/acknowledge"),
+      {
+        method: "POST",
+        headers: { authorization: auth, "content-type": "application/json" },
+        body: JSON.stringify({ acknowledgeUnredacted: true }),
+      },
+    );
     expect(acked.status).toBe(200);
     expect((await acked.json()).acknowledged).toBe(true);
 
     // (3) Now the desktop attach is allowed (201, a viewer holder on the warm box).
     const allowed = await app.request(url(workspaceId, sessionId, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
     expect(allowed.status).toBe(201);
@@ -230,18 +274,48 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
     // Principal X acknowledges; principal Y has not.
     await recordStreamAcknowledgment(db, {
-      accountId, workspaceId, sandboxGroupId, subjectId: "ack-x",
-      acknowledgeUnredacted: true, acknowledgeShared: false,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      subjectId: "ack-x",
+      acknowledgeUnredacted: true,
+      acknowledgeShared: false,
     });
-    const x = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId, subjectId: "ack-x" });
-    const y = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId, subjectId: "ack-y" });
+    const x = await getStreamAcknowledgment(db, {
+      workspaceId,
+      sandboxGroupId,
+      subjectId: "ack-x",
+    });
+    const y = await getStreamAcknowledgment(db, {
+      workspaceId,
+      sandboxGroupId,
+      subjectId: "ack-y",
+    });
     expect(x?.acknowledgedUnredacted).toBe(true);
     expect(y).toBeNull();
 
-    const authX = await bearer({ accountId, workspaceId, subjectId: "ack-x", permissions: ["sessions:read"] });
-    const authY = await bearer({ accountId, workspaceId, subjectId: "ack-y", permissions: ["sessions:read"] });
-    const capsX = await (await app.request(url(workspaceId, sessionId, "/stream-capabilities"), { headers: { authorization: authX } })).json();
-    const capsY = await (await app.request(url(workspaceId, sessionId, "/stream-capabilities"), { headers: { authorization: authY } })).json();
+    const authX = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "ack-x",
+      permissions: ["sessions:read"],
+    });
+    const authY = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "ack-y",
+      permissions: ["sessions:read"],
+    });
+    const capsX = await (
+      await app.request(url(workspaceId, sessionId, "/stream-capabilities"), {
+        headers: { authorization: authX },
+      })
+    ).json();
+    const capsY = await (
+      await app.request(url(workspaceId, sessionId, "/stream-capabilities"), {
+        headers: { authorization: authY },
+      })
+    ).json();
     expect(capsX.DesktopStream.acknowledged).toBe(true);
     expect(capsY.DesktopStream.acknowledged).toBe(false);
     // Solo box: not shared, no sibling ids disclosed.
@@ -254,15 +328,27 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
   // A + B share ONE box (B spawned from inside A). The shared-exposure disclosure
   // surfaces the OTHER session's id; attaching to A's desktop requires the SHARED
   // acknowledgment (409 shared_acknowledgment_required until consented).
-  async function sharedPair(): Promise<{ accountId: string; workspaceId: string; a: string; b: string; sandboxGroupId: string }> {
+  async function sharedPair(): Promise<{
+    accountId: string;
+    workspaceId: string;
+    a: string;
+    b: string;
+    sandboxGroupId: string;
+  }> {
     const { accountId, workspaceId } = await freshWorkspace();
     const grant = (fromSessionId?: string) => ({
-      accountId, workspaceId, subjectId: "spawner",
+      accountId,
+      workspaceId,
+      subjectId: "spawner",
       permissions: ["sessions:create", "sessions:read"] as Permission[],
       ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
     });
-    const a = await createSessionForRequest(deps(), grant(), workspaceId, { initialMessage: "founder" });
-    const b = await createSessionForRequest(deps(), grant(a.id), workspaceId, { initialMessage: "spawned" });
+    const a = await createSessionForRequest(deps(), grant(), workspaceId, {
+      initialMessage: "founder",
+    });
+    const b = await createSessionForRequest(deps(), grant(a.id), workspaceId, {
+      initialMessage: "spawned",
+    });
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
     await seedWarmBox(accountId, workspaceId, a.id, a.sandboxGroupId);
     return { accountId, workspaceId, a: a.id, b: b.id, sandboxGroupId: a.sandboxGroupId };
@@ -271,20 +357,31 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
   test("a shared box → 409 shared_acknowledgment_required even after a bare un-redacted ack; shared ack unblocks", async () => {
     if (!available) return;
     const { accountId, workspaceId, a, b } = await sharedPair();
-    const auth = await bearer({ accountId, workspaceId, subjectId: "viewer-shared", permissions: ["stream:view", "stream:acknowledge", "sessions:read"] });
+    const auth = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "viewer-shared",
+      permissions: ["stream:view", "stream:acknowledge", "sessions:read"],
+    });
 
     // Negotiation read advertises shared + the OTHER session's id ONLY.
-    const caps = await (await app.request(url(workspaceId, a, "/stream-capabilities"), { headers: { authorization: auth } })).json();
+    const caps = await (
+      await app.request(url(workspaceId, a, "/stream-capabilities"), {
+        headers: { authorization: auth },
+      })
+    ).json();
     expect(caps.DesktopStream.shared).toBe(true);
     expect(caps.DesktopStream.sharedSessionIds).toEqual([b]);
 
     // A BARE un-redacted ack is NOT enough for a shared box.
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: false }),
     });
     const blockedShared = await app.request(url(workspaceId, a, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
     expect(blockedShared.status).toBe(409);
@@ -292,11 +389,13 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
 
     // The SHARED ack unblocks the attach.
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: true }),
     });
     const allowed = await app.request(url(workspaceId, a, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      method: "POST",
+      headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
     expect(allowed.status).toBe(201);
@@ -308,16 +407,32 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     // The viewer is authorized to WATCH A (stream:view + stream:acknowledge) but
     // has NO sessions:read — so even knowing B's id (from sharedSessionIds), it
     // cannot subscribe to B's conversation/events.
-    const auth = await bearer({ accountId, workspaceId, subjectId: "viewer-of-a", permissions: ["stream:view", "stream:acknowledge"] });
+    const auth = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "viewer-of-a",
+      permissions: ["stream:view", "stream:acknowledge"],
+    });
 
     // Cross-session-events probe against B → 403 (sessions:read missing).
-    const probeEvents = await app.request(url(workspaceId, b, "/events"), { headers: { authorization: auth } });
+    const probeEvents = await app.request(url(workspaceId, b, "/events"), {
+      headers: { authorization: auth },
+    });
     expect(probeEvents.status).toBe(403);
-    const probeStream = await app.request(url(workspaceId, b, "/events/stream"), { headers: { authorization: auth } });
+    const probeStream = await app.request(url(workspaceId, b, "/events/stream"), {
+      headers: { authorization: auth },
+    });
     expect(probeStream.status).toBe(403);
     // (Sanity) A holder WITH sessions:read can read B's events.
-    const authRead = await bearer({ accountId, workspaceId, subjectId: "reader", permissions: ["sessions:read"] });
-    const okEvents = await app.request(url(workspaceId, b, "/events"), { headers: { authorization: authRead } });
+    const authRead = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "reader",
+      permissions: ["sessions:read"],
+    });
+    const okEvents = await app.request(url(workspaceId, b, "/events"), {
+      headers: { authorization: authRead },
+    });
     expect(okEvents.status).toBe(200);
   }, 60_000);
 });
@@ -328,11 +443,20 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
 
     // One viewer attaches (refcount 1).
-    const attached = await attachViewer({ db, settings }, {
-      accountId, workspaceId,
-      session: { id: sessionId, sandboxGroupId, sandboxBackend: BACKEND, sandboxOs: "linux" } as never,
-      viewerId: "v-only",
-    });
+    const attached = await attachViewer(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: {
+          id: sessionId,
+          sandboxGroupId,
+          sandboxBackend: BACKEND,
+          sandboxOs: "linux",
+        } as never,
+        viewerId: "v-only",
+      },
+    );
     expect(attached.liveness).toBe("warm");
     const before = await readLease(db, workspaceId, sandboxGroupId);
     expect(before?.viewerHolders).toBe(1);
@@ -340,7 +464,11 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
 
     // Revoke the sole viewer → holder dropped, refcount 0, warm->draining.
     const revoked = await revokeViewer(db, {
-      accountId, workspaceId, sandboxGroupId, viewerId: "v-only", idleGraceMs: settings.sandboxIdleGraceMs,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      viewerId: "v-only",
+      idleGraceMs: settings.sandboxIdleGraceMs,
     });
     expect(revoked?.refcount).toBe(0);
     expect(revoked?.liveness).toBe("draining");
@@ -352,22 +480,47 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const session = await createSession(db, {
-      accountId, workspaceId, initialMessage: "turn", resources: [], metadata: {}, model: "m", sandboxBackend: BACKEND,
+      accountId,
+      workspaceId,
+      initialMessage: "turn",
+      resources: [],
+      metadata: {},
+      model: "m",
+      sandboxBackend: BACKEND,
     });
     const sandboxGroupId = session.sandboxGroupId;
     // A turn holds the box warm (the spawner path).
     const acquired = await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId, kind: "turn", holderId: "turn-1",
-      subjectId: session.id, backend: "none", leaseTtlMs: 5_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "turn",
+      holderId: "turn-1",
+      subjectId: session.id,
+      backend: "none",
+      leaseTtlMs: 5_000,
     });
     await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId, expectedEpoch: acquired.lease.leaseEpoch,
-      instanceId: "inst", dataPlaneUrl: null, resumeBackendId: "none", resumeState: { backendId: "none" }, leaseTtlMs: 5_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "inst",
+      dataPlaneUrl: null,
+      resumeBackendId: "none",
+      resumeState: { backendId: "none" },
+      leaseTtlMs: 5_000,
     });
     // A viewer also attaches (refcount 2: 1 turn + 1 viewer).
     await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId, kind: "viewer", holderId: "v-rev",
-      subjectId: session.id, backend: "none", leaseTtlMs: 5_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      kind: "viewer",
+      holderId: "v-rev",
+      subjectId: session.id,
+      backend: "none",
+      leaseTtlMs: 5_000,
     });
     const two = await readLease(db, workspaceId, sandboxGroupId);
     expect(two?.refcount).toBe(2);
@@ -375,7 +528,11 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
     // Revoke the viewer → its holder drops, BUT the turn holder keeps the box
     // warm (the box is NOT drained — group-refcount liveness, guarded turn_holders).
     const revoked = await revokeViewer(db, {
-      accountId, workspaceId, sandboxGroupId, viewerId: "v-rev", idleGraceMs: settings.sandboxIdleGraceMs,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      viewerId: "v-rev",
+      idleGraceMs: settings.sandboxIdleGraceMs,
     });
     expect(revoked?.refcount).toBe(1);
     expect(revoked?.liveness).toBe("warm");
@@ -387,14 +544,29 @@ describe("P3.2 viewer revocation (OD-6 v1) — holder-drop drains iff last holde
   test("revoke via the route (stream:view) drops the holder", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId, sandboxGroupId } = await soloSession();
-    await attachViewer({ db, settings }, {
-      accountId, workspaceId,
-      session: { id: sessionId, sandboxGroupId, sandboxBackend: BACKEND, sandboxOs: "linux" } as never,
-      viewerId: "route-viewer",
+    await attachViewer(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        session: {
+          id: sessionId,
+          sandboxGroupId,
+          sandboxBackend: BACKEND,
+          sandboxOs: "linux",
+        } as never,
+        viewerId: "route-viewer",
+      },
+    );
+    const auth = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "revoker",
+      permissions: ["stream:view"],
     });
-    const auth = await bearer({ accountId, workspaceId, subjectId: "revoker", permissions: ["stream:view"] });
     const res = await app.request(url(workspaceId, sessionId, "/viewers/route-viewer/revoke"), {
-      method: "POST", headers: { authorization: auth },
+      method: "POST",
+      headers: { authorization: auth },
     });
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -409,9 +581,16 @@ describe("P3.2 route auth (stream:view / stream:acknowledge)", () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId } = await soloSession();
     // sessions:read is NOT enough for the un-redacted pixel plane.
-    const readOnly = await bearer({ accountId, workspaceId, subjectId: "ro", permissions: ["sessions:read"] });
+    const readOnly = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "ro",
+      permissions: ["sessions:read"],
+    });
     const denied = await app.request(url(workspaceId, sessionId, "/viewers"), {
-      method: "POST", headers: { authorization: readOnly, "content-type": "application/json" }, body: "{}",
+      method: "POST",
+      headers: { authorization: readOnly, "content-type": "application/json" },
+      body: "{}",
     });
     expect(denied.status).toBe(403);
   }, 60_000);
@@ -419,20 +598,35 @@ describe("P3.2 route auth (stream:view / stream:acknowledge)", () => {
   test("the acknowledge route requires stream:acknowledge — stream:view alone is 403", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId } = await soloSession();
-    const viewOnly = await bearer({ accountId, workspaceId, subjectId: "vo", permissions: ["stream:view"] });
-    const denied = await app.request(url(workspaceId, sessionId, "/stream-capabilities/acknowledge"), {
-      method: "POST", headers: { authorization: viewOnly, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true }),
+    const viewOnly = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "vo",
+      permissions: ["stream:view"],
     });
+    const denied = await app.request(
+      url(workspaceId, sessionId, "/stream-capabilities/acknowledge"),
+      {
+        method: "POST",
+        headers: { authorization: viewOnly, "content-type": "application/json" },
+        body: JSON.stringify({ acknowledgeUnredacted: true }),
+      },
+    );
     expect(denied.status).toBe(403);
   }, 60_000);
 
   test("the revoke route requires stream:view — sessions:read alone is 403", async () => {
     if (!available) return;
     const { accountId, workspaceId, sessionId } = await soloSession();
-    const readOnly = await bearer({ accountId, workspaceId, subjectId: "ro2", permissions: ["sessions:read"] });
+    const readOnly = await bearer({
+      accountId,
+      workspaceId,
+      subjectId: "ro2",
+      permissions: ["sessions:read"],
+    });
     const denied = await app.request(url(workspaceId, sessionId, "/viewers/whatever/revoke"), {
-      method: "POST", headers: { authorization: readOnly },
+      method: "POST",
+      headers: { authorization: readOnly },
     });
     expect(denied.status).toBe(403);
   }, 60_000);

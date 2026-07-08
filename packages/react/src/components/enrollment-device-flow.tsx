@@ -99,7 +99,9 @@ export function EnrollmentDeviceFlow({
 
       {installCommand ? (
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">1 · Run on the machine</span>
+          <span className="text-[11px] font-medium uppercase tracking-wide text-og-fg-subtle">
+            1 · Run on the machine
+          </span>
           <div className="flex items-center justify-between gap-2 overflow-hidden rounded-og-md border border-og-border bg-og-bg px-2.5 py-1.5">
             <code className="flex min-w-0 items-center gap-2 overflow-x-auto font-og-mono text-[12px] text-og-fg">
               <TerminalIcon className="size-3.5 shrink-0 text-og-fg-subtle" aria-hidden />
@@ -164,13 +166,14 @@ export function EnrollmentDeviceFlow({
         {awaitingCode ? (
           <>
             The one-liner prints a short code. Open{" "}
-            <span className="font-og-mono text-og-fg-muted">{verificationUri}</span> and confirm the code shown there
-            matches.
+            <span className="font-og-mono text-og-fg-muted">{verificationUri}</span> and confirm the
+            code shown there matches.
           </>
         ) : (
           <>
-            Confirm code <span className="font-og-mono text-og-fg-muted">{userCode}</span> — the one printed by the
-            one-liner — at <span className="font-og-mono text-og-fg-muted">{verificationUri}</span>.
+            Confirm code <span className="font-og-mono text-og-fg-muted">{userCode}</span> — the one
+            printed by the one-liner — at{" "}
+            <span className="font-og-mono text-og-fg-muted">{verificationUri}</span>.
             {typeof expiresInSeconds === "number" ? (
               <> Expires in {Math.max(0, Math.round(expiresInSeconds / 60))} min.</>
             ) : null}

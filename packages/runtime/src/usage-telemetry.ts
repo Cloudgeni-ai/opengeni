@@ -7,29 +7,41 @@ export type ModelCallUsageTelemetry = {
   reasoningTokens: number | null;
 };
 
-export function modelCallUsageTelemetry(usage: {
-  inputTokens?: unknown;
-  outputTokens?: unknown;
-  inputTokensDetails?: UsageDetails | undefined;
-  outputTokensDetails?: UsageDetails | undefined;
-} | null | undefined): ModelCallUsageTelemetry {
+export function modelCallUsageTelemetry(
+  usage:
+    | {
+        inputTokens?: unknown;
+        outputTokens?: unknown;
+        inputTokensDetails?: UsageDetails | undefined;
+        outputTokensDetails?: UsageDetails | undefined;
+      }
+    | null
+    | undefined,
+): ModelCallUsageTelemetry {
   return {
     inputTokens: finiteNumberOrNull(usage?.inputTokens),
     outputTokens: finiteNumberOrNull(usage?.outputTokens),
-    cachedTokens: usage ? firstPositiveDetailNumber(usage.inputTokensDetails, [
-      "cached_tokens",
-      "cachedInputTokens",
-      "cached_input_tokens",
-    ]) : null,
-    reasoningTokens: usage ? firstPositiveDetailNumber(usage.outputTokensDetails, [
-      "reasoning_tokens",
-      "reasoningTokens",
-      "reasoning_output_tokens",
-    ]) : null,
+    cachedTokens: usage
+      ? firstPositiveDetailNumber(usage.inputTokensDetails, [
+          "cached_tokens",
+          "cachedInputTokens",
+          "cached_input_tokens",
+        ])
+      : null,
+    reasoningTokens: usage
+      ? firstPositiveDetailNumber(usage.outputTokensDetails, [
+          "reasoning_tokens",
+          "reasoningTokens",
+          "reasoning_output_tokens",
+        ])
+      : null,
   };
 }
 
-function firstPositiveDetailNumber(details: UsageDetails | undefined, keys: string[]): number | null {
+function firstPositiveDetailNumber(
+  details: UsageDetails | undefined,
+  keys: string[],
+): number | null {
   if (!details) {
     return null;
   }

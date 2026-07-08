@@ -1,5 +1,10 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
-import { CREDIT_EXHAUSTION_MESSAGE, humanizeFailureReason, isCreditExhaustion, tryParseJson } from "../lib/format";
+import {
+  CREDIT_EXHAUSTION_MESSAGE,
+  humanizeFailureReason,
+  isCreditExhaustion,
+  tryParseJson,
+} from "../lib/format";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -49,9 +54,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   };
 
-  const finalizeOpen = (turnId?: string | null, disposition: "complete" | "failed" | "cancelled" = "complete"): void => {
+  const finalizeOpen = (
+    turnId?: string | null,
+    disposition: "complete" | "failed" | "cancelled" = "complete",
+  ): void => {
     for (const item of items) {
-      if (turnId !== undefined && "turnId" in item && item.turnId && turnId && item.turnId !== turnId) {
+      if (
+        turnId !== undefined &&
+        "turnId" in item &&
+        item.turnId &&
+        turnId &&
+        item.turnId !== turnId
+      ) {
         continue;
       }
       if ((item.kind === "agent-message" || item.kind === "reasoning") && item.streaming) {
@@ -133,8 +147,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // completed text never duplicates the streamed one.
         const open = [...items]
           .reverse()
-          .find((item): item is AgentMessageItem => item.kind === "agent-message" && item.turnId === turnId);
-        if (open && (open.streaming || !open.text || text === open.text || text.startsWith(open.text))) {
+          .find(
+            (item): item is AgentMessageItem =>
+              item.kind === "agent-message" && item.turnId === turnId,
+          );
+        if (
+          open &&
+          (open.streaming || !open.text || text === open.text || text.startsWith(open.text))
+        ) {
           // The completed text is authoritative when it extends what streamed.
           if (!open.text || (text && text.startsWith(open.text))) {
             open.text = text || open.text;
@@ -254,7 +274,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "sandbox.operation.completed":
       case "sandbox.operation.failed": {
         const name = typeof payload.name === "string" ? payload.name : "sandbox";
-        const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
+        const status = event.type.endsWith(".failed")
+          ? "failed"
+          : event.type.endsWith(".completed")
+            ? "complete"
+            : "running";
         // Routine per-turn platform plumbing that runs before EVERY turn to
         // guarantee box contents survive a re-warm — NOT the agent redoing work:
         //   - repository-clone: idempotent clone check + off-manifest token re-seed;
@@ -265,7 +289,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // Rendering either every turn reads as churn. Only FAILURES surface, and
         // they surface loudly — the failed event below creates its own item even
         // without a started row.
-        if ((name === "repository-clone" || name === "file-resource-download") && status !== "failed") {
+        if (
+          (name === "repository-clone" || name === "file-resource-download") &&
+          status !== "failed"
+        ) {
           break;
         }
         const existing = findOpenSandbox(items, name);
@@ -295,9 +322,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "sandbox.command.output.delta": {
         // `chunk` is the canonical wire field; text/output are legacy shapes.
-        const text = typeof payload.chunk === "string"
-          ? payload.chunk
-          : typeof payload.text === "string" ? payload.text : typeof payload.output === "string" ? payload.output : "";
+        const text =
+          typeof payload.chunk === "string"
+            ? payload.chunk
+            : typeof payload.text === "string"
+              ? payload.text
+              : typeof payload.output === "string"
+                ? payload.output
+                : "";
         if (!text) {
           break;
         }
@@ -305,7 +337,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // otherwise the latest running operation is the best available owner.
         const open =
           (typeof payload.name === "string" ? findOpenSandbox(items, payload.name) : undefined) ??
-          [...items].reverse().find((item): item is SandboxItem => item.kind === "sandbox" && item.status === "running");
+          [...items]
+            .reverse()
+            .find(
+              (item): item is SandboxItem => item.kind === "sandbox" && item.status === "running",
+            );
         if (open) {
           open.output += text;
         }
@@ -325,7 +361,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!ATTENTION_STATUSES.has(status)) {
           break;
         }
-        const previous = [...items].reverse().find((item): item is SessionStatusItem => item.kind === "session-status");
+        const previous = [...items]
+          .reverse()
+          .find((item): item is SessionStatusItem => item.kind === "session-status");
         if (previous?.status === status) {
           break;
         }
@@ -361,7 +399,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           scopes: stringList(payload.scopes),
           resource: typeof payload.resource === "string" ? payload.resource : null,
           toolName: typeof payload.toolName === "string" ? payload.toolName : null,
-          authorizationUrl: typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
+          authorizationUrl:
+            typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -396,7 +435,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // Credit death can hide behind fields `failureMessage` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
-        const failureText = isCreditExhaustionPayload(payload) ? CREDIT_EXHAUSTION_MESSAGE : failureMessage(payload);
+        const failureText = isCreditExhaustionPayload(payload)
+          ? CREDIT_EXHAUSTION_MESSAGE
+          : failureMessage(payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
@@ -494,7 +535,11 @@ export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
   for (let index = ordered.length - 1; index >= 0; index -= 1) {
     const event = ordered[index];
-    if (event?.type !== "turn.completed" && event?.type !== "turn.failed" && event?.type !== "turn.cancelled") {
+    if (
+      event?.type !== "turn.completed" &&
+      event?.type !== "turn.failed" &&
+      event?.type !== "turn.cancelled"
+    ) {
       continue;
     }
     return isCreditExhaustionPayload(asRecord(event.payload));
@@ -586,7 +631,8 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
     if (event.type === "turn.queued") {
-      const triggerEventId = typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
+      const triggerEventId =
+        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
       const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
       if (triggerEventId && queuedTurnId) {
         queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
@@ -594,7 +640,8 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       continue;
     }
     if (event.type === "turn.started") {
-      const triggerEventId = typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
+      const triggerEventId =
+        typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
       if (triggerEventId) {
         startSeqByTrigger.set(triggerEventId, event.sequence);
       }
@@ -627,7 +674,11 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
 
   const cancelledBeforeStartTriggers = new Set<string>();
   for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
-    if (cancelledTurnIds.has(turnId) && !startSeqByTrigger.has(triggerEventId) && !fallbackSeqByTurn.has(turnId)) {
+    if (
+      cancelledTurnIds.has(turnId) &&
+      !startSeqByTrigger.has(triggerEventId) &&
+      !fallbackSeqByTurn.has(turnId)
+    ) {
       cancelledBeforeStartTriggers.add(triggerEventId);
     }
   }
@@ -674,7 +725,11 @@ function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan)
   return projected;
 }
 
-function pushInsertion(insertions: Map<number, TimelineEvent[]>, sequence: number, event: SessionEvent): void {
+function pushInsertion(
+  insertions: Map<number, TimelineEvent[]>,
+  sequence: number,
+  event: SessionEvent,
+): void {
   const bucket = insertions.get(sequence);
   if (bucket) {
     bucket.push(event);
@@ -736,7 +791,10 @@ function stampTurnOutcome(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   }
 }
 
-function applyTurnOutcome(group: Extract<TimelineGroup, { kind: "activity" }>, turnEnd: TurnEndItem): void {
+function applyTurnOutcome(
+  group: Extract<TimelineGroup, { kind: "activity" }>,
+  turnEnd: TurnEndItem,
+): void {
   // A sub-cluster reports ITS OWN outcome, not the turn's. When a turn fails
   // at step 7, clusters 1–6 completed — painting them all red says "everything
   // broke" when one thing did. The turn-level fold carries the turn outcome;
@@ -747,7 +805,9 @@ function applyTurnOutcome(group: Extract<TimelineGroup, { kind: "activity" }>, t
     return;
   }
   const hasFailed = group.items.some((item) => "status" in item && item.status === "failed");
-  const hasInterrupted = group.items.some((item) => "status" in item && item.status === "cancelled");
+  const hasInterrupted = group.items.some(
+    (item) => "status" in item && item.status === "cancelled",
+  );
   group.outcome = hasFailed ? "failed" : hasInterrupted ? "cancelled" : "complete";
   if (turnEnd.failureText && hasFailed) {
     group.failureText = turnEnd.failureText;
@@ -798,7 +858,11 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     turnGroup.failureText = turnEnd.failureText;
   }
 
-  groups.splice(startIndex, collected.length, ...(finalMessage ? [turnGroup, finalMessage] : [turnGroup]));
+  groups.splice(
+    startIndex,
+    collected.length,
+    ...(finalMessage ? [turnGroup, finalMessage] : [turnGroup]),
+  );
 }
 
 function isTurnBoundary(group: TimelineGroup | undefined): boolean {
@@ -810,16 +874,31 @@ function belongsToDifferentTurn(group: TimelineGroup | undefined, turnId: string
     return false;
   }
   if (group.kind === "activity") {
-    return group.items.length > 0 && group.items.every((item) => item.turnId !== null && item.turnId !== turnId);
+    return (
+      group.items.length > 0 &&
+      group.items.every((item) => item.turnId !== null && item.turnId !== turnId)
+    );
   }
-  return group.kind === "item" && group.item.kind === "agent-message" && group.item.turnId !== null && group.item.turnId !== turnId;
+  return (
+    group.kind === "item" &&
+    group.item.kind === "agent-message" &&
+    group.item.turnId !== null &&
+    group.item.turnId !== turnId
+  );
 }
 
 function isBetweenTurnDivider(group: TimelineGroup | undefined): boolean {
-  return group?.kind === "item" && group.item.kind === "session-status" && group.item.status !== "running";
+  return (
+    group?.kind === "item" &&
+    group.item.kind === "session-status" &&
+    group.item.status !== "running"
+  );
 }
 
-function extractFinalAgentMessage(groups: TimelineGroup[], turnEnd: TurnEndItem): Extract<TimelineGroup, { kind: "item" }> | null {
+function extractFinalAgentMessage(
+  groups: TimelineGroup[],
+  turnEnd: TurnEndItem,
+): Extract<TimelineGroup, { kind: "item" }> | null {
   const tail = groups[groups.length - 1];
   if (tail?.kind !== "item" || tail.item.kind !== "agent-message" || tail.item.streaming) {
     return null;
@@ -848,10 +927,21 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-const SESSION_STATUSES: readonly SessionStatus[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
+const SESSION_STATUSES: readonly SessionStatus[] = [
+  "queued",
+  "running",
+  "idle",
+  "requires_action",
+  "failed",
+  "cancelled",
+];
 
 /** Statuses that demand the reader's attention and so earn a timeline divider. */
-const ATTENTION_STATUSES: ReadonlySet<SessionStatus> = new Set(["requires_action", "failed", "cancelled"]);
+const ATTENTION_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  "requires_action",
+  "failed",
+  "cancelled",
+]);
 
 /** Keep only entries that match the wire shapes; user payloads are untyped. */
 function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
@@ -888,10 +978,10 @@ function workerCompletionPayload(value: unknown): {
   const payload = asRecord(value);
   const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (
-    typeof payload.childSessionId !== "string"
-    || !uuidPattern.test(payload.childSessionId)
-    || typeof payload.status !== "string"
-    || payload.status.trim() === ""
+    typeof payload.childSessionId !== "string" ||
+    !uuidPattern.test(payload.childSessionId) ||
+    typeof payload.status !== "string" ||
+    payload.status.trim() === ""
   ) {
     return null;
   }
@@ -905,9 +995,12 @@ function workerCompletionPayload(value: unknown): {
     // Console pauses and several server paths put the human explanation on
     // `rationale`, not `pausedReason` — same fallback the goal pill uses, so a
     // paused worker card never shows "Worker paused" with the reason missing.
-    pausedReason: typeof goal.pausedReason === "string"
-      ? goal.pausedReason
-      : typeof goal.rationale === "string" ? goal.rationale : null,
+    pausedReason:
+      typeof goal.pausedReason === "string"
+        ? goal.pausedReason
+        : typeof goal.rationale === "string"
+          ? goal.rationale
+          : null,
   };
 }
 
@@ -921,23 +1014,36 @@ function isErrorOutput(payload: Record<string, unknown>): boolean {
     return true;
   }
   const output = payload.output;
-  return !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true;
+  return (
+    !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true
+  );
 }
 
-function findOpenCall(items: TimelineItem[], callId: string | null): ToolCallItem | WorkerItem | undefined {
+function findOpenCall(
+  items: TimelineItem[],
+  callId: string | null,
+): ToolCallItem | WorkerItem | undefined {
   const reversed = [...items].reverse();
-  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem => item.kind === "tool-call" || item.kind === "worker";
+  const isCall = (item: TimelineItem): item is ToolCallItem | WorkerItem =>
+    item.kind === "tool-call" || item.kind === "worker";
   if (callId) {
     const byId = reversed.find((item) => isCall(item) && item.callId === callId);
     if (byId) {
       return byId as ToolCallItem | WorkerItem;
     }
   }
-  return reversed.find((item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running");
+  return reversed.find(
+    (item): item is ToolCallItem | WorkerItem => isCall(item) && item.status === "running",
+  );
 }
 
 function findOpenSandbox(items: TimelineItem[], name: string): SandboxItem | undefined {
-  return [...items].reverse().find((item): item is SandboxItem => item.kind === "sandbox" && item.name === name && item.status === "running");
+  return [...items]
+    .reverse()
+    .find(
+      (item): item is SandboxItem =>
+        item.kind === "sandbox" && item.name === name && item.status === "running",
+    );
 }
 
 function failureMessage(payload: Record<string, unknown>): string | null {
@@ -978,12 +1084,15 @@ function memoryItem(
   payload: Record<string, unknown>,
   occurredAt: string,
 ): MemoryItem | null {
-  const memoryId = typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
+  const memoryId =
+    typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
   if (!memoryId) {
     return null;
   }
-  const replacementPreview = typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
-  const replacementMemoryId = typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
+  const replacementPreview =
+    typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
+  const replacementMemoryId =
+    typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
   const action = typeof payload.action === "string" ? payload.action : undefined;
   return {
     kind: "memory",
@@ -1001,14 +1110,23 @@ function memoryItem(
   };
 }
 
-const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]);
+const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {
-  return typeof value === "string" && AUTH_NEEDED_REASONS.has(value) ? (value as AuthNeededItem["reason"]) : null;
+  return typeof value === "string" && AUTH_NEEDED_REASONS.has(value)
+    ? (value as AuthNeededItem["reason"])
+    : null;
 }
 
 function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0) : [];
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    : [];
 }
 
 function reasoningText(payload: unknown): string {
@@ -1074,7 +1192,11 @@ export function extractSessionRef(value: unknown, depth = 0): string | null {
   if (typeof record.sessionId === "string" && looksLikeId(record.sessionId)) {
     return record.sessionId;
   }
-  if (typeof record.id === "string" && looksLikeId(record.id) && ("status" in record || "workspaceId" in record || "initialMessage" in record)) {
+  if (
+    typeof record.id === "string" &&
+    looksLikeId(record.id) &&
+    ("status" in record || "workspaceId" in record || "initialMessage" in record)
+  ) {
     return record.id;
   }
   for (const key of ["structuredContent", "session", "result", "content"] as const) {

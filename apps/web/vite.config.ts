@@ -7,8 +7,7 @@ import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
-const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS
-  ?.split(",")
+const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
 

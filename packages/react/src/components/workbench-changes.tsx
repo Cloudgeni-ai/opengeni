@@ -78,7 +78,10 @@ type RailRow =
  *  `index` addresses the matching pane section. Exported for tests. */
 export function buildRail(files: GitFileDiff[]): { orderedFiles: GitFileDiff[]; rows: RailRow[] } {
   if (files.length <= GROUP_THRESHOLD) {
-    return { orderedFiles: files, rows: files.map((file, index) => ({ kind: "file", file, index })) };
+    return {
+      orderedFiles: files,
+      rows: files.map((file, index) => ({ kind: "file", file, index })),
+    };
   }
   const groups = new Map<string, GitFileDiff[]>();
   for (const file of files) {
@@ -277,7 +280,11 @@ function SourceBadge({
       </span>
     );
   }
-  return <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle">{label}</span>;
+  return (
+    <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle">
+      {label}
+    </span>
+  );
 }
 
 /** "live" · "as of turn 7 · 14:32" · "as of 14:32" (no revision). */
@@ -317,7 +324,9 @@ function RailFileRow({
         active && "bg-og-surface-2",
       )}
     >
-      <span className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", STATUS_TINT[file.status])}>
+      <span
+        className={cn("w-3 shrink-0 text-center font-og-mono text-og-xs", STATUS_TINT[file.status])}
+      >
         {STATUS_LETTER[file.status]}
       </span>
       <span className="min-w-0 flex-1 truncate">{shown}</span>
@@ -408,9 +417,7 @@ function GuardBody({ file }: { file: GitFileDiff }) {
   return (
     <div className="flex items-center gap-2 px-3 py-3 text-og-sm text-og-fg-subtle">
       <FileWarningIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0">
-        {reason} — open it on the machine to view.
-      </span>
+      <span className="min-w-0">{reason} — open it on the machine to view.</span>
     </div>
   );
 }
@@ -431,7 +438,9 @@ function LayoutToggle({
           onClick={() => onChange(value)}
           className={cn(
             "rounded-og-xs px-1.5 py-0.5 text-2xs capitalize pointer-coarse:min-h-10",
-            layout === value ? "bg-og-accent-soft text-og-fg" : "text-og-fg-subtle hover:text-og-fg",
+            layout === value
+              ? "bg-og-accent-soft text-og-fg"
+              : "text-og-fg-subtle hover:text-og-fg",
           )}
         >
           {value}

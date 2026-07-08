@@ -87,8 +87,14 @@ function assertPublishableMetadata(pkg: WorkspacePackage): void {
   if (!Array.isArray(json.files) || !json.files.includes("dist") || !json.files.includes("src")) {
     failures.push(`${pkg.name} is publishable but its files list must include "dist" and "src".`);
   }
-  if (json.main !== "./src/index.ts" || json.module !== "./src/index.ts" || json.types !== "./src/index.ts") {
-    failures.push(`${pkg.name} committed entry points must stay on ./src/index.ts for workspace source resolution.`);
+  if (
+    json.main !== "./src/index.ts" ||
+    json.module !== "./src/index.ts" ||
+    json.types !== "./src/index.ts"
+  ) {
+    failures.push(
+      `${pkg.name} committed entry points must stay on ./src/index.ts for workspace source resolution.`,
+    );
   }
   if (!json.exports || typeof json.exports !== "object") {
     failures.push(`${pkg.name} is publishable but has no exports map.`);
@@ -108,7 +114,9 @@ for (const pkg of publishable) {
   for (const depName of workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS)) {
     if (!publishableNames.has(depName)) {
       const ignoredText = ignored.has(depName) ? "ignored" : "private";
-      failures.push(`${pkg.name} depends on ${ignoredText} workspace package ${depName} in a published dependency map.`);
+      failures.push(
+        `${pkg.name} depends on ${ignoredText} workspace package ${depName} in a published dependency map.`,
+      );
     }
   }
 }
@@ -136,7 +144,9 @@ if (sdkRuntimeDeps.length > 0) {
 }
 const sdkOpengeniDeps = opengeniRuntimeDeps(sdkPkg);
 if (sdkOpengeniDeps.length > 0) {
-  failures.push(`@opengeni/sdk has forbidden @opengeni/* runtime dependency: ${sdkOpengeniDeps.join(", ")}.`);
+  failures.push(
+    `@opengeni/sdk has forbidden @opengeni/* runtime dependency: ${sdkOpengeniDeps.join(", ")}.`,
+  );
 }
 
 // (b) React's only @opengeni runtime dependency may be @opengeni/sdk.
@@ -213,4 +223,6 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-process.stdout.write(`Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean.\n`);
+process.stdout.write(
+  `Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean.\n`,
+);

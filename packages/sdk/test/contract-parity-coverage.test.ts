@@ -122,7 +122,8 @@ describe("SDK / contracts parity (full coverage)", () => {
     const goalStatuses: readonly SessionGoalStatus[] = ContractSessionGoalStatus.options;
     const goalCreators: readonly SessionGoalCreatedBy[] = ContractSessionGoalCreatedBy.options;
     const runStatuses: readonly ScheduledTaskRunStatus[] = ContractScheduledTaskRunStatus.options;
-    const triggerTypes: readonly ScheduledTaskTriggerType[] = ContractScheduledTaskTriggerType.options;
+    const triggerTypes: readonly ScheduledTaskTriggerType[] =
+      ContractScheduledTaskTriggerType.options;
     const fileStatuses: readonly FileStatus[] = ContractFileStatus.options;
     const documentStatuses: readonly DocumentStatus[] = ContractDocumentStatus.options;
     const packStatuses: readonly PackInstallationStatus[] = ContractPackInstallationStatus.options;
@@ -141,26 +142,44 @@ describe("SDK / contracts parity (full coverage)", () => {
   });
 
   test("contract-parsed responses are assignable to SDK types (compile-time)", () => {
-    const acceptAccessContext = (value: z.infer<typeof ContractAccessContext>): AccessContext => value;
+    const acceptAccessContext = (value: z.infer<typeof ContractAccessContext>): AccessContext =>
+      value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
     const acceptApiKey = (value: z.infer<typeof ContractApiKey>): ApiKey => value;
     const acceptGoal = (value: z.infer<typeof ContractSessionGoal>): SessionGoal => value;
     const acceptRun = (value: z.infer<typeof ContractScheduledTaskRun>): ScheduledTaskRun => value;
-    const acceptEnvironment = (value: z.infer<typeof ContractWorkspaceEnvironment>): WorkspaceEnvironment => value;
+    const acceptEnvironment = (
+      value: z.infer<typeof ContractWorkspaceEnvironment>,
+    ): WorkspaceEnvironment => value;
     const acceptFile = (value: z.infer<typeof ContractFileAsset>): FileAsset => value;
-    const acceptUploadBegin = (value: z.infer<typeof ContractCreateFileUploadResponse>): CreateFileUploadResponse => value;
+    const acceptUploadBegin = (
+      value: z.infer<typeof ContractCreateFileUploadResponse>,
+    ): CreateFileUploadResponse => value;
     const acceptDocumentBase = (value: z.infer<typeof ContractDocumentBase>): DocumentBase => value;
     const acceptDocument = (value: z.infer<typeof ContractDocument>): Document => value;
-    const acceptSearchResult = (value: z.infer<typeof ContractDocumentSearchResult>): DocumentSearchResult => value;
+    const acceptSearchResult = (
+      value: z.infer<typeof ContractDocumentSearchResult>,
+    ): DocumentSearchResult => value;
     const acceptPack = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
-    const acceptRegisteredPack = (value: z.infer<typeof ContractWorkspaceRegisteredPack>): WorkspaceRegisteredPack => value;
-    const acceptPackInstallation = (value: z.infer<typeof ContractPackInstallation>): PackInstallation => value;
-    const acceptCatalogItem = (value: z.infer<typeof ContractCapabilityCatalogItem>): CapabilityCatalogItem => value;
-    const acceptCapabilityInstallation = (value: z.infer<typeof ContractCapabilityInstallation>): CapabilityInstallation => value;
-    const acceptRepository = (value: z.infer<typeof ContractGitHubRepository>): GitHubRepository => value;
+    const acceptRegisteredPack = (
+      value: z.infer<typeof ContractWorkspaceRegisteredPack>,
+    ): WorkspaceRegisteredPack => value;
+    const acceptPackInstallation = (
+      value: z.infer<typeof ContractPackInstallation>,
+    ): PackInstallation => value;
+    const acceptCatalogItem = (
+      value: z.infer<typeof ContractCapabilityCatalogItem>,
+    ): CapabilityCatalogItem => value;
+    const acceptCapabilityInstallation = (
+      value: z.infer<typeof ContractCapabilityInstallation>,
+    ): CapabilityInstallation => value;
+    const acceptRepository = (value: z.infer<typeof ContractGitHubRepository>): GitHubRepository =>
+      value;
     const acceptBalance = (value: z.infer<typeof ContractBillingBalance>): BillingBalance => value;
     const acceptUsageEvent = (value: z.infer<typeof ContractUsageEvent>): UsageEvent => value;
-    const acceptCheckout = (value: z.infer<typeof ContractCreateCheckoutResponse>): CreateCheckoutResponse => value;
+    const acceptCheckout = (
+      value: z.infer<typeof ContractCreateCheckoutResponse>,
+    ): CreateCheckoutResponse => value;
     const checks = [
       acceptAccessContext,
       acceptWorkspace,
@@ -187,34 +206,65 @@ describe("SDK / contracts parity (full coverage)", () => {
   });
 
   test("SDK-built requests are assignable to contract inputs (compile-time)", () => {
-    const acceptCreateWorkspace = (value: CreateWorkspaceRequest): z.input<typeof ContractCreateWorkspaceRequest> => value;
-    const acceptUpdateWorkspace = (value: UpdateWorkspaceRequest): z.input<typeof ContractUpdateWorkspaceRequest> => value;
+    const acceptCreateWorkspace = (
+      value: CreateWorkspaceRequest,
+    ): z.input<typeof ContractCreateWorkspaceRequest> => value;
+    const acceptUpdateWorkspace = (
+      value: UpdateWorkspaceRequest,
+    ): z.input<typeof ContractUpdateWorkspaceRequest> => value;
     // Permissions are open string unions in the SDK; the server validates them.
-    const ContractCreateApiKeyBody = ContractCreateApiKeyRequest.omit({ workspaceId: true, permissions: true });
+    const ContractCreateApiKeyBody = ContractCreateApiKeyRequest.omit({
+      workspaceId: true,
+      permissions: true,
+    });
     const acceptCreateApiKey = (
       value: Omit<CreateApiKeyRequest, "permissions">,
     ): z.input<typeof ContractCreateApiKeyBody> => value;
-    const acceptUpdateGoal = (value: UpdateSessionGoalRequest): z.input<typeof ContractUpdateSessionGoalRequest> => value;
-    const acceptUpdateTurn = (value: UpdateSessionTurnRequest): z.input<typeof ContractUpdateSessionTurnRequest> => value;
-    const acceptCreateTask = (value: CreateScheduledTaskRequest): z.input<typeof ContractCreateScheduledTaskRequest> => value;
-    const acceptUpdateTask = (value: UpdateScheduledTaskRequest): z.input<typeof ContractUpdateScheduledTaskRequest> => value;
+    const acceptUpdateGoal = (
+      value: UpdateSessionGoalRequest,
+    ): z.input<typeof ContractUpdateSessionGoalRequest> => value;
+    const acceptUpdateTurn = (
+      value: UpdateSessionTurnRequest,
+    ): z.input<typeof ContractUpdateSessionTurnRequest> => value;
+    const acceptCreateTask = (
+      value: CreateScheduledTaskRequest,
+    ): z.input<typeof ContractCreateScheduledTaskRequest> => value;
+    const acceptUpdateTask = (
+      value: UpdateScheduledTaskRequest,
+    ): z.input<typeof ContractUpdateScheduledTaskRequest> => value;
     const acceptCreateEnvironment = (
       value: CreateWorkspaceEnvironmentRequest,
     ): z.input<typeof ContractCreateWorkspaceEnvironmentRequest> => value;
     const acceptUpdateEnvironment = (
       value: UpdateWorkspaceEnvironmentRequest,
     ): z.input<typeof ContractUpdateWorkspaceEnvironmentRequest> => value;
-    const acceptSetVariable = (value: { value: string }): z.input<typeof ContractSetVariableRequest> => value;
-    const acceptBeginUpload = (value: CreateFileUploadRequest): z.input<typeof ContractCreateFileUploadRequest> => value;
-    const acceptCreateBase = (value: CreateDocumentBaseRequest): z.input<typeof ContractCreateDocumentBaseRequest> => value;
-    const acceptRegisterPack = (value: RegisterCapabilityPackRequest): z.input<typeof ContractRegisterCapabilityPackRequest> => value;
-    const acceptEnablePack = (value: EnablePackRequest): z.input<typeof ContractEnablePackRequest> => value;
+    const acceptSetVariable = (value: {
+      value: string;
+    }): z.input<typeof ContractSetVariableRequest> => value;
+    const acceptBeginUpload = (
+      value: CreateFileUploadRequest,
+    ): z.input<typeof ContractCreateFileUploadRequest> => value;
+    const acceptCreateBase = (
+      value: CreateDocumentBaseRequest,
+    ): z.input<typeof ContractCreateDocumentBaseRequest> => value;
+    const acceptRegisterPack = (
+      value: RegisterCapabilityPackRequest,
+    ): z.input<typeof ContractRegisterCapabilityPackRequest> => value;
+    const acceptEnablePack = (
+      value: EnablePackRequest,
+    ): z.input<typeof ContractEnablePackRequest> => value;
     const acceptCreateCapability = (
       value: CreateCapabilityCatalogItemRequest,
     ): z.input<typeof ContractCreateCapabilityCatalogItemRequest> => value;
-    const acceptEnableCapability = (value: EnableCapabilityRequest): z.input<typeof ContractEnableCapabilityRequest> => value;
-    const acceptAppManifest = (value: CreateGitHubAppManifestRequest): z.input<typeof ContractGitHubAppManifestCreate> => value;
-    const acceptCheckout = (value: CreateCheckoutRequest): z.input<typeof ContractCreateCheckoutRequest> => value;
+    const acceptEnableCapability = (
+      value: EnableCapabilityRequest,
+    ): z.input<typeof ContractEnableCapabilityRequest> => value;
+    const acceptAppManifest = (
+      value: CreateGitHubAppManifestRequest,
+    ): z.input<typeof ContractGitHubAppManifestCreate> => value;
+    const acceptCheckout = (
+      value: CreateCheckoutRequest,
+    ): z.input<typeof ContractCreateCheckoutRequest> => value;
     const checks = [
       acceptCreateWorkspace,
       acceptUpdateWorkspace,
@@ -266,7 +316,10 @@ describe("SDK / contracts parity (full coverage)", () => {
     const goalUpdate: UpdateSessionGoalRequest = { status: "paused", rationale: "manual review" };
     expect(ContractUpdateSessionGoalRequest.safeParse(goalUpdate).success).toBe(true);
 
-    const turnUpdate: UpdateSessionTurnRequest = { prompt: "rewritten prompt", reasoningEffort: "high" };
+    const turnUpdate: UpdateSessionTurnRequest = {
+      prompt: "rewritten prompt",
+      reasoningEffort: "high",
+    };
     expect(ContractUpdateSessionTurnRequest.safeParse(turnUpdate).success).toBe(true);
   });
 });

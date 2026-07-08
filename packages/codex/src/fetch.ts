@@ -12,7 +12,11 @@
 
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
-import { codexRequestStorage, type CodexTokenSnapshot, type CodexUsageHeaderSnapshot } from "./request-context";
+import {
+  codexRequestStorage,
+  type CodexTokenSnapshot,
+  type CodexUsageHeaderSnapshot,
+} from "./request-context";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -65,9 +69,19 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
   const nowMs = Date.now();
   return {
     primaryUsedPercent,
-    primaryResetAt: resolveResetAt(headers, "x-codex-primary-reset-at", "x-codex-primary-reset-after-seconds", nowMs),
+    primaryResetAt: resolveResetAt(
+      headers,
+      "x-codex-primary-reset-at",
+      "x-codex-primary-reset-after-seconds",
+      nowMs,
+    ),
     secondaryUsedPercent,
-    secondaryResetAt: resolveResetAt(headers, "x-codex-secondary-reset-at", "x-codex-secondary-reset-after-seconds", nowMs),
+    secondaryResetAt: resolveResetAt(
+      headers,
+      "x-codex-secondary-reset-at",
+      "x-codex-secondary-reset-after-seconds",
+      nowMs,
+    ),
     checkedAt: new Date(nowMs),
   };
 }
@@ -117,8 +131,13 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         }
       }
       if (process.env.CODEX_DEBUG) {
-        const keys = typeof nextInit.body === "string" ? Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>) : [];
-        console.error(`[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`);
+        const keys =
+          typeof nextInit.body === "string"
+            ? Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>)
+            : [];
+        console.error(
+          `[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`,
+        );
       }
       const res = await base(rewritten, nextInit);
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
@@ -182,8 +201,12 @@ export function classifyCodexUsageLimitError(error: unknown): CodexUsageLimitInf
   let cur: unknown = error;
   for (let depth = 0; depth < 6 && cur && typeof cur === "object"; depth++) {
     const e = cur as Record<string, unknown>;
-    const body = (e.error && typeof e.error === "object" ? e.error : undefined) as Record<string, unknown> | undefined;
-    const type = (typeof e.type === "string" ? e.type : undefined) ?? (typeof body?.type === "string" ? body.type : undefined);
+    const body = (e.error && typeof e.error === "object" ? e.error : undefined) as
+      | Record<string, unknown>
+      | undefined;
+    const type =
+      (typeof e.type === "string" ? e.type : undefined) ??
+      (typeof body?.type === "string" ? body.type : undefined);
     const message = typeof e.message === "string" ? e.message : "";
     const status = Number(e.status);
     if (
@@ -248,10 +271,18 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
       continue;
     }
     try {
-      const ev = JSON.parse(data) as { type?: string; response?: Record<string, unknown>; item?: unknown };
+      const ev = JSON.parse(data) as {
+        type?: string;
+        response?: Record<string, unknown>;
+        item?: unknown;
+      };
       if (ev.type === "response.output_item.done" && ev.item !== undefined) {
         items.push(ev.item);
-      } else if (ev.type === "response.completed" || ev.type === "response.done" || ev.type === "response.incomplete") {
+      } else if (
+        ev.type === "response.completed" ||
+        ev.type === "response.done" ||
+        ev.type === "response.incomplete"
+      ) {
         final = ev.response ?? null;
       }
     } catch {
@@ -262,7 +293,9 @@ async function sseToJsonResponse(res: Response): Promise<Response> {
     final = { ...final, output: items }; // prefer the assembled items over an empty output array
   }
   if (process.env.CODEX_DEBUG) {
-    console.error(`[codex-debug] sse->json items=${items.length} outputLen=${Array.isArray(final?.output) ? (final.output as unknown[]).length : "?"}`);
+    console.error(
+      `[codex-debug] sse->json items=${items.length} outputLen=${Array.isArray(final?.output) ? (final.output as unknown[]).length : "?"}`,
+    );
   }
   const headers = new Headers(res.headers);
   headers.set("content-type", "application/json");
@@ -308,7 +341,10 @@ function repairCodexStream(res: Response): Response {
 /** Collect output_item.done items (mutating `items`); rewrite the terminal event's empty output. */
 function patchSseBlock(block: string, items: unknown[]): string {
   const lines = block.split("\n");
-  const dataStr = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+  const dataStr = lines
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => l.slice(5).trim())
+    .join("\n");
   if (!dataStr || dataStr === "[DONE]") {
     return block;
   }
@@ -323,7 +359,9 @@ function patchSseBlock(block: string, items: unknown[]): string {
     return block;
   }
   if (
-    (ev.type === "response.completed" || ev.type === "response.done" || ev.type === "response.incomplete") &&
+    (ev.type === "response.completed" ||
+      ev.type === "response.done" ||
+      ev.type === "response.incomplete") &&
     ev.response
   ) {
     const out = ev.response.output;

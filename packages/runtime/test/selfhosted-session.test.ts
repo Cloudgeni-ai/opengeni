@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  AgentError,
-  ControlRequest,
-  ControlResponse,
-  ErrorCode,
-} from "@opengeni/agent-proto";
+import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   type ControlRpc,
   MockAgentResponder,
@@ -24,7 +19,13 @@ const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
 
 function sessionWith(rpc: ControlRpc, epoch = 0): SelfhostedSession {
-  return new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: rpc, relay: RELAY, epoch });
+  return new SelfhostedSession({
+    workspaceId: WS,
+    agentId: AGENT,
+    controlRpc: rpc,
+    relay: RELAY,
+    epoch,
+  });
 }
 
 describe("SelfhostedSession — structural surface over a ControlRpc (mock)", () => {
@@ -156,7 +157,13 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // does `Object.entries(state.environment)`. An absent field crashes the post-turn
     // RunState serialize with "Object.entries requires that input parameter not be
     // null or undefined". So `state.environment` must always be a defined object.
-    const threaded = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: new MockAgentResponder(), relay: RELAY, environment: { HOME: "/workspace", FOO: "bar" } });
+    const threaded = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: new MockAgentResponder(),
+      relay: RELAY,
+      environment: { HOME: "/workspace", FOO: "bar" },
+    });
     expect(threaded.state.environment).toEqual({ HOME: "/workspace", FOO: "bar" });
     // The negotiation/test path (no env) defaults to `{}` — still a defined object.
     const bare = sessionWith(new MockAgentResponder());
@@ -278,7 +285,13 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
 
   function wireExecCwd(workingDir: string, workdir: string | undefined): Promise<string> {
     const mock = new MockAgentResponder({ hostname: "vm" });
-    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir });
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      workingDir,
+    });
     return session
       .exec({ cmd: "hostname", ...(workdir !== undefined ? { workdir } : {}) })
       .then(() => {
@@ -312,7 +325,13 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
 
   test("the fs path boundary shares the SAME workingDir rewrite (fsWrite path on the wire)", async () => {
     const mock = new MockAgentResponder();
-    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir: "/home/u/proj" });
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: mock,
+      relay: RELAY,
+      workingDir: "/home/u/proj",
+    });
     await session.writeFile({ path: "/workspace/sub/file.txt", content: "x" });
     const op = mock.requests[0]?.req.op;
     if (op?.$case !== "fsWrite") throw new Error("expected an fsWrite op on the wire");
@@ -341,7 +360,12 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
 });
 
 describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
-  const err = (code: ErrorCode, retryable = false): AgentError => ({ code, message: `e${code}`, retryable, detail: {} });
+  const err = (code: ErrorCode, retryable = false): AgentError => ({
+    code,
+    message: `e${code}`,
+    retryable,
+    detail: {},
+  });
 
   test("AGENT_OFFLINE → agent_offline, NOT a NotFound", () => {
     const mapped = agentErrorToControlError(err(ErrorCode.ERROR_CODE_AGENT_OFFLINE));
@@ -358,7 +382,9 @@ describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
   });
 
   test("CONSENT_REQUIRED → consent_required", () => {
-    expect(agentErrorToControlError(err(ErrorCode.ERROR_CODE_CONSENT_REQUIRED)).reason).toBe("consent_required");
+    expect(agentErrorToControlError(err(ErrorCode.ERROR_CODE_CONSENT_REQUIRED)).reason).toBe(
+      "consent_required",
+    );
   });
 
   test("DRAINING → no capability reason, retryable + draining", () => {
@@ -503,7 +529,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
         throw e;
       },
     }));
-    const res = await rpc.request("agent.x.y.rpc", { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest, { timeoutMs: 10 });
+    const res = await rpc.request(
+      "agent.x.y.rpc",
+      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      { timeoutMs: 10 },
+    );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
   });
 
@@ -516,7 +546,11 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
         throw e;
       },
     }));
-    const res = await rpc.request("agent.x.y.rpc", { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest, { timeoutMs: 10 });
+    const res = await rpc.request(
+      "agent.x.y.rpc",
+      { requestId: "r", epoch: 0, op: { $case: "ping", ping: { nonce: "1" } } } as ControlRequest,
+      { timeoutMs: 10 },
+    );
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_TIMEOUT);
   });
 
@@ -529,7 +563,13 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
         const res: ControlResponse = {
           requestId: req.requestId,
           error: undefined,
-          result: { $case: "ping", ping: { nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "", agentMonotonicMs: "1" } },
+          result: {
+            $case: "ping",
+            ping: {
+              nonce: req.op?.$case === "ping" ? req.op.ping.nonce : "",
+              agentMonotonicMs: "1",
+            },
+          },
         };
         return { data: ControlResponse.encode(res).finish() };
       },

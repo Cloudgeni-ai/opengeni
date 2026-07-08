@@ -47,7 +47,15 @@ export type TurnSummaryProps = {
   children: React.ReactNode;
 };
 
-export function TurnSummary({ items, outcome, failureText, durationMs, defaultOpen, bare, children }: TurnSummaryProps) {
+export function TurnSummary({
+  items,
+  outcome,
+  failureText,
+  durationMs,
+  defaultOpen,
+  bare,
+  children,
+}: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
@@ -56,7 +64,11 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
   const facets = summarizeTurn(items, durationMs);
 
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen} className={enter && !bare ? "animate-og-enter" : undefined}>
+    <Collapsible.Root
+      open={open}
+      onOpenChange={setOpen}
+      className={enter && !bare ? "animate-og-enter" : undefined}
+    >
       <Collapsible.Trigger
         className={cn(
           // Both the top-level turn fold and a nested cluster fold render as a
@@ -109,7 +121,9 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
           {outcome === "failed" && failureText ? (
             <span className="text-og-status-failed"> · {failureText}</span>
           ) : null}
-          {outcome === "cancelled" ? <span className="text-og-fg-subtle"> · interrupted</span> : null}
+          {outcome === "cancelled" ? (
+            <span className="text-og-fg-subtle"> · interrupted</span>
+          ) : null}
         </span>
         {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
             and keyboard focus), but always present on coarse pointers where there
@@ -162,7 +176,11 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
       files += applyPatchOps(item.raw).length;
     } else if (item.name === "exec_command") {
       commands += 1;
-    } else if (rawTypeOf(item) === "computer_call" || item.name === "computer_call" || item.name === "computer_screenshot") {
+    } else if (
+      rawTypeOf(item) === "computer_call" ||
+      item.name === "computer_call" ||
+      item.name === "computer_screenshot"
+    ) {
       if (screenshotDataUrl(item.output) !== null) {
         screenshots += 1;
       }

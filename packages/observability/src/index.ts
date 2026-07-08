@@ -1,10 +1,4 @@
-import {
-  collectDefaultMetrics,
-  Counter,
-  Gauge,
-  Histogram,
-  Registry,
-} from "prom-client";
+import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -34,9 +28,14 @@ export type Span = {
 export type MetricLabels = Record<string, AttributeValue>;
 
 const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
-const durationHistogramBuckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600];
+const durationHistogramBuckets = [
+  0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600,
+];
 
-export function createObservability(settings: ObservabilitySettings, options: ObservabilityOptions): Observability {
+export function createObservability(
+  settings: ObservabilitySettings,
+  options: ObservabilityOptions,
+): Observability {
   return new Observability(settings, options);
 }
 
@@ -52,10 +51,17 @@ export class Observability {
   private readonly histograms = new Map<string, Histogram<string>>();
   private readonly registrations = new Map<string, MetricRegistration>();
   private readonly now: () => number;
-  private readonly exporter: (url: string, body: unknown, headers: Record<string, string>) => Promise<void>;
+  private readonly exporter: (
+    url: string,
+    body: unknown,
+    headers: Record<string, string>,
+  ) => Promise<void>;
   private readonly resourceAttributes: Attributes;
 
-  constructor(private readonly settings: ObservabilitySettings, private readonly options: ObservabilityOptions) {
+  constructor(
+    private readonly settings: ObservabilitySettings,
+    private readonly options: ObservabilityOptions,
+  ) {
     this.now = options.now ?? Date.now;
     this.exporter = options.exporter ?? defaultExporter;
     this.resourceAttributes = {
@@ -98,7 +104,11 @@ export class Observability {
     this.log("error", message, attributes);
   }
 
-  log(level: "debug" | "info" | "warn" | "error", message: string, attributes: Attributes = {}): void {
+  log(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    attributes: Attributes = {},
+  ): void {
     if (!this.settings.observabilityStructuredLogs) {
       const line = attributes.error ? `${message}: ${String(attributes.error)}` : message;
       if (level === "warn") {
@@ -160,7 +170,12 @@ export class Observability {
     };
   }
 
-  recordHttpRequest(input: { method: string; route: string; status: number; durationSeconds: number }): void {
+  recordHttpRequest(input: {
+    method: string;
+    route: string;
+    status: number;
+    durationSeconds: number;
+  }): void {
     this.incrementCounter({
       name: "opengeni_http_requests_total",
       help: "Total HTTP requests handled by OpenGeni.",
@@ -206,12 +221,21 @@ export class Observability {
     });
   }
 
-  incrementCounter(input: { name: string; help?: string; labels?: MetricLabels; amount?: number }): void {
+  incrementCounter(input: {
+    name: string;
+    help?: string;
+    labels?: MetricLabels;
+    amount?: number;
+  }): void {
     if (!this.settings.observabilityMetricsEnabled) {
       return;
     }
     const labels = normalizeLabels(input.labels);
-    const counter = this.counter(input.name, input.help ?? `${input.name} counter.`, Object.keys(labels));
+    const counter = this.counter(
+      input.name,
+      input.help ?? `${input.name} counter.`,
+      Object.keys(labels),
+    );
     counter.inc(labels as never, input.amount ?? 1);
   }
 
@@ -224,7 +248,12 @@ export class Observability {
     gauge.set(labels as never, input.value);
   }
 
-  incrementGauge(input: { name: string; help?: string; labels?: MetricLabels; amount?: number }): void {
+  incrementGauge(input: {
+    name: string;
+    help?: string;
+    labels?: MetricLabels;
+    amount?: number;
+  }): void {
     if (!this.settings.observabilityMetricsEnabled) {
       return;
     }
@@ -233,7 +262,13 @@ export class Observability {
     gauge.inc(labels as never, input.amount ?? 1);
   }
 
-  observeHistogram(input: { name: string; help?: string; labels?: MetricLabels; value: number; buckets?: number[] }): void {
+  observeHistogram(input: {
+    name: string;
+    help?: string;
+    labels?: MetricLabels;
+    value: number;
+    buckets?: number[];
+  }): void {
     if (!this.settings.observabilityMetricsEnabled) {
       return;
     }
@@ -278,7 +313,12 @@ export class Observability {
     return metric;
   }
 
-  private histogram(name: string, help: string, labelNames: string[], buckets: number[]): Histogram<string> {
+  private histogram(
+    name: string,
+    help: string,
+    labelNames: string[],
+    buckets: number[],
+  ): Histogram<string> {
     const existing = this.histograms.get(name);
     if (existing) {
       this.assertRegistration(name, "histogram", labelNames);
@@ -295,18 +335,22 @@ export class Observability {
     this.registrations.set(name, { kind, labelNames: sorted });
   }
 
-  private assertRegistration(name: string, kind: MetricRegistration["kind"], labelNames: string[]): void {
+  private assertRegistration(
+    name: string,
+    kind: MetricRegistration["kind"],
+    labelNames: string[],
+  ): void {
     const registration = this.registrations.get(name);
     const sorted = [...labelNames].sort();
     if (
-      !registration
-      || registration.kind !== kind
-      || registration.labelNames.length !== sorted.length
-      || registration.labelNames.some((label, index) => label !== sorted[index])
+      !registration ||
+      registration.kind !== kind ||
+      registration.labelNames.length !== sorted.length ||
+      registration.labelNames.some((label, index) => label !== sorted[index])
     ) {
       throw new Error(
-        `Metric ${name} was already registered as ${registration?.kind ?? "unknown"} `
-        + `with labels [${registration?.labelNames.join(",") ?? ""}], not ${kind} [${sorted.join(",")}]`,
+        `Metric ${name} was already registered as ${registration?.kind ?? "unknown"} ` +
+          `with labels [${registration?.labelNames.join(",") ?? ""}], not ${kind} [${sorted.join(",")}]`,
       );
     }
   }
@@ -325,31 +369,39 @@ export class Observability {
     }
     const endpoint = `${this.settings.observabilityOtlpEndpoint.replace(/\/$/, "")}/v1/traces`;
     const body = {
-      resourceSpans: [{
-        resource: {
-          attributes: otlpAttributes(this.resourceAttributes),
-        },
-        scopeSpans: [{
-          scope: {
-            name: "@opengeni/observability",
-            version: "0.1.0",
+      resourceSpans: [
+        {
+          resource: {
+            attributes: otlpAttributes(this.resourceAttributes),
           },
-          spans: [{
-            traceId: span.traceId,
-            spanId: span.spanId,
-            name: span.name,
-            kind: 1,
-            startTimeUnixNano: millisToNanos(span.startMs),
-            endTimeUnixNano: millisToNanos(span.endMs),
-            attributes: otlpAttributes(span.attributes),
-            status: span.error ? { code: 2, message: errorMessage(span.error) } : { code: 1 },
-          }],
-        }],
-      }],
+          scopeSpans: [
+            {
+              scope: {
+                name: "@opengeni/observability",
+                version: "0.1.0",
+              },
+              spans: [
+                {
+                  traceId: span.traceId,
+                  spanId: span.spanId,
+                  name: span.name,
+                  kind: 1,
+                  startTimeUnixNano: millisToNanos(span.startMs),
+                  endTimeUnixNano: millisToNanos(span.endMs),
+                  attributes: otlpAttributes(span.attributes),
+                  status: span.error ? { code: 2, message: errorMessage(span.error) } : { code: 1 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
     };
-    void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch((error) => {
-      this.warn("OTLP span export failed", { error: errorMessage(error), endpoint });
-    });
+    void this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)).catch(
+      (error) => {
+        this.warn("OTLP span export failed", { error: errorMessage(error), endpoint });
+      },
+    );
   }
 }
 
@@ -361,7 +413,10 @@ export type StartupDependencyRetryEvent = {
   error: unknown;
 };
 
-export function logStartupDependencyRetry(observability: Observability, event: StartupDependencyRetryEvent): void {
+export function logStartupDependencyRetry(
+  observability: Observability,
+  event: StartupDependencyRetryEvent,
+): void {
   const message = event.error instanceof Error ? event.error.message : String(event.error);
   observability.warn("Startup dependency connection failed; retrying", {
     dependency: event.label,
@@ -382,13 +437,13 @@ function normalizeLabels(labels: MetricLabels = {}): Record<string, string> {
 }
 
 function buildVersion(): string {
-  return process.env.OPENGENI_VERSION
-    ?? process.env.npm_package_version
-    ?? "dev";
+  return process.env.OPENGENI_VERSION ?? process.env.npm_package_version ?? "dev";
 }
 
 function cleanAttributes(attributes: Attributes): Record<string, string | number | boolean | null> {
-  return Object.fromEntries(Object.entries(attributes).filter(([, value]) => value !== undefined)) as Record<string, string | number | boolean | null>;
+  return Object.fromEntries(
+    Object.entries(attributes).filter(([, value]) => value !== undefined),
+  ) as Record<string, string | number | boolean | null>;
 }
 
 function errorToAttributes(error: unknown): Attributes {
@@ -402,14 +457,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function otlpAttributes(attributes: Attributes): Array<{ key: string; value: Record<string, string | number | boolean> }> {
+function otlpAttributes(
+  attributes: Attributes,
+): Array<{ key: string; value: Record<string, string | number | boolean> }> {
   return Object.entries(cleanAttributes(attributes)).map(([key, value]) => ({
     key,
     value: otlpValue(value),
   }));
 }
 
-function otlpValue(value: string | number | boolean | null): Record<string, string | number | boolean> {
+function otlpValue(
+  value: string | number | boolean | null,
+): Record<string, string | number | boolean> {
   if (typeof value === "number") {
     return Number.isInteger(value) ? { intValue: value } : { doubleValue: value };
   }
@@ -432,17 +491,24 @@ export function parseHeaders(value: string): Record<string, string> {
   if (!value.trim()) {
     return {};
   }
-  const entries: Array<[string, string]> = value.split(",").map((pair): [string, string] => {
-    const separator = pair.indexOf("=");
-    if (separator === -1) {
-      return [pair.trim(), ""];
-    }
-    return [pair.slice(0, separator).trim(), pair.slice(separator + 1).trim()];
-  }).filter(([key]) => key.length > 0);
+  const entries: Array<[string, string]> = value
+    .split(",")
+    .map((pair): [string, string] => {
+      const separator = pair.indexOf("=");
+      if (separator === -1) {
+        return [pair.trim(), ""];
+      }
+      return [pair.slice(0, separator).trim(), pair.slice(separator + 1).trim()];
+    })
+    .filter(([key]) => key.length > 0);
   return Object.fromEntries(entries);
 }
 
-async function defaultExporter(url: string, body: unknown, headers: Record<string, string>): Promise<void> {
+async function defaultExporter(
+  url: string,
+  body: unknown,
+  headers: Record<string, string>,
+): Promise<void> {
   const response = await fetch(url, {
     method: "POST",
     headers: {

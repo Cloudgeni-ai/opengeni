@@ -1,4 +1,10 @@
-import type { CapabilityCatalogItem, CapabilityKind, CapabilitySource, ConnectionMetadata, CreateCapabilityInput } from "@/types";
+import type {
+  CapabilityCatalogItem,
+  CapabilityKind,
+  CapabilitySource,
+  ConnectionMetadata,
+  CreateCapabilityInput,
+} from "@/types";
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -43,24 +49,35 @@ export function capabilityChipLabel(id: string): string {
 /** Singular human label for a capability kind ("MCP server", "API"…). */
 export function capabilityKindLabel(kind: CapabilityKind): string {
   switch (kind) {
-    case "pack": return "Pack";
-    case "mcp": return "MCP server";
-    case "api": return "API";
-    case "skill": return "Skill";
-    case "plugin": return "Plugin";
-    default: return kind;
+    case "pack":
+      return "Pack";
+    case "mcp":
+      return "MCP server";
+    case "api":
+      return "API";
+    case "skill":
+      return "Skill";
+    case "plugin":
+      return "Plugin";
+    default:
+      return kind;
   }
 }
 
 /** Human label for where a catalog item came from. */
 export function capabilitySourceLabel(source: CapabilitySource | string): string {
   switch (source) {
-    case "built_in": return "Built in";
-    case "configured": return "Configured";
+    case "built_in":
+      return "Built in";
+    case "configured":
+      return "Configured";
     case "public_registry":
-    case "registry": return "Public registry";
-    case "manual": return "Added";
-    default: return String(source).replaceAll("_", " ");
+    case "registry":
+      return "Public registry";
+    case "manual":
+      return "Added";
+    default:
+      return String(source).replaceAll("_", " ");
   }
 }
 
@@ -90,7 +107,11 @@ export function emptyCapabilityForm(): CapabilityFormState {
   };
 }
 
-export function filterCapabilityCatalogItems(items: CapabilityCatalogItem[], filter: CapabilityFilter, query: string): CapabilityCatalogItem[] {
+export function filterCapabilityCatalogItems(
+  items: CapabilityCatalogItem[],
+  filter: CapabilityFilter,
+  query: string,
+): CapabilityCatalogItem[] {
   const normalized = query.trim().toLowerCase();
   return items.filter((item) => {
     if (filter !== "all" && item.kind !== filter) {
@@ -110,20 +131,34 @@ export function filterCapabilityCatalogItems(items: CapabilityCatalogItem[], fil
       item.installUrl,
       ...item.tags,
       JSON.stringify(item.metadata),
-    ].filter(Boolean).join(" ").toLowerCase().includes(normalized);
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(normalized);
   });
 }
 
-export function capabilityErrorToast(error: unknown, fallbackTitle: string): { title: string; description: string } {
+export function capabilityErrorToast(
+  error: unknown,
+  fallbackTitle: string,
+): { title: string; description: string } {
   const description = cleanApiErrorMessage(error instanceof Error ? error.message : String(error));
   // The raw "requires credentials; pass them in the enable request 'headers'
   // field" 422 is an API-only contract detail — never surface it verbatim. The
   // UI collects credentials in the connect sheet before enabling, so this only
   // fires as a fallback; translate it to plain language.
   if (isMissingCredentialsError(error)) {
-    return { title: "Credentials needed", description: "This integration needs to be connected before it can be enabled." };
+    return {
+      title: "Credentials needed",
+      description: "This integration needs to be connected before it can be enabled.",
+    };
   }
-  if (/^MCP capability ".+" could not be enabled because OpenGeni could not initialize /.test(description)) {
+  if (
+    /^MCP capability ".+" could not be enabled because OpenGeni could not initialize /.test(
+      description,
+    )
+  ) {
     return { title: "Connection failed", description };
   }
   return { title: fallbackTitle, description };
@@ -164,7 +199,8 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   if (item.kind !== "mcp") {
     return { mode: "enable" };
   }
-  const providerDomain = item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
+  const providerDomain =
+    item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
   if (item.authKind === "oauth2") {
     return { mode: "oauth", providerDomain, mcpUrl: item.mcpUrl ?? item.endpointUrl };
   }
@@ -206,9 +242,11 @@ function headerFieldLabel(name: string): string {
   // Key"; two-letter vendor prefixes and real acronyms keep their caps.
   const titled = cleaned
     .split(/\s+/)
-    .map((word) => (word === word.toUpperCase() && word.length > 2 && !headerLabelAcronyms.has(word)
-      ? word[0] + word.slice(1).toLowerCase()
-      : word.replace(/^\w/, (character) => character.toUpperCase())))
+    .map((word) =>
+      word === word.toUpperCase() && word.length > 2 && !headerLabelAcronyms.has(word)
+        ? word[0] + word.slice(1).toLowerCase()
+        : word.replace(/^\w/, (character) => character.toUpperCase()),
+    )
     .join(" ");
   return titled || "Credential";
 }
@@ -228,7 +266,9 @@ export function domainFromUrl(url: string | null): string | null {
  * `null` means the item was enabled without a connection (headers-enabled or
  * credential-free), which is healthy.
  */
-export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityCatalogItem["connectionRef"] {
+export function installedConnectionRef(
+  item: CapabilityCatalogItem,
+): CapabilityCatalogItem["connectionRef"] {
   return item.connectionRef ?? null;
 }
 
@@ -243,7 +283,12 @@ export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityC
  * those the snapshot renders until the live row appears; for a normal catalog
  * selection it stays false so a vanished row closes the sheet instead of ghosting.
  */
-export type SheetSelection = { id: string; registry: boolean; snapshotFallback: boolean; snapshot: CapabilityCatalogItem };
+export type SheetSelection = {
+  id: string;
+  registry: boolean;
+  snapshotFallback: boolean;
+  snapshot: CapabilityCatalogItem;
+};
 
 /**
  * The item the detail sheet should render, derived from the LIVE catalog by id so
@@ -252,9 +297,15 @@ export type SheetSelection = { id: string; registry: boolean; snapshotFallback: 
  * not yet in `items`) falls back to its snapshot; any other selection absent from
  * the catalog resolves to null so the caller closes the sheet rather than ghost.
  */
-export function resolveSheetItem(selected: SheetSelection | null, items: CapabilityCatalogItem[]): CapabilityCatalogItem | null {
+export function resolveSheetItem(
+  selected: SheetSelection | null,
+  items: CapabilityCatalogItem[],
+): CapabilityCatalogItem | null {
   if (!selected) return null;
-  return items.find((entry) => entry.id === selected.id) ?? (selected.snapshotFallback ? selected.snapshot : null);
+  return (
+    items.find((entry) => entry.id === selected.id) ??
+    (selected.snapshotFallback ? selected.snapshot : null)
+  );
 }
 
 export type ConnectionHealth =
@@ -275,7 +326,11 @@ export type ConnectionHealth =
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */
-export function connectionHealth(item: CapabilityCatalogItem, connections: ConnectionMetadata[], loaded: boolean): ConnectionHealth {
+export function connectionHealth(
+  item: CapabilityCatalogItem,
+  connections: ConnectionMetadata[],
+  loaded: boolean,
+): ConnectionHealth {
   const ref = installedConnectionRef(item);
   if (!ref?.connectionId) return { state: "none" };
   if (!loaded) return { state: "unverified" };
@@ -295,18 +350,26 @@ export type ReconnectPlan =
   | { kind: "oauth"; connectionId: string | null }
   | { kind: "api_key"; connectionId: string | null };
 
-export function capabilityReconnectPlan(item: CapabilityCatalogItem, health: ConnectionHealth): ReconnectPlan | null {
+export function capabilityReconnectPlan(
+  item: CapabilityCatalogItem,
+  health: ConnectionHealth,
+): ReconnectPlan | null {
   if (!item.enabled || health.state !== "attention") return null;
   const ref = item.connectionRef;
   if (!ref) return null;
   const connectionId = health.connection?.id ?? null;
-  return ref.kind === "oauth2" ? { kind: "oauth", connectionId } : { kind: "api_key", connectionId };
+  return ref.kind === "oauth2"
+    ? { kind: "oauth", connectionId }
+    : { kind: "api_key", connectionId };
 }
 
 /** The generic single credential field for an api-key reconnect when the catalog
  * no longer supplies requiredHeaders (drift). The wire name defaults to the most
  * common bearer header; the label never leaks the word "headers". */
-export const GENERIC_API_KEY_FIELD: RequiredHeaderField = { name: "Authorization", label: "API key" };
+export const GENERIC_API_KEY_FIELD: RequiredHeaderField = {
+  name: "Authorization",
+  label: "API key",
+};
 
 /**
  * The workspace-shared connection (subjectId null) for a provider domain, used
@@ -314,11 +377,18 @@ export const GENERIC_API_KEY_FIELD: RequiredHeaderField = { name: "Authorization
  * duplicate. Both sides normalized (the catalog domain is raw; the row's is
  * API-canonicalized) so the match holds.
  */
-export function workspaceConnectionForDomain(connections: ConnectionMetadata[], providerDomain: string): ConnectionMetadata | null {
+export function workspaceConnectionForDomain(
+  connections: ConnectionMetadata[],
+  providerDomain: string,
+): ConnectionMetadata | null {
   const target = normalizeProviderDomain(providerDomain);
-  return connections.find(
-    (connection) => connection.subjectId === null && normalizeProviderDomain(connection.providerDomain) === target,
-  ) ?? null;
+  return (
+    connections.find(
+      (connection) =>
+        connection.subjectId === null &&
+        normalizeProviderDomain(connection.providerDomain) === target,
+    ) ?? null
+  );
 }
 
 /**
@@ -332,7 +402,11 @@ export function connectionToReuseForApiKey(
   connections: ConnectionMetadata[],
   providerDomain: string,
 ): string | null {
-  return item.connectionRef?.connectionId ?? workspaceConnectionForDomain(connections, providerDomain)?.id ?? null;
+  return (
+    item.connectionRef?.connectionId ??
+    workspaceConnectionForDomain(connections, providerDomain)?.id ??
+    null
+  );
 }
 
 /**
@@ -356,7 +430,10 @@ export function registryResultsForQuery(
  * connection row the API returns, never from a domain the client canonicalized.
  */
 export function normalizeProviderDomain(domain: string): string {
-  return domain.trim().toLowerCase().replace(/^www\./, "");
+  return domain
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
 }
 
 /**
@@ -372,7 +449,10 @@ export function normalizeProviderDomain(domain: string): string {
  */
 export type OAuthResumeAction = "missing" | "no_connection" | "reconnect" | "enable";
 
-export function oauthResumeAction(item: CapabilityCatalogItem | null, connectionId: string | null): OAuthResumeAction {
+export function oauthResumeAction(
+  item: CapabilityCatalogItem | null,
+  connectionId: string | null,
+): OAuthResumeAction {
   if (!item) return "missing";
   if (!connectionId) return "no_connection";
   // An enabled item whose stored ref points at the returned connection was
@@ -426,12 +506,11 @@ export function summarizePackContents(item: CapabilityCatalogItem): PackContents
     return null;
   }
   const metadata = item.metadata;
-  const mcpServerIds = uniqueStrings(item.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id));
+  const mcpServerIds = uniqueStrings(
+    item.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
+  );
   const firstPartyMcpTools = uniqueStrings(stringArray(metadata.firstPartyMcpTools));
-  const skills = uniqueStrings([
-    stringValue(metadata.skill),
-    ...stringArray(metadata.skills),
-  ]);
+  const skills = uniqueStrings([stringValue(metadata.skill), ...stringArray(metadata.skills)]);
   const connectors = recordArray(metadata.connectors).map((connector) => ({
     id: stringValue(connector.id) ?? stringValue(connector.name) ?? "connector",
     name: stringValue(connector.name) ?? stringValue(connector.id) ?? "Connector",
@@ -451,12 +530,13 @@ export function summarizePackContents(item: CapabilityCatalogItem): PackContents
     scheduleSummary: scheduleSummaryForMetadata(template.defaultSchedule),
   }));
   return {
-    hasContents: mcpServerIds.length > 0
-      || firstPartyMcpTools.length > 0
-      || skills.length > 0
-      || connectors.length > 0
-      || knowledge.length > 0
-      || scheduledTaskTemplates.length > 0,
+    hasContents:
+      mcpServerIds.length > 0 ||
+      firstPartyMcpTools.length > 0 ||
+      skills.length > 0 ||
+      connectors.length > 0 ||
+      knowledge.length > 0 ||
+      scheduledTaskTemplates.length > 0,
     mcpServerIds,
     firstPartyMcpTools,
     skills,
@@ -486,21 +566,29 @@ export function scheduleSummaryForMetadata(value: unknown): string {
     return everySeconds ? `Every ${everySeconds} seconds` : "Interval schedule";
   }
   if (type === "once") {
-    return stringValue(schedule.runAt) ? `Once at ${stringValue(schedule.runAt)}` : "One-time schedule";
+    return stringValue(schedule.runAt)
+      ? `Once at ${stringValue(schedule.runAt)}`
+      : "One-time schedule";
   }
   return type ? `${type} schedule` : "Custom schedule";
 }
 
 function recordArray(value: unknown): Record<string, unknown>[] {
-  return Array.isArray(value) ? value.map(recordValue).filter((entry): entry is Record<string, unknown> => Boolean(entry)) : [];
+  return Array.isArray(value)
+    ? value.map(recordValue).filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(stringValue).filter((entry): entry is string => Boolean(entry)) : [];
+  return Array.isArray(value)
+    ? value.map(stringValue).filter((entry): entry is string => Boolean(entry))
+    : [];
 }
 
 function stringValue(value: unknown): string | null {
@@ -528,13 +616,20 @@ export function capabilityCounts(items: CapabilityCatalogItem[]): Record<Capabil
 
 export function capabilityFilterLabel(kind: CapabilityFilter): string {
   switch (kind) {
-    case "all": return "All";
-    case "pack": return "Packs";
-    case "mcp": return "MCP servers";
-    case "api": return "APIs";
-    case "skill": return "Skills";
-    case "plugin": return "Plugins";
-    default: return kind;
+    case "all":
+      return "All";
+    case "pack":
+      return "Packs";
+    case "mcp":
+      return "MCP servers";
+    case "api":
+      return "APIs";
+    case "skill":
+      return "Skills";
+    case "plugin":
+      return "Plugins";
+    default:
+      return kind;
   }
 }
 
@@ -596,7 +691,10 @@ export function capabilityInputFromForm(form: CapabilityFormState): CreateCapabi
     name,
     ...(form.description.trim() ? { description: form.description.trim() } : {}),
     category: form.category.trim() || "custom",
-    tags: form.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+    tags: form.tags
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean),
     ...(form.endpointUrl.trim() ? { endpointUrl: form.endpointUrl.trim() } : {}),
     ...(form.homepageUrl.trim() ? { homepageUrl: form.homepageUrl.trim() } : {}),
     ...(form.installUrl.trim() ? { installUrl: form.installUrl.trim() } : {}),

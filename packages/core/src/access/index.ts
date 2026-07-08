@@ -1,5 +1,10 @@
 import type { Settings } from "@opengeni/config";
-import { verifyDelegatedAccessToken, type AccessContext, type AccessGrant, type Permission } from "@opengeni/contracts";
+import {
+  verifyDelegatedAccessToken,
+  type AccessContext,
+  type AccessGrant,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
@@ -28,10 +33,16 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   return context;
 }
 
-export async function requireAccessGrant(c: Context, deps: AccessDeps, workspaceId: string, permission?: Permission): Promise<AccessGrant> {
+export async function requireAccessGrant(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrant> {
   const context = await requireAccessContext(c, deps);
-  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId)
-    ?? await getWorkspaceGrant(deps.db, context.subjectId, workspaceId);
+  const grant =
+    context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId) ??
+    (await getWorkspaceGrant(deps.db, context.subjectId, workspaceId));
   if (!grant) {
     const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
     if (!workspace) {
@@ -69,16 +80,16 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     });
   }
 
-	  if (deps.settings.productAccessMode === "configured") {
-	    const delegated = await delegatedAccessContext(c, deps, "configured");
-	    if (delegated) {
-	      return delegated;
-	    }
-	    if (deps.settings.delegationSecret) {
-	      return null;
-	    }
-	    return await bootstrapWorkspace(deps.db, {
-	      accountExternalSource: "opengeni:configured",
+  if (deps.settings.productAccessMode === "configured") {
+    const delegated = await delegatedAccessContext(c, deps, "configured");
+    if (delegated) {
+      return delegated;
+    }
+    if (deps.settings.delegationSecret) {
+      return null;
+    }
+    return await bootstrapWorkspace(deps.db, {
+      accountExternalSource: "opengeni:configured",
       accountExternalId: "default",
       accountName: "Configured",
       workspaceExternalSource: "opengeni:configured",
@@ -98,25 +109,33 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
     if (apiKey) {
       const accountPermissions = apiKey.workspaceId
-        ? apiKey.permissions.filter((permission) => permission === "billing:read" || permission === "billing:manage")
+        ? apiKey.permissions.filter(
+            (permission) => permission === "billing:read" || permission === "billing:manage",
+          )
         : apiKey.permissions;
       return {
         mode: "managed",
         subjectId: `api_key:${apiKey.id}`,
         subjectLabel: apiKey.name,
-        accountGrants: [{
-          accountId: apiKey.accountId,
-          subjectId: `api_key:${apiKey.id}`,
-          subjectLabel: apiKey.name,
-          permissions: accountPermissions,
-        }],
-        workspaceGrants: apiKey.workspaceId ? [{
-          workspaceId: apiKey.workspaceId,
-          accountId: apiKey.accountId,
-          subjectId: `api_key:${apiKey.id}`,
-          subjectLabel: apiKey.name,
-          permissions: apiKey.permissions,
-        }] : [],
+        accountGrants: [
+          {
+            accountId: apiKey.accountId,
+            subjectId: `api_key:${apiKey.id}`,
+            subjectLabel: apiKey.name,
+            permissions: accountPermissions,
+          },
+        ],
+        workspaceGrants: apiKey.workspaceId
+          ? [
+              {
+                workspaceId: apiKey.workspaceId,
+                accountId: apiKey.accountId,
+                subjectId: `api_key:${apiKey.id}`,
+                subjectLabel: apiKey.name,
+                permissions: apiKey.permissions,
+              },
+            ]
+          : [],
         defaultAccountId: apiKey.accountId,
         defaultWorkspaceId: apiKey.workspaceId,
       } satisfies AccessContext;
@@ -137,7 +156,12 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   return null;
 }
 
-async function delegatedAccessContext(c: Context, deps: AccessDeps, mode: "configured" | "managed", token = bearerToken(c)): Promise<AccessContext | null> {
+async function delegatedAccessContext(
+  c: Context,
+  deps: AccessDeps,
+  mode: "configured" | "managed",
+  token = bearerToken(c),
+): Promise<AccessContext | null> {
   if (!token || !deps.settings.delegationSecret) {
     return null;
   }
@@ -149,22 +173,29 @@ async function delegatedAccessContext(c: Context, deps: AccessDeps, mode: "confi
     mode,
     subjectId: payload.subjectId,
     ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-    accountGrants: [{
-      accountId: payload.accountId,
-      subjectId: payload.subjectId,
-      ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-      permissions: payload.permissions,
-    }],
-    workspaceGrants: [{
-      workspaceId: payload.workspaceId,
-      accountId: payload.accountId,
-      subjectId: payload.subjectId,
-      ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
-      permissions: payload.permissions,
-      // sessionId is worker-asserted (HMAC-signed token claim), not agent
-      // controlled; it scopes session-bound MCP tools such as goal management.
-      metadata: { delegated: true, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}) },
-    }],
+    accountGrants: [
+      {
+        accountId: payload.accountId,
+        subjectId: payload.subjectId,
+        ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
+        permissions: payload.permissions,
+      },
+    ],
+    workspaceGrants: [
+      {
+        workspaceId: payload.workspaceId,
+        accountId: payload.accountId,
+        subjectId: payload.subjectId,
+        ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
+        permissions: payload.permissions,
+        // sessionId is worker-asserted (HMAC-signed token claim), not agent
+        // controlled; it scopes session-bound MCP tools such as goal management.
+        metadata: {
+          delegated: true,
+          ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
+        },
+      },
+    ],
     defaultAccountId: payload.accountId,
     defaultWorkspaceId: payload.workspaceId,
   };
@@ -182,5 +213,7 @@ function bearerToken(c: Context): string | null {
 
 async function sha256Hex(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }

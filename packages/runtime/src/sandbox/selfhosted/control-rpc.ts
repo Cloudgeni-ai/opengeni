@@ -20,12 +20,7 @@
 // hardening, retries) behind this SAME `ControlRpc` interface — design for that,
 // do not duplicate.
 
-import {
-  AgentError,
-  ControlRequest,
-  ControlResponse,
-  ErrorCode,
-} from "@opengeni/agent-proto";
+import { AgentError, ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import type { CapabilityUnavailableReason } from "@opengeni/contracts";
 
 // Re-export the contracts reason union locally so callers of the mapping below

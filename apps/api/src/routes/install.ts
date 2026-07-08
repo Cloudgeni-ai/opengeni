@@ -41,7 +41,10 @@ const TEXT_ASSETS: Record<string, { file: string; contentType: string }> = {
   "/install.sh": { file: "install.sh", contentType: "text/x-shellscript; charset=utf-8" },
   "/install.ps1": { file: "install.ps1", contentType: "text/plain; charset=utf-8" },
   "/uninstall.sh": { file: "uninstall.sh", contentType: "text/x-shellscript; charset=utf-8" },
-  "/opengeni-agent-minisign.pub": { file: "opengeni-agent-minisign.pub", contentType: "text/plain; charset=utf-8" },
+  "/opengeni-agent-minisign.pub": {
+    file: "opengeni-agent-minisign.pub",
+    contentType: "text/plain; charset=utf-8",
+  },
 };
 
 const assetCache = new Map<string, string>();
@@ -84,7 +87,11 @@ const DEFAULT_BASE_REWRITES: Record<string, (base: string) => { from: string; to
 // archive default stands), when the URL is not absolute http(s) (never serve a
 // script with a broken base), or when the file has no marker (script drift — fail
 // safe to serving it verbatim rather than crashing the install surface).
-function rewriteDefaultBaseUrl(file: string, body: string, publicBaseUrl: string | undefined): string {
+function rewriteDefaultBaseUrl(
+  file: string,
+  body: string,
+  publicBaseUrl: string | undefined,
+): string {
   if (!publicBaseUrl || !/^https?:\/\//.test(publicBaseUrl)) {
     return body;
   }

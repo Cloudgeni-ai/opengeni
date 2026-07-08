@@ -22,7 +22,10 @@ export type ScheduledTaskFormState = {
   resources: ResourceRef[];
 };
 
-export function newScheduledTaskFormState(includeOpenGeniTool: boolean, resources: ResourceRef[] = []): ScheduledTaskFormState {
+export function newScheduledTaskFormState(
+  includeOpenGeniTool: boolean,
+  resources: ResourceRef[] = [],
+): ScheduledTaskFormState {
   return {
     name: "",
     prompt: "",
@@ -66,7 +69,13 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
 }
 
 export function scheduleFromFormState(form: ScheduledTaskFormState): ScheduledTaskScheduleSpec {
-  return scheduledTaskSchedule(form.scheduleType, form.runAt, form.intervalMinutes, form.calendarTime, form.timeZone);
+  return scheduledTaskSchedule(
+    form.scheduleType,
+    form.runAt,
+    form.intervalMinutes,
+    form.calendarTime,
+    form.timeZone,
+  );
 }
 
 export function agentConfigFromFormState(
@@ -74,7 +83,9 @@ export function agentConfigFromFormState(
   existingTask?: ScheduledTask,
   defaults: { resources?: ResourceRef[]; model?: string; reasoningEffort?: ReasoningEffort } = {},
 ): ScheduledTaskAgentConfig {
-  const tools = (existingTask?.agentConfig.tools ?? []).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
+  const tools = (existingTask?.agentConfig.tools ?? []).filter(
+    (tool) => !(tool.kind === "mcp" && tool.id === "opengeni"),
+  );
   if (form.includeOpenGeniTool) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
@@ -83,13 +94,25 @@ export function agentConfigFromFormState(
     resources: form.resources,
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
-    ...(existingTask?.agentConfig.model ?? defaults.model ? { model: existingTask?.agentConfig.model ?? defaults.model } : {}),
-    ...(existingTask?.agentConfig.reasoningEffort ?? defaults.reasoningEffort ? { reasoningEffort: existingTask?.agentConfig.reasoningEffort ?? defaults.reasoningEffort } : {}),
-    ...(existingTask?.agentConfig.sandboxBackend ? { sandboxBackend: existingTask.agentConfig.sandboxBackend } : {}),
+    ...((existingTask?.agentConfig.model ?? defaults.model)
+      ? { model: existingTask?.agentConfig.model ?? defaults.model }
+      : {}),
+    ...((existingTask?.agentConfig.reasoningEffort ?? defaults.reasoningEffort)
+      ? { reasoningEffort: existingTask?.agentConfig.reasoningEffort ?? defaults.reasoningEffort }
+      : {}),
+    ...(existingTask?.agentConfig.sandboxBackend
+      ? { sandboxBackend: existingTask.agentConfig.sandboxBackend }
+      : {}),
   };
 }
 
-function scheduledTaskSchedule(type: "once" | "interval" | "calendar", runAt: string, intervalMinutes: number, calendarTime: string, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"): ScheduledTaskScheduleSpec {
+function scheduledTaskSchedule(
+  type: "once" | "interval" | "calendar",
+  runAt: string,
+  intervalMinutes: number,
+  calendarTime: string,
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+): ScheduledTaskScheduleSpec {
   if (type === "interval") {
     return { type: "interval", everySeconds: Math.max(60, Math.round(intervalMinutes * 60)) };
   }
@@ -133,7 +156,11 @@ export function summarizeLastRun(runs: ScheduledTaskRun[]): LastRunSummary | nul
     return null;
   }
   if (last.status === "failed") {
-    return { run: last, label: `last run failed${last.error ? `: ${last.error}` : ""}`, tone: "failed" };
+    return {
+      run: last,
+      label: `last run failed${last.error ? `: ${last.error}` : ""}`,
+      tone: "failed",
+    };
   }
   if (last.status === "dispatched") {
     return { run: last, label: `last run ${formatTimestamp(last.firedAt)}`, tone: "ok" };

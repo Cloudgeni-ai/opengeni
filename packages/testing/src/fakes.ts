@@ -10,7 +10,10 @@ export class MemoryEventBus implements EventBus {
   /** Agent-event (one-way) subscribers, keyed by the subscribed subject pattern.
    *  The in-memory mirror of `agent.*.*.events` pub/sub for the metrics-ingestion
    *  consumer. */
-  private agentEventSubscribers = new Map<string, Set<(payload: Uint8Array, subject: string) => void | Promise<void>>>();
+  private agentEventSubscribers = new Map<
+    string,
+    Set<(payload: Uint8Array, subject: string) => void | Promise<void>>
+  >();
 
   async publish(workspaceId: string, sessionId: string, events: SessionEvent[]): Promise<void> {
     this.published.push(events);
@@ -21,7 +24,11 @@ export class MemoryEventBus implements EventBus {
     await Promise.all([...subscribers].map((subscriber) => subscriber(events)));
   }
 
-  async subscribe(workspaceId: string, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>): Promise<() => void> {
+  async subscribe(
+    workspaceId: string,
+    sessionId: string,
+    onEvents: (events: SessionEvent[]) => void | Promise<void>,
+  ): Promise<() => void> {
     const key = subject(workspaceId, sessionId);
     const subscribers = this.subscribers.get(key) ?? new Set();
     subscribers.add(onEvents);
@@ -31,7 +38,11 @@ export class MemoryEventBus implements EventBus {
     };
   }
 
-  async request(subject: string, payload: Uint8Array, _opts: { timeoutMs: number }): Promise<RequestReply> {
+  async request(
+    subject: string,
+    payload: Uint8Array,
+    _opts: { timeoutMs: number },
+  ): Promise<RequestReply> {
     const handler = this.responders.get(subject);
     if (!handler) {
       // No responder on the subject — model the NATS 503 NoResponders the real
@@ -53,7 +64,10 @@ export class MemoryEventBus implements EventBus {
     };
   }
 
-  subscribeAgentEvents(subjectPattern: string, handler: (payload: Uint8Array, subject: string) => void | Promise<void>): () => void {
+  subscribeAgentEvents(
+    subjectPattern: string,
+    handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  ): () => void {
     const subscribers = this.agentEventSubscribers.get(subjectPattern) ?? new Set();
     subscribers.add(handler);
     this.agentEventSubscribers.set(subjectPattern, subscribers);
@@ -78,7 +92,8 @@ export class MemoryEventBus implements EventBus {
 
   getRequestConnection(): RequestConnection {
     return {
-      request: (subject, payload, opts) => this.request(subject, payload, { timeoutMs: opts.timeout }),
+      request: (subject, payload, opts) =>
+        this.request(subject, payload, { timeoutMs: opts.timeout }),
     };
   }
 

@@ -24,7 +24,12 @@ export function formatMoneyMicros(amountMicros: number, currency: string): strin
 
 export function validTopupAmount(value: string): boolean {
   const amount = Number(value);
-  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
+  return (
+    Number.isFinite(amount) &&
+    amount >= 5 &&
+    amount <= 10_000 &&
+    Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9
+  );
 }
 
 /** Human label for an entitlement value (`true` reads as "enabled", not "true"). */
@@ -39,7 +44,9 @@ export function formatEntitlementValue(value: EntitlementValue): string {
 }
 
 /** Stable, render-ready rows for the account's entitlements map. */
-export function entitlementEntries(entitlements: Entitlements): Array<{ name: string; value: string }> {
+export function entitlementEntries(
+  entitlements: Entitlements,
+): Array<{ name: string; value: string }> {
   return Object.entries(entitlements)
     .map(([name, value]) => ({ name, value: formatEntitlementValue(value) }))
     .sort((a, b) => a.name.localeCompare(b.name));

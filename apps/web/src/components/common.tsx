@@ -36,7 +36,9 @@ export function ProblemPanel(props: { title: string; description: string; action
  * surfaces only while the stream is degraded, in sentence case.
  */
 export function ConnectionPill({ state }: { state: SessionEventsConnectionState }) {
-  const degraded: Partial<Record<SessionEventsConnectionState, { label: string; dot: string; text: string }>> = {
+  const degraded: Partial<
+    Record<SessionEventsConnectionState, { label: string; dot: string; text: string }>
+  > = {
     connecting: { label: "Connecting…", dot: "bg-status-running", text: "text-status-running" },
     reconnecting: { label: "Reconnecting…", dot: "bg-status-running", text: "text-status-running" },
     error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
@@ -46,7 +48,12 @@ export function ConnectionPill({ state }: { state: SessionEventsConnectionState 
     return null;
   }
   return (
-    <span className={cn("inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium", meta.text)}>
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium",
+        meta.text,
+      )}
+    >
       <span className={cn("size-2 rounded-full motion-safe:animate-pulse", meta.dot)} />
       <span>{meta.label}</span>
     </span>
@@ -65,13 +72,18 @@ export function InspectorSection({ title, children }: { title: string; children:
 }
 
 export function InfoRow({ label, value }: { label: string; value: ReactNode }) {
-  const renderedValue = typeof value === "string" || typeof value === "number"
-    ? <span className="min-w-0 truncate">{value}</span>
-    : value;
+  const renderedValue =
+    typeof value === "string" || typeof value === "number" ? (
+      <span className="min-w-0 truncate">{value}</span>
+    ) : (
+      value
+    );
   return (
     <div className="grid min-h-7 min-w-0 grid-cols-[5.25rem_minmax(0,1fr)] items-center gap-3 border-b border-border/70 py-1.5 last:border-b-0">
       <span className="min-w-0 truncate text-xs text-fg-subtle">{label}</span>
-      <span className="flex min-w-0 justify-end overflow-hidden text-right text-xs text-fg-muted">{renderedValue}</span>
+      <span className="flex min-w-0 justify-end overflow-hidden text-right text-xs text-fg-muted">
+        {renderedValue}
+      </span>
     </div>
   );
 }
@@ -94,7 +106,12 @@ export function CopyableMono({ value }: { value: string }) {
 }
 
 /** Standard page header: icon, title, blurb, and trailing actions. */
-export function PageHeader(props: { icon: ReactNode; title: string; description: string; actions?: ReactNode }) {
+export function PageHeader(props: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  actions?: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
@@ -104,7 +121,9 @@ export function PageHeader(props: { icon: ReactNode; title: string; description:
         </div>
         <p className="mt-1 text-sm leading-5 text-fg-muted">{props.description}</p>
       </div>
-      {props.actions ? <div className="flex min-w-0 flex-wrap items-center gap-2">{props.actions}</div> : null}
+      {props.actions ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-2">{props.actions}</div>
+      ) : null}
     </div>
   );
 }
@@ -122,13 +141,25 @@ export function EmptyState({ children }: { children: ReactNode }) {
  * affordance instead of letting routes fall through to "No X yet…" copy when
  * the request failed.
  */
-export function LoadErrorState({ title, error, onRetry }: { title: string; error?: Error | null; onRetry: () => void }) {
+export function LoadErrorState({
+  title,
+  error,
+  onRetry,
+}: {
+  title: string;
+  error?: Error | null;
+  onRetry: () => void;
+}) {
   return (
     <div className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-status-failed">
       <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
-        {error?.message ? <div className="mt-0.5 break-words text-xs leading-4 text-status-failed/80">{error.message}</div> : null}
+        {error?.message ? (
+          <div className="mt-0.5 break-words text-xs leading-4 text-status-failed/80">
+            {error.message}
+          </div>
+        ) : null}
       </div>
       <button
         type="button"

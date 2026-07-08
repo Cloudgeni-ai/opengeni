@@ -57,7 +57,9 @@ describe("M5 enrollment route discipline", () => {
   test("every handler asserts the selfhosted flag", () => {
     for (const route of [...AGENT_ROUTES, ...USER_ROUTES, LOOKUP_ROUTE, EXCHANGE_ROUTE]) {
       const body = handlerBody(routesSrc, route.method, route.path);
-      expect(body, `${route.method} ${route.path} must gate on the flag`).toContain("assertSelfhostedEnabled");
+      expect(body, `${route.method} ${route.path} must gate on the flag`).toContain(
+        "assertSelfhostedEnabled",
+      );
     }
   });
 
@@ -72,7 +74,9 @@ describe("M5 enrollment route discipline", () => {
       const body = handlerBody(routesSrc, route.method, route.path);
       expect(body, `${route.path} must be rate-limited`).toContain("rateLimit(");
       // The CALL form (not a comment mention) must be absent — these are agent routes.
-      expect(body.includes("requireAccessGrant("), `${route.path} must NOT user-authenticate`).toBe(false);
+      expect(body.includes("requireAccessGrant("), `${route.path} must NOT user-authenticate`).toBe(
+        false,
+      );
     }
   });
 
@@ -82,7 +86,10 @@ describe("M5 enrollment route discipline", () => {
       const grantAt = body.indexOf("requireAccessGrant");
       expect(grantAt, `${route.path} must call requireAccessGrant`).toBeGreaterThanOrEqual(0);
       const parseAt = Math.min(
-        ...[".parse(", ".safeParse("].map((p) => body.indexOf(p)).filter((i) => i >= 0).concat([Number.MAX_SAFE_INTEGER]),
+        ...[".parse(", ".safeParse("]
+          .map((p) => body.indexOf(p))
+          .filter((i) => i >= 0)
+          .concat([Number.MAX_SAFE_INTEGER]),
       );
       if (parseAt !== Number.MAX_SAFE_INTEGER) {
         expect(parseAt, `${route.path} parse must follow auth`).toBeGreaterThan(grantAt);
@@ -91,11 +98,19 @@ describe("M5 enrollment route discipline", () => {
   });
 
   test("approve uses the enrollments:manage permission; list uses enrollments:read", () => {
-    const approve = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/device/approve");
+    const approve = handlerBody(
+      routesSrc,
+      "post",
+      "/v1/workspaces/:workspaceId/enrollments/device/approve",
+    );
     expect(approve).toContain('"enrollments:manage"');
     const list = handlerBody(routesSrc, "get", "/v1/workspaces/:workspaceId/enrollments");
     expect(list).toContain('"enrollments:read"');
-    const revoke = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke");
+    const revoke = handlerBody(
+      routesSrc,
+      "post",
+      "/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke",
+    );
     expect(revoke).toContain('"enrollments:manage"');
   });
 
@@ -108,7 +123,11 @@ describe("M5 enrollment route discipline", () => {
   });
 
   test("deny + token use enrollments:manage", () => {
-    const deny = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/device/deny");
+    const deny = handlerBody(
+      routesSrc,
+      "post",
+      "/v1/workspaces/:workspaceId/enrollments/device/deny",
+    );
     expect(deny).toContain('"enrollments:manage"');
     const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
     expect(token).toContain('"enrollments:manage"');

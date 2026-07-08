@@ -11,15 +11,22 @@ export const CREATE_WORKSPACE_OPTION = "__create-workspace__";
  * grant that can create workspaces. Null when the subject cannot create one
  * anywhere — the affordance hides instead of failing on submit.
  */
-export function workspaceCreationAccountId(context: AccessContext, activeAccountId: string | null): string | null {
+export function workspaceCreationAccountId(
+  context: AccessContext,
+  activeAccountId: string | null,
+): string | null {
   for (const candidate of [activeAccountId, context.defaultAccountId]) {
     if (candidate && hasAccountPermission(context, candidate, "workspace:create")) {
       return candidate;
     }
   }
-  return context.accountGrants.find((grant) =>
-    grant.permissions.includes("workspace:create") || grant.permissions.includes("account:admin"),
-  )?.accountId ?? null;
+  return (
+    context.accountGrants.find(
+      (grant) =>
+        grant.permissions.includes("workspace:create") ||
+        grant.permissions.includes("account:admin"),
+    )?.accountId ?? null
+  );
 }
 
 /** Replace-or-append a workspace in the cached list (create + rename share it). */

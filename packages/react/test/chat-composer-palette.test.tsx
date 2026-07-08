@@ -23,7 +23,11 @@ afterEach(async () => {
 });
 
 /** A controlled fake composer whose value is driven by React state in the test tree. */
-function makeComposer(value: string, setValue: (v: string) => void, overrides: Partial<ComposerState> = {}): ComposerState {
+function makeComposer(
+  value: string,
+  setValue: (v: string) => void,
+  overrides: Partial<ComposerState> = {},
+): ComposerState {
   return {
     value,
     setValue,
@@ -67,7 +71,12 @@ describe("ChatComposer slash palette", () => {
   test("opens the palette listbox when the value starts with '/'", async () => {
     let value = "/";
     const container = await mount(
-      <ChatComposer composer={makeComposer(value, (v) => { value = v; })} commandContext={ctx} />,
+      <ChatComposer
+        composer={makeComposer(value, (v) => {
+          value = v;
+        })}
+        commandContext={ctx}
+      />,
     );
     const listbox = container.querySelector('[role="listbox"]');
     expect(listbox).not.toBeNull();
@@ -83,28 +92,34 @@ describe("ChatComposer slash palette", () => {
     const withPerm = await mount(
       <ChatComposer composer={makeComposer("/", () => {})} commandContext={ctx} />,
     );
-    const labels = [...withPerm.querySelectorAll('[role="option"]')].map((el) => el.textContent ?? "");
+    const labels = [...withPerm.querySelectorAll('[role="option"]')].map(
+      (el) => el.textContent ?? "",
+    );
     expect(labels.join(" ")).toContain("/clear");
     expect(labels.join(" ")).toContain("/compact");
     if (mounted) {
-      const c = mounted; mounted = null;
+      const c = mounted;
+      mounted = null;
       await act(async () => c.root.unmount());
       c.container.remove();
     }
 
     const noPerm = await mount(
-      <ChatComposer composer={makeComposer("/", () => {})} commandContext={{ ...ctx, permissions: [] as never }} />,
+      <ChatComposer
+        composer={makeComposer("/", () => {})}
+        commandContext={{ ...ctx, permissions: [] as never }}
+      />,
     );
-    const noPermLabels = [...noPerm.querySelectorAll('[role="option"]')].map((el) => el.textContent ?? "").join(" ");
+    const noPermLabels = [...noPerm.querySelectorAll('[role="option"]')]
+      .map((el) => el.textContent ?? "")
+      .join(" ");
     expect(noPermLabels).toContain("/help");
     expect(noPermLabels).not.toContain("/clear ");
     expect(noPermLabels).not.toContain("/compact");
   });
 
   test("the palette is inert (not rendered) without a commandContext", async () => {
-    const container = await mount(
-      <ChatComposer composer={makeComposer("/clear", () => {})} />,
-    );
+    const container = await mount(<ChatComposer composer={makeComposer("/clear", () => {})} />);
     expect(container.querySelector('[role="listbox"]')).toBeNull();
   });
 
@@ -140,7 +155,9 @@ describe("ChatComposer slash palette", () => {
       textarea.focus();
       // happy-dom dispatches the native keydown through React's event system on
       // the focused element; the composer's onKeyDown drives the palette run.
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
       // Let the async run() + notice state update settle.
       await Promise.resolve();
       await Promise.resolve();
@@ -156,7 +173,13 @@ describe("ChatComposer slash palette", () => {
 
   test("/clear-view invokes onClearView and reports success when it is wired", async () => {
     let cleared = 0;
-    const container = await mount(<ClearViewHarness onClearView={() => { cleared += 1; }} />);
+    const container = await mount(
+      <ClearViewHarness
+        onClearView={() => {
+          cleared += 1;
+        }}
+      />,
+    );
     await pressEnterOnTextarea(container);
     expect(cleared).toBe(1);
     expect(container.textContent ?? "").toMatch(/local view cleared/i);
@@ -180,9 +203,13 @@ describe("ChatComposer slash palette", () => {
     // Sanity: before Enter the palette lists clear-view FIRST (the near-match
     // that used to leak into the confirm bar) — clear-view prefix-matches
     // "clear" and is declared earlier than the destructive clear.
-    const optionText = [...container.querySelectorAll('[role="option"]')].map((el) => el.textContent ?? "");
+    const optionText = [...container.querySelectorAll('[role="option"]')].map(
+      (el) => el.textContent ?? "",
+    );
     expect(optionText[0]).toContain("/clear-view");
-    expect(optionText.some((t) => t.includes("/clear") && t.toLowerCase().includes("danger"))).toBe(true);
+    expect(optionText.some((t) => t.includes("/clear") && t.toLowerCase().includes("danger"))).toBe(
+      true,
+    );
 
     await pressEnterOnTextarea(container);
 
@@ -205,7 +232,9 @@ describe("ChatComposer slash palette", () => {
 
     // Cancel to settle the pending confirm() promise (clear.run awaits it), so
     // unmount in afterEach is clean and no run is left dangling.
-    const cancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel");
+    const cancel = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Cancel",
+    );
     await act(async () => {
       cancel?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
@@ -230,7 +259,9 @@ describe("ChatComposer slash palette", () => {
         <ChatComposer
           composer={makeComposer(value, setValue)}
           commandContext={ctx}
-          onClearView={() => { cleared += 1; }}
+          onClearView={() => {
+            cleared += 1;
+          }}
         />
       );
     };
@@ -241,10 +272,14 @@ describe("ChatComposer slash palette", () => {
     const clearViewRow = options.find((el) => (el.textContent ?? "").includes("/clear-view"));
     expect(clearViewRow).toBeTruthy();
     // Sanity: the destructive /clear is also present (the pair this guards).
-    expect(options.some((el) => {
-      const t = el.textContent ?? "";
-      return t.includes("/clear") && !t.includes("/clear-view") && t.toLowerCase().includes("danger");
-    })).toBe(true);
+    expect(
+      options.some((el) => {
+        const t = el.textContent ?? "";
+        return (
+          t.includes("/clear") && !t.includes("/clear-view") && t.toLowerCase().includes("danger")
+        );
+      }),
+    ).toBe(true);
 
     await act(async () => {
       // The palette runs on mousedown (keeps textarea focus); this is the click.
@@ -287,7 +322,9 @@ describe("ChatComposer slash palette", () => {
     expect(confirmBar?.getAttribute("aria-label")).toBe("Confirm /clear");
 
     // Settle the pending confirm() promise for a clean unmount.
-    const cancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel");
+    const cancel = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Cancel",
+    );
     await act(async () => {
       cancel?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
@@ -306,7 +343,12 @@ describe("ChatComposer slash palette", () => {
       const [value, setValue] = useState("/help");
       return (
         <ChatComposer
-          composer={makeComposer(value, setValue, { send: async () => { sent += 1; return true; } })}
+          composer={makeComposer(value, setValue, {
+            send: async () => {
+              sent += 1;
+              return true;
+            },
+          })}
           commandContext={ctx}
         />
       );
@@ -316,9 +358,13 @@ describe("ChatComposer slash palette", () => {
     // Dismiss the palette with Escape (palette consumes the key), then Enter.
     await act(async () => {
       textarea.focus();
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
       await Promise.resolve();
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -342,14 +388,21 @@ describe("ChatComposer slash palette", () => {
     let sent = 0;
     const container = await mount(
       <ChatComposer
-        composer={makeComposer("hello there", () => {}, { send: async () => { sent += 1; return true; } })}
+        composer={makeComposer("hello there", () => {}, {
+          send: async () => {
+            sent += 1;
+            return true;
+          },
+        })}
         commandContext={ctx}
       />,
     );
     const textarea = container.querySelector("textarea")!;
     await act(async () => {
       textarea.focus();
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
       await Promise.resolve();
     });
     expect(sent).toBe(1);

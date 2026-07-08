@@ -4,24 +4,31 @@ import { createObjectStorage } from "../src";
 
 describe("object storage adapters", () => {
   test("creates S3-compatible storage from endpoint credentials", () => {
-    const storage = withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
-      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
-      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
-      OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
-    }, () => createObjectStorage(getSettings()));
+    const storage = withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+      },
+      () => createObjectStorage(getSettings()),
+    );
 
     expect(storage?.backend).toBe("s3-compatible");
     expect(storage?.bucket).toBe("opengeni-files");
   });
 
   test("creates Azure Blob storage and signs upload/download URLs", async () => {
-    const storage = withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
-      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: Buffer.from("test-storage-key").toString("base64"),
-    }, () => createObjectStorage(getSettings()));
+    const storage = withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "azure-blob",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "opengeni",
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY:
+          Buffer.from("test-storage-key").toString("base64"),
+      },
+      () => createObjectStorage(getSettings()),
+    );
 
     expect(storage?.backend).toBe("azure-blob");
     expect(storage?.bucket).toBe("opengeni-files");
@@ -31,7 +38,9 @@ describe("object storage adapters", () => {
       contentType: "text/plain",
       sha256: "checksum",
     });
-    expect(put.url).toContain("https://opengeni.blob.core.windows.net/opengeni-files/files/file-id/original/test.txt?");
+    expect(put.url).toContain(
+      "https://opengeni.blob.core.windows.net/opengeni-files/files/file-id/original/test.txt?",
+    );
     expect(put.url).toContain("sp=cw");
     expect(put.requiredHeaders).toMatchObject({
       "content-type": "text/plain",
@@ -44,23 +53,29 @@ describe("object storage adapters", () => {
   });
 
   test("creates AWS S3 storage without requiring static credentials", () => {
-    const storage = withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "aws-s3",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_REGION: "us-east-1",
-      OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "false",
-    }, () => createObjectStorage(getSettings()));
+    const storage = withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "aws-s3",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_REGION: "us-east-1",
+        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "false",
+      },
+      () => createObjectStorage(getSettings()),
+    );
 
     expect(storage?.backend).toBe("aws-s3");
     expect(storage?.bucket).toBe("opengeni-files");
   });
 
   test("creates GCS storage from provider-neutral settings", () => {
-    const storage = withEnv({
-      OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
-      OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
-      OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
-    }, () => createObjectStorage(getSettings()));
+    const storage = withEnv(
+      {
+        OPENGENI_OBJECT_STORAGE_BACKEND: "gcs",
+        OPENGENI_OBJECT_STORAGE_BUCKET: "opengeni-files",
+        OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: "opengeni-test",
+      },
+      () => createObjectStorage(getSettings()),
+    );
 
     expect(storage?.backend).toBe("gcs");
     expect(storage?.bucket).toBe("opengeni-files");
@@ -92,23 +107,31 @@ describe("getObjectBytes (S3-compatible)", () => {
             { status: 404, headers: { "content-type": "application/xml" } },
           );
         }
-        return new Response(object.body, { status: 200, headers: { "content-type": object.contentType } });
+        return new Response(object.body, {
+          status: 200,
+          headers: { "content-type": object.contentType },
+        });
       },
     });
     return { url: `http://127.0.0.1:${server.port}`, close: () => server.stop(true) };
   }
 
   test("returns bytes and content type for an existing object", async () => {
-    const fake = startFakeS3({ "catalog-assets/logos/example.com/abc.png": { body: "logo-bytes", contentType: "image/png" } });
+    const fake = startFakeS3({
+      "catalog-assets/logos/example.com/abc.png": { body: "logo-bytes", contentType: "image/png" },
+    });
     try {
-      const storage = withEnv({
-        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
-        OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
-        OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
-        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
-        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
-        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
-      }, () => createObjectStorage(getSettings()));
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      );
       const result = await storage!.getObjectBytes("catalog-assets/logos/example.com/abc.png");
       expect(result).not.toBeNull();
       expect(Buffer.from(result!.bytes).toString("utf8")).toBe("logo-bytes");
@@ -121,14 +144,17 @@ describe("getObjectBytes (S3-compatible)", () => {
   test("returns null for a missing object instead of throwing", async () => {
     const fake = startFakeS3({});
     try {
-      const storage = withEnv({
-        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
-        OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
-        OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
-        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
-        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
-        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
-      }, () => createObjectStorage(getSettings()));
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      );
       const result = await storage!.getObjectBytes("catalog-assets/logos/missing.com/zzz.png");
       expect(result).toBeNull();
     } finally {

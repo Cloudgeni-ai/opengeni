@@ -37,7 +37,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { relativeTimeLabel } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
-import type { KnowledgeMemory, KnowledgeMemoryKind, KnowledgeMemoryStatus, WorkspaceMemorySearchResult } from "@/types";
+import type {
+  KnowledgeMemory,
+  KnowledgeMemoryKind,
+  KnowledgeMemoryStatus,
+  WorkspaceMemorySearchResult,
+} from "@/types";
 
 // Human labels — no raw enum slugs ever reach the UI. Chips read as singular
 // nouns; the injected working-set block uses the plural section names.
@@ -57,9 +62,21 @@ const STATUS_LABEL: Record<KnowledgeMemoryStatus, string> = {
   archived: "Archived",
 };
 
-const kindFilterOptions: KnowledgeMemoryKind[] = ["preference", "semantic", "procedural", "decision", "episodic"];
+const kindFilterOptions: KnowledgeMemoryKind[] = [
+  "preference",
+  "semantic",
+  "procedural",
+  "decision",
+  "episodic",
+];
 // The statuses worth browsing; "active" is the default working set an agent sees.
-const statusFilterOptions: KnowledgeMemoryStatus[] = ["active", "proposed", "approved", "archived", "superseded"];
+const statusFilterOptions: KnowledgeMemoryStatus[] = [
+  "active",
+  "proposed",
+  "approved",
+  "archived",
+  "superseded",
+];
 
 const selectClass =
   "h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]";
@@ -169,9 +186,15 @@ export function MemoryPane({
     }
     // Inject the fetched copy only when it belongs to THIS workspace — guard
     // against a fallback fetched for a workspace we've since navigated away from.
-    if (focusFallback && focusFallback.id === pendingFocusId && focusFallback.workspaceId === workspaceId) {
+    if (
+      focusFallback &&
+      focusFallback.id === pendingFocusId &&
+      focusFallback.workspaceId === workspaceId
+    ) {
       setMemories((current) =>
-        current.some((item) => item.id === pendingFocusId) ? current : sortMemories([focusFallback, ...current]),
+        current.some((item) => item.id === pendingFocusId)
+          ? current
+          : sortMemories([focusFallback, ...current]),
       );
     }
   }, [pendingFocusId, loading, memories, searchResults, focusFallback, workspaceId]);
@@ -205,11 +228,17 @@ export function MemoryPane({
     if (!trimmed) return;
     setSearching(true);
     try {
-      const response = await client.searchWorkspaceMemories(workspaceId, { query: trimmed, mode: "hybrid", limit: 10 });
+      const response = await client.searchWorkspaceMemories(workspaceId, {
+        query: trimmed,
+        mode: "hybrid",
+        limit: 10,
+      });
       setSearchResults(response.results);
       setSearchedQuery(trimmed);
     } catch (caught) {
-      toast.error("Memory search failed", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Memory search failed", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     } finally {
       setSearching(false);
     }
@@ -234,10 +263,14 @@ export function MemoryPane({
       toast.success("Memory saved");
       // Only surface it in place if it belongs in the current view.
       if (statusFilter === created.status && (!kindFilter || kindFilter === created.kind)) {
-        setMemories((current) => sortMemories([created, ...current.filter((item) => item.id !== created.id)]));
+        setMemories((current) =>
+          sortMemories([created, ...current.filter((item) => item.id !== created.id)]),
+        );
       }
     } catch (caught) {
-      toast.error("Couldn't save memory", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Couldn't save memory", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     } finally {
       setCreating(false);
     }
@@ -254,13 +287,26 @@ export function MemoryPane({
 
   // Patch a record in whichever view(s) currently show it.
   function patchLists(updated: KnowledgeMemory) {
-    setMemories((current) => sortMemories(current.map((item) => (item.id === updated.id ? updated : item))));
-    setSearchResults((current) => (current === null ? null : current.map((result) => (result.memory.id === updated.id ? { ...result, memory: updated } : result))));
+    setMemories((current) =>
+      sortMemories(current.map((item) => (item.id === updated.id ? updated : item))),
+    );
+    setSearchResults((current) =>
+      current === null
+        ? null
+        : current.map((result) =>
+            result.memory.id === updated.id ? { ...result, memory: updated } : result,
+          ),
+    );
   }
 
   // A status change (archive/approve/reject) can move a record out of the active
   // browse filter, so refetch that list for accuracy; pin/text edits patch in place.
-  async function runUpdate(memory: KnowledgeMemory, patch: Parameters<typeof client.updateKnowledgeMemory>[2], successMessage: string, statusChange: boolean) {
+  async function runUpdate(
+    memory: KnowledgeMemory,
+    patch: Parameters<typeof client.updateKnowledgeMemory>[2],
+    successMessage: string,
+    statusChange: boolean,
+  ) {
     withBusy(memory.id, true);
     try {
       const updated = await client.updateKnowledgeMemory(workspaceId, memory.id, patch);
@@ -271,7 +317,9 @@ export function MemoryPane({
         patchLists(updated);
       }
     } catch (caught) {
-      toast.error("Couldn't update memory", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Couldn't update memory", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     } finally {
       withBusy(memory.id, false);
     }
@@ -290,7 +338,9 @@ export function MemoryPane({
       setEditingId(null);
       toast.success("Memory updated");
     } catch (caught) {
-      toast.error("Couldn't update memory", { description: caught instanceof Error ? caught.message : String(caught) });
+      toast.error("Couldn't update memory", {
+        description: caught instanceof Error ? caught.message : String(caught),
+      });
     } finally {
       withBusy(memory.id, false);
     }
@@ -311,10 +361,20 @@ export function MemoryPane({
       editing={editingId === memory.id}
       editText={editText}
       onEditTextChange={setEditText}
-      onStartEdit={() => { setEditingId(memory.id); setEditText(memory.text); }}
+      onStartEdit={() => {
+        setEditingId(memory.id);
+        setEditText(memory.text);
+      }}
       onCancelEdit={() => setEditingId(null)}
       onSaveEdit={() => void saveEdit(memory)}
-      onTogglePin={() => void runUpdate(memory, { pinned: !memory.pinned }, memory.pinned ? "Unpinned" : "Pinned", false)}
+      onTogglePin={() =>
+        void runUpdate(
+          memory,
+          { pinned: !memory.pinned },
+          memory.pinned ? "Unpinned" : "Pinned",
+          false,
+        )
+      }
       onArchive={() => void runUpdate(memory, { status: "archived" }, "Memory archived", true)}
       onApprove={() => void runUpdate(memory, { status: "approved" }, "Memory approved", true)}
       onReject={() => void runUpdate(memory, { status: "rejected" }, "Memory rejected", true)}
@@ -348,7 +408,11 @@ export function MemoryPane({
             aria-label="Refresh memories"
             title="Refresh"
           >
-            {loading ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+            {loading ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <RefreshCwIcon className="size-4" />
+            )}
           </Button>
         </div>
       </div>
@@ -362,15 +426,16 @@ export function MemoryPane({
           tone="info"
           className="mt-3"
           title="Memory is off for this workspace"
-          action={(
+          action={
             <Button asChild type="button" variant="secondary" size="xs">
               <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
                 Settings
               </Link>
             </Button>
-          )}
+          }
         >
-          Agents won't read or write memory until it's enabled. You can still browse and seed records here.
+          Agents won't read or write memory until it's enabled. You can still browse and seed
+          records here.
         </Notice>
       ) : null}
 
@@ -384,14 +449,41 @@ export function MemoryPane({
             className="min-h-20 text-xs"
           />
           <div className="grid grid-cols-[1fr_auto_auto] gap-2">
-            <select value={draftKind} onChange={(event) => setDraftKind(event.target.value as KnowledgeMemoryKind)} className={selectClass}>
-              {kindFilterOptions.map((kind) => <option key={kind} value={kind}>{KIND_LABEL[kind]}</option>)}
+            <select
+              value={draftKind}
+              onChange={(event) => setDraftKind(event.target.value as KnowledgeMemoryKind)}
+              className={selectClass}
+            >
+              {kindFilterOptions.map((kind) => (
+                <option key={kind} value={kind}>
+                  {KIND_LABEL[kind]}
+                </option>
+              ))}
             </select>
-            <Button type="button" variant="ghost" size="sm" className="h-8" onClick={() => { setAdding(false); setDraftText(""); }}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8"
+              onClick={() => {
+                setAdding(false);
+                setDraftText("");
+              }}
+            >
               Cancel
             </Button>
-            <Button type="button" size="sm" className="h-8" disabled={creating || !draftText.trim()} onClick={() => void handleCreate()}>
-              {creating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+            <Button
+              type="button"
+              size="sm"
+              className="h-8"
+              disabled={creating || !draftText.trim()}
+              onClick={() => void handleCreate()}
+            >
+              {creating ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <CheckIcon className="size-3.5" />
+              )}
               Save
             </Button>
           </div>
@@ -408,8 +500,18 @@ export function MemoryPane({
             if (event.key === "Enter") void handleSearch();
           }}
         />
-        <Button type="button" size="sm" className="h-8 shrink-0" disabled={searching || !query.trim()} onClick={() => void handleSearch()}>
-          {searching ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 shrink-0"
+          disabled={searching || !query.trim()}
+          onClick={() => void handleSearch()}
+        >
+          {searching ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <SearchIcon className="size-3.5" />
+          )}
           Search
         </Button>
       </div>
@@ -418,7 +520,8 @@ export function MemoryPane({
         <div className="mt-3">
           <div className="flex items-center justify-between gap-2">
             <div className="text-2xs uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
-              {searchResults.length} {searchResults.length === 1 ? "match" : "matches"} for “{searchedQuery}”
+              {searchResults.length} {searchResults.length === 1 ? "match" : "matches"} for “
+              {searchedQuery}”
             </div>
             <Button type="button" variant="ghost" size="xs" onClick={clearSearch}>
               <ArrowLeftIcon className="size-3" />
@@ -437,13 +540,29 @@ export function MemoryPane({
                   editing={editingId === result.memory.id}
                   editText={editText}
                   onEditTextChange={setEditText}
-                  onStartEdit={() => { setEditingId(result.memory.id); setEditText(result.memory.text); }}
+                  onStartEdit={() => {
+                    setEditingId(result.memory.id);
+                    setEditText(result.memory.text);
+                  }}
                   onCancelEdit={() => setEditingId(null)}
                   onSaveEdit={() => void saveEdit(result.memory)}
-                  onTogglePin={() => void runUpdate(result.memory, { pinned: !result.memory.pinned }, result.memory.pinned ? "Unpinned" : "Pinned", false)}
-                  onArchive={() => void runUpdate(result.memory, { status: "archived" }, "Memory archived", true)}
-                  onApprove={() => void runUpdate(result.memory, { status: "approved" }, "Memory approved", true)}
-                  onReject={() => void runUpdate(result.memory, { status: "rejected" }, "Memory rejected", true)}
+                  onTogglePin={() =>
+                    void runUpdate(
+                      result.memory,
+                      { pinned: !result.memory.pinned },
+                      result.memory.pinned ? "Unpinned" : "Pinned",
+                      false,
+                    )
+                  }
+                  onArchive={() =>
+                    void runUpdate(result.memory, { status: "archived" }, "Memory archived", true)
+                  }
+                  onApprove={() =>
+                    void runUpdate(result.memory, { status: "approved" }, "Memory approved", true)
+                  }
+                  onReject={() =>
+                    void runUpdate(result.memory, { status: "rejected" }, "Memory rejected", true)
+                  }
                 />
               ))
             ) : (
@@ -456,12 +575,28 @@ export function MemoryPane({
       ) : (
         <>
           <div className="mt-3 grid grid-cols-2 gap-2">
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as KnowledgeMemoryStatus)} className={selectClass}>
-              {statusFilterOptions.map((status) => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as KnowledgeMemoryStatus)}
+              className={selectClass}
+            >
+              {statusFilterOptions.map((status) => (
+                <option key={status} value={status}>
+                  {STATUS_LABEL[status]}
+                </option>
+              ))}
             </select>
-            <select value={kindFilter} onChange={(event) => setKindFilter(event.target.value as KnowledgeMemoryKind | "")} className={selectClass}>
+            <select
+              value={kindFilter}
+              onChange={(event) => setKindFilter(event.target.value as KnowledgeMemoryKind | "")}
+              className={selectClass}
+            >
               <option value="">All kinds</option>
-              {kindFilterOptions.map((kind) => <option key={kind} value={kind}>{KIND_LABEL[kind]}</option>)}
+              {kindFilterOptions.map((kind) => (
+                <option key={kind} value={kind}>
+                  {KIND_LABEL[kind]}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -480,7 +615,16 @@ export function MemoryPane({
                   <Notice
                     tone="failed"
                     title="Couldn't load memory"
-                    action={<Button type="button" variant="ghost" size="xs" onClick={() => void refresh()}>Retry</Button>}
+                    action={
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        onClick={() => void refresh()}
+                      >
+                        Retry
+                      </Button>
+                    }
                   >
                     {error.message}
                   </Notice>
@@ -524,8 +668,10 @@ function MemoryCard(props: {
   onReject: () => void;
 }) {
   const { memory, busy, editing } = props;
-  const faded = memory.status === "superseded" || memory.status === "archived" || memory.status === "rejected";
-  const canArchive = memory.status === "active" || memory.status === "approved" || memory.status === "proposed";
+  const faded =
+    memory.status === "superseded" || memory.status === "archived" || memory.status === "rejected";
+  const canArchive =
+    memory.status === "active" || memory.status === "approved" || memory.status === "proposed";
 
   return (
     <div
@@ -539,15 +685,21 @@ function MemoryCard(props: {
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
-          {memory.pinned ? <PinIcon className="size-3 shrink-0 text-[color:var(--color-brand)]" /> : null}
+          {memory.pinned ? (
+            <PinIcon className="size-3 shrink-0 text-[color:var(--color-brand)]" />
+          ) : null}
           <MetaChip>{KIND_LABEL[memory.kind]}</MetaChip>
           {memory.status !== "active" ? (
-            <span className="shrink-0 text-2xs text-[color:var(--color-fg-subtle)]">{STATUS_LABEL[memory.status]}</span>
+            <span className="shrink-0 text-2xs text-[color:var(--color-fg-subtle)]">
+              {STATUS_LABEL[memory.status]}
+            </span>
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {props.score !== undefined ? (
-            <span className="text-2xs text-[color:var(--color-fg-subtle)]">{Math.round(props.score * 100)}%</span>
+            <span className="text-2xs text-[color:var(--color-fg-subtle)]">
+              {Math.round(props.score * 100)}%
+            </span>
           ) : null}
           {busy ? (
             <Loader2Icon className="size-4 animate-spin text-[color:var(--color-fg-subtle)]" />
@@ -558,17 +710,34 @@ function MemoryCard(props: {
                   <MoreHorizontalIcon className="size-3.5" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" sideOffset={6} className="w-40 rounded-xl border-border bg-surface p-1.5 shadow-xl">
-                <DropdownMenuItem className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs" onSelect={() => props.onTogglePin()}>
-                  {memory.pinned ? <PinOffIcon className="size-3.5 text-fg-subtle" /> : <PinIcon className="size-3.5 text-fg-subtle" />}
+              <DropdownMenuContent
+                align="end"
+                sideOffset={6}
+                className="w-40 rounded-xl border-border bg-surface p-1.5 shadow-xl"
+              >
+                <DropdownMenuItem
+                  className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs"
+                  onSelect={() => props.onTogglePin()}
+                >
+                  {memory.pinned ? (
+                    <PinOffIcon className="size-3.5 text-fg-subtle" />
+                  ) : (
+                    <PinIcon className="size-3.5 text-fg-subtle" />
+                  )}
                   {memory.pinned ? "Unpin" : "Pin"}
                 </DropdownMenuItem>
-                <DropdownMenuItem className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs" onSelect={() => props.onStartEdit()}>
+                <DropdownMenuItem
+                  className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs"
+                  onSelect={() => props.onStartEdit()}
+                >
                   <PencilIcon className="size-3.5 text-fg-subtle" />
                   Edit text
                 </DropdownMenuItem>
                 {canArchive ? (
-                  <DropdownMenuItem className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs" onSelect={() => props.onArchive()}>
+                  <DropdownMenuItem
+                    className="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs"
+                    onSelect={() => props.onArchive()}
+                  >
                     <ArchiveIcon className="size-3.5 text-fg-subtle" />
                     Archive
                   </DropdownMenuItem>
@@ -581,22 +750,40 @@ function MemoryCard(props: {
 
       {editing ? (
         <div className="mt-2 grid gap-2">
-          <Textarea value={props.editText} onChange={(event) => props.onEditTextChange(event.target.value)} className="min-h-20 text-xs" autoFocus />
+          <Textarea
+            value={props.editText}
+            onChange={(event) => props.onEditTextChange(event.target.value)}
+            className="min-h-20 text-xs"
+            autoFocus
+          />
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="xs" onClick={props.onCancelEdit}>Cancel</Button>
-            <Button type="button" size="xs" disabled={busy || !props.editText.trim()} onClick={props.onSaveEdit}>
+            <Button type="button" variant="ghost" size="xs" onClick={props.onCancelEdit}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              disabled={busy || !props.editText.trim()}
+              onClick={props.onSaveEdit}
+            >
               <CheckIcon className="size-3" />
               Save
             </Button>
           </div>
         </div>
       ) : (
-        <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-[color:var(--color-fg-muted)]">{memory.text}</p>
+        <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-[color:var(--color-fg-muted)]">
+          {memory.text}
+        </p>
       )}
 
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[color:var(--color-fg-subtle)]">
         <span>{relativeTimeLabel(memory.updatedAt)}</span>
-        {memory.usageCount > 0 ? <span>· {memory.usageCount} {memory.usageCount === 1 ? "use" : "uses"}</span> : null}
+        {memory.usageCount > 0 ? (
+          <span>
+            · {memory.usageCount} {memory.usageCount === 1 ? "use" : "uses"}
+          </span>
+        ) : null}
         {memory.createdBySessionId ? (
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
@@ -611,11 +798,25 @@ function MemoryCard(props: {
 
       {memory.status === "proposed" ? (
         <div className="mt-3 flex gap-2">
-          <Button type="button" size="sm" variant="secondary" className="h-7 flex-1" disabled={busy} onClick={props.onApprove}>
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="h-7 flex-1"
+            disabled={busy}
+            onClick={props.onApprove}
+          >
             <CheckCircle2Icon className="size-3.5" />
             Approve
           </Button>
-          <Button type="button" size="sm" variant="ghost" className="h-7 flex-1" disabled={busy} onClick={props.onReject}>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 flex-1"
+            disabled={busy}
+            onClick={props.onReject}
+          >
             <XCircleIcon className="size-3.5" />
             Reject
           </Button>

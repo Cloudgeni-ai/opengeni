@@ -45,7 +45,9 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
  * Resolve the client only — for hooks that are not workspace-scoped
  * (`useWorkspaces`, `useBillingUsage`).
  */
-export function useOpenGeniClient(override: Pick<ClientOverride, "client"> = {}): SessionClientLike {
+export function useOpenGeniClient(
+  override: Pick<ClientOverride, "client"> = {},
+): SessionClientLike {
   const context = useContext(OpenGeniContext);
   const client = override.client ?? context?.client;
   if (!client) {

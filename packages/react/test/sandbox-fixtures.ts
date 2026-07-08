@@ -7,7 +7,9 @@ import type {
 import { SESSION_ID, WORKSPACE_ID } from "./fake-client";
 
 /** A fully-warm, desktop-capable capability doc for a Modal-style box. */
-export function fakeCapabilities(overrides: Partial<SessionCapabilities> = {}): SessionCapabilities {
+export function fakeCapabilities(
+  overrides: Partial<SessionCapabilities> = {},
+): SessionCapabilities {
   return {
     sessionId: SESSION_ID,
     backend: "modal",
@@ -15,8 +17,22 @@ export function fakeCapabilities(overrides: Partial<SessionCapabilities> = {}): 
     liveness: "warm",
     leaseEpoch: 1,
     viewerHeartbeatIntervalMs: 30_000,
-    FileSystem: { available: true, readOnly: false, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: null },
-    Terminal: { transport: "sse-events", ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: null },
+    FileSystem: {
+      available: true,
+      readOnly: false,
+      root: "/workspace",
+      pathSep: "/",
+      treeMode: "lazy",
+      reason: null,
+    },
+    Terminal: {
+      transport: "sse-events",
+      ptyCapable: false,
+      shell: "/bin/bash",
+      url: null,
+      token: null,
+      reason: null,
+    },
     Git: { available: true, repos: ["."], reason: null },
     DesktopStream: {
       transport: "vnc-ws",
@@ -87,7 +103,9 @@ export function fakeColdCapabilities(): SessionCapabilities {
   });
 }
 
-export function fakeAttachResponse(overrides: Partial<AttachViewerResponse> = {}): AttachViewerResponse {
+export function fakeAttachResponse(
+  overrides: Partial<AttachViewerResponse> = {},
+): AttachViewerResponse {
   return {
     viewerId: "44444444-4444-4444-8444-444444444444",
     sandboxGroupId: "55555555-5555-4555-8555-555555555555",

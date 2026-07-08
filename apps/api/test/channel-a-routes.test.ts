@@ -32,11 +32,26 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", permission: "files:read" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec", permission: "terminal:attach" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", permission: "terminal:attach" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write", permission: "terminal:attach" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize", permission: "terminal:attach" },
-  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close", permission: "terminal:attach" },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec",
+    permission: "terminal:attach",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty",
+    permission: "terminal:attach",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write",
+    permission: "terminal:attach",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize",
+    permission: "terminal:attach",
+  },
+  {
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close",
+    permission: "terminal:attach",
+  },
 ];
 
 function handlerBody(source: string, method: string, path: string): string {
@@ -58,7 +73,10 @@ function handlerBody(source: string, method: string, path: string): string {
 describe("P4.4 Channel-A route discipline", () => {
   test("all 13 routes are registered", () => {
     for (const route of CHANNEL_A_ROUTES) {
-      expect(sessionsRoute.includes(`app.post("${route.path}"`), `missing route ${route.path}`).toBe(true);
+      expect(
+        sessionsRoute.includes(`app.post("${route.path}"`),
+        `missing route ${route.path}`,
+      ).toBe(true);
     }
   });
 
@@ -67,7 +85,10 @@ describe("P4.4 Channel-A route discipline", () => {
       const body = handlerBody(sessionsRoute, "post", route.path);
       const preambleAt = body.indexOf("channelAPreamble");
       const parseAt = body.indexOf("parseChannelABody");
-      expect(preambleAt, "handler must call channelAPreamble (auth+flag+session)").toBeGreaterThanOrEqual(0);
+      expect(
+        preambleAt,
+        "handler must call channelAPreamble (auth+flag+session)",
+      ).toBeGreaterThanOrEqual(0);
       // the preamble (auth) always precedes the body parse.
       if (parseAt >= 0) {
         expect(parseAt).toBeGreaterThan(preambleAt);
@@ -123,7 +144,11 @@ describe("P4.4 Channel-A route discipline", () => {
   });
 
   test("the PTY write route 409s when the backend lacks writeStdin (execSessionId null)", () => {
-    const body = handlerBody(sessionsRoute, "post", "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write");
+    const body = handlerBody(
+      sessionsRoute,
+      "post",
+      "/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write",
+    );
     expect(body).toContain("execSessionId === null");
     expect(body).toContain("interactive terminal unsupported on this backend");
   });

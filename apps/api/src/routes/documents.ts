@@ -45,13 +45,20 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     const payload = CreateDocumentBaseRequest.parse(await c.req.json());
-    return c.json(DocumentBase.parse(await createDocumentBase(db, { ...payload, accountId: grant.accountId, workspaceId })), 201);
+    return c.json(
+      DocumentBase.parse(
+        await createDocumentBase(db, { ...payload, accountId: grant.accountId, workspaceId }),
+      ),
+      201,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/document-bases", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    return c.json((await listDocumentBases(db, workspaceId)).map((base) => DocumentBase.parse(base)));
+    return c.json(
+      (await listDocumentBases(db, workspaceId)).map((base) => DocumentBase.parse(base)),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/document-bases/:baseId", async (c) => {
@@ -70,12 +77,30 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 0 });
+    await requireLimit(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      action: "document:index",
+      quantity: 0,
+    });
     const payload = AddDocumentRequest.parse(await c.req.json());
     try {
-      const document = await addDocumentToBase(db, { ...payload, accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId") });
-      const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
-      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? document);
+      const document = await addDocumentToBase(db, {
+        ...payload,
+        accountId: grant.accountId,
+        workspaceId,
+        baseId: c.req.param("baseId"),
+      });
+      const wasCreated =
+        document.status === "queued" && document.chunkCount === 0 && document.error === null;
+      const indexed =
+        document.status === "ready"
+          ? document
+          : ((await documentIndexer.indexDocument({
+              accountId: grant.accountId,
+              workspaceId,
+              documentId: document.id,
+            })) ?? document);
       if (indexed.status === "ready") {
         await recordWorkspaceUsage(deps, {
           accountId: grant.accountId,
@@ -98,66 +123,86 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/document-bases/:baseId/documents", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    return c.json((await listDocuments(db, workspaceId, c.req.param("baseId"))).map((document) => Document.parse(document)));
+    return c.json(
+      (await listDocuments(db, workspaceId, c.req.param("baseId"))).map((document) =>
+        Document.parse(document),
+      ),
+    );
   });
 
-  app.delete("/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    try {
-      await deleteDocumentFromBase(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        baseId: c.req.param("baseId"),
-        documentId: c.req.param("documentId"),
-      });
-      return c.body(null, 204);
-    } catch (error) {
-      throw documentHttpException(error);
-    }
-  });
-
-  app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-    if (!objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
-    }
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 0 });
-    try {
-      const document = await getDocument(db, workspaceId, c.req.param("documentId"));
-      if (!document) {
-        throw new HTTPException(404, { message: "document not found" });
-      }
-      if (document.status !== "failed") {
-        throw new HTTPException(422, { message: "only failed documents can be retried" });
-      }
-      if (document.baseId !== c.req.param("baseId")) {
-        throw new HTTPException(404, { message: "document not found" });
-      }
-      const queued = await queueDocumentForReindex(db, workspaceId, document.id);
-      const indexed = await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? queued;
-      if (indexed.status === "ready") {
-        await recordWorkspaceUsage(deps, {
+  app.delete(
+    "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      try {
+        await deleteDocumentFromBase(db, {
           accountId: grant.accountId,
           workspaceId,
-          subjectId: grant.subjectId,
-          eventType: "document.indexed",
-          quantity: indexed.chunkCount,
-          unit: "chunk",
-          sourceResourceType: "document",
-          sourceResourceId: indexed.id,
-          idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+          baseId: c.req.param("baseId"),
+          documentId: c.req.param("documentId"),
         });
+        return c.body(null, 204);
+      } catch (error) {
+        throw documentHttpException(error);
       }
-      return c.json(Document.parse(indexed));
-    } catch (error) {
-      if (error instanceof HTTPException) {
-        throw error;
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      if (!objectStorage) {
+        throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      throw documentHttpException(error);
-    }
-  });
+      await requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        action: "document:index",
+        quantity: 0,
+      });
+      try {
+        const document = await getDocument(db, workspaceId, c.req.param("documentId"));
+        if (!document) {
+          throw new HTTPException(404, { message: "document not found" });
+        }
+        if (document.status !== "failed") {
+          throw new HTTPException(422, { message: "only failed documents can be retried" });
+        }
+        if (document.baseId !== c.req.param("baseId")) {
+          throw new HTTPException(404, { message: "document not found" });
+        }
+        const queued = await queueDocumentForReindex(db, workspaceId, document.id);
+        const indexed =
+          (await documentIndexer.indexDocument({
+            accountId: grant.accountId,
+            workspaceId,
+            documentId: document.id,
+          })) ?? queued;
+        if (indexed.status === "ready") {
+          await recordWorkspaceUsage(deps, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            eventType: "document.indexed",
+            quantity: indexed.chunkCount,
+            unit: "chunk",
+            sourceResourceType: "document",
+            sourceResourceId: indexed.id,
+            idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+          });
+        }
+        return c.json(Document.parse(indexed));
+      } catch (error) {
+        if (error instanceof HTTPException) {
+          throw error;
+        }
+        throw documentHttpException(error);
+      }
+    },
+  );
 
   app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -168,15 +213,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "document base not found" });
     }
     return c.json({
-      results: await searchDocuments(db, {
-        workspaceId,
-        baseIds: [base.id],
-        query: payload.query,
-        limit: payload.limit,
-        mode: payload.mode,
-        sourceKinds: payload.sourceKinds,
-        aclTags: payload.aclTags,
-      }, getDocumentServices()),
+      results: await searchDocuments(
+        db,
+        {
+          workspaceId,
+          baseIds: [base.id],
+          query: payload.query,
+          limit: payload.limit,
+          mode: payload.mode,
+          sourceKinds: payload.sourceKinds,
+          aclTags: payload.aclTags,
+        },
+        getDocumentServices(),
+      ),
     });
   });
 
@@ -185,15 +234,19 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const payload = DocumentSearchRequest.parse(await c.req.json());
     return c.json({
-      results: await searchDocuments(db, {
-        workspaceId,
-        query: payload.query,
-        baseIds: payload.baseIds,
-        limit: payload.limit,
-        mode: payload.mode,
-        sourceKinds: payload.sourceKinds,
-        aclTags: payload.aclTags,
-      }, getDocumentServices()),
+      results: await searchDocuments(
+        db,
+        {
+          workspaceId,
+          query: payload.query,
+          baseIds: payload.baseIds,
+          limit: payload.limit,
+          mode: payload.mode,
+          sourceKinds: payload.sourceKinds,
+          aclTags: payload.aclTags,
+        },
+        getDocumentServices(),
+      ),
     });
   });
 
@@ -210,7 +263,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid knowledge memory query parameters" });
     }
-    return c.json((await listKnowledgeMemories(db, workspaceId, parsed.data)).map((memory) => KnowledgeMemory.parse(memory)));
+    return c.json(
+      (await listKnowledgeMemories(db, workspaceId, parsed.data)).map((memory) =>
+        KnowledgeMemory.parse(memory),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
@@ -232,10 +289,20 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace memory search request" });
     }
-    const results = await searchWorkspaceMemories(db, workspaceId, parsed.data, getDocumentServices().embedder);
-    return c.json(WorkspaceMemorySearchResponse.parse({
-      results: results.map((result) => ({ ...result, memory: KnowledgeMemory.parse(result.memory) })),
-    }));
+    const results = await searchWorkspaceMemories(
+      db,
+      workspaceId,
+      parsed.data,
+      getDocumentServices().embedder,
+    );
+    return c.json(
+      WorkspaceMemorySearchResponse.parse({
+        results: results.map((result) => ({
+          ...result,
+          memory: KnowledgeMemory.parse(result.memory),
+        })),
+      }),
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
@@ -251,40 +318,62 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     // the legacy curated create.
     if (payload.status === "active") {
       try {
-        const result = await saveWorkspaceMemory(db, {
-          accountId: grant.accountId,
-          workspaceId,
-          text: payload.text,
-          kind: payload.kind,
-          confidence: payload.confidence,
-          pinned: payload.pinned,
-          replacesId: payload.replacesId ?? null,
-          metadata: payload.metadata,
-          origin: "human",
-        }, getDocumentServices().embedder);
+        const result = await saveWorkspaceMemory(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            text: payload.text,
+            kind: payload.kind,
+            confidence: payload.confidence,
+            pinned: payload.pinned,
+            replacesId: payload.replacesId ?? null,
+            metadata: payload.metadata,
+            origin: "human",
+          },
+          getDocumentServices().embedder,
+        );
         return c.json(KnowledgeMemory.parse(result.memory), 201);
       } catch (error) {
         throw documentHttpException(error);
       }
     }
-    return c.json(KnowledgeMemory.parse(await createKnowledgeMemory(db, {
-      ...payload,
-      accountId: grant.accountId,
-      workspaceId,
-    })), 201);
+    return c.json(
+      KnowledgeMemory.parse(
+        await createKnowledgeMemory(db, {
+          ...payload,
+          accountId: grant.accountId,
+          workspaceId,
+        }),
+      ),
+      201,
+    );
   });
 
   app.patch("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     const payload = UpdateKnowledgeMemoryRequest.parse(await c.req.json());
-    const reviewedBy = payload.reviewedBy
-      ?? (payload.status === "approved" || payload.status === "rejected" ? grant.subjectLabel ?? grant.subjectId : undefined);
+    const reviewedBy =
+      payload.reviewedBy ??
+      (payload.status === "approved" || payload.status === "rejected"
+        ? (grant.subjectLabel ?? grant.subjectId)
+        : undefined);
     try {
-      return c.json(KnowledgeMemory.parse(await updateKnowledgeMemory(db, workspaceId, c.req.param("memoryId"), {
-        ...payload,
-        ...(reviewedBy ? { reviewedBy } : {}),
-      }, getDocumentServices().embedder)));
+      return c.json(
+        KnowledgeMemory.parse(
+          await updateKnowledgeMemory(
+            db,
+            workspaceId,
+            c.req.param("memoryId"),
+            {
+              ...payload,
+              ...(reviewedBy ? { reviewedBy } : {}),
+            },
+            getDocumentServices().embedder,
+          ),
+        ),
+      );
     } catch (error) {
       throw documentHttpException(error);
     }
@@ -293,9 +382,16 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const sessionId = typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
+    const sessionId =
+      typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const server = buildDocumentsMcpServer(db, grant.accountId, workspaceId, getDocumentServices(), { createdBySessionId: sessionId });
+    const server = buildDocumentsMcpServer(
+      db,
+      grant.accountId,
+      workspaceId,
+      getDocumentServices(),
+      { createdBySessionId: sessionId },
+    );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });
@@ -311,11 +407,11 @@ function documentHttpException(error: unknown): HTTPException {
   }
   // Workspace-memory write-gate rejections are client errors, not server faults.
   if (
-    message.includes("too long")
-    || message.includes("visible memory is full")
-    || message.includes("empty after sanitization")
-    || message.includes("does not match")
-    || message.includes("Ambiguous memory id")
+    message.includes("too long") ||
+    message.includes("visible memory is full") ||
+    message.includes("empty after sanitization") ||
+    message.includes("does not match") ||
+    message.includes("Ambiguous memory id")
   ) {
     return new HTTPException(400, { message });
   }

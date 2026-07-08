@@ -74,7 +74,13 @@ export interface RoutableBackendSession {
   // `event` is kept `unknown` (mirroring the interface's structural style + avoiding
   // a proto import into the leaf); the SelfhostedSession takes `DesktopInputRequest["event"]`.
   desktopInput?(event: unknown): Promise<void>;
-  screenshot?(): Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
+  screenshot?(): Promise<{
+    png: Uint8Array;
+    width: number;
+    height: number;
+    nativeWidth: number;
+    nativeHeight: number;
+  }>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -148,10 +154,12 @@ function isFenceError(error: unknown): boolean {
   if ((error as { fenced?: unknown }).fenced === true) {
     return true;
   }
-  const name = typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
+  const name =
+    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
+  const message =
+    error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
   const haystack = `${name} ${message}`.toLowerCase();
-  return haystack.includes("fenced") || haystack.includes("epoch") && haystack.includes("super");
+  return haystack.includes("fenced") || (haystack.includes("epoch") && haystack.includes("super"));
 }
 
 /**
@@ -189,7 +197,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // that cannot serve them. So the constructor assigns them ONLY when the
   // construction-time default backend actually implements the native surface (below).
   desktopInput?: (event: unknown) => Promise<void>;
-  screenshot?: () => Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
+  screenshot?: () => Promise<{
+    png: Uint8Array;
+    width: number;
+    height: number;
+    nativeWidth: number;
+    nativeHeight: number;
+  }>;
 
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
@@ -271,7 +285,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     this.cached = resolved;
     this.lastResolved = resolved;
     this.deps.onTransition?.({
-      type: this.cachedEpoch !== undefined && fromEpoch !== pointer.activeEpoch ? "epoch-changed" : "resolved",
+      type:
+        this.cachedEpoch !== undefined && fromEpoch !== pointer.activeEpoch
+          ? "epoch-changed"
+          : "resolved",
       fromEpoch,
       toEpoch: pointer.activeEpoch,
       sandboxId: resolved.sandboxId,
@@ -291,7 +308,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * A non-fence error propagates immediately (it is a real op failure, not a swap
    * race).
    */
-  private async dispatch<T>(op: string, fn: (session: RoutableBackendSession) => Promise<T>): Promise<T> {
+  private async dispatch<T>(
+    op: string,
+    fn: (session: RoutableBackendSession) => Promise<T>,
+  ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
@@ -443,7 +463,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (eager) {
       return eager;
     }
-    const op = (name: "createFile" | "updateFile" | "deleteFile") =>
+    const op =
+      (name: "createFile" | "updateFile" | "deleteFile") =>
       (operation: unknown, context?: unknown): Promise<unknown> =>
         this.dispatch(`editor.${name}`, async (s) => {
           const editor = s.createEditor?.(runAs) as
@@ -454,7 +475,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           }
           return editor[name](operation, context);
         });
-    return { createFile: op("createFile"), updateFile: op("updateFile"), deleteFile: op("deleteFile") };
+    return {
+      createFile: op("createFile"),
+      updateFile: op("updateFile"),
+      deleteFile: op("deleteFile"),
+    };
   }
 
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {

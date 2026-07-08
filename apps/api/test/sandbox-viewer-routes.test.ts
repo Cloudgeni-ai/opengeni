@@ -25,7 +25,10 @@ const sessionsRoute = readFileSync(resolve(here, "..", "src", "routes", "session
 const NEW_ROUTES = [
   { method: "get", path: "/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities" },
   { method: "post", path: "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers" },
-  { method: "post", path: "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat" },
+  {
+    method: "post",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat",
+  },
   { method: "delete", path: "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId" },
 ];
 

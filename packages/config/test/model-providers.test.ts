@@ -55,14 +55,16 @@ describe("parseModelProvidersJson", () => {
   });
 
   test("parses a valid provider registry and applies defaults", () => {
-    const providers = parseModelProvidersJson(JSON.stringify([
-      {
-        id: "fireworks",
-        baseUrl: "https://api.fireworks.ai/inference/v1",
-        apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY",
-        models: [{ id: "accounts/fireworks/models/glm-5p2" }],
-      },
-    ]));
+    const providers = parseModelProvidersJson(
+      JSON.stringify([
+        {
+          id: "fireworks",
+          baseUrl: "https://api.fireworks.ai/inference/v1",
+          apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY",
+          models: [{ id: "accounts/fireworks/models/glm-5p2" }],
+        },
+      ]),
+    );
     expect(providers).toHaveLength(1);
     const provider = providers[0]!;
     // api defaults to "chat" for registry providers; label is optional here.
@@ -81,31 +83,46 @@ describe("parseModelProvidersJson", () => {
 
   test("rejects an entry missing a required field, naming the index", () => {
     // baseUrl is required; provider[0] omits it.
-    expect(() => parseModelProvidersJson(JSON.stringify([
-      { id: "fireworks", apiKey: "fw", models: [{ id: "m" }] },
-    ]))).toThrow("provider[0] is invalid");
+    expect(() =>
+      parseModelProvidersJson(
+        JSON.stringify([{ id: "fireworks", apiKey: "fw", models: [{ id: "m" }] }]),
+      ),
+    ).toThrow("provider[0] is invalid");
   });
 
   test("rejects a provider id with illegal characters", () => {
-    expect(() => parseModelProvidersJson(JSON.stringify([
-      { id: "fire works", baseUrl: "https://x.test", apiKey: "fw", models: [{ id: "m" }] },
-    ]))).toThrow("provider[0] is invalid");
+    expect(() =>
+      parseModelProvidersJson(
+        JSON.stringify([
+          { id: "fire works", baseUrl: "https://x.test", apiKey: "fw", models: [{ id: "m" }] },
+        ]),
+      ),
+    ).toThrow("provider[0] is invalid");
   });
 
   test("rejects a provider with an empty models list", () => {
-    expect(() => parseModelProvidersJson(JSON.stringify([
-      { id: "fireworks", baseUrl: "https://x.test", apiKey: "fw", models: [] },
-    ]))).toThrow("provider[0] is invalid");
+    expect(() =>
+      parseModelProvidersJson(
+        JSON.stringify([{ id: "fireworks", baseUrl: "https://x.test", apiKey: "fw", models: [] }]),
+      ),
+    ).toThrow("provider[0] is invalid");
   });
 });
 
 describe("resolveProviderApiKey", () => {
   test("prefers an inline apiKey", () => {
-    expect(resolveProviderApiKey({ apiKey: "inline", apiKeyEnv: "SOME_ENV" }, { SOME_ENV: "from-env" })).toBe("inline");
+    expect(
+      resolveProviderApiKey({ apiKey: "inline", apiKeyEnv: "SOME_ENV" }, { SOME_ENV: "from-env" }),
+    ).toBe("inline");
   });
 
   test("falls back to the named env var", () => {
-    expect(resolveProviderApiKey({ apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY" }, { OPENGENI_FIREWORKS_API_KEY: "fw_env" })).toBe("fw_env");
+    expect(
+      resolveProviderApiKey(
+        { apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY" },
+        { OPENGENI_FIREWORKS_API_KEY: "fw_env" },
+      ),
+    ).toBe("fw_env");
   });
 
   test("returns undefined when neither inline nor env is resolvable", () => {
@@ -117,10 +134,13 @@ describe("resolveProviderApiKey", () => {
 
 describe("configuredProviders", () => {
   test("built-in OpenAI provider first with server compaction, then registry providers with client compaction", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     const providers = configuredProviders(settings);
     expect(providers.map((provider) => provider.id)).toEqual(["openai", "fireworks"]);
     expect(providers[0]).toMatchObject({
@@ -143,11 +163,14 @@ describe("configuredProviders", () => {
   });
 
   test("built-in Azure provider id/label and client compaction", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_PROVIDER: "azure",
-      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
-      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+      },
+      () => getSettings(),
+    );
     const builtin = configuredProviders(settings)[0]!;
     expect(builtin).toMatchObject({
       id: "azure",
@@ -164,11 +187,14 @@ describe("configuredProviders", () => {
 
 describe("configuredModels", () => {
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4,gpt-5.4-mini",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4,gpt-5.4-mini",
+      },
+      () => getSettings(),
+    );
     const models = configuredModels(settings);
     expect(models.map((model) => model.id)).toEqual(["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]);
     expect(models[0]).toMatchObject({
@@ -184,12 +210,15 @@ describe("configuredModels", () => {
   });
 
   test("unions built-in models first, then registry models in declaration order", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     const models = configuredModels(settings);
     expect(models.map((model) => model.id)).toEqual([
       "gpt-5.5",
@@ -209,17 +238,20 @@ describe("configuredModels", () => {
   });
 
   test("registry model defaults: label falls back to id, reasoningEffort/hostedWebSearch default false", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        {
-          id: "acme",
-          baseUrl: "https://api.acme.test/v1",
-          apiKey: "acme-key",
-          models: [{ id: "acme/model-a" }],
-        },
-      ]),
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "acme",
+            baseUrl: "https://api.acme.test/v1",
+            apiKey: "acme-key",
+            models: [{ id: "acme/model-a" }],
+          },
+        ]),
+      },
+      () => getSettings(),
+    );
     const model = configuredModels(settings).find((candidate) => candidate.id === "acme/model-a")!;
     expect(model).toMatchObject({
       label: "acme/model-a",
@@ -239,14 +271,21 @@ describe("configuredModels", () => {
     // and the first-wins de-dup dropped the real codex entry → Azure 404. Mirror
     // the worker's per-turn runSettings overlay by spread-overriding a validated
     // base (matching production, which never re-validates the overlay).
-    const base = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_PROVIDER: "azure",
-      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
-      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-    }, () => getSettings());
-    const runSettings = { ...base, openaiModel: "codex/gpt-5.5", modelProvidersJson: codexRegistry };
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+      },
+      () => getSettings(),
+    );
+    const runSettings = {
+      ...base,
+      openaiModel: "codex/gpt-5.5",
+      modelProvidersJson: codexRegistry,
+    };
     const models = configuredModels(runSettings);
     const codexEntries = models.filter((model) => model.id === "codex/gpt-5.5");
     expect(codexEntries).toHaveLength(1);
@@ -258,13 +297,16 @@ describe("configuredModels", () => {
   });
 
   test("a codex/ openaiModel with NO codex provider injected is unexposed (so the runtime fails loud, never Azure)", () => {
-    const base = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_PROVIDER: "azure",
-      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
-      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-    }, () => getSettings());
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+      },
+      () => getSettings(),
+    );
     const runSettings = { ...base, openaiModel: "codex/gpt-5.5" };
     expect(configuredModels(runSettings).some((model) => model.id === "codex/gpt-5.5")).toBe(false);
     expect(resolveModelProvider(runSettings, "codex/gpt-5.5")).toBeUndefined();
@@ -273,36 +315,46 @@ describe("configuredModels", () => {
   test("a namespaced registry id (Fireworks) as the turn's openaiModel resolves to its registry provider, not the Azure built-in", () => {
     // The same shadow class for registry providers (Investigation 3's flag):
     // closing it routes a registry-model turn to its provider instead of Azure.
-    const base = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_PROVIDER: "azure",
-      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
-      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const base = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     const runSettings = { ...base, openaiModel: "accounts/fireworks/models/glm-5p2" };
-    const entries = configuredModels(runSettings).filter((model) => model.id === "accounts/fireworks/models/glm-5p2");
+    const entries = configuredModels(runSettings).filter(
+      (model) => model.id === "accounts/fireworks/models/glm-5p2",
+    );
     expect(entries).toHaveLength(1);
     expect(entries[0]!.providerId).toBe("fireworks");
-    expect(resolveModelProvider(runSettings, "accounts/fireworks/models/glm-5p2")!.provider.builtin).toBe(false);
+    expect(
+      resolveModelProvider(runSettings, "accounts/fireworks/models/glm-5p2")!.provider.builtin,
+    ).toBe(false);
   });
 
   test("de-dups by id with first (built-in) winning when a registry repeats it", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        {
-          id: "shadow",
-          baseUrl: "https://api.shadow.test/v1",
-          apiKey: "shadow-key",
-          // Redeclares the built-in default model id; built-in entry must win.
-          models: [{ id: "gpt-5.5", label: "Shadowed" }, { id: "shadow/only" }],
-        },
-      ]),
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "shadow",
+            baseUrl: "https://api.shadow.test/v1",
+            apiKey: "shadow-key",
+            // Redeclares the built-in default model id; built-in entry must win.
+            models: [{ id: "gpt-5.5", label: "Shadowed" }, { id: "shadow/only" }],
+          },
+        ]),
+      },
+      () => getSettings(),
+    );
     const models = configuredModels(settings);
     expect(models.map((model) => model.id)).toEqual(["gpt-5.5", "gpt-5.4", "shadow/only"]);
     const gpt = models.find((model) => model.id === "gpt-5.5")!;
@@ -313,21 +365,27 @@ describe("configuredModels", () => {
 
 describe("configuredAllowedModels", () => {
   test("with no registry is exactly today's behaviour: default model first, then the allow-list", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "custom-model",
-      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.5,gpt-5.4",
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "custom-model",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.5,gpt-5.4",
+      },
+      () => getSettings(),
+    );
     expect(configuredAllowedModels(settings)).toEqual(["custom-model", "gpt-5.5", "gpt-5.4"]);
   });
 
   test("appends registry ids after the built-in allow-list", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.4",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     expect(configuredAllowedModels(settings)).toEqual([
       "gpt-5.5",
       "gpt-5.4",
@@ -338,11 +396,14 @@ describe("configuredAllowedModels", () => {
 
 describe("resolveModelProvider", () => {
   test("resolves a built-in model to the built-in provider", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_OPENAI_MODEL: "gpt-5.5",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.5",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     const resolved = resolveModelProvider(settings, "gpt-5.5");
     expect(resolved).toBeDefined();
     expect(resolved!.provider.id).toBe("openai");
@@ -352,10 +413,13 @@ describe("resolveModelProvider", () => {
   });
 
   test("resolves a registry model to its registry provider", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     const resolved = resolveModelProvider(settings, "accounts/fireworks/models/glm-5p2");
     expect(resolved).toBeDefined();
     expect(resolved!.provider.id).toBe("fireworks");
@@ -382,40 +446,43 @@ describe("configuredModelPricing", () => {
   });
 
   test("merge precedence: registry model pricing overrides defaults, explicit JSON overrides registry", () => {
-    const settings = withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        {
-          id: "fireworks",
-          baseUrl: "https://api.fireworks.ai/inference/v1",
-          apiKey: "fw",
-          models: [
-            {
-              id: "accounts/fireworks/models/glm-5p2",
-              // Registry override differs from the built-in default.
-              pricing: {
-                inputMicrosPerMillionTokens: 999_000,
-                outputMicrosPerMillionTokens: 999_000,
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "fireworks",
+            baseUrl: "https://api.fireworks.ai/inference/v1",
+            apiKey: "fw",
+            models: [
+              {
+                id: "accounts/fireworks/models/glm-5p2",
+                // Registry override differs from the built-in default.
+                pricing: {
+                  inputMicrosPerMillionTokens: 999_000,
+                  outputMicrosPerMillionTokens: 999_000,
+                },
               },
-            },
-            {
-              id: "fireworks/another",
-              pricing: {
-                inputMicrosPerMillionTokens: 111_000,
-                outputMicrosPerMillionTokens: 222_000,
+              {
+                id: "fireworks/another",
+                pricing: {
+                  inputMicrosPerMillionTokens: 111_000,
+                  outputMicrosPerMillionTokens: 222_000,
+                },
               },
-            },
-          ],
-        },
-      ]),
-      // Explicit JSON wins over the registry entry for the same id.
-      OPENGENI_MODEL_PRICING_JSON: JSON.stringify({
-        "accounts/fireworks/models/glm-5p2": {
-          inputMicrosPerMillionTokens: 1_000,
-          outputMicrosPerMillionTokens: 2_000,
-        },
-      }),
-    }, () => getSettings());
+            ],
+          },
+        ]),
+        // Explicit JSON wins over the registry entry for the same id.
+        OPENGENI_MODEL_PRICING_JSON: JSON.stringify({
+          "accounts/fireworks/models/glm-5p2": {
+            inputMicrosPerMillionTokens: 1_000,
+            outputMicrosPerMillionTokens: 2_000,
+          },
+        }),
+      },
+      () => getSettings(),
+    );
     const pricing = configuredModelPricing(settings);
     // explicit OPENGENI_MODEL_PRICING_JSON beats both registry + default.
     expect(pricing["accounts/fireworks/models/glm-5p2"]).toEqual({
@@ -434,101 +501,137 @@ describe("configuredModelPricing", () => {
 
 describe("validateSettings registry checks", () => {
   test("rejects a registry id colliding with the built-in provider id", () => {
-    expect(() => withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        { id: "openai", baseUrl: "https://x.test/v1", apiKey: "k", models: [{ id: "m" }] },
-      ]),
-    }, () => getSettings())).toThrow("collides with the built-in provider id");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            { id: "openai", baseUrl: "https://x.test/v1", apiKey: "k", models: [{ id: "m" }] },
+          ]),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("collides with the built-in provider id");
   });
 
   test("rejects duplicate registry provider ids", () => {
-    expect(() => withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        { id: "dup", baseUrl: "https://a.test/v1", apiKey: "k", models: [{ id: "m1" }] },
-        { id: "dup", baseUrl: "https://b.test/v1", apiKey: "k", models: [{ id: "m2" }] },
-      ]),
-    }, () => getSettings())).toThrow("duplicate provider id");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            { id: "dup", baseUrl: "https://a.test/v1", apiKey: "k", models: [{ id: "m1" }] },
+            { id: "dup", baseUrl: "https://b.test/v1", apiKey: "k", models: [{ id: "m2" }] },
+          ]),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("duplicate provider id");
   });
 
   test("rejects a registry provider with no resolvable API key", () => {
-    expect(() => withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        { id: "fireworks", baseUrl: "https://x.test/v1", apiKeyEnv: "MISSING_KEY_ENV", models: [{ id: "m" }] },
-      ]),
-    }, () => getSettings())).toThrow("requires a resolvable API key");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            {
+              id: "fireworks",
+              baseUrl: "https://x.test/v1",
+              apiKeyEnv: "MISSING_KEY_ENV",
+              models: [{ id: "m" }],
+            },
+          ]),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("requires a resolvable API key");
   });
 
   test("accepts a registry provider whose key resolves from the environment", () => {
     // configuredProviders resolves apiKeyEnv against process.env at CALL time,
     // so both getSettings (boot validation) and configuredProviders must run
     // inside the patched environment.
-    withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_FIREWORKS_API_KEY: "fw_from_env",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
-        {
-          id: "fireworks",
-          baseUrl: "https://api.fireworks.ai/inference/v1",
-          apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY",
-          models: [{ id: "accounts/fireworks/models/glm-5p2" }],
-        },
-      ]),
-    }, () => {
-      const settings = getSettings();
-      expect(configuredProviders(settings)[1]?.apiKey).toBe("fw_from_env");
-    });
+    withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_FIREWORKS_API_KEY: "fw_from_env",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+          {
+            id: "fireworks",
+            baseUrl: "https://api.fireworks.ai/inference/v1",
+            apiKeyEnv: "OPENGENI_FIREWORKS_API_KEY",
+            models: [{ id: "accounts/fireworks/models/glm-5p2" }],
+          },
+        ]),
+      },
+      () => {
+        const settings = getSettings();
+        expect(configuredProviders(settings)[1]?.apiKey).toBe("fw_from_env");
+      },
+    );
   });
 
   test("surfaces a malformed registry as a boot error", () => {
-    expect(() => withEnv({
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: "[not valid json",
-    }, () => getSettings())).toThrow("OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: "[not valid json",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON");
   });
 
   test("managed billing requires pricing for registry models that lack a default", () => {
-    expect(() => withEnv({
-      OPENGENI_ENVIRONMENT: "production",
-      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
-      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
-      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
-      OPENGENI_RESEND_API_KEY: "re_test",
-      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
-      OPENGENI_BILLING_MODE: "stripe",
-      OPENGENI_STRIPE_SECRET_KEY: "sk_test",
-      OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+    expect(() =>
+      withEnv(
         {
-          id: "acme",
-          baseUrl: "https://api.acme.test/v1",
-          apiKey: "acme-key",
-          // No default pricing and no pricing entry -> managed billing must reject.
-          models: [{ id: "acme/unpriced" }],
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+          OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+          OPENGENI_RESEND_API_KEY: "re_test",
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+          OPENGENI_BILLING_MODE: "stripe",
+          OPENGENI_STRIPE_SECRET_KEY: "sk_test",
+          OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
+            {
+              id: "acme",
+              baseUrl: "https://api.acme.test/v1",
+              apiKey: "acme-key",
+              // No default pricing and no pricing entry -> managed billing must reject.
+              models: [{ id: "acme/unpriced" }],
+            },
+          ]),
         },
-      ]),
-    }, () => getSettings())).toThrow("Missing model pricing for managed billing");
+        () => getSettings(),
+      ),
+    ).toThrow("Missing model pricing for managed billing");
   });
 
   test("managed billing accepts the GLM-5.2 registry model via its built-in default pricing", () => {
-    const settings = withEnv({
-      OPENGENI_ENVIRONMENT: "production",
-      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
-      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
-      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
-      OPENGENI_RESEND_API_KEY: "re_test",
-      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
-      OPENGENI_BILLING_MODE: "stripe",
-      OPENGENI_STRIPE_SECRET_KEY: "sk_test",
-      OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
-      OPENGENI_OPENAI_API_KEY: "sk-test",
-      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
-    }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_ENVIRONMENT: "production",
+        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+        OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+        OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+        OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+        OPENGENI_RESEND_API_KEY: "re_test",
+        OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+        OPENGENI_BILLING_MODE: "stripe",
+        OPENGENI_STRIPE_SECRET_KEY: "sk_test",
+        OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+      },
+      () => getSettings(),
+    );
     expect(configuredAllowedModels(settings)).toContain("accounts/fireworks/models/glm-5p2");
   });
 });

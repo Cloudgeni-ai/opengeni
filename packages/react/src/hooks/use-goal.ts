@@ -1,17 +1,23 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useDebouncedCallback, useMutationRunner, useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
+import {
+  useDebouncedCallback,
+  useMutationRunner,
+  useSessionEventTrigger,
+  type SessionEventFeedOptions,
+} from "./internal";
 
 /** Event types that change the session goal (set/updated/completed/paused/...). */
 export function isGoalEvent(event: Pick<SessionEvent, "type">): boolean {
   return event.type.startsWith("goal.");
 }
 
-export type UseGoalOptions = ClientOverride & SessionEventFeedOptions & {
-  /** Optional safety-net polling (ms). Off by default — goal.* events drive updates. */
-  pollIntervalMs?: number | undefined;
-};
+export type UseGoalOptions = ClientOverride &
+  SessionEventFeedOptions & {
+    /** Optional safety-net polling (ms). Off by default — goal.* events drive updates. */
+    pollIntervalMs?: number | undefined;
+  };
 
 export type UseGoalResult = {
   /** The session goal, or null when the session has none. */
@@ -43,7 +49,10 @@ export type UseGoalResult = {
  * `goal: null` (the 404 is absorbed). Live-updates on `goal.*` events —
  * pass `options.events` from `useSessionEvents` to reuse its stream.
  */
-export function useGoal(sessionId: string | null | undefined, options: UseGoalOptions = {}): UseGoalResult {
+export function useGoal(
+  sessionId: string | null | undefined,
+  options: UseGoalOptions = {},
+): UseGoalResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const sharedEvents = options.events;
@@ -129,7 +138,8 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
         client.updateGoal(workspaceId, sessionId, {
           status: "paused",
           ...(rationale !== undefined ? { rationale } : {}),
-        }));
+        }),
+      );
       if (result) {
         setGoal(result);
       }
@@ -142,7 +152,9 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     if (!sessionId) {
       return null;
     }
-    const result = await mutation.run(() => client.updateGoal(workspaceId, sessionId, { status: "active" }));
+    const result = await mutation.run(() =>
+      client.updateGoal(workspaceId, sessionId, { status: "active" }),
+    );
     if (result) {
       setGoal(result);
     }

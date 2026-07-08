@@ -1,8 +1,17 @@
 {
   "name": "@opengeni/runtime",
   "version": "0.6.1",
-  "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/runtime"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
@@ -16,10 +25,6 @@
       "default": "./src/sandbox/index.ts"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -30,22 +35,17 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@opengeni/agent-proto": "workspace:*",
-    "@opengeni/config": "workspace:*",
-    "@opengeni/contracts": "workspace:*",
     "@openai/agents": "^0.11.6",
     "@openai/agents-extensions": "^0.11.6",
+    "@opengeni/agent-proto": "workspace:*",
+    "@opengeni/codex": "workspace:*",
+    "@opengeni/config": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
     "modal": "^0.7.4",
-    "openai": "6.36.0",
-    "@opengeni/codex": "workspace:*"
+    "openai": "6.36.0"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/runtime"
   }
 }

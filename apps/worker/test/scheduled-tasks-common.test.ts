@@ -22,7 +22,14 @@ describe("reusable session revival guard (cancelled-resurrection)", () => {
     // Keep parity with apps/api/src/domain/sessions.ts: cancelled is the SOLE
     // rejected state. If a future status is added, this test forces a conscious
     // decision rather than silently widening or narrowing the guard.
-    const all: SessionStatus[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
+    const all: SessionStatus[] = [
+      "queued",
+      "running",
+      "idle",
+      "requires_action",
+      "failed",
+      "cancelled",
+    ];
     const rejected = all.filter((status) => {
       try {
         assertReusableSessionRevivable(status);

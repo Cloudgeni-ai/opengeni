@@ -19,7 +19,13 @@
 // lease's recorded data_plane_url (null until P4 mints it).
 
 import { createHash } from "node:crypto";
-import { applyGitAuthPointerEnvironment, hasGitCredentialRepositorySelection, hasGitHubRepositorySelection, resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
+import {
+  applyGitAuthPointerEnvironment,
+  hasGitCredentialRepositorySelection,
+  hasGitHubRepositorySelection,
+  resolveStreamTokenSecret,
+  stableSandboxEnvironmentForRun,
+} from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
@@ -133,14 +139,21 @@ export async function sessionAttachEnvironment(
   // attach env keyed off the deployment default would cold-create e.g. an e2b
   // session's box with /workspace-rooted values while its turn declares
   // /home/user-rooted ones — the same guard-killed first turn all over again.
-  const settingsForSession = session.sandboxBackend !== services.settings.sandboxBackend
-    ? { ...services.settings, sandboxBackend: session.sandboxBackend }
-    : services.settings;
-  const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
+  const settingsForSession =
+    session.sandboxBackend !== services.settings.sandboxBackend
+      ? { ...services.settings, sandboxBackend: session.sandboxBackend }
+      : services.settings;
+  const environment = stableSandboxEnvironmentForRun(
+    settingsForSession,
+    workspaceEnvironment?.values ?? {},
+    { workspaceId },
+  );
   if (hasGitCredentialRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(
       environment,
-      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(services.settings) : null,
+      hasGitHubRepositorySelection(session.resources)
+        ? githubAppBotIdentity(services.settings)
+        : null,
     );
   }
   return environment;
@@ -192,7 +205,9 @@ export async function attachViewer(
   // holder and surface a 409 — the client re-reads capabilities and re-attaches.
   if (acquired.role === "fenced") {
     await release();
-    throw new HTTPException(409, { message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach` });
+    throw new HTTPException(409, {
+      message: `sandbox lease superseded (epoch ${acquired.lease.leaseEpoch}); re-read capabilities and re-attach`,
+    });
   }
 
   // SPAWNER: we won the cold->warming CAS. Establish the box in-process from the
@@ -228,7 +243,8 @@ export async function attachViewer(
       // call, the reaper) resumes THIS box by id instead of cold-creating a
       // rival. Fall back to the session envelope only when serialize is
       // unavailable. (Without this the box churned: each op spawned its own box.)
-      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
+      const resumeEnvelope =
+        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId,
         workspaceId,
@@ -258,7 +274,9 @@ export async function attachViewer(
       };
     } catch (error) {
       if (error instanceof SandboxLeaseSupersededError) {
-        throw new HTTPException(409, { message: `sandbox lease superseded (epoch ${error.leaseEpoch}); re-read capabilities and re-attach` });
+        throw new HTTPException(409, {
+          message: `sandbox lease superseded (epoch ${error.leaseEpoch}); re-read capabilities and re-attach`,
+        });
       }
       // Caught spawn failure: roll the warming row back to cold so the next
       // arrival (a turn or another viewer) re-acquires and re-spawns. Holders
@@ -272,7 +290,9 @@ export async function attachViewer(
       // to cold, so a re-attach re-acquires and re-spawns. Preserve an already-typed
       // HTTPException unchanged.
       if (error instanceof HTTPException) throw error;
-      throw new HTTPException(409, { message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})` });
+      throw new HTTPException(409, {
+        message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
+      });
     } finally {
       // Drop the in-process handle: the API resumed BY ID for the cold-spawn,
       // it does NOT own the box. The lease's refcount (this viewer holder) keeps
@@ -301,7 +321,13 @@ export async function attachViewer(
  */
 export async function heartbeatViewer(
   services: ViewerServices,
-  input: { accountId: string; workspaceId: string; sandboxGroupId: string; viewerId: string; expectedEpoch: number },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    viewerId: string;
+    expectedEpoch: number;
+  },
 ): Promise<boolean> {
   return await heartbeatLeaseHolder(services.db, {
     accountId: input.accountId,
@@ -361,7 +387,9 @@ export function viewerHeartbeatIntervalMs(settings: Settings): number {
 // (the lease showed warm while Modal showed the box gone; reads 404'd against a
 // fresh box). We therefore DO NOT call session.close()/shutdown()/delete() — the
 // reaper (provider stop at refcount 0) is the ONLY sanctioned box terminator.
-async function dropEstablishedHandle(established: EstablishedSandboxSession | undefined): Promise<void> {
+async function dropEstablishedHandle(
+  established: EstablishedSandboxSession | undefined,
+): Promise<void> {
   // Intentionally a no-op beyond dropping the reference: terminating the box here
   // is wrong (see above). The lease owns lifecycle; the reaper owns teardown.
   void established;
@@ -401,7 +429,11 @@ async function dropEstablishedHandle(established: EstablishedSandboxSession | un
 export function resolveActiveDesktopTransport(
   selfhostedActive: boolean,
   interactive: boolean,
-): { transport: "relay-frames" | "vnc-ws"; client: "frames" | "novnc"; mode: "read-only" | "interactive" } {
+): {
+  transport: "relay-frames" | "vnc-ws";
+  client: "frames" | "novnc";
+  mode: "read-only" | "interactive";
+} {
   if (selfhostedActive) {
     return { transport: "relay-frames", client: "frames", mode: "read-only" };
   }
@@ -436,12 +468,12 @@ export type MintDesktopStreamInput = {
    *  real leaf `establishSandboxSessionFromEnvelope`. Production NEVER passes
    *  this; it exists so a real-lease integration test can inject a fake provider
    *  session carrying `resolveExposedPort` without a live cloud box. */
-  establish?: (
-    envelope: Record<string, unknown> | null,
-  ) => Promise<EstablishedSandboxSession>;
+  establish?: (envelope: Record<string, unknown> | null) => Promise<EstablishedSandboxSession>;
   /** Test seam: inject a fake relay-resolving session for the selfhosted-active
    *  branch. Production NEVER passes this. */
-  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
+  resolveSelfhostedSession?: (
+    sandbox: SandboxRecord,
+  ) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
 };
 
 /**
@@ -490,9 +522,27 @@ export async function mintDesktopStream(
   if (session.activeSandboxId) {
     const active = await getSandbox(db, workspaceId, session.activeSandboxId);
     if (active?.kind === "selfhosted") {
-      const m = await tryMintActiveSelfhostedStream(services, { session, viewerId: input.viewerId, workspaceId, port: DESKTOP_STREAM_PORT, sandbox: active }, input.resolveSelfhostedSession);
+      const m = await tryMintActiveSelfhostedStream(
+        services,
+        {
+          session,
+          viewerId: input.viewerId,
+          workspaceId,
+          port: DESKTOP_STREAM_PORT,
+          sandbox: active,
+        },
+        input.resolveSelfhostedSession,
+      );
       // mintSelfhostedStream returns no resolution; the desktop cell needs it.
-      return m ? { url: m.url, token: m.token, expiresAt: m.expiresAt, resolution: defaultResolution(settings), leaseEpoch: m.leaseEpoch } : null;
+      return m
+        ? {
+            url: m.url,
+            token: m.token,
+            expiresAt: m.expiresAt,
+            resolution: defaultResolution(settings),
+            leaseEpoch: m.leaseEpoch,
+          }
+        : null;
     }
     // A Modal swap target (or unknown) falls through to the existing group-box path.
   }
@@ -533,7 +583,8 @@ export async function mintDesktopStream(
   // Resume the LIVE box by id. The lease's resume_state is authoritative (it is
   // the box the lease currently fences); fall back to the session envelope only
   // when the lease has none (a freshly-warmed lease always has it).
-  const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  const envelope =
+    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore (the lease's box is gone) this create() must carry the
@@ -670,12 +721,12 @@ export type MintTerminalStreamInput = {
   lease?: LeaseSnapshot;
   /** Test seam: override how the box is re-established by id (see
    *  MintDesktopStreamInput.establish). Production NEVER passes this. */
-  establish?: (
-    envelope: Record<string, unknown> | null,
-  ) => Promise<EstablishedSandboxSession>;
+  establish?: (envelope: Record<string, unknown> | null) => Promise<EstablishedSandboxSession>;
   /** Test seam: inject a fake relay-resolving session for the selfhosted-active
    *  branch. Production NEVER passes this. */
-  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
+  resolveSelfhostedSession?: (
+    sandbox: SandboxRecord,
+  ) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
 };
 
 /**
@@ -716,7 +767,17 @@ export async function mintTerminalStream(
   if (session.activeSandboxId) {
     const active = await getSandbox(db, workspaceId, session.activeSandboxId);
     if (active?.kind === "selfhosted") {
-      return await tryMintActiveSelfhostedStream(services, { session, viewerId: input.viewerId, workspaceId, port: TERMINAL_STREAM_PORT, sandbox: active }, input.resolveSelfhostedSession);
+      return await tryMintActiveSelfhostedStream(
+        services,
+        {
+          session,
+          viewerId: input.viewerId,
+          workspaceId,
+          port: TERMINAL_STREAM_PORT,
+          sandbox: active,
+        },
+        input.resolveSelfhostedSession,
+      );
     }
     // A Modal swap target (or unknown) falls through to the existing group-box path
     // (unchanged — Modal swap-target streaming is out of scope for this fix).
@@ -752,7 +813,8 @@ export async function mintTerminalStream(
 
   // Resume the LIVE box by id (lease.resume_state authoritative), ensure ttyd, and
   // resolve the 7681 tunnel + mint the scoped token, IN-PROCESS.
-  const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  const envelope =
+    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore this create() must carry the SAME stable run-env the turn
@@ -857,10 +919,18 @@ function controlRpc(bus: EventBus | undefined): ControlRpc {
  */
 async function tryMintActiveSelfhostedStream(
   services: ViewerServices,
-  input: { session: Session; viewerId: string; workspaceId: string; port: number; sandbox: SandboxRecord },
+  input: {
+    session: Session;
+    viewerId: string;
+    workspaceId: string;
+    port: number;
+    sandbox: SandboxRecord;
+  },
   // optional test seam (mirrors the existing `establish?` seam pattern): inject a
   // fake relay-resolving session; production NEVER passes it.
-  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>,
+  resolveSelfhostedSession?: (
+    sandbox: SandboxRecord,
+  ) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>,
 ): Promise<TerminalStreamMint | null> {
   const { settings, bus } = services;
   const { session, workspaceId, port, sandbox } = input;

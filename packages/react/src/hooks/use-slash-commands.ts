@@ -298,7 +298,9 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
         case "ArrowDown": {
           event.preventDefault();
           navigatedRef.current = true;
-          setHighlight((current) => (items.length === 0 ? 0 : (Math.min(current, items.length - 1) + 1) % items.length));
+          setHighlight((current) =>
+            items.length === 0 ? 0 : (Math.min(current, items.length - 1) + 1) % items.length,
+          );
           return true;
         }
         case "ArrowUp": {

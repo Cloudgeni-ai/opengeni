@@ -64,7 +64,9 @@ describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
       expect(has0018).toBe(true);
 
       await sql`SELECT pg_advisory_lock(727458)`;
-      await sql.unsafe(`CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`);
+      await sql.unsafe(
+        `CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`,
+      );
       for (const file of pre0018) {
         await applyFile(sql, file);
         await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
@@ -96,7 +98,14 @@ describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
       await sql`SELECT pg_advisory_unlock(727458)`;
 
       // --- Columns exist with the right nullability/default.
-      const cols = await sql<{ table_name: string; column_name: string; is_nullable: string; column_default: string | null }[]>`
+      const cols = await sql<
+        {
+          table_name: string;
+          column_name: string;
+          is_nullable: string;
+          column_default: string | null;
+        }[]
+      >`
         SELECT table_name, column_name, is_nullable, column_default
         FROM information_schema.columns
         WHERE (table_name = 'sessions' AND column_name IN ('sandbox_os', 'sandbox_group_id'))
@@ -118,8 +127,10 @@ describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
       expect(turnOs!.is_nullable).toBe("YES"); // nullable override
 
       // --- Backfill correctness: the legacy row got linux + group == id.
-      const legacyRow = (await sql<{ sandbox_os: string; sandbox_group_id: string; id: string }[]>`
-        SELECT "sandbox_os", "sandbox_group_id", "id" FROM "sessions" WHERE "id" = ${legacySessionId}`)[0]!;
+      const legacyRow = (
+        await sql<{ sandbox_os: string; sandbox_group_id: string; id: string }[]>`
+        SELECT "sandbox_os", "sandbox_group_id", "id" FROM "sessions" WHERE "id" = ${legacySessionId}`
+      )[0]!;
       expect(legacyRow.sandbox_os).toBe("linux");
       expect(legacyRow.sandbox_group_id).toBe(legacySessionId);
       expect(legacyRow.sandbox_group_id).toBe(legacyRow.id);
@@ -129,7 +140,10 @@ describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
         SELECT conname FROM pg_constraint
         WHERE conname IN ('sessions_sandbox_os_check', 'session_turns_sandbox_os_check')
         ORDER BY conname`;
-      expect(checks.map((c) => c.conname)).toEqual(["session_turns_sandbox_os_check", "sessions_sandbox_os_check"]);
+      expect(checks.map((c) => c.conname)).toEqual([
+        "session_turns_sandbox_os_check",
+        "sessions_sandbox_os_check",
+      ]);
 
       let rejected = false;
       try {
@@ -158,8 +172,10 @@ describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {
       // chain (it sees 0018 already applied and skips; re-running any IF NOT
       // EXISTS DDL is a no-op). Must not throw and must not corrupt the backfill.
       await migrate(DB_URL);
-      const legacyAfter = (await sql<{ sandbox_os: string; sandbox_group_id: string }[]>`
-        SELECT "sandbox_os", "sandbox_group_id" FROM "sessions" WHERE "id" = ${legacySessionId}`)[0]!;
+      const legacyAfter = (
+        await sql<{ sandbox_os: string; sandbox_group_id: string }[]>`
+        SELECT "sandbox_os", "sandbox_group_id" FROM "sessions" WHERE "id" = ${legacySessionId}`
+      )[0]!;
       expect(legacyAfter.sandbox_os).toBe("linux");
       expect(legacyAfter.sandbox_group_id).toBe(legacySessionId);
     } finally {

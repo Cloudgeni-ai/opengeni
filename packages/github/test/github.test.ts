@@ -56,15 +56,19 @@ describe("GitHub app manifest helpers", () => {
   });
 
   test("builds GitHub OAuth authorization URLs for installation binding", () => {
-    const url = new URL(githubOAuthAuthorizeUrl({
-      clientId: "client-id",
-      state: "signed-state",
-      redirectUri: "https://staging.app.opengeni.ai/v1/github/oauth/callback",
-    }));
+    const url = new URL(
+      githubOAuthAuthorizeUrl({
+        clientId: "client-id",
+        state: "signed-state",
+        redirectUri: "https://staging.app.opengeni.ai/v1/github/oauth/callback",
+      }),
+    );
     expect(url.origin + url.pathname).toBe("https://github.com/login/oauth/authorize");
     expect(url.searchParams.get("client_id")).toBe("client-id");
     expect(url.searchParams.get("state")).toBe("signed-state");
-    expect(url.searchParams.get("redirect_uri")).toBe("https://staging.app.opengeni.ai/v1/github/oauth/callback");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "https://staging.app.opengeni.ai/v1/github/oauth/callback",
+    );
   });
 
   test("derives GitHub App bot identity for git commits", () => {

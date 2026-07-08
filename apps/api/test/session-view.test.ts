@@ -13,7 +13,11 @@ import {
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";
 const SESSION = "00000000-0000-4000-8000-000000000002";
 
-function makeEvent(sequence: number, type: SessionEventType["type"], payload: unknown): SessionEventType {
+function makeEvent(
+  sequence: number,
+  type: SessionEventType["type"],
+  payload: unknown,
+): SessionEventType {
   return {
     id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE,
@@ -147,12 +151,17 @@ describe("capEventPage", () => {
     // 100 fat events. Even after per-event trim (~2k chars each) the page is
     // ~200k chars / ~50k tokens, well over the 10k-token budget -> head/tail.
     const events = Array.from({ length: 100 }, (_, i) =>
-      makeEvent(1_000 + i, "agent.toolCall.output", { id: `call_${i}`, output: "Z".repeat(40_000) }),
+      makeEvent(1_000 + i, "agent.toolCall.output", {
+        id: `call_${i}`,
+        output: "Z".repeat(40_000),
+      }),
     );
     const result = capEventPage(events);
     expect(result.truncated).toBe(true);
     // head (8) + 1 marker + tail (8)
-    expect(result.events).toHaveLength(DEFAULT_EVENT_CAP.headEvents + 1 + DEFAULT_EVENT_CAP.tailEvents);
+    expect(result.events).toHaveLength(
+      DEFAULT_EVENT_CAP.headEvents + 1 + DEFAULT_EVENT_CAP.tailEvents,
+    );
 
     const marker = result.events[DEFAULT_EVENT_CAP.headEvents]!;
     expect((marker.payload as { _truncated?: boolean })._truncated).toBe(true);
@@ -209,7 +218,8 @@ describe("capEventPage", () => {
     );
     const result = capEventPage(events);
     const marker = result.events[DEFAULT_EVENT_CAP.headEvents]!;
-    const range = (marker.payload as { omittedSequenceRange: [number, number] }).omittedSequenceRange;
+    const range = (marker.payload as { omittedSequenceRange: [number, number] })
+      .omittedSequenceRange;
     // first dropped is head index (8) -> sequence 4008; last dropped is
     // length-tail-1 = 50-8-1 = 41 -> sequence 4041.
     expect(range[0]).toBe(4_008);
@@ -250,7 +260,10 @@ describe("capSessionDetail", () => {
   });
 
   test("clamps an over-long initial message", () => {
-    const session = { metadata: {}, initialMessage: "I".repeat(DEFAULT_SESSION_DETAIL_CHARS + 5_000) };
+    const session = {
+      metadata: {},
+      initialMessage: "I".repeat(DEFAULT_SESSION_DETAIL_CHARS + 5_000),
+    };
     const capped = capSessionDetail(session);
     expect((capped.initialMessage as string).length).toBeLessThan(session.initialMessage.length);
     expect(capped.initialMessage).toContain("chars truncated");

@@ -3,7 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { createApiSandboxClient, makeResumeBoxById, type ApiSandboxSession } from "../src/sandbox/access";
+import {
+  createApiSandboxClient,
+  makeResumeBoxById,
+  type ApiSandboxSession,
+} from "../src/sandbox/access";
 
 // P0.4 LIVE API-DIRECT RESUME SMOKE (NEEDS-CREDS(Modal)).
 //
@@ -96,7 +100,9 @@ async function terminate(session: ApiSandboxSession | null | undefined): Promise
     }
   } catch (error) {
     // Surface but never throw out of teardown.
-    console.error(`[smoke teardown] terminate failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `[smoke teardown] terminate failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 

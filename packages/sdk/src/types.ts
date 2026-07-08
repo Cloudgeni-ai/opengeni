@@ -603,7 +603,13 @@ export type SandboxCommandOutputDeltaPayload = {
 };
 export type FsChangeKind = "created" | "modified" | "deleted" | "renamed";
 export type FsChangedPayload = {
-  changes: { path: string; kind: FsChangeKind; isDir: boolean; sizeBytes: number | null; oldPath?: string | undefined }[];
+  changes: {
+    path: string;
+    kind: FsChangeKind;
+    isDir: boolean;
+    sizeBytes: number | null;
+    oldPath?: string | undefined;
+  }[];
   source: "write" | "watch" | "agent";
   revision: number;
   leaseEpoch: number;
@@ -618,9 +624,24 @@ export type GitChangedPayload = {
   revision: number;
   leaseEpoch: number;
 };
-export type TerminalPtyStartedPayload = { ptyId: string; cols: number; rows: number; shell: string; cwd: string };
-export type TerminalPtyOutputDeltaPayload = { ptyId: string; stream: "stdout" | "stderr"; chunk: string; seq: number };
-export type TerminalPtyExitedPayload = { ptyId: string; exitCode: number | null; reason: "exit" | "killed" | "owner_gone" | "timeout" };
+export type TerminalPtyStartedPayload = {
+  ptyId: string;
+  cols: number;
+  rows: number;
+  shell: string;
+  cwd: string;
+};
+export type TerminalPtyOutputDeltaPayload = {
+  ptyId: string;
+  stream: "stdout" | "stderr";
+  chunk: string;
+  seq: number;
+};
+export type TerminalPtyExitedPayload = {
+  ptyId: string;
+  exitCode: number | null;
+  reason: "exit" | "killed" | "owner_gone" | "timeout";
+};
 
 // A2 FileSystem request/response.
 export type FsNodeType = "file" | "dir" | "symlink" | "other";
@@ -635,31 +656,115 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
-export type FsListRequest = { path?: string; depth?: number; maxEntries?: number; includeHidden?: boolean };
+export type FsListRequest = {
+  path?: string;
+  depth?: number;
+  maxEntries?: number;
+  includeHidden?: boolean;
+};
 export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
 export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
-export type FsReadResponse = { path: string; encoding: FsEncoding; content: string; sizeBytes: number; truncated: boolean; isBinary: boolean; revision: number };
-export type FsWriteRequest = { path: string; encoding?: FsEncoding; content: string; overwrite?: boolean; createParents?: boolean };
+export type FsReadResponse = {
+  path: string;
+  encoding: FsEncoding;
+  content: string;
+  sizeBytes: number;
+  truncated: boolean;
+  isBinary: boolean;
+  revision: number;
+};
+export type FsWriteRequest = {
+  path: string;
+  encoding?: FsEncoding;
+  content: string;
+  overwrite?: boolean;
+  createParents?: boolean;
+};
 export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
-export type FsMoveRequest = { path: string; newPath: string; overwrite?: boolean; createParents?: boolean };
+export type FsMoveRequest = {
+  path: string;
+  newPath: string;
+  overwrite?: boolean;
+  createParents?: boolean;
+};
 export type FsMoveResponse = { path: string; newPath: string; revision: number };
 export type FsMkdirRequest = { path: string; recursive?: boolean };
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
-export type GitFileStatusCode = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "ignored" | "conflicted" | "typechange";
-export type GitFileStatus = { path: string; oldPath: string | null; index: GitFileStatusCode | null; worktree: GitFileStatusCode | null; isConflicted: boolean };
+export type GitFileStatusCode =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "untracked"
+  | "ignored"
+  | "conflicted"
+  | "typechange";
+export type GitFileStatus = {
+  path: string;
+  oldPath: string | null;
+  index: GitFileStatusCode | null;
+  worktree: GitFileStatusCode | null;
+  isConflicted: boolean;
+};
 export type GitStatusRequest = { path?: string };
-export type GitStatusResponse = { isRepo: boolean; head: string | null; detached: boolean; upstream: string | null; ahead: number; behind: number; files: GitFileStatus[]; revision: number };
+export type GitStatusResponse = {
+  isRepo: boolean;
+  head: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitFileStatus[];
+  revision: number;
+};
 export type GitDiffLineType = "context" | "add" | "del" | "meta";
-export type GitDiffLine = { type: GitDiffLineType; oldNo: number | null; newNo: number | null; text: string };
-export type GitDiffHunk = { oldStart: number; oldLines: number; newStart: number; newLines: number; header: string; lines: GitDiffLine[] };
-export type GitFileDiff = { path: string; oldPath: string | null; status: GitFileStatusCode; isBinary: boolean; isImage: boolean; additions: number; deletions: number; hunks: GitDiffHunk[]; truncated: boolean };
-export type GitDiffRequest = { path?: string; staged?: boolean; fromRef?: string; toRef?: string; pathspec?: string[]; contextLines?: number; maxBytesPerFile?: number };
+export type GitDiffLine = {
+  type: GitDiffLineType;
+  oldNo: number | null;
+  newNo: number | null;
+  text: string;
+};
+export type GitDiffHunk = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  header: string;
+  lines: GitDiffLine[];
+};
+export type GitFileDiff = {
+  path: string;
+  oldPath: string | null;
+  status: GitFileStatusCode;
+  isBinary: boolean;
+  isImage: boolean;
+  additions: number;
+  deletions: number;
+  hunks: GitDiffHunk[];
+  truncated: boolean;
+};
+export type GitDiffRequest = {
+  path?: string;
+  staged?: boolean;
+  fromRef?: string;
+  toRef?: string;
+  pathspec?: string[];
+  contextLines?: number;
+  maxBytesPerFile?: number;
+};
 export type GitDiffResponse = { files: GitFileDiff[]; revision: number };
-export type GitLogRequest = { path?: string; ref?: string; maxCount?: number; skip?: number; pathspec?: string[] };
+export type GitLogRequest = {
+  path?: string;
+  ref?: string;
+  maxCount?: number;
+  skip?: number;
+  pathspec?: string[];
+};
 export type GitCommit = {
   sha: string;
   shortSha: string;
@@ -671,8 +776,19 @@ export type GitCommit = {
   refs: string[];
 };
 export type GitLogResponse = { commits: GitCommit[]; hasMore: boolean };
-export type GitShowRequest = { path?: string; ref: string; filePath?: string; encoding?: FsEncoding; maxBytesPerFile?: number };
-export type GitShowResponse = { commit: GitCommit | null; files: GitFileDiff[]; blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null; revision: number };
+export type GitShowRequest = {
+  path?: string;
+  ref: string;
+  filePath?: string;
+  encoding?: FsEncoding;
+  maxBytesPerFile?: number;
+};
+export type GitShowResponse = {
+  commit: GitCommit | null;
+  files: GitFileDiff[];
+  blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null;
+  revision: number;
+};
 
 // Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
 // + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
@@ -762,8 +878,19 @@ export type GetWorkspaceCaptureFileResponse = {
 };
 
 // A2 Terminal exec + PTY.
-export type TerminalExecRequest = { command: string; cwd?: string; timeoutMs?: number; emitStream?: boolean };
-export type TerminalExecResponse = { stdout: string; stderr: string; exitCode: number | null; running: boolean; wallTimeSeconds: number };
+export type TerminalExecRequest = {
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+  emitStream?: boolean;
+};
+export type TerminalExecResponse = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  running: boolean;
+  wallTimeSeconds: number;
+};
 export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
 export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
 export type PtyWriteRequest = { ptyId: string; data: string };
@@ -989,8 +1116,18 @@ export type CodexUsagePayload = {
   fetchedAt: string;
   /** Present only on an auth/refresh failure path. */
   reason?: "needs_relogin";
-  additionalLimits?: Array<{ limitName: string; meteredFeature: string; fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null }>;
-  credits?: { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string };
+  additionalLimits?: Array<{
+    limitName: string;
+    meteredFeature: string;
+    fiveHour: CodexUsageWindow | null;
+    weekly: CodexUsageWindow | null;
+  }>;
+  credits?: {
+    hasCredits: boolean;
+    unlimited: boolean;
+    overageLimitReached: boolean;
+    balance: string;
+  };
 };
 
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
@@ -1055,7 +1192,10 @@ export type CodexConnectPoll =
   | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
-export type CodexUsage = { status: "ok" | "limit_reached" | "error" | "no-data"; usage: CodexUsagePayload | null };
+export type CodexUsage = {
+  status: "ok" | "limit_reached" | "error" | "no-data";
+  usage: CodexUsagePayload | null;
+};
 
 /** Batched live-refresh response, keyed by credential id; each entry independently statused. */
 export type CodexUsageMap = Record<string, CodexUsage>;
@@ -1432,7 +1572,15 @@ export type UploadFileInput = {
 // --- Documents -------------------------------------------------------------------
 
 export type DocumentStatus = "queued" | "indexing" | "ready" | "failed";
-export type KnowledgeSourceKind = "manual_upload" | "meeting_transcript" | "repository" | "email" | "chat" | "document" | "web" | "other";
+export type KnowledgeSourceKind =
+  | "manual_upload"
+  | "meeting_transcript"
+  | "repository"
+  | "email"
+  | "chat"
+  | "document"
+  | "web"
+  | "other";
 export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
 export type DocumentBase = {
@@ -1524,8 +1672,19 @@ export type DocumentSearchResponse = {
   results: DocumentSearchResult[];
 };
 
-export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected" | "active" | "superseded" | "archived";
-export type KnowledgeMemoryKind = "semantic" | "episodic" | "procedural" | "decision" | "preference";
+export type KnowledgeMemoryStatus =
+  | "proposed"
+  | "approved"
+  | "rejected"
+  | "active"
+  | "superseded"
+  | "archived";
+export type KnowledgeMemoryKind =
+  | "semantic"
+  | "episodic"
+  | "procedural"
+  | "decision"
+  | "preference";
 
 export type KnowledgeSourceRef = {
   kind: "document_chunk" | "document" | "session_event" | "memory" | "external";
@@ -1693,43 +1852,53 @@ export type RegisterCapabilityPackRequest = {
   category: string;
   version: string;
   sandboxImage?: string | undefined;
-  skills?: {
-    name: string;
-    description?: string | undefined;
-    files: CapabilityPackSkillFile[];
-  }[] | undefined;
+  skills?:
+    | {
+        name: string;
+        description?: string | undefined;
+        files: CapabilityPackSkillFile[];
+      }[]
+    | undefined;
   tools?: ToolRef[] | undefined;
-  connectors?: {
-    id: string;
-    name: string;
-    category: string;
-    authModel: CapabilityPackConnectorAuthModel;
-    providers?: string[] | undefined;
-    scopes?: string[] | undefined;
-    required?: boolean | undefined;
-    metadata?: Record<string, unknown> | undefined;
-  }[] | undefined;
-  knowledge?: {
-    type: "document_base";
-    id: string;
-    name: string;
-    description?: string | null | undefined;
-    required?: boolean | undefined;
-  }[] | undefined;
-  scheduledTaskTemplates?: {
-    id: string;
-    name: string;
-    description: string;
-    defaultSchedule: ScheduledTaskScheduleSpec;
-    defaultRunMode?: ScheduledTaskRunMode | undefined;
-    defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
-    prompt?: string | undefined;
-  }[] | undefined;
-  environment?: {
-    description: string;
-    requiredVariables?: string[] | undefined;
-    required?: boolean | undefined;
-  } | undefined;
+  connectors?:
+    | {
+        id: string;
+        name: string;
+        category: string;
+        authModel: CapabilityPackConnectorAuthModel;
+        providers?: string[] | undefined;
+        scopes?: string[] | undefined;
+        required?: boolean | undefined;
+        metadata?: Record<string, unknown> | undefined;
+      }[]
+    | undefined;
+  knowledge?:
+    | {
+        type: "document_base";
+        id: string;
+        name: string;
+        description?: string | null | undefined;
+        required?: boolean | undefined;
+      }[]
+    | undefined;
+  scheduledTaskTemplates?:
+    | {
+        id: string;
+        name: string;
+        description: string;
+        defaultSchedule: ScheduledTaskScheduleSpec;
+        defaultRunMode?: ScheduledTaskRunMode | undefined;
+        defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+        prompt?: string | undefined;
+      }[]
+    | undefined;
+  environment?:
+    | {
+        description: string;
+        requiredVariables?: string[] | undefined;
+        required?: boolean | undefined;
+      }
+    | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
 
@@ -1773,7 +1942,12 @@ export type GetPackResponse = {
 
 export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
-export type CapabilitySource = "built_in" | "configured" | "public_registry" | "registry" | "manual";
+export type CapabilitySource =
+  | "built_in"
+  | "configured"
+  | "public_registry"
+  | "registry"
+  | "manual";
 
 export type CapabilityInstallationStatus = "active" | "disabled";
 

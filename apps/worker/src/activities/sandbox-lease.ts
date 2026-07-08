@@ -165,7 +165,8 @@ export function createSandboxLeaseActivities(
   options: SandboxLeaseActivityOptions = {},
 ) {
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
-  const sweepModalOrphans: SweepModalOrphansFn = options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const sweepModalOrphans: SweepModalOrphansFn =
+    options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
    * Gated by the caller (the Schedule is only registered when
@@ -175,7 +176,14 @@ export function createSandboxLeaseActivities(
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
     const { db, settings, observability } = await services();
     if (!settings.sandboxOwnershipEnabled) {
-      return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0, modalOrphansTerminated: 0 };
+      return {
+        examined: 0,
+        terminated: 0,
+        skipped: 0,
+        metered: 0,
+        forceDrained: 0,
+        modalOrphansTerminated: 0,
+      };
     }
     await refreshQueueLeaseAndCreditGauges(db, observability);
 
@@ -189,7 +197,12 @@ export function createSandboxLeaseActivities(
     // workspace at 0 balance / over its warm cap force-drains its VIEWER-ONLY
     // boxes (guarded turn_holders=0 — a paying turn is NEVER killed). The newly
     // draining rows are caught by the same sweep's terminate below.
-    const forceDrained = await forceDrainOverLimitWorkspaces(db, settings, metered.workspaceIds, observability);
+    const forceDrained = await forceDrainOverLimitWorkspaces(
+      db,
+      settings,
+      metered.workspaceIds,
+      observability,
+    );
 
     // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
     const drainable: ReapDrainable[] = await reapStaleLeaseHoldersGlobal(db, {
@@ -216,7 +229,13 @@ export function createSandboxLeaseActivities(
     // next sweep retries it; the provider idle-timeout is the backstop).
     for (const row of drainable) {
       try {
-        const drainedCold = await terminateDrainableBox(db, settings, row, observability, terminateBox);
+        const drainedCold = await terminateDrainableBox(
+          db,
+          settings,
+          row,
+          observability,
+          terminateBox,
+        );
         if (drainedCold) {
           terminated += 1;
         } else {
@@ -244,7 +263,12 @@ export function createSandboxLeaseActivities(
 
     await refreshQueueLeaseAndCreditGauges(db, observability);
 
-    if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0 || modalOrphansTerminated > 0) {
+    if (
+      drainable.length > 0 ||
+      metered.accrued > 0 ||
+      forceDrained > 0 ||
+      modalOrphansTerminated > 0
+    ) {
       observability.info("sandbox reaper swept", {
         drainable: drainable.length,
         terminated,
@@ -255,7 +279,14 @@ export function createSandboxLeaseActivities(
       });
     }
 
-    return { examined: drainable.length, terminated, skipped, metered: metered.accrued, forceDrained, modalOrphansTerminated };
+    return {
+      examined: drainable.length,
+      terminated,
+      skipped,
+      metered: metered.accrued,
+      forceDrained,
+      modalOrphansTerminated,
+    };
   }
 
   return { reapSandboxLeases };
@@ -352,7 +383,8 @@ async function forceDrainOverLimitWorkspaces(
   workspaceIds: Set<string>,
   observability: ActivityServices["observability"],
 ): Promise<number> {
-  const enforceBalance = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const enforceBalance =
+    settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
   // Nothing to enforce → skip the whole pass (no lock churn).
   if (!enforceBalance && cap <= 0) {
@@ -362,7 +394,9 @@ async function forceDrainOverLimitWorkspaces(
   for (const workspaceId of workspaceIds) {
     try {
       const { accountId } = await rlsContextForWorkspace(db, workspaceId);
-      const balance = enforceBalance ? await getBillingBalance(db, accountId) : { balanceMicros: 1 } as { balanceMicros: number };
+      const balance = enforceBalance
+        ? await getBillingBalance(db, accountId)
+        : ({ balanceMicros: 1 } as { balanceMicros: number });
       const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
         workspaceId,
         balanceMicros: balance.balanceMicros,
@@ -463,9 +497,9 @@ async function terminateDrainableBox(
     return false;
   }
   if (
-    lease.liveness !== "draining"
-    || lease.refcount !== 0
-    || lease.leaseEpoch !== row.leaseEpoch
+    lease.liveness !== "draining" ||
+    lease.refcount !== 0 ||
+    lease.leaseEpoch !== row.leaseEpoch
   ) {
     // Re-armed (warm again) / a newer epoch / already drained by a concurrent
     // sweep. Skip — provider stop() must fire ONLY past the drain grace at
@@ -528,10 +562,13 @@ async function terminateDrainableBox(
         payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
       });
     } catch (eventError) {
-      observability.warn("sandbox reaper: box-terminated event write failed (drain outcome unaffected)", {
-        sandboxGroupId: row.sandboxGroupId,
-        error: eventError instanceof Error ? eventError.message : String(eventError),
-      });
+      observability.warn(
+        "sandbox reaper: box-terminated event write failed (drain outcome unaffected)",
+        {
+          sandboxGroupId: row.sandboxGroupId,
+          error: eventError instanceof Error ? eventError.message : String(eventError),
+        },
+      );
     }
   }
   return wentCold;
@@ -594,11 +631,18 @@ export async function terminateProviderBox(
   // persistence — nothing to snapshot), no delete/kill. The session simply detaches;
   // the machine stays up under the agent's own process lifetime (§23.0). Checked on
   // BOTH the lease backend and the resume envelope's backend so neither path leaks.
-  if (backend === "selfhosted" || lease.backend === "selfhosted" || lease.resumeBackendId === "selfhosted") {
-    observability.info("sandbox reaper: selfhosted lease drained to cold (NEVER provider-stopped — it is the user's machine)", {
-      sandboxGroupId: lease.sandboxGroupId,
-      backend,
-    });
+  if (
+    backend === "selfhosted" ||
+    lease.backend === "selfhosted" ||
+    lease.resumeBackendId === "selfhosted"
+  ) {
+    observability.info(
+      "sandbox reaper: selfhosted lease drained to cold (NEVER provider-stopped — it is the user's machine)",
+      {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      },
+    );
     return true;
   }
 
@@ -609,11 +653,14 @@ export async function terminateProviderBox(
   if (backend === "modal" && !lease.resumeState && lease.instanceId) {
     const { wrote } = await persistArchive(null);
     if (!wrote) {
-      observability.info("sandbox reaper: Modal lease re-armed before direct terminate — leaving sandbox RUNNING", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-        instanceId: lease.instanceId,
-      });
+      observability.info(
+        "sandbox reaper: Modal lease re-armed before direct terminate — leaving sandbox RUNNING",
+        {
+          sandboxGroupId: lease.sandboxGroupId,
+          backend,
+          instanceId: lease.instanceId,
+        },
+      );
       return false;
     }
     try {
@@ -666,7 +713,10 @@ export async function terminateProviderBox(
     // legacy flat envelope — providerState at the top — resumable too.)
     const envelopeSessionState =
       (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
-    const resumedState = await deserializeSandboxSessionStateEnvelope(client as never, envelopeSessionState);
+    const resumedState = await deserializeSandboxSessionStateEnvelope(
+      client as never,
+      envelopeSessionState,
+    );
     if (resumedState === undefined) {
       return true;
     }
@@ -674,10 +724,13 @@ export async function terminateProviderBox(
     sessionState = resumedState;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info("sandbox reaper: drainable box already gone (NotFound on resume) — proceeding to cold", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-      });
+      observability.info(
+        "sandbox reaper: drainable box already gone (NotFound on resume) — proceeding to cold",
+        {
+          sandboxGroupId: lease.sandboxGroupId,
+          backend,
+        },
+      );
       return true;
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
@@ -694,17 +747,23 @@ export async function terminateProviderBox(
     archiveBytes = session?.persistWorkspace ? await session.persistWorkspace() : undefined;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info("sandbox reaper: box gone during persist (NotFound) — nothing to snapshot, proceeding to cold", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-      });
+      observability.info(
+        "sandbox reaper: box gone during persist (NotFound) — nothing to snapshot, proceeding to cold",
+        {
+          sandboxGroupId: lease.sandboxGroupId,
+          backend,
+        },
+      );
       return true;
     }
-    observability.warn("sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)", {
-      sandboxGroupId: lease.sandboxGroupId,
-      backend,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    observability.warn(
+      "sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)",
+      {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
     // NEVER terminate a box whose snapshot we could not capture.
     throw error;
   }
@@ -725,10 +784,13 @@ export async function terminateProviderBox(
     const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
     const { wrote, priorArchive, priorArchivePrev } = await persistArchive(archiveBase64);
     if (!wrote) {
-      observability.info("sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-      });
+      observability.info(
+        "sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)",
+        {
+          sandboxGroupId: lease.sandboxGroupId,
+          backend,
+        },
+      );
       return false;
     }
     // Keep-latest-per-lease GC: best-effort delete the prior snapshot image now,
@@ -755,10 +817,13 @@ export async function terminateProviderBox(
     // snapshot window, wrote:false → leave the box RUNNING (abort terminate).
     const { wrote } = await persistArchive(null);
     if (!wrote) {
-      observability.info("sandbox reaper: lease re-armed during snapshot window (no-archive path) — leaving box RUNNING (no terminate)", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-      });
+      observability.info(
+        "sandbox reaper: lease re-armed during snapshot window (no-archive path) — leaving box RUNNING (no terminate)",
+        {
+          sandboxGroupId: lease.sandboxGroupId,
+          backend,
+        },
+      );
       return false;
     }
   }

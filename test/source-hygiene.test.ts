@@ -19,7 +19,10 @@ describe("source hygiene", () => {
       maxBuffer: 64 * 1024 * 1024,
     });
     expect(list.status).toBe(0);
-    const files = list.stdout.toString("utf8").split("\u0000").filter((file) => file.length > 0);
+    const files = list.stdout
+      .toString("utf8")
+      .split("\u0000")
+      .filter((file) => file.length > 0);
     expect(files.length).toBeGreaterThan(100);
 
     const binaryFiles = files.filter((file) => readFileSync(join(repoRoot, file)).includes(0));

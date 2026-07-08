@@ -34,7 +34,8 @@ function importSpecifiersOf(source: string): string[] {
   // `import ... from "x"` / `export ... from "x"` / `import "x"` — string-literal
   // module specifiers (covers static import + re-export; the leaf has no dynamic
   // import()).
-  const re = /(?:import|export)\b[^;]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']/g;
+  const re =
+    /(?:import|export)\b[^;]*?from\s*["']([^"']+)["']|(?:^|\n)\s*import\s*["']([^"']+)["']/g;
   let match: RegExpExecArray | null;
   while ((match = re.exec(source)) !== null) {
     specifiers.push((match[1] ?? match[2])!);
@@ -150,7 +151,9 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
     ] as const) {
       expect(typeof (leaf as Record<string, unknown>)[name]).toBe("function");
       // `export * from "./sandbox"` keeps the barrel surface identical.
-      expect((barrel as Record<string, unknown>)[name]).toBe((leaf as Record<string, unknown>)[name]);
+      expect((barrel as Record<string, unknown>)[name]).toBe(
+        (leaf as Record<string, unknown>)[name],
+      );
     }
   });
 
@@ -164,7 +167,11 @@ describe("@opengeni/runtime/sandbox — agent-loop-free leaf (P0.2 guard)", () =
       _sandbox: {
         currentAgentKey: "root",
         sessionsByAgent: {
-          root: { backendId: "modal", currentAgentKey: "root", sessionState: { providerState: { id: "sb-1" } } },
+          root: {
+            backendId: "modal",
+            currentAgentKey: "root",
+            sessionState: { providerState: { id: "sb-1" } },
+          },
         },
       },
     });

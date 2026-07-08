@@ -19,7 +19,11 @@ registerDom();
 
 let timelineSequence = 0;
 
-function timelineEvent(type: string, payload: unknown, turnId: string | null = "turn-1"): SessionEvent {
+function timelineEvent(
+  type: string,
+  payload: unknown,
+  turnId: string | null = "turn-1",
+): SessionEvent {
   timelineSequence += 1;
   return {
     id: `timeline-evt-${timelineSequence}`,
@@ -37,7 +41,12 @@ function resetTimelineEvents(): void {
   timelineSequence = 0;
 }
 
-function timelineEventAt(type: string, payload: unknown, occurredAt: string, turnId: string | null = "turn-1"): SessionEvent {
+function timelineEventAt(
+  type: string,
+  payload: unknown,
+  occurredAt: string,
+  turnId: string | null = "turn-1",
+): SessionEvent {
   timelineSequence += 1;
   return {
     id: `timeline-evt-${timelineSequence}`,
@@ -52,7 +61,9 @@ function timelineEventAt(type: string, payload: unknown, occurredAt: string, tur
 }
 
 function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll("button")).filter((button) => /\d+ steps?/.test(button.textContent ?? ""));
+  return Array.from(container.querySelectorAll("button")).filter((button) =>
+    /\d+ steps?/.test(button.textContent ?? ""),
+  );
 }
 
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
@@ -80,10 +91,20 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Run the checks" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "bun test" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "first pass failed" }),
-      timelineEvent("agent.message.completed", { text: "Narration: one fixture needs a quick patch." }),
-      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "bun test --watch=false" } }),
+      timelineEvent("agent.message.completed", {
+        text: "Narration: one fixture needs a quick patch.",
+      }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "bun test --watch=false" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "Final answer: checks are green." }),
       timelineEvent("turn.completed", {}),
@@ -114,7 +135,11 @@ describe("MessageTimeline — settled turn folding", () => {
     const events = [
       timelineEvent("user.message", { text: "Run the checks" }),
       timelineEvent("agent.reasoning.delta", { text: "Checking the suite." }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "bun test" },
+      }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
@@ -129,7 +154,11 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const pendingEvents = [
       timelineEvent("user.message", { text: "Follow up after this turn" }, null),
-      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" }, "turn-b"),
+      timelineEvent(
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" },
+        "turn-b",
+      ),
     ];
     const pending = await renderComponent(<MessageTimeline events={pendingEvents} />);
     await flush();
@@ -141,7 +170,11 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const anchoredEvents = [
       timelineEvent("user.message", { text: "Follow up after this turn" }, null),
-      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" }, "turn-b"),
+      timelineEvent(
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" },
+        "turn-b",
+      ),
       timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }, "turn-b"),
     ];
     const anchored = await renderComponent(<MessageTimeline events={anchoredEvents} />);
@@ -156,10 +189,27 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const start = Date.UTC(2024, 5, 10, 12, 0, 0);
     const events = [
-      timelineEventAt("user.message", { text: "Run the checks" }, new Date(start).toISOString(), null),
-      timelineEventAt("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, new Date(start + 1000).toISOString()),
-      timelineEventAt("agent.toolCall.output", { id: "call-1", output: "ok" }, new Date(start + 2000).toISOString()),
-      timelineEventAt("agent.message.completed", { text: "Done." }, new Date(start + 290000).toISOString()),
+      timelineEventAt(
+        "user.message",
+        { text: "Run the checks" },
+        new Date(start).toISOString(),
+        null,
+      ),
+      timelineEventAt(
+        "agent.toolCall.created",
+        { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } },
+        new Date(start + 1000).toISOString(),
+      ),
+      timelineEventAt(
+        "agent.toolCall.output",
+        { id: "call-1", output: "ok" },
+        new Date(start + 2000).toISOString(),
+      ),
+      timelineEventAt(
+        "agent.message.completed",
+        { text: "Done." },
+        new Date(start + 290000).toISOString(),
+      ),
       timelineEventAt("turn.completed", {}, new Date(start + 301000).toISOString()),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
@@ -174,9 +224,22 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const start = Date.UTC(2024, 5, 10, 12, 0, 0);
     const events = [
-      timelineEventAt("user.message", { text: "Run the checks" }, new Date(start).toISOString(), null),
-      timelineEventAt("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, new Date(start + 100).toISOString()),
-      timelineEventAt("agent.toolCall.output", { id: "call-1", output: "ok" }, new Date(start + 200).toISOString()),
+      timelineEventAt(
+        "user.message",
+        { text: "Run the checks" },
+        new Date(start).toISOString(),
+        null,
+      ),
+      timelineEventAt(
+        "agent.toolCall.created",
+        { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } },
+        new Date(start + 100).toISOString(),
+      ),
+      timelineEventAt(
+        "agent.toolCall.output",
+        { id: "call-1", output: "ok" },
+        new Date(start + 200).toISOString(),
+      ),
       timelineEventAt("turn.completed", {}, new Date(start + 999).toISOString()),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
@@ -191,7 +254,11 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Deploy preview" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "helm upgrade preview ./chart" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "helm upgrade preview ./chart" },
+      }),
       timelineEvent("turn.failed", { error: "provider down" }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
@@ -208,11 +275,19 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Do a long job" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
       timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
-      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
@@ -235,7 +310,11 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Deploy it" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "terraform apply" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "terraform apply" },
+      }),
       timelineEvent("session.requiresAction", {}),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="requires_action" />);
@@ -254,16 +333,28 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Do a long job" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
       timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
       // The ACTIVE cluster: tool call still running (no output yet).
-      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two running" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two running" },
+      }),
       // A queued follow-up renders at the tail (#197 pending anchoring) —
       // making the running cluster second-to-last. It must STILL not fold.
       timelineEvent("user.message", { text: "queued follow-up" }, null),
-      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-7", source: "user" }, "turn-b"),
+      timelineEvent(
+        "turn.queued",
+        { turnId: "turn-b", triggerEventId: "timeline-evt-7", source: "user" },
+        "turn-b",
+      ),
     ];
     const r = await renderComponent(<MessageTimeline events={events} status="running" />);
     await flush();
@@ -281,11 +372,19 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Do a long job" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "step one" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
       timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
-      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "step two" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
       timelineEvent("agent.message.completed", { text: "All finished." }),
       timelineEvent("turn.completed", {}),
@@ -307,11 +406,19 @@ describe("MessageTimeline — settled turn folding", () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Deploy preview" }),
-      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "helm dep update" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "helm dep update" },
+      }),
       timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
       timelineEvent("agent.message.delta", { text: "Dependencies ready, deploying now." }),
       timelineEvent("agent.message.completed", { text: "Dependencies ready, deploying now." }),
-      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "helm upgrade preview ./chart" } }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-2",
+        name: "exec_command",
+        arguments: { cmd: "helm upgrade preview ./chart" },
+      }),
       timelineEvent("turn.failed", { error: "provider down" }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
@@ -573,7 +680,9 @@ describe("ExecRenderer — failed status with non-empty output", () => {
 describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
   const rawSingleOp = {
     type: "apply_patch_call",
-    operations: [{ type: "update_file", path: "src/foo.ts", diff: "@@ -1,2 +1,2 @@\n context\n-old\n+new" }],
+    operations: [
+      { type: "update_file", path: "src/foo.ts", diff: "@@ -1,2 +1,2 @@\n context\n-old\n+new" },
+    ],
   };
   const rawMultiOp = {
     type: "apply_patch_call",
@@ -889,7 +998,10 @@ describe("MemoryRow", () => {
   test("with a handler, expanding shows 'View in memory' and clicking it links the saved record", async () => {
     const clicked: string[] = [];
     const r = await renderComponent(
-      <ActivityRail items={[memoryItem({ memoryId: "mem-saved" })]} onMemoryClick={(id) => clicked.push(id)} />,
+      <ActivityRail
+        items={[memoryItem({ memoryId: "mem-saved" })]}
+        onMemoryClick={(id) => clicked.push(id)}
+      />,
     );
     await flush();
     const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
@@ -918,7 +1030,9 @@ describe("MemoryRow", () => {
       memoryId: "mem-old",
       replacementMemoryId: "mem-new",
     });
-    const r = await renderComponent(<ActivityRail items={[item]} onMemoryClick={(id) => clicked.push(id)} />);
+    const r = await renderComponent(
+      <ActivityRail items={[item]} onMemoryClick={(id) => clicked.push(id)} />,
+    );
     await flush();
     expect(r.container.textContent ?? "").toContain("Updated memory");
     const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
@@ -994,7 +1108,11 @@ describe("turn fold — memory facet", () => {
     resetTimelineEvents();
     const { r, trigger } = await foldedTrigger([
       timelineEvent("user.message", { text: "note it" }),
-      timelineEvent("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
+      timelineEvent("memory.saved", {
+        memoryId: "mem-1",
+        kind: "preference",
+        preview: "A preference.",
+      }),
       timelineEvent("turn.completed", {}),
     ]);
     expect(trigger?.textContent).toContain("1 memory saved");
@@ -1018,7 +1136,12 @@ describe("turn fold — memory facet", () => {
     resetTimelineEvents();
     const { r, trigger } = await foldedTrigger([
       timelineEvent("user.message", { text: "fix it" }),
-      timelineEvent("memory.corrected", { memoryId: "mem-1", kind: "decision", preview: "Old.", action: "archived" }),
+      timelineEvent("memory.corrected", {
+        memoryId: "mem-1",
+        kind: "decision",
+        preview: "Old.",
+        action: "archived",
+      }),
       timelineEvent("turn.completed", {}),
     ]);
     expect(trigger?.textContent).toContain("1 memory updated");

@@ -36,7 +36,10 @@ function EmbedHarness() {
   const [preloaded, setPreloaded] = useState<SessionEvent[] | null>(preload ? null : []);
   useEffect(() => {
     if (!preload) return;
-    void client.listEvents(WS, SID, { compact: true }).then((e) => setPreloaded(e)).catch(() => setPreloaded([]));
+    void client
+      .listEvents(WS, SID, { compact: true })
+      .then((e) => setPreloaded(e))
+      .catch(() => setPreloaded([]));
   }, []);
   // In preload mode, block the dock mount until events are in hand (embedder
   // owns this gate); otherwise feed the live async stream.

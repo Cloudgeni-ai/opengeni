@@ -69,7 +69,14 @@ export type {
   WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
-import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";
+import type {
+  ClientModel,
+  GoalSpec,
+  ReasoningEffort,
+  ResourceRef,
+  SandboxBackend,
+  ToolRef,
+} from "@opengeni/sdk";
 export type { ClientModel } from "@opengeni/sdk";
 
 export type TurnSubmission = {

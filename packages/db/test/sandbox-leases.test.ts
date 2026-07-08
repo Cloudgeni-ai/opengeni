@@ -52,7 +52,11 @@ let db: Database;
 // sandbox_group_id is a bare uuid (NOT an FK), so we don't even need a sessions
 // row for the lease tables. We DO seed account + workspace because
 // rlsContextForWorkspace reads workspaces.account_id.
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+  groupId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
@@ -67,11 +71,18 @@ async function readRow(workspaceId: string, groupId: string) {
            pg_typeof(lease_epoch) as epoch_type, expires_at, instance_id
     from sandbox_leases
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
-  return r as {
-    liveness: string; refcount: number; turn_holders: number;
-    viewer_holders: number; lease_epoch: number; epoch_type: string;
-    expires_at: Date; instance_id: string | null;
-  } | undefined;
+  return r as
+    | {
+        liveness: string;
+        refcount: number;
+        turn_holders: number;
+        viewer_holders: number;
+        lease_epoch: number;
+        epoch_type: string;
+        expires_at: Date;
+        instance_id: string | null;
+      }
+    | undefined;
 }
 
 beforeAll(async () => {
@@ -90,7 +101,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -99,8 +112,13 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "t0", backend: "modal", leaseTtlMs: 45_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t0",
+      backend: "modal",
+      leaseTtlMs: 45_000,
     });
     const row = await readRow(workspaceId, groupId);
     expect(row?.epoch_type).toBe("integer");
@@ -114,9 +132,15 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const results = await Promise.all(
       Array.from({ length: N }, (_, i) =>
         acquireLease(db, {
-          accountId, workspaceId, sandboxGroupId: groupId,
-          kind: "viewer", holderId: `v-${i}`, backend: "modal", leaseTtlMs: 45_000,
-        })),
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "viewer",
+          holderId: `v-${i}`,
+          backend: "modal",
+          leaseTtlMs: 45_000,
+        }),
+      ),
     );
     const spawners = results.filter((r) => r.role === "spawner").length;
     const attached = results.filter((r) => r.role === "attached").length;
@@ -131,8 +155,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     const acquired = await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "slow-spawner", backend: "modal",
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "slow-spawner",
+      backend: "modal",
       leaseTtlMs: 90_000,
       warmingLeaseTtlMs: 600_000,
     });
@@ -175,7 +203,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       values (${accountId}, ${workspaceId}, ${groupId}, 'cold', 'modal', now() + interval '60s')`;
 
     async function skipLockedAcquire(): Promise<"spawner" | "skipped-no-row" | "attached"> {
-      return await admin.begin(async (tx) => {
+      return (await admin.begin(async (tx) => {
         const rows = await tx`
           select * from sandbox_leases
           where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
@@ -188,7 +216,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
           return "spawner";
         }
         return "attached";
-      }) as "spawner" | "skipped-no-row" | "attached";
+      })) as "spawner" | "skipped-no-row" | "attached";
     }
 
     const [a, b] = await Promise.all([skipLockedAcquire(), skipLockedAcquire()]);
@@ -202,8 +230,24 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     // never skips: two concurrent arrivals -> 1 spawner + 1 attached, both on one row.
     const fresh = await freshWorkspace();
     const [r1, r2] = await Promise.all([
-      acquireLease(db, { accountId: fresh.accountId, workspaceId: fresh.workspaceId, sandboxGroupId: fresh.groupId, kind: "turn", holderId: "A", backend: "modal", leaseTtlMs: 45_000 }),
-      acquireLease(db, { accountId: fresh.accountId, workspaceId: fresh.workspaceId, sandboxGroupId: fresh.groupId, kind: "turn", holderId: "B", backend: "modal", leaseTtlMs: 45_000 }),
+      acquireLease(db, {
+        accountId: fresh.accountId,
+        workspaceId: fresh.workspaceId,
+        sandboxGroupId: fresh.groupId,
+        kind: "turn",
+        holderId: "A",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      }),
+      acquireLease(db, {
+        accountId: fresh.accountId,
+        workspaceId: fresh.workspaceId,
+        sandboxGroupId: fresh.groupId,
+        kind: "turn",
+        holderId: "B",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      }),
     ]);
     const roles = [r1.role, r2.role].sort();
     expect(roles).toEqual(["attached", "spawner"]);
@@ -215,10 +259,22 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // S1 acquires (spawner) then commits warming->warm at expectedEpoch 0 -> epoch 1.
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "turn-1", backend: "modal", leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-1",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
     const c1 = await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      expectedEpoch: 0, instanceId: "box-s1", leaseTtlMs: 45_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-s1",
+      leaseTtlMs: 45_000,
     });
     expect(c1.committed).toBe(true);
     const s1Epoch = c1.lease!.leaseEpoch;
@@ -226,8 +282,13 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
 
     // Baseline: S1 heartbeat at its OWN epoch succeeds.
     const ok = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "turn-1", leaseTtlMs: 45_000, expectedEpoch: s1Epoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-1",
+      leaseTtlMs: 45_000,
+      expectedEpoch: s1Epoch,
     });
     expect(ok).toBe(true);
 
@@ -235,27 +296,45 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     await admin`update sandbox_leases set liveness='warming'
                 where workspace_id=${workspaceId} and sandbox_group_id=${groupId}`;
     const c2 = await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      expectedEpoch: s1Epoch, instanceId: "box-s2", leaseTtlMs: 45_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: s1Epoch,
+      instanceId: "box-s2",
+      leaseTtlMs: 45_000,
     });
     const s2Epoch = c2.lease!.leaseEpoch;
     expect(s2Epoch).toBe(s1Epoch + 1);
 
     // THE SPLIT-BRAIN TEST: stale owner S1 heartbeats with its OLD epoch.
-    const beforeExp = (await admin`select expires_at from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId}`)[0] as { expires_at: Date };
+    const beforeExp = (
+      await admin`select expires_at from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId}`
+    )[0] as { expires_at: Date };
     const staleAccepted = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "turn-1", leaseTtlMs: 999_000, expectedEpoch: s1Epoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-1",
+      leaseTtlMs: 999_000,
+      expectedEpoch: s1Epoch,
     });
-    const afterExp = (await admin`select expires_at, lease_epoch from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId}`)[0] as { expires_at: Date; lease_epoch: number };
-    expect(staleAccepted).toBe(false);                       // rejected -> S1 self-evicts
+    const afterExp = (
+      await admin`select expires_at, lease_epoch from sandbox_leases where workspace_id=${workspaceId} and sandbox_group_id=${groupId}`
+    )[0] as { expires_at: Date; lease_epoch: number };
+    expect(staleAccepted).toBe(false); // rejected -> S1 self-evicts
     expect(new Date(afterExp.expires_at).getTime()).toBe(new Date(beforeExp.expires_at).getTime()); // NOT refreshed
-    expect(afterExp.lease_epoch).toBe(s2Epoch);              // epoch unchanged by stale HB
+    expect(afterExp.lease_epoch).toBe(s2Epoch); // epoch unchanged by stale HB
 
     // The CURRENT owner S2 can heartbeat at the live epoch.
     const freshAccepted = await heartbeatLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "turn-1", leaseTtlMs: 45_000, expectedEpoch: s2Epoch,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-1",
+      leaseTtlMs: 45_000,
+      expectedEpoch: s2Epoch,
     });
     expect(freshAccepted).toBe(true);
   }, 60_000);
@@ -264,54 +343,121 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     await acquireLease(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "turn-files", backend: "modal", leaseTtlMs: 45_000,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-files",
+      backend: "modal",
+      leaseTtlMs: 45_000,
     });
     const committed = await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      expectedEpoch: 0, instanceId: "box-files-1", leaseTtlMs: 45_000,
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "box-files-1" } } },
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box-files-1",
+      leaseTtlMs: 45_000,
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-files-1" } },
+      },
     });
     const epoch = committed.lease!.leaseEpoch;
 
-    expect(await getMaterializedSandboxFileResources(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
-    })).toEqual(new Set());
+    expect(
+      await getMaterializedSandboxFileResources(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        instanceId: "box-files-1",
+      }),
+    ).toEqual(new Set());
 
-    expect(await markSandboxFileResourcesMaterialized(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
-      fileIds: ["file-a", "file-b", "file-a"],
-    })).toEqual({ wrote: true });
-    expect(await markSandboxFileResourcesMaterialized(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
-      fileIds: ["file-c"],
-    })).toEqual({ wrote: true });
+    expect(
+      await markSandboxFileResourcesMaterialized(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        instanceId: "box-files-1",
+        fileIds: ["file-a", "file-b", "file-a"],
+      }),
+    ).toEqual({ wrote: true });
+    expect(
+      await markSandboxFileResourcesMaterialized(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        instanceId: "box-files-1",
+        fileIds: ["file-c"],
+      }),
+    ).toEqual({ wrote: true });
 
-    expect(await getMaterializedSandboxFileResources(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-1",
-    })).toEqual(new Set(["file-a", "file-b", "file-c"]));
-    expect(await markSandboxFileResourcesMaterialized(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch - 1, instanceId: "box-files-1",
-      fileIds: ["stale-epoch"],
-    })).toEqual({ wrote: false });
-    expect(await getMaterializedSandboxFileResources(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, instanceId: "box-files-2",
-    })).toEqual(new Set());
+    expect(
+      await getMaterializedSandboxFileResources(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        instanceId: "box-files-1",
+      }),
+    ).toEqual(new Set(["file-a", "file-b", "file-c"]));
+    expect(
+      await markSandboxFileResourcesMaterialized(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch - 1,
+        instanceId: "box-files-1",
+        fileIds: ["stale-epoch"],
+      }),
+    ).toEqual({ wrote: false });
+    expect(
+      await getMaterializedSandboxFileResources(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        expectedEpoch: epoch,
+        instanceId: "box-files-2",
+      }),
+    ).toEqual(new Set());
   }, 60_000);
 
   test("(3) refcount->0 drives warm->draining (turn_holders=0 guard) then the reaper surfaces it", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "turn-x", backend: "modal", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "box", leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-x",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box",
+      leaseTtlMs: 45_000,
+    });
     const warm = await readRow(workspaceId, groupId);
     expect(warm?.liveness).toBe("warm");
     expect(warm?.refcount).toBe(1);
 
     // Release the last holder with 0ms grace so the drain deadline is already past.
     const rel = await releaseLeaseHolder(db, {
-      accountId, workspaceId, sandboxGroupId: groupId,
-      kind: "turn", holderId: "turn-x", idleGraceMs: 0,
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-x",
+      idleGraceMs: 0,
     });
     expect(rel?.liveness).toBe("draining");
     expect(rel?.refcount).toBe(0);
@@ -319,7 +465,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(drainRow?.turn_holders).toBe(0);
 
     // Reaper sees the draining lease whose grace (0ms) elapsed -> drainable.
-    const reap = await reapStaleLeaseHolders(db, { workspaceId, viewerHolderTtlMs: 90_000, idleGraceMs: 45_000 });
+    const reap = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 90_000,
+      idleGraceMs: 45_000,
+    });
     expect(reap.drained.map((d) => d.sandboxGroupId)).toContain(groupId);
     expect(reap.drained.find((d) => d.sandboxGroupId === groupId)?.instanceId).toBe("box");
   }, 60_000);
@@ -327,9 +477,32 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(4) a stale VIEWER holder is TTL-reaped while a same-age TURN holder survives; lease stays warm", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "turn-keep", backend: "modal", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "box", leaseTtlMs: 45_000 });
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "viewer-stale", backend: "modal", leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "turn-keep",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "box",
+      leaseTtlMs: 45_000,
+    });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "viewer-stale",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
     const before = await readRow(workspaceId, groupId);
     expect(before?.refcount).toBe(2);
     expect(before?.turn_holders).toBe(1);
@@ -339,14 +512,18 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     await admin`update sandbox_lease_holders set last_heartbeat_at = now() - interval '10 minutes'
                 where workspace_id = ${workspaceId}`;
 
-    const reap = await reapStaleLeaseHolders(db, { workspaceId, viewerHolderTtlMs: 90_000, idleGraceMs: 45_000 });
+    const reap = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 90_000,
+      idleGraceMs: 45_000,
+    });
     expect(reap.reapedViewers).toBe(1);
 
     const after = await readRow(workspaceId, groupId);
     expect(after?.refcount).toBe(1);
-    expect(after?.turn_holders).toBe(1);   // the turn holder is TTL-EXEMPT (survives)
+    expect(after?.turn_holders).toBe(1); // the turn holder is TTL-EXEMPT (survives)
     expect(after?.viewer_holders).toBe(0);
-    expect(after?.liveness).toBe("warm");  // NOT drained out from under the agent
+    expect(after?.liveness).toBe("warm"); // NOT drained out from under the agent
 
     const survivors = await admin<{ kind: string; holder_id: string }[]>`
       select kind, holder_id from sandbox_lease_holders where workspace_id = ${workspaceId}`;
@@ -363,12 +540,37 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const wsA = await freshWorkspace();
     const wsB = await freshWorkspace();
     for (const ws of [wsA, wsB]) {
-      await acquireLease(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, kind: "turn", holderId: "t", backend: "modal", leaseTtlMs: 45_000 });
-      await commitWarmingToWarm(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: 0, instanceId: `box-${ws.workspaceId.slice(0, 6)}`, leaseTtlMs: 45_000 });
-      await releaseLeaseHolder(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, kind: "turn", holderId: "t", idleGraceMs: 0 });
+      await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      await commitWarmingToWarm(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        expectedEpoch: 0,
+        instanceId: `box-${ws.workspaceId.slice(0, 6)}`,
+        leaseTtlMs: 45_000,
+      });
+      await releaseLeaseHolder(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "t",
+        idleGraceMs: 0,
+      });
     }
     // Both are now draining with an already-elapsed grace.
-    const drained = await reapStaleLeaseHoldersGlobal(db, { viewerHolderTtlMs: 90_000, idleGraceMs: 45_000 });
+    const drained = await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 90_000,
+      idleGraceMs: 45_000,
+    });
     const groups = drained.map((d) => d.sandboxGroupId);
     expect(groups).toContain(wsA.groupId);
     expect(groups).toContain(wsB.groupId);
@@ -381,15 +583,35 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const wsA = await freshWorkspace();
     const wsB = await freshWorkspace();
-    await acquireLease(db, { accountId: wsA.accountId, workspaceId: wsA.workspaceId, sandboxGroupId: wsA.groupId, kind: "turn", holderId: "a", backend: "modal", leaseTtlMs: 45_000 });
-    await acquireLease(db, { accountId: wsB.accountId, workspaceId: wsB.workspaceId, sandboxGroupId: wsB.groupId, kind: "turn", holderId: "b", backend: "modal", leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId: wsA.accountId,
+      workspaceId: wsA.workspaceId,
+      sandboxGroupId: wsA.groupId,
+      kind: "turn",
+      holderId: "a",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await acquireLease(db, {
+      accountId: wsB.accountId,
+      workspaceId: wsB.workspaceId,
+      sandboxGroupId: wsB.groupId,
+      kind: "turn",
+      holderId: "b",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
 
     // Reaping under workspace A's RLS context must NOT touch workspace B's holder.
     await admin`update sandbox_lease_holders set last_heartbeat_at = now() - interval '10 minutes'
                 where workspace_id = ${wsB.workspaceId}`;
     // Make B a viewer so it would be reapable IF RLS leaked.
     await admin`update sandbox_lease_holders set kind='viewer' where workspace_id = ${wsB.workspaceId}`;
-    const reapUnderA = await reapStaleLeaseHolders(db, { workspaceId: wsA.workspaceId, viewerHolderTtlMs: 90_000, idleGraceMs: 45_000 });
+    const reapUnderA = await reapStaleLeaseHolders(db, {
+      workspaceId: wsA.workspaceId,
+      viewerHolderTtlMs: 90_000,
+      idleGraceMs: 45_000,
+    });
     expect(reapUnderA.reapedViewers).toBe(0); // A's sweep cannot see/reap B's stale viewer
 
     const bHolders = await admin<{ id: string }[]>`
@@ -408,40 +630,87 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm a box with a realistic resume envelope (providerState + sandboxId).
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
     await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live",
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
       resumeBackendId: "modal",
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live", appName: "app" }, workspaceReady: true } },
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "sb-live", appName: "app" },
+          workspaceReady: true,
+        },
+      },
       leaseTtlMs: 45_000,
     });
     // Drain it (0ms grace) -> draining at refcount 0. commitWarmingToWarm bumped
     // the epoch (0->1), so the drain seam fences on the LIVE epoch.
-    const rel = await releaseLeaseHolder(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", idleGraceMs: 0 });
+    const rel = await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t",
+      idleGraceMs: 0,
+    });
     expect(rel?.liveness).toBe("draining");
     const epoch = (await readRow(workspaceId, groupId))!.lease_epoch;
 
     // The reaper persist seam: fold the /workspace snapshot-ref onto the lease.
-    const ARCHIVE_B64 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-snap-xyz\"}").toString("base64");
-    const persisted = await persistDrainSnapshot(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, workspaceArchive: ARCHIVE_B64 });
+    const ARCHIVE_B64 = Buffer.from(
+      'MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-snap-xyz"}',
+    ).toString("base64");
+    const persisted = await persistDrainSnapshot(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: epoch,
+      workspaceArchive: ARCHIVE_B64,
+    });
     expect(persisted.wrote).toBe(true);
 
     // Now the cold commit — the seam that USED to wipe the archive.
-    const cold = await confirmDrainCold(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch });
+    const cold = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: epoch,
+    });
     expect(cold.wentCold).toBe(true);
 
-    const [row] = await admin<{ liveness: string; instance_id: string | null; resume_backend_id: string | null; archive: string | null; sandbox_id: string | null; backend_id: string | null }[]>`
+    const [row] = await admin<
+      {
+        liveness: string;
+        instance_id: string | null;
+        resume_backend_id: string | null;
+        archive: string | null;
+        sandbox_id: string | null;
+        backend_id: string | null;
+      }[]
+    >`
       select liveness, instance_id, resume_backend_id,
              resume_state #>> '{sessionState,workspaceArchive}' as archive,
              resume_state #>> '{sessionState,providerState,sandboxId}' as sandbox_id,
              resume_state ->> 'backendId' as backend_id
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.liveness).toBe("cold");
-    expect(row?.instance_id).toBeNull();            // live-box id cleared
+    expect(row?.instance_id).toBeNull(); // live-box id cleared
     // The archive SURVIVES the cold transition — the whole point of the fix.
     expect(row?.archive).toBe(ARCHIVE_B64);
-    expect(row?.resume_backend_id).toBe("modal");   // backend kept so cold-restore knows the client
-    expect(row?.backend_id).toBe("modal");          // archive-only envelope carries backendId
+    expect(row?.resume_backend_id).toBe("modal"); // backend kept so cold-restore knows the client
+    expect(row?.backend_id).toBe("modal"); // archive-only envelope carries backendId
     // The DEAD box's providerState/sandboxId is dropped (resume-by-id would only fail).
     expect(row?.sandbox_id).toBeNull();
   }, 60_000);
@@ -451,18 +720,47 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(8) confirmDrainCold with NO archive nulls resume_state (clean cold)", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, {
-      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live",
-      resumeBackendId: "modal",
-      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" }, workspaceReady: true } },
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t",
+      backend: "modal",
       leaseTtlMs: 45_000,
     });
-    await releaseLeaseHolder(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", idleGraceMs: 0 });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-live" }, workspaceReady: true },
+      },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t",
+      idleGraceMs: 0,
+    });
     const epoch = (await readRow(workspaceId, groupId))!.lease_epoch;
-    const cold = await confirmDrainCold(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch });
+    const cold = await confirmDrainCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: epoch,
+    });
     expect(cold.wentCold).toBe(true);
-    const [row] = await admin<{ liveness: string; resume_state: unknown; resume_backend_id: string | null }[]>`
+    const [row] = await admin<
+      { liveness: string; resume_state: unknown; resume_backend_id: string | null }[]
+    >`
       select liveness, resume_state, resume_backend_id
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.liveness).toBe("cold");
@@ -475,7 +773,16 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(9) image B3: cold-create stamps the image on the warming row", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    const res = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "t",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
     expect(res.role).toBe("spawner");
     const [row] = await admin<{ image: string | null; liveness: string }[]>`
       select image, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
@@ -486,16 +793,45 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(10) image B3: warm box + SAME image = plain attach (no recreate)", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "spawner", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "spawner",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+      leaseTtlMs: 45_000,
+    });
     // A SECOND holder arrives on the warm box with the SAME image -> attach, box intact.
-    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "v2", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    const res = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "v2",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
     expect(res.role).toBe("attached");
-    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null; refcount: number }[]>`
+    const [row] = await admin<
+      { liveness: string; image: string | null; instance_id: string | null; refcount: number }[]
+    >`
       select liveness, image, instance_id, refcount from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
-    expect(row?.liveness).toBe("warm");        // never recreated
+    expect(row?.liveness).toBe("warm"); // never recreated
     expect(row?.image).toBe("img-A");
-    expect(row?.instance_id).toBe("sb-live");   // live box untouched
+    expect(row?.instance_id).toBe("sb-live"); // live box untouched
     expect(row?.refcount).toBe(2);
   });
 
@@ -503,13 +839,50 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm on img-A, held by exactly ONE holder ("solo").
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" } } }, leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "solo",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-live" } },
+      },
+      leaseTtlMs: 45_000,
+    });
     // The SAME solo holder re-arrives resolving a DIFFERENT image -> recreate. acquireLease
     // resets to cold, re-stamps img-B, and CASes the holder back in as spawner.
-    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-B", leaseTtlMs: 45_000 });
+    const res = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "solo",
+      backend: "modal",
+      image: "img-B",
+      leaseTtlMs: 45_000,
+    });
     expect(res.role).toBe("spawner");
-    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null; resume_state: unknown }[]>`
+    const [row] = await admin<
+      {
+        liveness: string;
+        image: string | null;
+        instance_id: string | null;
+        resume_state: unknown;
+      }[]
+    >`
       select liveness, image, instance_id, resume_state from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     // Warming (spawner will cold-create on the NEW image), image re-stamped, live-box
     // fields cleared (a divergent image cannot replay the old box's live state).
@@ -523,14 +896,43 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
     // Warm on img-A with a holder that STAYS on the box.
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "keeper",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+      leaseTtlMs: 45_000,
+    });
     // A DIFFERENT holder resolves a DIFFERENT image while "keeper" still holds -> refuse.
     await expect(
-      acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "newcomer", backend: "modal", image: "img-B", leaseTtlMs: 45_000 }),
+      acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: "newcomer",
+        backend: "modal",
+        image: "img-B",
+        leaseTtlMs: 45_000,
+      }),
     ).rejects.toThrow(SandboxImageConflictError);
     // The box is UNTOUCHED — the other session keeps running its filesystem.
-    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null }[]>`
+    const [row] = await admin<
+      { liveness: string; image: string | null; instance_id: string | null }[]
+    >`
       select liveness, image, instance_id from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.liveness).toBe("warm");
     expect(row?.image).toBe("img-A");
@@ -540,10 +942,36 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(13) image B3: a null input image (e.g. selfhosted) NEVER conflicts + never stamps", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
-    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "keeper",
+      backend: "modal",
+      image: "img-A",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal" },
+      leaseTtlMs: 45_000,
+    });
     // No image on this acquire -> attach, no conflict, image column unchanged.
-    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "no-image", backend: "modal", leaseTtlMs: 45_000 });
+    const res = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "no-image",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
     expect(res.role).toBe("attached");
     const [row] = await admin<{ image: string | null; liveness: string }[]>`
       select image, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;

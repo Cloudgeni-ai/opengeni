@@ -221,24 +221,29 @@ export class DeterministicEmbeddingProvider implements DocumentEmbedder {
   }
 }
 
-export function createDocumentServices(settings?: Settings, overrides: Partial<DocumentServices> = {}): DocumentServices {
+export function createDocumentServices(
+  settings?: Settings,
+  overrides: Partial<DocumentServices> = {},
+): DocumentServices {
   const dimensions = settings?.documentEmbeddingDimensions ?? DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS;
   const openAIEmbeddingConfig = documentOpenAIEmbeddingConfig(settings);
   return {
     parser: overrides.parser ?? new LiteParseDocumentParser(),
-    chunker: overrides.chunker ?? new RecursiveTextChunker(
-      settings?.documentChunkSize ?? DEFAULT_DOCUMENT_CHUNK_SIZE,
-      settings?.documentChunkOverlap ?? DEFAULT_DOCUMENT_CHUNK_OVERLAP,
-    ),
-    embedder: overrides.embedder ?? (
-      settings?.documentEmbeddingProvider === "deterministic"
+    chunker:
+      overrides.chunker ??
+      new RecursiveTextChunker(
+        settings?.documentChunkSize ?? DEFAULT_DOCUMENT_CHUNK_SIZE,
+        settings?.documentChunkOverlap ?? DEFAULT_DOCUMENT_CHUNK_OVERLAP,
+      ),
+    embedder:
+      overrides.embedder ??
+      (settings?.documentEmbeddingProvider === "deterministic"
         ? new DeterministicEmbeddingProvider(dimensions, settings.documentEmbeddingModel)
         : new OpenAIEmbeddingProvider({
-          ...openAIEmbeddingConfig,
-          model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-          dimensions,
-        })
-    ),
+            ...openAIEmbeddingConfig,
+            model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+            dimensions,
+          })),
   };
 }
 
@@ -251,8 +256,10 @@ export function documentOpenAIEmbeddingConfig(settings?: Settings): {
   if (!settings) return {};
   if (settings.documentEmbeddingApiKey || settings.documentEmbeddingBaseUrl) {
     return {
-      apiKey: settings.documentEmbeddingApiKey ?? settings.openaiApiKey ?? settings.azureOpenaiApiKey,
-      baseURL: settings.documentEmbeddingBaseUrl ?? settings.openaiBaseUrl ?? settings.azureOpenaiBaseUrl,
+      apiKey:
+        settings.documentEmbeddingApiKey ?? settings.openaiApiKey ?? settings.azureOpenaiApiKey,
+      baseURL:
+        settings.documentEmbeddingBaseUrl ?? settings.openaiBaseUrl ?? settings.azureOpenaiBaseUrl,
     };
   }
   if (settings.openaiProvider === "azure") {
@@ -261,9 +268,10 @@ export function documentOpenAIEmbeddingConfig(settings?: Settings): {
       apiKey: settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token",
       baseURL,
       defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-      defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
-        ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
-        : undefined,
+      defaultHeaders:
+        settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+          ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
+          : undefined,
     };
   }
   return {
@@ -292,129 +300,226 @@ function azureOpenAIDefaultQuery(
   return { "api-version": settings.azureOpenaiApiVersion };
 }
 
-export async function createDocumentBase(db: Database, input: CreateDocumentBaseRequest & { accountId: string; workspaceId: string }): Promise<DocumentBase> {
-  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
-    const [row] = await scopedDb.insert(schema.documentBases).values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      name: input.name.trim(),
-      description: input.description?.trim() || null,
-    }).returning();
-    if (!row) throw new Error("Failed to create document base");
-    return mapDocumentBase(row);
-  });
+export async function createDocumentBase(
+  db: Database,
+  input: CreateDocumentBaseRequest & { accountId: string; workspaceId: string },
+): Promise<DocumentBase> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .insert(schema.documentBases)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          name: input.name.trim(),
+          description: input.description?.trim() || null,
+        })
+        .returning();
+      if (!row) throw new Error("Failed to create document base");
+      return mapDocumentBase(row);
+    },
+  );
 }
 
-export async function listDocumentBases(db: Database, workspaceId: string): Promise<DocumentBase[]> {
+export async function listDocumentBases(
+  db: Database,
+  workspaceId: string,
+): Promise<DocumentBase[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.select().from(schema.documentBases)
+    const rows = await scopedDb
+      .select()
+      .from(schema.documentBases)
       .where(eq(schema.documentBases.workspaceId, workspaceId))
       .orderBy(desc(schema.documentBases.createdAt));
     return rows.map(mapDocumentBase);
   });
 }
 
-export async function getDocumentBase(db: Database, workspaceId: string, baseId: string): Promise<DocumentBase | null> {
+export async function getDocumentBase(
+  db: Database,
+  workspaceId: string,
+  baseId: string,
+): Promise<DocumentBase | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.select().from(schema.documentBases).where(and(eq(schema.documentBases.workspaceId, workspaceId), eq(schema.documentBases.id, baseId))).limit(1);
+    const [row] = await scopedDb
+      .select()
+      .from(schema.documentBases)
+      .where(
+        and(eq(schema.documentBases.workspaceId, workspaceId), eq(schema.documentBases.id, baseId)),
+      )
+      .limit(1);
     return row ? mapDocumentBase(row) : null;
   });
 }
 
-export async function addDocumentToBase(db: Database, input: AddDocumentRequest & { accountId: string; workspaceId: string; baseId: string }): Promise<Document> {
-  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
-    const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
-    if (!base) throw new Error(`Document base not found: ${input.baseId}`);
-    const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
-    const now = new Date();
-    const [existing] = await scopedDb.select().from(schema.documents)
-      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.baseId, input.baseId), eq(schema.documents.fileId, input.fileId)))
-      .limit(1);
-    if (existing) {
-      // Idempotent re-add: refresh caller-supplied source metadata on the
-      // existing row instead of silently discarding it (aclTags especially —
-      // a re-add that tightens tags must not be a no-op).
-      const [updated] = await scopedDb.update(schema.documents).set({
-        title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? existing.title,
-        ...(input.sourceKind !== undefined ? { sourceKind: input.sourceKind } : {}),
-        sourceUri: cleanString(input.sourceUri) ?? existing.sourceUri,
-        sourceExternalId: cleanString(input.sourceExternalId) ?? existing.sourceExternalId,
-        sourceTitle: cleanString(input.sourceTitle) ?? existing.sourceTitle,
-        sourceAuthor: cleanString(input.sourceAuthor) ?? existing.sourceAuthor,
-        sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt) ?? existing.sourceCreatedAt,
-        sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt) ?? existing.sourceUpdatedAt,
-        sourceVersion: cleanString(input.sourceVersion) ?? existing.sourceVersion,
-        ...(input.aclTags !== undefined ? { aclTags: cleanStringArray(input.aclTags) } : {}),
-        updatedAt: now,
-      }).where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, existing.id))).returning();
-      return mapDocument(updated ?? existing);
-    }
-    const [row] = await scopedDb.insert(schema.documents).values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      baseId: input.baseId,
-      fileId: input.fileId,
-      status: "queued",
-      title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? file.filename,
-      parser: DEFAULT_DOCUMENT_PARSER,
-      sourceKind: input.sourceKind ?? "manual_upload",
-      sourceUri: cleanString(input.sourceUri) ?? null,
-      sourceExternalId: cleanString(input.sourceExternalId) ?? null,
-      sourceTitle: cleanString(input.sourceTitle) ?? null,
-      sourceAuthor: cleanString(input.sourceAuthor) ?? null,
-      sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
-      sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
-      sourceVersion: cleanString(input.sourceVersion) ?? null,
-      aclTags: cleanStringArray(input.aclTags),
-      updatedAt: now,
-    }).returning();
-    if (!row) throw new Error("Failed to create document");
-    return mapDocument(row);
-  });
+export async function addDocumentToBase(
+  db: Database,
+  input: AddDocumentRequest & { accountId: string; workspaceId: string; baseId: string },
+): Promise<Document> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
+      if (!base) throw new Error(`Document base not found: ${input.baseId}`);
+      const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
+      const now = new Date();
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.baseId, input.baseId),
+            eq(schema.documents.fileId, input.fileId),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        // Idempotent re-add: refresh caller-supplied source metadata on the
+        // existing row instead of silently discarding it (aclTags especially —
+        // a re-add that tightens tags must not be a no-op).
+        const [updated] = await scopedDb
+          .update(schema.documents)
+          .set({
+            title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? existing.title,
+            ...(input.sourceKind !== undefined ? { sourceKind: input.sourceKind } : {}),
+            sourceUri: cleanString(input.sourceUri) ?? existing.sourceUri,
+            sourceExternalId: cleanString(input.sourceExternalId) ?? existing.sourceExternalId,
+            sourceTitle: cleanString(input.sourceTitle) ?? existing.sourceTitle,
+            sourceAuthor: cleanString(input.sourceAuthor) ?? existing.sourceAuthor,
+            sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt) ?? existing.sourceCreatedAt,
+            sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt) ?? existing.sourceUpdatedAt,
+            sourceVersion: cleanString(input.sourceVersion) ?? existing.sourceVersion,
+            ...(input.aclTags !== undefined ? { aclTags: cleanStringArray(input.aclTags) } : {}),
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.id, existing.id),
+            ),
+          )
+          .returning();
+        return mapDocument(updated ?? existing);
+      }
+      const [row] = await scopedDb
+        .insert(schema.documents)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          baseId: input.baseId,
+          fileId: input.fileId,
+          status: "queued",
+          title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? file.filename,
+          parser: DEFAULT_DOCUMENT_PARSER,
+          sourceKind: input.sourceKind ?? "manual_upload",
+          sourceUri: cleanString(input.sourceUri) ?? null,
+          sourceExternalId: cleanString(input.sourceExternalId) ?? null,
+          sourceTitle: cleanString(input.sourceTitle) ?? null,
+          sourceAuthor: cleanString(input.sourceAuthor) ?? null,
+          sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
+          sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
+          sourceVersion: cleanString(input.sourceVersion) ?? null,
+          aclTags: cleanStringArray(input.aclTags),
+          updatedAt: now,
+        })
+        .returning();
+      if (!row) throw new Error("Failed to create document");
+      return mapDocument(row);
+    },
+  );
 }
 
 export async function deleteDocumentFromBase(
   db: Database,
   input: { accountId: string; workspaceId: string; baseId: string; documentId: string },
 ): Promise<void> {
-  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
-    const [document] = await scopedDb.select().from(schema.documents)
-      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, input.documentId)))
-      .limit(1);
-    if (!document) {
-      throw new Error(`Document not found: ${input.documentId}`);
-    }
-    if (document.baseId !== input.baseId) {
-      throw new Error(`Document not found: ${input.documentId}`);
-    }
-    await scopedDb.delete(schema.documents)
-      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, input.documentId)));
-  });
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [document] = await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.id, input.documentId),
+          ),
+        )
+        .limit(1);
+      if (!document) {
+        throw new Error(`Document not found: ${input.documentId}`);
+      }
+      if (document.baseId !== input.baseId) {
+        throw new Error(`Document not found: ${input.documentId}`);
+      }
+      await scopedDb
+        .delete(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.id, input.documentId),
+          ),
+        );
+    },
+  );
 }
 
-export async function listDocuments(db: Database, workspaceId: string, baseId: string): Promise<Document[]> {
+export async function listDocuments(
+  db: Database,
+  workspaceId: string,
+  baseId: string,
+): Promise<Document[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.select().from(schema.documents)
-      .where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.baseId, baseId)))
+    const rows = await scopedDb
+      .select()
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.baseId, baseId)),
+      )
       .orderBy(asc(schema.documents.createdAt));
     return rows.map(mapDocument);
   });
 }
 
-export async function getDocument(db: Database, workspaceId: string, documentId: string): Promise<Document | null> {
+export async function getDocument(
+  db: Database,
+  workspaceId: string,
+  documentId: string,
+): Promise<Document | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.select().from(schema.documents).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).limit(1);
+    const [row] = await scopedDb
+      .select()
+      .from(schema.documents)
+      .where(
+        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+      )
+      .limit(1);
     return row ? mapDocument(row) : null;
   });
 }
 
-export async function queueDocumentForReindex(db: Database, workspaceId: string, documentId: string): Promise<Document> {
+export async function queueDocumentForReindex(
+  db: Database,
+  workspaceId: string,
+  documentId: string,
+): Promise<Document> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.update(schema.documents).set({
-      status: "queued",
-      error: null,
-      updatedAt: new Date(),
-    }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).returning();
+    const [row] = await scopedDb
+      .update(schema.documents)
+      .set({
+        status: "queued",
+        error: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+      )
+      .returning();
     if (!row) throw new Error(`Document not found: ${documentId}`);
     return mapDocument(row);
   });
@@ -428,18 +533,32 @@ export async function indexDocumentNow(
   services: DocumentServices = createDocumentServices(),
   hooks: DocumentIndexHooks = {},
 ): Promise<Document> {
-  const [document] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-    await scopedDb.select().from(schema.documents).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).limit(1)
+  const [document] = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(
+          and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+        )
+        .limit(1),
   );
   if (!document) throw new Error(`Document not found: ${documentId}`);
   const file = await requireReadyFile(db, workspaceId, document.fileId);
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.update(schema.documents).set({
-      status: "indexing",
-      parser: services.parser.name,
-      error: null,
-      updatedAt: new Date(),
-    }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)));
+    await scopedDb
+      .update(schema.documents)
+      .set({
+        status: "indexing",
+        parser: services.parser.name,
+        error: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+      );
   });
   try {
     const bytes = await objectStorage.getFileBytes(file);
@@ -453,51 +572,88 @@ export async function indexDocumentNow(
     });
     const embeddings = await services.embedder.embedMany(chunks.map((chunk) => chunk.text));
     if (embeddings.length !== chunks.length) {
-      throw new Error(`Embedding provider returned ${embeddings.length} embeddings for ${chunks.length} chunks`);
+      throw new Error(
+        `Embedding provider returned ${embeddings.length} embeddings for ${chunks.length} chunks`,
+      );
     }
-    await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
-      await tx.delete(schema.documentChunks).where(and(eq(schema.documentChunks.workspaceId, workspaceId), eq(schema.documentChunks.documentId, documentId)));
-      if (chunks.length > 0) {
-        await tx.insert(schema.documentChunks).values(chunks.map((chunk, index) => ({
-          accountId: document.accountId,
-          workspaceId: document.workspaceId,
-          documentId,
-          baseId: document.baseId,
-          fileId: file.id,
-          chunkIndex: index,
-          text: chunk.text,
-          metadata: {
-            ...chunk.metadata,
-            documentTitle: document.title,
-            sourceKind: document.sourceKind,
-            sourceUri: document.sourceUri,
-            sourceExternalId: document.sourceExternalId,
-            sourceTitle: document.sourceTitle,
-            sourceAuthor: document.sourceAuthor,
-            sourceCreatedAt: document.sourceCreatedAt?.toISOString() ?? null,
-            sourceUpdatedAt: document.sourceUpdatedAt?.toISOString() ?? null,
-            sourceVersion: document.sourceVersion,
-            aclTags: document.aclTags,
-          },
-          embedding: validateEmbedding(embeddings[index] ?? [], services.embedder.dimensions, services.embedder.model),
-          embeddingModel: services.embedder.model,
-        })));
-      }
-      await tx.update(schema.documents).set({
-        status: "ready",
-        parser: services.parser.name,
-        chunkCount: chunks.length,
-        error: null,
-        updatedAt: new Date(),
-      }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)));
-    }));
+    await withWorkspaceRls(
+      db,
+      workspaceId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          await tx
+            .delete(schema.documentChunks)
+            .where(
+              and(
+                eq(schema.documentChunks.workspaceId, workspaceId),
+                eq(schema.documentChunks.documentId, documentId),
+              ),
+            );
+          if (chunks.length > 0) {
+            await tx.insert(schema.documentChunks).values(
+              chunks.map((chunk, index) => ({
+                accountId: document.accountId,
+                workspaceId: document.workspaceId,
+                documentId,
+                baseId: document.baseId,
+                fileId: file.id,
+                chunkIndex: index,
+                text: chunk.text,
+                metadata: {
+                  ...chunk.metadata,
+                  documentTitle: document.title,
+                  sourceKind: document.sourceKind,
+                  sourceUri: document.sourceUri,
+                  sourceExternalId: document.sourceExternalId,
+                  sourceTitle: document.sourceTitle,
+                  sourceAuthor: document.sourceAuthor,
+                  sourceCreatedAt: document.sourceCreatedAt?.toISOString() ?? null,
+                  sourceUpdatedAt: document.sourceUpdatedAt?.toISOString() ?? null,
+                  sourceVersion: document.sourceVersion,
+                  aclTags: document.aclTags,
+                },
+                embedding: validateEmbedding(
+                  embeddings[index] ?? [],
+                  services.embedder.dimensions,
+                  services.embedder.model,
+                ),
+                embeddingModel: services.embedder.model,
+              })),
+            );
+          }
+          await tx
+            .update(schema.documents)
+            .set({
+              status: "ready",
+              parser: services.parser.name,
+              chunkCount: chunks.length,
+              error: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.documents.workspaceId, workspaceId),
+                eq(schema.documents.id, documentId),
+              ),
+            );
+        }),
+    );
   } catch (error) {
-    const [failed] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-      await scopedDb.update(schema.documents).set({
-        status: "failed",
-        error: error instanceof Error ? error.message : String(error),
-        updatedAt: new Date(),
-      }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).returning()
+    const [failed] = await withWorkspaceRls(
+      db,
+      workspaceId,
+      async (scopedDb) =>
+        await scopedDb
+          .update(schema.documents)
+          .set({
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+          )
+          .returning(),
     );
     if (!failed) throw error;
     return mapDocument(failed);
@@ -518,19 +674,22 @@ export async function searchDocuments(
   const rows: CombinedSearchRow[] = [];
   if (mode === "vector" || mode === "hybrid") {
     try {
-      rows.push(...await vectorSearchDocuments(db, input, candidateLimit, services));
+      rows.push(...(await vectorSearchDocuments(db, input, candidateLimit, services)));
     } catch (error) {
       if (mode === "vector") {
         throw error;
       }
-      console.warn("document hybrid search vector component failed; falling back to keyword search", {
-        workspaceId: input.workspaceId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      console.warn(
+        "document hybrid search vector component failed; falling back to keyword search",
+        {
+          workspaceId: input.workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
     }
   }
   if (mode === "keyword" || mode === "hybrid") {
-    rows.push(...await keywordSearchDocuments(db, input, candidateLimit));
+    rows.push(...(await keywordSearchDocuments(db, input, candidateLimit)));
   }
   return mergeDocumentSearchRows(rows, mode).slice(0, limit);
 }
@@ -544,31 +703,36 @@ async function vectorSearchDocuments(
   const queryEmbedding = await services.embedder.embedQuery(input.query);
   validateEmbedding(queryEmbedding, services.embedder.dimensions, services.embedder.model);
   const distance = sql<number>`${schema.documentChunks.embedding} <=> ${vectorLiteral(queryEmbedding)}::vector`;
-  const rows = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
-    await scopedDb.select({
-      chunkId: schema.documentChunks.id,
-      documentId: schema.documentChunks.documentId,
-      baseId: schema.documentChunks.baseId,
-      fileId: schema.documentChunks.fileId,
-      title: schema.documents.title,
-      text: schema.documentChunks.text,
-      chunkIndex: schema.documentChunks.chunkIndex,
-      metadata: schema.documentChunks.metadata,
-      sourceKind: schema.documents.sourceKind,
-      sourceUri: schema.documents.sourceUri,
-      sourceExternalId: schema.documents.sourceExternalId,
-      sourceTitle: schema.documents.sourceTitle,
-      sourceAuthor: schema.documents.sourceAuthor,
-      sourceCreatedAt: schema.documents.sourceCreatedAt,
-      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
-      sourceVersion: schema.documents.sourceVersion,
-      aclTags: schema.documents.aclTags,
-      distance,
-    }).from(schema.documentChunks)
-      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-      .where(and(...documentSearchConditions(input, services.embedder.model)))
-      .orderBy(distance)
-      .limit(limit)
+  const rows = await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          chunkId: schema.documentChunks.id,
+          documentId: schema.documentChunks.documentId,
+          baseId: schema.documentChunks.baseId,
+          fileId: schema.documentChunks.fileId,
+          title: schema.documents.title,
+          text: schema.documentChunks.text,
+          chunkIndex: schema.documentChunks.chunkIndex,
+          metadata: schema.documentChunks.metadata,
+          sourceKind: schema.documents.sourceKind,
+          sourceUri: schema.documents.sourceUri,
+          sourceExternalId: schema.documents.sourceExternalId,
+          sourceTitle: schema.documents.sourceTitle,
+          sourceAuthor: schema.documents.sourceAuthor,
+          sourceCreatedAt: schema.documents.sourceCreatedAt,
+          sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+          sourceVersion: schema.documents.sourceVersion,
+          aclTags: schema.documents.aclTags,
+          distance,
+        })
+        .from(schema.documentChunks)
+        .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+        .where(and(...documentSearchConditions(input, services.embedder.model)))
+        .orderBy(distance)
+        .limit(limit),
   );
   return rows.map((row) => ({
     ...mapSearchRowBase(row, input.workspaceId),
@@ -577,36 +741,47 @@ async function vectorSearchDocuments(
   }));
 }
 
-async function keywordSearchDocuments(db: Database, input: DocumentSearchInput, limit: number): Promise<CombinedSearchRow[]> {
+async function keywordSearchDocuments(
+  db: Database,
+  input: DocumentSearchInput,
+  limit: number,
+): Promise<CombinedSearchRow[]> {
   const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.documentChunks.text}), plainto_tsquery('simple', ${input.query}))`;
-  const rows = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
-    await scopedDb.select({
-      chunkId: schema.documentChunks.id,
-      documentId: schema.documentChunks.documentId,
-      baseId: schema.documentChunks.baseId,
-      fileId: schema.documentChunks.fileId,
-      title: schema.documents.title,
-      text: schema.documentChunks.text,
-      chunkIndex: schema.documentChunks.chunkIndex,
-      metadata: schema.documentChunks.metadata,
-      sourceKind: schema.documents.sourceKind,
-      sourceUri: schema.documents.sourceUri,
-      sourceExternalId: schema.documents.sourceExternalId,
-      sourceTitle: schema.documents.sourceTitle,
-      sourceAuthor: schema.documents.sourceAuthor,
-      sourceCreatedAt: schema.documents.sourceCreatedAt,
-      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
-      sourceVersion: schema.documents.sourceVersion,
-      aclTags: schema.documents.aclTags,
-      rank,
-    }).from(schema.documentChunks)
-      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-      .where(and(
-        ...documentSearchConditions(input),
-        sql`to_tsvector('simple', ${schema.documentChunks.text}) @@ plainto_tsquery('simple', ${input.query})`,
-      ))
-      .orderBy(desc(rank))
-      .limit(limit)
+  const rows = await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          chunkId: schema.documentChunks.id,
+          documentId: schema.documentChunks.documentId,
+          baseId: schema.documentChunks.baseId,
+          fileId: schema.documentChunks.fileId,
+          title: schema.documents.title,
+          text: schema.documentChunks.text,
+          chunkIndex: schema.documentChunks.chunkIndex,
+          metadata: schema.documentChunks.metadata,
+          sourceKind: schema.documents.sourceKind,
+          sourceUri: schema.documents.sourceUri,
+          sourceExternalId: schema.documents.sourceExternalId,
+          sourceTitle: schema.documents.sourceTitle,
+          sourceAuthor: schema.documents.sourceAuthor,
+          sourceCreatedAt: schema.documents.sourceCreatedAt,
+          sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+          sourceVersion: schema.documents.sourceVersion,
+          aclTags: schema.documents.aclTags,
+          rank,
+        })
+        .from(schema.documentChunks)
+        .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+        .where(
+          and(
+            ...documentSearchConditions(input),
+            sql`to_tsvector('simple', ${schema.documentChunks.text}) @@ plainto_tsquery('simple', ${input.query})`,
+          ),
+        )
+        .orderBy(desc(rank))
+        .limit(limit),
   );
   return rows.map((row) => ({
     ...mapSearchRowBase(row, input.workspaceId),
@@ -615,30 +790,45 @@ async function keywordSearchDocuments(db: Database, input: DocumentSearchInput, 
   }));
 }
 
-export async function getDocumentChunk(db: Database, workspaceId: string, chunkId: string): Promise<DocumentSearchResult | null> {
-  const [row] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-    await scopedDb.select({
-      chunkId: schema.documentChunks.id,
-      documentId: schema.documentChunks.documentId,
-      baseId: schema.documentChunks.baseId,
-      fileId: schema.documentChunks.fileId,
-      title: schema.documents.title,
-      text: schema.documentChunks.text,
-      chunkIndex: schema.documentChunks.chunkIndex,
-      metadata: schema.documentChunks.metadata,
-      sourceKind: schema.documents.sourceKind,
-      sourceUri: schema.documents.sourceUri,
-      sourceExternalId: schema.documents.sourceExternalId,
-      sourceTitle: schema.documents.sourceTitle,
-      sourceAuthor: schema.documents.sourceAuthor,
-      sourceCreatedAt: schema.documents.sourceCreatedAt,
-      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
-      sourceVersion: schema.documents.sourceVersion,
-      aclTags: schema.documents.aclTags,
-    }).from(schema.documentChunks)
-      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-      .where(and(eq(schema.documentChunks.workspaceId, workspaceId), eq(schema.documentChunks.id, chunkId), eq(schema.documents.status, "ready")))
-      .limit(1)
+export async function getDocumentChunk(
+  db: Database,
+  workspaceId: string,
+  chunkId: string,
+): Promise<DocumentSearchResult | null> {
+  const [row] = await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .select({
+          chunkId: schema.documentChunks.id,
+          documentId: schema.documentChunks.documentId,
+          baseId: schema.documentChunks.baseId,
+          fileId: schema.documentChunks.fileId,
+          title: schema.documents.title,
+          text: schema.documentChunks.text,
+          chunkIndex: schema.documentChunks.chunkIndex,
+          metadata: schema.documentChunks.metadata,
+          sourceKind: schema.documents.sourceKind,
+          sourceUri: schema.documents.sourceUri,
+          sourceExternalId: schema.documents.sourceExternalId,
+          sourceTitle: schema.documents.sourceTitle,
+          sourceAuthor: schema.documents.sourceAuthor,
+          sourceCreatedAt: schema.documents.sourceCreatedAt,
+          sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+          sourceVersion: schema.documents.sourceVersion,
+          aclTags: schema.documents.aclTags,
+        })
+        .from(schema.documentChunks)
+        .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+        .where(
+          and(
+            eq(schema.documentChunks.workspaceId, workspaceId),
+            eq(schema.documentChunks.id, chunkId),
+            eq(schema.documents.status, "ready"),
+          ),
+        )
+        .limit(1),
   );
   if (!row) return null;
   return {
@@ -650,7 +840,10 @@ export async function getDocumentChunk(db: Database, workspaceId: string, chunkI
   };
 }
 
-type SearchRowBase = Omit<DocumentSearchResult, "score" | "matchType" | "vectorScore" | "keywordScore">;
+type SearchRowBase = Omit<
+  DocumentSearchResult,
+  "score" | "matchType" | "vectorScore" | "keywordScore"
+>;
 type CombinedSearchRow = SearchRowBase & {
   vectorScore: number | null;
   keywordScore: number | null;
@@ -677,25 +870,28 @@ function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: s
   return conditions;
 }
 
-function mapSearchRowBase(row: {
-  chunkId: string;
-  documentId: string;
-  baseId: string;
-  fileId: string;
-  title: string;
-  text: string;
-  chunkIndex: number;
-  metadata: Record<string, unknown>;
-  sourceKind: string;
-  sourceUri: string | null;
-  sourceExternalId: string | null;
-  sourceTitle: string | null;
-  sourceAuthor: string | null;
-  sourceCreatedAt: Date | null;
-  sourceUpdatedAt: Date | null;
-  sourceVersion: string | null;
-  aclTags: string[];
-}, workspaceId: string): SearchRowBase {
+function mapSearchRowBase(
+  row: {
+    chunkId: string;
+    documentId: string;
+    baseId: string;
+    fileId: string;
+    title: string;
+    text: string;
+    chunkIndex: number;
+    metadata: Record<string, unknown>;
+    sourceKind: string;
+    sourceUri: string | null;
+    sourceExternalId: string | null;
+    sourceTitle: string | null;
+    sourceAuthor: string | null;
+    sourceCreatedAt: Date | null;
+    sourceUpdatedAt: Date | null;
+    sourceVersion: string | null;
+    aclTags: string[];
+  },
+  workspaceId: string,
+): SearchRowBase {
   return {
     chunkId: row.chunkId,
     workspaceId,
@@ -718,7 +914,10 @@ function mapSearchRowBase(row: {
   };
 }
 
-function mergeDocumentSearchRows(rows: CombinedSearchRow[], mode: DocumentSearchMode): DocumentSearchResult[] {
+function mergeDocumentSearchRows(
+  rows: CombinedSearchRow[],
+  mode: DocumentSearchMode,
+): DocumentSearchResult[] {
   const byChunk = new Map<string, CombinedSearchRow>();
   for (const row of rows) {
     const existing = byChunk.get(row.chunkId);
@@ -732,25 +931,29 @@ function mergeDocumentSearchRows(rows: CombinedSearchRow[], mode: DocumentSearch
       keywordScore: Math.max(existing.keywordScore ?? 0, row.keywordScore ?? 0) || null,
     });
   }
-  return [...byChunk.values()].map((row) => {
-    const vectorScore = row.vectorScore;
-    const keywordScore = row.keywordScore;
-    const matchType: DocumentSearchMode = vectorScore !== null && keywordScore !== null
-      ? "hybrid"
-      : vectorScore !== null
-        ? "vector"
-        : "keyword";
-    return {
-      ...row,
-      score: combinedSearchScore(mode, vectorScore, keywordScore, matchType),
-      matchType,
-    };
-  }).sort((left, right) =>
-    right.score - left.score
-    || (right.vectorScore ?? 0) - (left.vectorScore ?? 0)
-    || (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
-    || left.chunkIndex - right.chunkIndex
-  );
+  return [...byChunk.values()]
+    .map((row) => {
+      const vectorScore = row.vectorScore;
+      const keywordScore = row.keywordScore;
+      const matchType: DocumentSearchMode =
+        vectorScore !== null && keywordScore !== null
+          ? "hybrid"
+          : vectorScore !== null
+            ? "vector"
+            : "keyword";
+      return {
+        ...row,
+        score: combinedSearchScore(mode, vectorScore, keywordScore, matchType),
+        matchType,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        (right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
+        (right.keywordScore ?? 0) - (left.keywordScore ?? 0) ||
+        left.chunkIndex - right.chunkIndex,
+    );
 }
 
 function combinedSearchScore(
@@ -763,7 +966,9 @@ function combinedSearchScore(
   const keyword = keywordScore ?? 0;
   if (mode === "vector") return roundScore(vector);
   if (mode === "keyword") return roundScore(keyword);
-  return roundScore(Math.min(1, (0.65 * vector) + (0.35 * keyword) + (matchType === "hybrid" ? 0.1 : 0)));
+  return roundScore(
+    Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0)),
+  );
 }
 
 function normalizeKeywordScore(rank: number): number {
@@ -777,17 +982,31 @@ function roundScore(value: number): number {
   return Number(value.toFixed(6));
 }
 
-export async function parseDocumentBytes(bytes: Uint8Array, file: FileAsset, parser: DocumentParser = new LiteParseDocumentParser()): Promise<ParsedDocument> {
+export async function parseDocumentBytes(
+  bytes: Uint8Array,
+  file: FileAsset,
+  parser: DocumentParser = new LiteParseDocumentParser(),
+): Promise<ParsedDocument> {
   return await parser.parse(bytes, file);
 }
 
-export function chunkText(text: string, maxChars = DEFAULT_DOCUMENT_CHUNK_SIZE, overlapChars = DEFAULT_DOCUMENT_CHUNK_OVERLAP): string[] {
+export function chunkText(
+  text: string,
+  maxChars = DEFAULT_DOCUMENT_CHUNK_SIZE,
+  overlapChars = DEFAULT_DOCUMENT_CHUNK_OVERLAP,
+): string[] {
   if (overlapChars >= maxChars) {
     throw new Error("chunk overlap must be smaller than chunk size");
   }
-  const normalized = text.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").trim();
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .trim();
   if (!normalized) return [];
-  const paragraphs = normalized.split(/\n{2,}/).map((part) => part.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const paragraphs = normalized
+    .split(/\n{2,}/)
+    .map((part) => part.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
   const chunks: string[] = [];
   let current = "";
   for (const paragraph of paragraphs.length > 0 ? paragraphs : [normalized.replace(/\s+/g, " ")]) {
@@ -806,7 +1025,10 @@ export function chunkText(text: string, maxChars = DEFAULT_DOCUMENT_CHUNK_SIZE, 
   return chunks.map((chunk) => chunk.trim()).filter(Boolean);
 }
 
-export function deterministicEmbedding(text: string, dimensions = DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS): number[] {
+export function deterministicEmbedding(
+  text: string,
+  dimensions = DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+): number[] {
   const values = new Array(dimensions).fill(0);
   const tokens = text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
   for (const token of tokens) {
@@ -821,7 +1043,11 @@ export function deterministicEmbedding(text: string, dimensions = DEFAULT_DOCUME
   return values.map((value) => Number((value / norm).toFixed(6)));
 }
 
-async function requireReadyFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset> {
+async function requireReadyFile(
+  db: Database,
+  workspaceId: string,
+  fileId: string,
+): Promise<FileAsset> {
   const file = await requireFile(db, workspaceId, fileId);
   if (file.status !== "ready") {
     throw new Error(`File ${fileId} is ${file.status}`);
@@ -831,7 +1057,9 @@ async function requireReadyFile(db: Database, workspaceId: string, fileId: strin
 
 function validateEmbedding(values: number[], dimensions: number, model: string): number[] {
   if (values.length !== dimensions) {
-    throw new Error(`Embedding model ${model} returned ${values.length} dimensions; expected ${dimensions}`);
+    throw new Error(
+      `Embedding model ${model} returned ${values.length} dimensions; expected ${dimensions}`,
+    );
   }
   if (values.some((value) => !Number.isFinite(value))) {
     throw new Error(`Embedding model ${model} returned non-finite values`);
@@ -842,18 +1070,20 @@ function validateEmbedding(values: number[], dimensions: number, model: string):
 function isTextLike(file: FileAsset): boolean {
   const contentType = file.contentType.toLowerCase();
   const filename = file.filename.toLowerCase();
-  return contentType.startsWith("text/")
-    || contentType === "application/json"
-    || contentType === "application/xml"
-    || contentType === "application/x-yaml"
-    || filename.endsWith(".md")
-    || filename.endsWith(".markdown")
-    || filename.endsWith(".json")
-    || filename.endsWith(".yaml")
-    || filename.endsWith(".yml")
-    || filename.endsWith(".csv")
-    || filename.endsWith(".tsv")
-    || filename.endsWith(".xml");
+  return (
+    contentType.startsWith("text/") ||
+    contentType === "application/json" ||
+    contentType === "application/xml" ||
+    contentType === "application/x-yaml" ||
+    filename.endsWith(".md") ||
+    filename.endsWith(".markdown") ||
+    filename.endsWith(".json") ||
+    filename.endsWith(".yaml") ||
+    filename.endsWith(".yml") ||
+    filename.endsWith(".csv") ||
+    filename.endsWith(".tsv") ||
+    filename.endsWith(".xml")
+  );
 }
 
 function splitOversizedText(text: string, maxChars: number): string[] {
@@ -878,9 +1108,17 @@ function splitOversizedText(text: string, maxChars: number): string[] {
   return out;
 }
 
-function withOverlap(previous: string, overlapChars: number, next: string, maxChars: number): string {
+function withOverlap(
+  previous: string,
+  overlapChars: number,
+  next: string,
+  maxChars: number,
+): string {
   if (overlapChars <= 0) return next;
-  const overlap = previous.slice(Math.max(0, previous.length - overlapChars)).replace(/^\S+\s+/, "").trim();
+  const overlap = previous
+    .slice(Math.max(0, previous.length - overlapChars))
+    .replace(/^\S+\s+/, "")
+    .trim();
   const candidate = overlap ? `${overlap} ${next}` : next;
   return candidate.length <= maxChars ? candidate : next;
 }

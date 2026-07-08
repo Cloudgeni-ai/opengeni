@@ -41,11 +41,17 @@ describe("MessageTimeline — worker completions", () => {
         childCompletion: {
           childSessionId: CHILD_ID,
           status: "idle",
-          goal: { status: "completed", text: "verify login flow end-to-end", evidence: "128/128 green" },
+          goal: {
+            status: "completed",
+            text: "verify login flow end-to-end",
+            evidence: "128/128 green",
+          },
         },
       }),
     ];
-    const r = await renderComponent(<MessageTimeline events={events} onOpenSession={() => undefined} />);
+    const r = await renderComponent(
+      <MessageTimeline events={events} onOpenSession={() => undefined} />,
+    );
 
     expect(r.container.textContent).toContain("Worker completed");
     expect(r.container.textContent).toContain("verify login flow end-to-end");
@@ -53,7 +59,9 @@ describe("MessageTimeline — worker completions", () => {
     expect(r.container.textContent).not.toContain("All 128 assertions passed.");
     expect(r.container.textContent).not.toContain("128/128 green");
     // A "View session" affordance is present when a handler is wired.
-    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) => /View session/.test(b.textContent ?? ""));
+    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) =>
+      /View session/.test(b.textContent ?? ""),
+    );
     expect(viewButton).toBeDefined();
   });
 
@@ -68,8 +76,12 @@ describe("MessageTimeline — worker completions", () => {
         },
       }),
     ];
-    const r = await renderComponent(<MessageTimeline events={events} onOpenSession={() => undefined} />);
-    const toggle = Array.from(r.container.querySelectorAll("button")).find((b) => /Show details/.test(b.textContent ?? ""));
+    const r = await renderComponent(
+      <MessageTimeline events={events} onOpenSession={() => undefined} />,
+    );
+    const toggle = Array.from(r.container.querySelectorAll("button")).find((b) =>
+      /Show details/.test(b.textContent ?? ""),
+    );
     expect(toggle).toBeDefined();
     await act(async () => {
       toggle!.click();
@@ -84,11 +96,24 @@ describe("MessageTimeline — worker completions", () => {
     const events = [
       completionEvent({
         text: "done",
-        childCompletion: { childSessionId: CHILD_ID, status: "idle", goal: { status: "completed", text: "ship it" } },
+        childCompletion: {
+          childSessionId: CHILD_ID,
+          status: "idle",
+          goal: { status: "completed", text: "ship it" },
+        },
       }),
     ];
-    const r = await renderComponent(<MessageTimeline events={events} onOpenSession={(id) => { opened.push(id); }} />);
-    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) => /View session/.test(b.textContent ?? ""));
+    const r = await renderComponent(
+      <MessageTimeline
+        events={events}
+        onOpenSession={(id) => {
+          opened.push(id);
+        }}
+      />,
+    );
+    const viewButton = Array.from(r.container.querySelectorAll("button")).find((b) =>
+      /View session/.test(b.textContent ?? ""),
+    );
     await act(async () => {
       viewButton!.click();
       await flush();
@@ -100,7 +125,11 @@ describe("MessageTimeline — worker completions", () => {
     const failed = [
       completionEvent({
         text: "staging 503 for the whole window",
-        childCompletion: { childSessionId: CHILD_ID, status: "failed", goal: { status: "active", text: "capture a baseline" } },
+        childCompletion: {
+          childSessionId: CHILD_ID,
+          status: "failed",
+          goal: { status: "active", text: "capture a baseline" },
+        },
       }),
     ];
     const rf = await renderComponent(<MessageTimeline events={failed} />);
@@ -112,7 +141,11 @@ describe("MessageTimeline — worker completions", () => {
         childCompletion: {
           childSessionId: CHILD_ID,
           status: "idle",
-          goal: { status: "paused", text: "migrate billing", pausedReason: "missing GHCR credentials" },
+          goal: {
+            status: "paused",
+            text: "migrate billing",
+            pausedReason: "missing GHCR credentials",
+          },
         },
       }),
     ];

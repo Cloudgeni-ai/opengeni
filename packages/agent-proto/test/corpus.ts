@@ -9,13 +9,7 @@
  * Keep these in lock-step with the Rust corpus.
  */
 
-import {
-  Arch,
-  ControlRequest,
-  ControlResponse,
-  Hello,
-  Os,
-} from "../src/index";
+import { Arch, ControlRequest, ControlResponse, Hello, Os } from "../src/index";
 
 const textEncoder = new TextEncoder();
 

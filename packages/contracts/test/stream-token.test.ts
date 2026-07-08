@@ -53,7 +53,9 @@ describe("StreamTokenPayload sign/verify", () => {
     const [encoded, signature] = token.slice("ogs_".length).split(".");
     // Flip the workspaceId inside the payload but keep the original signature.
     const tamperedClaims = payload({ workspaceId: WORKSPACE_B });
-    const tamperedEncoded = Buffer.from(JSON.stringify(tamperedClaims), "utf8").toString("base64url");
+    const tamperedEncoded = Buffer.from(JSON.stringify(tamperedClaims), "utf8").toString(
+      "base64url",
+    );
     expect(tamperedEncoded).not.toBe(encoded);
     const tamperedToken = `ogs_${tamperedEncoded}.${signature}`;
     expect(await verifyStreamToken(SECRET, tamperedToken)).toBeNull();
@@ -128,7 +130,14 @@ describe("RelayTokenPayload sign/verify (the agent producer token, M8b)", () => 
 
 describe("sandbox-surfacing permissions", () => {
   test("stream:* + files:write + terminal:attach + toolspace:call are in the Permission enum", () => {
-    for (const perm of ["stream:view", "stream:control", "stream:acknowledge", "files:write", "terminal:attach", "toolspace:call"] as const) {
+    for (const perm of [
+      "stream:view",
+      "stream:control",
+      "stream:acknowledge",
+      "files:write",
+      "terminal:attach",
+      "toolspace:call",
+    ] as const) {
       expect(Permission.options).toContain(perm);
     }
   });

@@ -43,7 +43,9 @@ function makeComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   };
 }
 
-function makeAttachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFileAttachmentsResult {
+function makeAttachments(
+  overrides: Partial<UseFileAttachmentsResult> = {},
+): UseFileAttachmentsResult {
   return {
     attachments: [],
     readyResources: [],
@@ -58,7 +60,13 @@ function makeAttachments(overrides: Partial<UseFileAttachmentsResult> = {}): Use
 }
 
 function readyChip(name: string): FileAttachment {
-  return { id: crypto.randomUUID(), name, contentType: "image/png", sizeBytes: 2048, status: "ready" };
+  return {
+    id: crypto.randomUUID(),
+    name,
+    contentType: "image/png",
+    sizeBytes: 2048,
+    status: "ready",
+  };
 }
 
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
@@ -111,13 +119,19 @@ function fieldWrapper(container: HTMLElement): HTMLElement {
 describe("ChatComposer attachments", () => {
   test("with no attachments prop, no attach button renders (backward compatible)", async () => {
     const container = await mount(<ChatComposer composer={makeComposer()} />);
-    const attach = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Attach files");
+    const attach = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Attach files",
+    );
     expect(attach).toBeUndefined();
   });
 
   test("the attach button and hidden file input render in controlsStart when attachments is present", async () => {
-    const container = await mount(<ChatComposer composer={makeComposer()} attachments={makeAttachments()} />);
-    const attach = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Attach files");
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={makeAttachments()} />,
+    );
+    const attach = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Attach files",
+    );
     expect(attach).toBeTruthy();
     const input = container.querySelector('input[type="file"]');
     expect(input).toBeTruthy();
@@ -126,17 +140,29 @@ describe("ChatComposer attachments", () => {
 
   test("attachment chips render above the textarea when files are attached", async () => {
     const attachments = makeAttachments({ attachments: [readyChip("screenshot.png")] });
-    const container = await mount(<ChatComposer composer={makeComposer()} attachments={attachments} />);
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
     expect(container.textContent ?? "").toContain("screenshot.png");
     // The remove control for the chip is present.
-    const remove = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Remove screenshot.png");
+    const remove = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Remove screenshot.png",
+    );
     expect(remove).toBeTruthy();
   });
 
   test("while uploading, the send button is disabled and Enter does not call send", async () => {
     let sent = 0;
-    const composer = makeComposer({ send: async () => { sent += 1; return true; } });
-    const attachments = makeAttachments({ uploading: true, attachments: [{ ...readyChip("a.png"), status: "uploading" }] });
+    const composer = makeComposer({
+      send: async () => {
+        sent += 1;
+        return true;
+      },
+    });
+    const attachments = makeAttachments({
+      uploading: true,
+      attachments: [{ ...readyChip("a.png"), status: "uploading" }],
+    });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
 
     expect(sendButton(container)!.disabled).toBe(true);
@@ -144,7 +170,9 @@ describe("ChatComposer attachments", () => {
     const textarea = container.querySelector("textarea")!;
     await act(async () => {
       textarea.focus();
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
       await Promise.resolve();
     });
     expect(sent).toBe(0);
@@ -157,15 +185,26 @@ describe("ChatComposer attachments", () => {
 
   test("with uploads settled, Enter sends and the button is enabled", async () => {
     let sent = 0;
-    const composer = makeComposer({ send: async () => { sent += 1; return true; } });
-    const attachments = makeAttachments({ uploading: false, attachments: [readyChip("a.png")], readyResources: [{ kind: "file", fileId: "f1" }] });
+    const composer = makeComposer({
+      send: async () => {
+        sent += 1;
+        return true;
+      },
+    });
+    const attachments = makeAttachments({
+      uploading: false,
+      attachments: [readyChip("a.png")],
+      readyResources: [{ kind: "file", fileId: "f1" }],
+    });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
 
     expect(sendButton(container)!.disabled).toBe(false);
     const textarea = container.querySelector("textarea")!;
     await act(async () => {
       textarea.focus();
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
       await Promise.resolve();
     });
     expect(sent).toBe(1);
@@ -175,7 +214,10 @@ describe("ChatComposer attachments", () => {
     // A composer over an empty draft reports canSend=false; the ready attachment
     // is what makes the message sendable, and ChatComposer ORs it in.
     const composer = makeComposer({ value: "", canSend: false });
-    const attachments = makeAttachments({ attachments: [readyChip("a.png")], readyResources: [{ kind: "file", fileId: "f1" }] });
+    const attachments = makeAttachments({
+      attachments: [readyChip("a.png")],
+      readyResources: [{ kind: "file", fileId: "f1" }],
+    });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
     expect(sendButton(container)!.disabled).toBe(false);
   });
@@ -201,9 +243,19 @@ describe("ChatComposer attachments", () => {
   test("pasting into the textarea routes the clipboard through addFromPaste (and still calls host onPaste)", async () => {
     let pastedThroughHook = 0;
     let hostPaste = 0;
-    const attachments = makeAttachments({ addFromPaste: () => { pastedThroughHook += 1; } });
+    const attachments = makeAttachments({
+      addFromPaste: () => {
+        pastedThroughHook += 1;
+      },
+    });
     const container = await mount(
-      <ChatComposer composer={makeComposer()} attachments={attachments} onPaste={() => { hostPaste += 1; }} />,
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={attachments}
+        onPaste={() => {
+          hostPaste += 1;
+        }}
+      />,
     );
     const textarea = container.querySelector("textarea")!;
     await act(async () => {
@@ -218,8 +270,14 @@ describe("ChatComposer attachments", () => {
 
   test("dropping files onto the composer routes them through addFiles (the all-files picker path)", async () => {
     const added: File[][] = [];
-    const attachments = makeAttachments({ addFiles: (files) => { added.push([...files]); } });
-    const container = await mount(<ChatComposer composer={makeComposer()} attachments={attachments} />);
+    const attachments = makeAttachments({
+      addFiles: (files) => {
+        added.push([...files]);
+      },
+    });
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
     const field = fieldWrapper(container);
     const pdf = new File(["%PDF"], "doc.pdf", { type: "application/pdf" });
     await act(async () => {
@@ -234,8 +292,14 @@ describe("ChatComposer attachments", () => {
 
   test("a drag that carries no files is ignored (does not enqueue or show the overlay)", async () => {
     let addCalls = 0;
-    const attachments = makeAttachments({ addFiles: () => { addCalls += 1; } });
-    const container = await mount(<ChatComposer composer={makeComposer()} attachments={attachments} />);
+    const attachments = makeAttachments({
+      addFiles: () => {
+        addCalls += 1;
+      },
+    });
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
     const field = fieldWrapper(container);
     await act(async () => {
       // A text drag: types is ["text/plain"], no "Files" entry.
@@ -249,7 +313,9 @@ describe("ChatComposer attachments", () => {
 
   test("the drop overlay appears on a files-dragover and clears on drop", async () => {
     const attachments = makeAttachments();
-    const container = await mount(<ChatComposer composer={makeComposer()} attachments={attachments} />);
+    const container = await mount(
+      <ChatComposer composer={makeComposer()} attachments={attachments} />,
+    );
     const field = fieldWrapper(container);
     const img = new File(["x"], "shot.png", { type: "image/png" });
     await act(async () => {

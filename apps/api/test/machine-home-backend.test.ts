@@ -16,7 +16,12 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { testSettings, MemoryEventBus, acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  testSettings,
+  MemoryEventBus,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   createDb,
@@ -57,23 +62,41 @@ function busWithAgent(opts: { workspaceId: string; agentId: string }): MemoryEve
   bus.subscribeRequests(subjectFor(opts.workspaceId, opts.agentId), (payload) => {
     const req = ControlRequest.decode(payload);
     const op = req.op;
-    const res: ControlResponse = op?.$case === "ping"
-      ? { requestId: req.requestId, result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } } }
-      : { requestId: req.requestId, error: { code: ErrorCode.ERROR_CODE_UNSUPPORTED, message: "unsupported", retryable: false, detail: {} } };
+    const res: ControlResponse =
+      op?.$case === "ping"
+        ? {
+            requestId: req.requestId,
+            result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+          }
+        : {
+            requestId: req.requestId,
+            error: {
+              code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+              message: "unsupported",
+              retryable: false,
+              detail: {},
+            },
+          };
     return ControlResponse.encode(res).finish();
   });
   return bus;
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
 /** Seed an enrolled, online selfhosted machine (+ its sandbox record) in a fresh
  *  workspace, and return the id + a bus whose responder makes it probe online. */
-async function seedMachine(os: "linux" | "macos" | "windows" = "linux"): Promise<{ accountId: string; workspaceId: string; sandboxId: string; bus: MemoryEventBus }> {
+async function seedMachine(
+  os: "linux" | "macos" | "windows" = "linux",
+): Promise<{ accountId: string; workspaceId: string; sandboxId: string; bus: MemoryEventBus }> {
   const { accountId, workspaceId } = await freshWorkspace();
   const enrollment = await createEnrollment(db, {
     accountId,
@@ -95,7 +118,12 @@ async function seedMachine(os: "linux" | "macos" | "windows" = "linux"): Promise
     name: "my-laptop",
     enrollmentId: enrollment.id,
   });
-  return { accountId, workspaceId, sandboxId: sandbox.id, bus: busWithAgent({ workspaceId, agentId: enrollment.id }) };
+  return {
+    accountId,
+    workspaceId,
+    sandboxId: sandbox.id,
+    bus: busWithAgent({ workspaceId, agentId: enrollment.id }),
+  };
 }
 
 // A stub workflowClient — the create path only calls wakeSessionWorkflow.
@@ -121,9 +149,11 @@ function deps(bus: MemoryEventBus, settingsOverride?: typeof settings): ApiRoute
     githubStateSecret: "x",
     objectStorage: null,
     documentIndexer: { indexDocument: async () => {} },
-    getDocumentServices: () => ({} as never),
+    getDocumentServices: () => ({}) as never,
     resumeBoxById: async () => {
-      throw new Error("resumeBoxById should not be called in these tests (no box establish on the create path)");
+      throw new Error(
+        "resumeBoxById should not be called in these tests (no box establish on the create path)",
+      );
     },
   } as unknown as ApiRouteDeps;
 }
@@ -153,7 +183,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -161,10 +193,15 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
   test("a machine-targeted top-level create ⇒ home + first turn 'selfhosted'", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
-    const session = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "run this on my laptop",
-      targetSandboxId: sandboxId,
-    });
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "run this on my laptop",
+        targetSandboxId: sandboxId,
+      },
+    );
     // The home is labeled honestly — the machine, not the "modal" deployment default.
     expect(session.sandboxBackend).toBe("selfhosted");
     // A linux machine ⇒ sandbox_os 'linux' (matches the schema default here, but
@@ -179,10 +216,15 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
   test("a macOS machine target ⇒ home sandbox_os 'macos' (derived from the enrollment)", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine("macos");
-    const session = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "run this on my mac",
-      targetSandboxId: sandboxId,
-    });
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "run this on my mac",
+        targetSandboxId: sandboxId,
+      },
+    );
     // The OS axis reflects the targeted machine — NOT the 'linux' schema default.
     expect(session.sandboxBackend).toBe("selfhosted");
     expect(session.sandboxOs).toBe("macos");
@@ -205,10 +247,15 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       publicBaseUrl: "https://app.example",
     });
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine("macos");
-    const session = await createSessionForRequest(deps(bus, flagsOff), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "run this on my mac (flags off)",
-      targetSandboxId: sandboxId,
-    });
+    const session = await createSessionForRequest(
+      deps(bus, flagsOff),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "run this on my mac (flags off)",
+        targetSandboxId: sandboxId,
+      },
+    );
     expect(session.sandboxBackend).toBe("modal");
     expect(session.sandboxOs).toBe("linux");
   }, 60_000);
@@ -216,9 +263,14 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
   test("a normal top-level create (no machine target) ⇒ unchanged deployment default", async () => {
     if (!available) return;
     const { accountId, workspaceId, bus } = await seedMachine();
-    const session = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
-      initialMessage: "just a normal session",
-    });
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "just a normal session",
+      },
+    );
     // No target ⇒ the "modal" deployment default is untouched (only a machine
     // target flips the home to "selfhosted").
     expect(session.sandboxBackend).toBe("modal");

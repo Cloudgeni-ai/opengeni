@@ -1,10 +1,4 @@
-export type {
-  CommandContext,
-  CommandResult,
-  Notice,
-  SlashArg,
-  SlashCommand,
-} from "./types";
+export type { CommandContext, CommandResult, Notice, SlashArg, SlashCommand } from "./types";
 export {
   argHint,
   defaultCommands,

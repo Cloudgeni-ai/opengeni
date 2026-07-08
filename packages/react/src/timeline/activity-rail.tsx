@@ -1,4 +1,10 @@
-import { ArrowRightIcon, BotIcon, BrainCircuitIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
+import {
+  ArrowRightIcon,
+  BotIcon,
+  BrainCircuitIcon,
+  BrainIcon,
+  SquareTerminalIcon,
+} from "lucide-react";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
@@ -48,7 +54,14 @@ function familyOf(item: ActivityItem): string {
   return item.kind;
 }
 
-export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpenSession, onMemoryClick, bare, className }: ActivityRailProps) {
+export function ActivityRail({
+  items,
+  toolRegistry = defaultToolRegistry,
+  onOpenSession,
+  onMemoryClick,
+  bare,
+  className,
+}: ActivityRailProps) {
   const enter = useEntranceAnimation();
   return (
     <div
@@ -147,7 +160,13 @@ const MEMORY_KIND_LABEL: Record<string, string> = {
  * struck through above the new one. When the host opts in with `onMemoryClick`,
  * a quiet "View in memory" affordance deep-links to the LIVE record.
  */
-function MemoryRow({ item, onMemoryClick }: { item: MemoryItem; onMemoryClick?: ((memoryId: string) => void) | undefined }) {
+function MemoryRow({
+  item,
+  onMemoryClick,
+}: {
+  item: MemoryItem;
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
+}) {
   const corrected = item.variant === "corrected";
   const kindLabel = MEMORY_KIND_LABEL[item.memoryKind];
   // A supersede carries both the old text (`preview`) and the new (`replacementPreview`);
@@ -176,21 +195,29 @@ function MemoryRow({ item, onMemoryClick }: { item: MemoryItem; onMemoryClick?: 
         // The correction as a before → after: the old memory struck through and
         // dimmed, the new text in the ordinary body weight below it.
         <div className="flex flex-col gap-1.5">
-          <p className="whitespace-pre-wrap text-og-sm leading-6 text-og-fg-subtle line-through">{item.preview}</p>
-          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.replacementPreview}</p>
+          <p className="whitespace-pre-wrap text-og-sm leading-6 text-og-fg-subtle line-through">
+            {item.preview}
+          </p>
+          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
+            {item.replacementPreview}
+          </p>
         </div>
       ) : corrected && item.action === "updated" ? (
         // Edited in place, no replacement record: the memory is still live, so
         // show its current text — NOT the archived treatment.
         <>
-          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.preview}</p>
+          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
+            {item.preview}
+          </p>
           <BodyNote tone="muted">Updated in place.</BodyNote>
         </>
       ) : corrected ? (
         // A correction with no replacement (and not an in-place update) archived the record.
         <BodyNote tone="muted">Archived.</BodyNote>
       ) : (
-        <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.preview}</p>
+        <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">
+          {item.preview}
+        </p>
       )}
       {item.deduped ? <BodyNote tone="muted">Merged into an existing memory.</BodyNote> : null}
       {deepLink ? (
@@ -232,7 +259,9 @@ function SandboxRow({ item }: { item: SandboxItem }) {
   return (
     <ActivityDisclosure
       icon={<SquareTerminalIcon className="size-3.5" />}
-      iconTone={item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"}
+      iconTone={
+        item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"
+      }
       title={sandboxRowTitle(item)}
       running={item.status === "running"}
       failed={item.status === "failed"}
@@ -246,7 +275,13 @@ function SandboxRow({ item }: { item: SandboxItem }) {
 }
 
 /** Spawned/messaged worker sessions get a first-class card, not a tool row. */
-function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: ((sessionId: string) => void) | undefined }) {
+function WorkerRow({
+  item,
+  onOpenSession,
+}: {
+  item: WorkerItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+}) {
   const running = item.status === "running";
   const failed = item.status === "failed";
   const cancelled = item.status === "cancelled";
@@ -263,7 +298,13 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
         ? (() => {
             const verb = item.mode === "steer" ? "Steering" : "Stopping";
             const done = item.mode === "steer" ? "Worker steered" : "Worker stopped";
-            return running ? `${verb} worker` : failed ? "Worker interrupt failed" : cancelled ? "Worker interrupted" : done;
+            return running
+              ? `${verb} worker`
+              : failed
+                ? "Worker interrupt failed"
+                : cancelled
+                  ? "Worker interrupted"
+                  : done;
           })()
         : running
           ? "Messaging worker"
@@ -294,10 +335,19 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
       <div className="min-w-0 flex-1">
         {/* In-flight state is carried ONLY by the shimmering title (no detached
             pulse badge), matching every other running row in the rail. */}
-        <span className={cn("text-og-base font-medium", running ? "og-shimmer-text" : failed ? "text-og-status-failed" : "text-og-fg")}>
+        <span
+          className={cn(
+            "text-og-base font-medium",
+            running ? "og-shimmer-text" : failed ? "text-og-status-failed" : "text-og-fg",
+          )}
+        >
           {title}
         </span>
-        {item.prompt ? <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">{truncate(item.prompt, 140)}</p> : null}
+        {item.prompt ? (
+          <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">
+            {truncate(item.prompt, 140)}
+          </p>
+        ) : null}
       </div>
       {failed ? (
         <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">

@@ -15,14 +15,20 @@ describe("setRlsContext input guard", () => {
   }
 
   test("rejects an empty accountId before issuing any query", async () => {
-    await expect(setRlsContext(dbThatMustNotExecute(), { accountId: "" })).rejects.toThrow(/non-empty accountId/);
+    await expect(setRlsContext(dbThatMustNotExecute(), { accountId: "" })).rejects.toThrow(
+      /non-empty accountId/,
+    );
   });
 
   test("rejects a blank/whitespace accountId", async () => {
-    await expect(setRlsContext(dbThatMustNotExecute(), { accountId: "   " })).rejects.toThrow(/non-empty accountId/);
+    await expect(setRlsContext(dbThatMustNotExecute(), { accountId: "   " })).rejects.toThrow(
+      /non-empty accountId/,
+    );
   });
 
   test("rejects a non-string accountId", async () => {
-    await expect(setRlsContext(dbThatMustNotExecute(), { accountId: undefined as unknown as string })).rejects.toThrow();
+    await expect(
+      setRlsContext(dbThatMustNotExecute(), { accountId: undefined as unknown as string }),
+    ).rejects.toThrow();
   });
 });

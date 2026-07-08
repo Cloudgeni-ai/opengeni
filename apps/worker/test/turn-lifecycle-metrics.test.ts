@@ -43,15 +43,21 @@ describe("turn lifecycle metrics", () => {
     ]);
 
     let metrics = await observability.prometheusMetrics();
-    expect(metrics).toMatch(new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountA}"[^}]*\\} 25000`));
-    expect(metrics).toMatch(new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} -500`));
+    expect(metrics).toMatch(
+      new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountA}"[^}]*\\} 25000`),
+    );
+    expect(metrics).toMatch(
+      new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} -500`),
+    );
 
-    recordCreditBalanceGauges(observability, [
-      { accountId: accountA, balanceMicros: 10_000 },
-    ]);
+    recordCreditBalanceGauges(observability, [{ accountId: accountA, balanceMicros: 10_000 }]);
 
     metrics = await observability.prometheusMetrics();
-    expect(metrics).toMatch(new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountA}"[^}]*\\} 10000`));
-    expect(metrics).toMatch(new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`));
+    expect(metrics).toMatch(
+      new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountA}"[^}]*\\} 10000`),
+    );
+    expect(metrics).toMatch(
+      new RegExp(`opengeni_credit_balance_micros\\{[^}]*account_id="${accountB}"[^}]*\\} 0`),
+    );
   });
 });

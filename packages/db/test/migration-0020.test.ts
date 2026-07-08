@@ -64,7 +64,24 @@ describe("migration 0020 (session_recordings)", () => {
         WHERE table_name = 'session_recordings'
         ORDER BY column_name`;
       const colNames = new Set(cols.map((c) => c.column_name));
-      for (const name of ["id", "account_id", "workspace_id", "session_id", "turn_id", "state", "mode", "codec", "storage_key", "size_bytes", "duration_seconds", "width", "height", "reason", "created_at", "finalized_at"]) {
+      for (const name of [
+        "id",
+        "account_id",
+        "workspace_id",
+        "session_id",
+        "turn_id",
+        "state",
+        "mode",
+        "codec",
+        "storage_key",
+        "size_bytes",
+        "duration_seconds",
+        "width",
+        "height",
+        "reason",
+        "created_at",
+        "finalized_at",
+      ]) {
         expect(colNames.has(name), `missing column ${name}`).toBe(true);
       }
 
@@ -74,19 +91,31 @@ describe("migration 0020 (session_recordings)", () => {
       expect(idx.map((r) => r.indexname)).toContain("session_recordings_session_idx");
 
       // --- RLS is enabled + forced.
-      const rls = (await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
-        SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'session_recordings'`)[0]!;
+      const rls = (
+        await sql<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>`
+        SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'session_recordings'`
+      )[0]!;
       expect(rls.relrowsecurity).toBe(true);
       expect(rls.relforcerowsecurity).toBe(true);
 
       // --- Seed the FK chain.
-      const accountId = (await sql<{ id: string }[]>`INSERT INTO "managed_accounts" ("name") VALUES ('acct') RETURNING "id"`)[0]!.id;
-      const workspaceId = (await sql<{ id: string }[]>`INSERT INTO "workspaces" ("account_id", "name") VALUES (${accountId}, 'ws') RETURNING "id"`)[0]!.id;
+      const accountId = (
+        await sql<
+          { id: string }[]
+        >`INSERT INTO "managed_accounts" ("name") VALUES ('acct') RETURNING "id"`
+      )[0]!.id;
+      const workspaceId = (
+        await sql<
+          { id: string }[]
+        >`INSERT INTO "workspaces" ("account_id", "name") VALUES (${accountId}, 'ws') RETURNING "id"`
+      )[0]!.id;
       // sandbox_group_id is app-generated (== id for a singleton group), NOT NULL
       // since 0018 — supply both from one uuid.
-      const sessionId = (await sql<{ id: string }[]>`
+      const sessionId = (
+        await sql<{ id: string }[]>`
         INSERT INTO "sessions" ("id", "account_id", "workspace_id", "status", "sandbox_backend", "initial_message", "model", "sandbox_group_id")
-        VALUES (gen_random_uuid(), ${accountId}, ${workspaceId}, 'idle', 'modal', 'hi', 'gpt-5', gen_random_uuid()) RETURNING "id"`)[0]!.id;
+        VALUES (gen_random_uuid(), ${accountId}, ${workspaceId}, 'idle', 'modal', 'hi', 'gpt-5', gen_random_uuid()) RETURNING "id"`
+      )[0]!.id;
 
       // --- The CHECK constraints reject a bad state/mode/codec. Each negative
       // insert runs on its OWN short-lived connection so a failed statement can't
@@ -103,20 +132,28 @@ describe("migration 0020 (session_recordings)", () => {
         }
         expect(threw).toBe(true);
       };
-      await expectRejects((s) => s`
+      await expectRejects(
+        (s) => s`
         INSERT INTO "session_recordings" ("account_id","workspace_id","session_id","state","mode","codec","width","height")
-        VALUES (${accountId},${workspaceId},${sessionId},'bogus','on-turn','h264-mp4',1280,800)`);
-      await expectRejects((s) => s`
+        VALUES (${accountId},${workspaceId},${sessionId},'bogus','on-turn','h264-mp4',1280,800)`,
+      );
+      await expectRejects(
+        (s) => s`
         INSERT INTO "session_recordings" ("account_id","workspace_id","session_id","state","mode","codec","width","height")
-        VALUES (${accountId},${workspaceId},${sessionId},'recording','on-turn','av1',1280,800)`);
+        VALUES (${accountId},${workspaceId},${sessionId},'recording','on-turn','av1',1280,800)`,
+      );
 
       // --- The lifecycle: insert recording → finalizing → available (in place).
-      const recId = (await sql<{ id: string }[]>`
+      const recId = (
+        await sql<{ id: string }[]>`
         INSERT INTO "session_recordings" ("account_id","workspace_id","session_id","state","mode","codec","width","height")
-        VALUES (${accountId},${workspaceId},${sessionId},'recording','on-turn','h264-mp4',1280,800) RETURNING "id"`)[0]!.id;
+        VALUES (${accountId},${workspaceId},${sessionId},'recording','on-turn','h264-mp4',1280,800) RETURNING "id"`
+      )[0]!.id;
       await sql`UPDATE "session_recordings" SET state='finalizing' WHERE id=${recId}`;
       await sql`UPDATE "session_recordings" SET state='available', storage_key='recordings/x/y/z.mp4', size_bytes=4242, duration_seconds=12.5, finalized_at=now() WHERE id=${recId}`;
-      const rows = await sql<{ state: string; storage_key: string; size_bytes: string; duration_seconds: number }[]>`
+      const rows = await sql<
+        { state: string; storage_key: string; size_bytes: string; duration_seconds: number }[]
+      >`
         SELECT state, storage_key, size_bytes, duration_seconds FROM "session_recordings" WHERE id=${recId}`;
       expect(rows.length).toBe(1); // in-place, no duplicate
       expect(rows[0]!.state).toBe("available");
@@ -125,7 +162,9 @@ describe("migration 0020 (session_recordings)", () => {
 
       // --- Idempotent: re-running the whole chain is a no-op.
       await migrate(DB_URL);
-      const still = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM "session_recordings" WHERE id=${recId}`;
+      const still = await sql<
+        { n: number }[]
+      >`SELECT count(*)::int AS n FROM "session_recordings" WHERE id=${recId}`;
       expect(still[0]!.n).toBe(1);
     } finally {
       await sql.end();

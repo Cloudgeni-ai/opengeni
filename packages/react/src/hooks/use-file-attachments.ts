@@ -61,7 +61,9 @@ const isImage = (file: File): boolean => file.type.startsWith("image/");
  * `resources`. Workspace-scoped, so it resolves both client and workspace from
  * the {@link OpenGeniProvider} (or a per-call `{ client, workspaceId }`).
  */
-export function useFileAttachments(options: UseFileAttachmentsOptions = {}): UseFileAttachmentsResult {
+export function useFileAttachments(
+  options: UseFileAttachmentsOptions = {},
+): UseFileAttachmentsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const pasteFilter = options.pasteFilter ?? isImage;
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -72,60 +74,102 @@ export function useFileAttachments(options: UseFileAttachmentsOptions = {}): Use
   // Run (or re-run) the upload for one already-tracked attachment id. Sets it
   // back to `uploading`, then resolves to `ready` (with the asset) or `failed`
   // (with the error message).
-  const startUpload = useCallback((id: string, file: File) => {
-    void client.uploadFile(workspaceId, {
-      filename: file.name || "file",
-      contentType: file.type || "application/octet-stream",
-      data: file,
-    }).then((asset) => {
-      setAttachments((current) => current.map((attachment) => attachment.id === id
-        ? { ...attachment, status: "ready", file: asset, name: asset.filename, contentType: asset.contentType, sizeBytes: asset.sizeBytes, error: undefined }
-        : attachment));
-    }).catch((error: unknown) => {
-      setAttachments((current) => current.map((attachment) => attachment.id === id
-        ? { ...attachment, status: "failed", error: error instanceof Error ? error.message : String(error) }
-        : attachment));
-    });
-  }, [client, workspaceId]);
+  const startUpload = useCallback(
+    (id: string, file: File) => {
+      void client
+        .uploadFile(workspaceId, {
+          filename: file.name || "file",
+          contentType: file.type || "application/octet-stream",
+          data: file,
+        })
+        .then((asset) => {
+          setAttachments((current) =>
+            current.map((attachment) =>
+              attachment.id === id
+                ? {
+                    ...attachment,
+                    status: "ready",
+                    file: asset,
+                    name: asset.filename,
+                    contentType: asset.contentType,
+                    sizeBytes: asset.sizeBytes,
+                    error: undefined,
+                  }
+                : attachment,
+            ),
+          );
+        })
+        .catch((error: unknown) => {
+          setAttachments((current) =>
+            current.map((attachment) =>
+              attachment.id === id
+                ? {
+                    ...attachment,
+                    status: "failed",
+                    error: error instanceof Error ? error.message : String(error),
+                  }
+                : attachment,
+            ),
+          );
+        });
+    },
+    [client, workspaceId],
+  );
 
-  const addFiles = useCallback((files: Iterable<File>) => {
-    for (const file of files) {
-      const id = crypto.randomUUID();
-      sources.current.set(id, file);
-      const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
-      setAttachments((current) => [...current, {
-        id,
-        name: file.name || "image",
-        contentType: file.type || "application/octet-stream",
-        sizeBytes: file.size,
-        status: "uploading",
-        ...(previewUrl ? { previewUrl } : {}),
-      }]);
+  const addFiles = useCallback(
+    (files: Iterable<File>) => {
+      for (const file of files) {
+        const id = crypto.randomUUID();
+        sources.current.set(id, file);
+        const previewUrl = isImage(file) ? URL.createObjectURL(file) : undefined;
+        setAttachments((current) => [
+          ...current,
+          {
+            id,
+            name: file.name || "image",
+            contentType: file.type || "application/octet-stream",
+            sizeBytes: file.size,
+            status: "uploading",
+            ...(previewUrl ? { previewUrl } : {}),
+          },
+        ]);
+        startUpload(id, file);
+      }
+    },
+    [startUpload],
+  );
+
+  const retry = useCallback(
+    (id: string) => {
+      const file = sources.current.get(id);
+      if (!file) {
+        return;
+      }
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.id === id
+            ? { ...attachment, status: "uploading", error: undefined }
+            : attachment,
+        ),
+      );
       startUpload(id, file);
-    }
-  }, [startUpload]);
+    },
+    [startUpload],
+  );
 
-  const retry = useCallback((id: string) => {
-    const file = sources.current.get(id);
-    if (!file) {
-      return;
-    }
-    setAttachments((current) => current.map((attachment) => attachment.id === id
-      ? { ...attachment, status: "uploading", error: undefined }
-      : attachment));
-    startUpload(id, file);
-  }, [startUpload]);
-
-  const addFromPaste = useCallback((event: { clipboardData: DataTransfer | null }) => {
-    const clipboardFiles = event.clipboardData?.files;
-    if (!clipboardFiles) {
-      return;
-    }
-    const files = [...clipboardFiles].filter(pasteFilter);
-    if (files.length > 0) {
-      addFiles(files);
-    }
-  }, [addFiles, pasteFilter]);
+  const addFromPaste = useCallback(
+    (event: { clipboardData: DataTransfer | null }) => {
+      const clipboardFiles = event.clipboardData?.files;
+      if (!clipboardFiles) {
+        return;
+      }
+      const files = [...clipboardFiles].filter(pasteFilter);
+      if (files.length > 0) {
+        addFiles(files);
+      }
+    },
+    [addFiles, pasteFilter],
+  );
 
   const remove = useCallback((id: string) => {
     sources.current.delete(id);
@@ -152,9 +196,11 @@ export function useFileAttachments(options: UseFileAttachmentsOptions = {}): Use
 
   return {
     attachments,
-    readyResources: attachments.flatMap((attachment): FileResourceRef[] => attachment.status === "ready" && attachment.file
-      ? [{ kind: "file", fileId: attachment.file.id }]
-      : []),
+    readyResources: attachments.flatMap((attachment): FileResourceRef[] =>
+      attachment.status === "ready" && attachment.file
+        ? [{ kind: "file", fileId: attachment.file.id }]
+        : [],
+    ),
     uploading: attachments.some((attachment) => attachment.status === "uploading"),
     addFiles,
     addFromPaste,

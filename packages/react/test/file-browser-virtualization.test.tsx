@@ -11,12 +11,23 @@ import type { FileTreeNode, UseSandboxFilesResult } from "../src/hooks/use-sandb
 
 registerDom();
 
-function filesResult(tree: FileTreeNode[], overrides: Partial<UseSandboxFilesResult> = {}): UseSandboxFilesResult {
+function filesResult(
+  tree: FileTreeNode[],
+  overrides: Partial<UseSandboxFilesResult> = {},
+): UseSandboxFilesResult {
   return {
     tree,
     expand: async () => {},
     expandingPaths: new Set<string>(),
-    readFile: async () => ({ path: "", encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 }),
+    readFile: async () => ({
+      path: "",
+      encoding: "utf8",
+      content: "",
+      sizeBytes: 0,
+      truncated: false,
+      isBinary: false,
+      revision: 0,
+    }),
     writeFile: async () => ({ path: "", sizeBytes: 0, revision: 0 }),
     createFile: async () => {},
     createDir: async () => {},
@@ -57,8 +68,8 @@ describe("FileBrowser virtualization", () => {
     );
     await flush();
     // Expand the residue dir (its row is a button).
-    const dirButton = Array.from(r.container.querySelectorAll('[role="treeitem"] button')).find((b) =>
-      b.textContent?.includes("node_modules"),
+    const dirButton = Array.from(r.container.querySelectorAll('[role="treeitem"] button')).find(
+      (b) => b.textContent?.includes("node_modules"),
     ) as HTMLButtonElement | undefined;
     expect(dirButton).toBeTruthy();
     dirButton!.click();
@@ -68,12 +79,16 @@ describe("FileBrowser virtualization", () => {
   });
 
   test("a warm (live) truncated dir does NOT show the cold residue row", async () => {
-    const tree: FileTreeNode[] = [{ path: "node_modules", name: "node_modules", kind: "dir", truncated: true }];
+    const tree: FileTreeNode[] = [
+      { path: "node_modules", name: "node_modules", kind: "dir", truncated: true },
+    ];
     const r = await renderComponent(
       <FileBrowser result={filesResult(tree, { source: "live" })} editable={false} />,
     );
     await flush();
-    const dirButton = r.container.querySelector('[role="treeitem"] button') as HTMLButtonElement | null;
+    const dirButton = r.container.querySelector(
+      '[role="treeitem"] button',
+    ) as HTMLButtonElement | null;
     dirButton?.click();
     await flush();
     expect(r.container.textContent).not.toContain("contents on machine");

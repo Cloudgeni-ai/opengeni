@@ -22,7 +22,10 @@ describe("screenshotDataUrl — every computer-use transport shape", () => {
   });
 
   test("function-image: Buffer-JSON bytes", () => {
-    const out = { type: "image", image: { data: { type: "Buffer", data: BYTES }, mediaType: "image/png" } };
+    const out = {
+      type: "image",
+      image: { data: { type: "Buffer", data: BYTES }, mediaType: "image/png" },
+    };
     expect(screenshotDataUrl(out)).toBe(`data:image/png;base64,${B64}`);
   });
 
@@ -33,8 +36,12 @@ describe("screenshotDataUrl — every computer-use transport shape", () => {
   });
 
   test("agents-core normalized input_image content item (string and {url})", () => {
-    expect(screenshotDataUrl({ type: "input_image", image_url: "data:image/png;base64,AA" })).toBe("data:image/png;base64,AA");
-    expect(screenshotDataUrl([{ type: "input_image", image_url: { url: "data:image/png;base64,BB" } }])).toBe("data:image/png;base64,BB");
+    expect(screenshotDataUrl({ type: "input_image", image_url: "data:image/png;base64,AA" })).toBe(
+      "data:image/png;base64,AA",
+    );
+    expect(
+      screenshotDataUrl([{ type: "input_image", image_url: { url: "data:image/png;base64,BB" } }]),
+    ).toBe("data:image/png;base64,BB");
   });
 
   test("JSON-stringified structured output", () => {

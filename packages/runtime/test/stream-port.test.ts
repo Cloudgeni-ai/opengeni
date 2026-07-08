@@ -46,7 +46,12 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
   });
 
   test("Blaxel/Daytona provider token query is PRESERVED (it is the provider scope)", () => {
-    const url = buildStreamUrl({ host: "h.blaxel.dev", port: 443, tls: true, query: "bl_preview_token=abc123" });
+    const url = buildStreamUrl({
+      host: "h.blaxel.dev",
+      port: 443,
+      tls: true,
+      query: "bl_preview_token=abc123",
+    });
     expect(url).toBe("wss://h.blaxel.dev/?bl_preview_token=abc123");
   });
 
@@ -56,8 +61,12 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
   });
 
   test("a malformed endpoint (no host/port) throws StreamPortUnavailableError", () => {
-    expect(() => buildStreamUrl({ host: "", port: 6080 } as ExposedPortEndpoint)).toThrow(StreamPortUnavailableError);
-    expect(() => buildStreamUrl({ host: "h" } as unknown as ExposedPortEndpoint)).toThrow(StreamPortUnavailableError);
+    expect(() => buildStreamUrl({ host: "", port: 6080 } as ExposedPortEndpoint)).toThrow(
+      StreamPortUnavailableError,
+    );
+    expect(() => buildStreamUrl({ host: "h" } as unknown as ExposedPortEndpoint)).toThrow(
+      StreamPortUnavailableError,
+    );
   });
 
   test("the selfhosted relay path (/stream) + the channel-key routing query (M8b)", () => {
@@ -75,7 +84,9 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
   });
 
   test("a non-leading-slash path is normalized", () => {
-    expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe("wss://h:6080/stream");
+    expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe(
+      "wss://h:6080/stream",
+    );
   });
 });
 
@@ -111,8 +122,14 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
   });
 
   test("the minted token is fenced to the epoch (a different epoch token does not share claims)", async () => {
-    const a = await exposeStreamPort(fakeSession({ host: "h", port: 443, tls: true }), { ...baseInput, leaseEpoch: 1 });
-    const b = await exposeStreamPort(fakeSession({ host: "h", port: 443, tls: true }), { ...baseInput, leaseEpoch: 2 });
+    const a = await exposeStreamPort(fakeSession({ host: "h", port: 443, tls: true }), {
+      ...baseInput,
+      leaseEpoch: 1,
+    });
+    const b = await exposeStreamPort(fakeSession({ host: "h", port: 443, tls: true }), {
+      ...baseInput,
+      leaseEpoch: 2,
+    });
     const ca = await verifyStreamToken(SECRET, a.token);
     const cb = await verifyStreamToken(SECRET, b.token);
     expect(ca?.leaseEpoch).toBe(1);
@@ -120,14 +137,18 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
   });
 
   test("a session with no resolveExposedPort throws StreamPortUnavailableError (caller degrades to transport:null)", async () => {
-    await expect(exposeStreamPort({}, baseInput)).rejects.toBeInstanceOf(StreamPortUnavailableError);
+    await expect(exposeStreamPort({}, baseInput)).rejects.toBeInstanceOf(
+      StreamPortUnavailableError,
+    );
   });
 
   test("a provider tunnel-resolution failure surfaces as StreamPortUnavailableError", async () => {
     const session = fakeSession(async () => {
       throw new Error("modal tunnels() timed out");
     });
-    await expect(exposeStreamPort(session, baseInput)).rejects.toBeInstanceOf(StreamPortUnavailableError);
+    await expect(exposeStreamPort(session, baseInput)).rejects.toBeInstanceOf(
+      StreamPortUnavailableError,
+    );
   });
 
   test("a custom resolution is echoed back", async () => {

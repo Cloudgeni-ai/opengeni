@@ -30,7 +30,13 @@ export function ToolDiff({ files }: { files: GitFileDiff[] }) {
   );
 }
 
-function LayoutToggle({ layout, onChange }: { layout: "unified" | "split"; onChange: (next: "unified" | "split") => void }) {
+function LayoutToggle({
+  layout,
+  onChange,
+}: {
+  layout: "unified" | "split";
+  onChange: (next: "unified" | "split") => void;
+}) {
   return (
     <div className="inline-flex items-center gap-px rounded-og-xs border border-og-border p-px">
       {(["unified", "split"] as const).map((value) => (
@@ -40,7 +46,9 @@ function LayoutToggle({ layout, onChange }: { layout: "unified" | "split"; onCha
           onClick={() => onChange(value)}
           className={cn(
             "rounded-og-xs px-2 py-[3px] text-og-xs font-medium capitalize transition-colors",
-            layout === value ? "bg-og-surface-2 text-og-fg" : "text-og-fg-subtle hover:text-og-fg-muted",
+            layout === value
+              ? "bg-og-surface-2 text-og-fg"
+              : "text-og-fg-subtle hover:text-og-fg-muted",
           )}
         >
           {value}

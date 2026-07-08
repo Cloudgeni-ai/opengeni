@@ -5,7 +5,13 @@
 // active session (from the URL) is highlighted with an accent bar.
 import { useWorkspaceSessions } from "@opengeni/react";
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronRightIcon, EllipsisIcon, MessagesSquareIcon, PencilIcon, PlusIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  EllipsisIcon,
+  MessagesSquareIcon,
+  PencilIcon,
+  PlusIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
@@ -42,7 +48,10 @@ export function SessionList() {
   const context = useAppContext();
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
-  const { sessions, loading, error, refresh } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
+  const { sessions, loading, error, refresh } = useWorkspaceSessions({
+    limit: 50,
+    pollIntervalMs: 15_000,
+  });
 
   const activeSessionId = useRouterState({
     select: (state): string | null => {
@@ -116,24 +125,27 @@ export function SessionList() {
     }
   }, [activeSessionId, flat]);
 
-  const onKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (flat.length === 0) {
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      setFocusIndex((current) => Math.min(flat.length - 1, current + 1));
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setFocusIndex((current) => Math.max(0, current <= 0 ? 0 : current - 1));
-    } else if (event.key === "Enter" && focusIndex >= 0 && focusIndex < flat.length) {
-      event.preventDefault();
-      const session = flat[focusIndex];
-      if (session) {
-        rail.openSession(session.id);
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (flat.length === 0) {
+        return;
       }
-    }
-  }, [flat, focusIndex, rail]);
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setFocusIndex((current) => Math.min(flat.length - 1, current + 1));
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setFocusIndex((current) => Math.max(0, current <= 0 ? 0 : current - 1));
+      } else if (event.key === "Enter" && focusIndex >= 0 && focusIndex < flat.length) {
+        event.preventDefault();
+        const session = flat[focusIndex];
+        if (session) {
+          rail.openSession(session.id);
+        }
+      }
+    },
+    [flat, focusIndex, rail],
+  );
 
   // Scroll the keyboard-focused row into view.
   useEffect(() => {
@@ -180,7 +192,11 @@ export function SessionList() {
         ) : error && sessions.length === 0 ? (
           <div className="px-2 py-3 text-xs text-fg-subtle">
             Session history is unavailable.{" "}
-            <button type="button" className="underline hover:text-fg" onClick={() => void refresh()}>
+            <button
+              type="button"
+              className="underline hover:text-fg"
+              onClick={() => void refresh()}
+            >
               Retry
             </button>
           </div>
@@ -286,7 +302,8 @@ function SessionTreeRow(props: {
   // OPEN session must never vanish from the rail: a collapsed ancestor hiding
   // the URL-active session carries the active accent in its place, file-tree
   // style, so orientation survives any collapse state.
-  const representsHiddenActive = !isExpanded && childCount > 0 && subtreeContains(node, props.activeSessionId);
+  const representsHiddenActive =
+    !isExpanded && childCount > 0 && subtreeContains(node, props.activeSessionId);
   return (
     <>
       <SessionRow
@@ -338,7 +355,8 @@ function SessionRow(props: {
   onSelect: (sessionId: string) => void;
   onRename: RenameFn;
 }) {
-  const title = props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
+  const title =
+    props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
   const rename = useInlineRename(props.session, props.onRename);
   const hasChildren = props.childCount > 0;
   // Indent nested rows; the leading affordance is a chevron for parents, else a
@@ -350,9 +368,7 @@ function SessionRow(props: {
   const rowClassName = cn(
     "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-10",
     "hover:bg-surface-2",
-    props.active
-      ? "bg-surface-3 font-medium text-fg"
-      : "text-fg-muted",
+    props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
     props.focused && !props.active ? "bg-surface-2/60" : "",
   );
 
@@ -369,7 +385,9 @@ function SessionRow(props: {
           }}
           className="inline-flex size-4 items-center justify-center rounded text-fg-subtle outline-none hover:text-fg focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <ChevronRightIcon className={cn("size-3 transition-transform", props.expanded && "rotate-90")} />
+          <ChevronRightIcon
+            className={cn("size-3 transition-transform", props.expanded && "rotate-90")}
+          />
         </button>
       ) : (
         <span className="size-4" />
@@ -498,7 +516,11 @@ function RowRenameMenu({ onRename }: { onRename: () => void }) {
           <EllipsisIcon className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-40" onClick={(event) => event.stopPropagation()}>
+      <DropdownMenuContent
+        align="end"
+        className="min-w-40"
+        onClick={(event) => event.stopPropagation()}
+      >
         <DropdownMenuItem
           onSelect={onRename}
           // The menu item lives inside the row; stop the synthetic click from
@@ -572,11 +594,17 @@ export function CollapsedSessionsButton() {
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label={failed ? "Sessions (history unavailable)" : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`}
+            aria-label={
+              failed
+                ? "Sessions (history unavailable)"
+                : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`
+            }
             onClick={() => rail.setCollapsed(false)}
             className="relative text-fg-muted hover:text-fg"
           >
-            <MessagesSquareIcon className={cn("size-4", firstLoad && "motion-safe:animate-pulse")} />
+            <MessagesSquareIcon
+              className={cn("size-4", firstLoad && "motion-safe:animate-pulse")}
+            />
             {failed ? (
               <span className="absolute -right-0.5 -top-0.5 flex size-2 rounded-full bg-status-failed" />
             ) : runningCount > 0 ? (

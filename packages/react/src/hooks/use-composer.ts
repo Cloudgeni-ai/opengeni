@@ -47,7 +47,10 @@ export type ComposerState = {
  * more hostile than losing a typed message); each send carries a generated
  * `clientEventId` so retries stay idempotent server-side.
  */
-export function useComposer(sessionId: string | null | undefined, options: UseComposerOptions = {}): ComposerState {
+export function useComposer(
+  sessionId: string | null | undefined,
+  options: UseComposerOptions = {},
+): ComposerState {
   const { client, workspaceId } = useOpenGeni(options);
   const defaultMode = options.defaultMode ?? "queue";
   const [value, setValue] = useState("");
@@ -197,7 +200,11 @@ export function composeSendInput(
 }
 
 /** Submit on plain Enter; Shift+Enter inserts a newline. Exported for tests. */
-export function shouldSubmitOnKey(event: { key: string; shiftKey: boolean; nativeEvent?: { isComposing?: boolean } }): boolean {
+export function shouldSubmitOnKey(event: {
+  key: string;
+  shiftKey: boolean;
+  nativeEvent?: { isComposing?: boolean };
+}): boolean {
   if (event.key !== "Enter" || event.shiftKey) {
     return false;
   }

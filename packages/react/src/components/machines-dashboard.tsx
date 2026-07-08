@@ -143,7 +143,10 @@ export function MachinesDashboard({
       {loading && machines.length === 0 ? (
         <div data-machines-loading className="grid gap-3 sm:grid-cols-2">
           {[0, 1].map((i) => (
-            <div key={i} className="h-36 animate-og-pulse rounded-og-lg border border-og-border bg-og-surface-1" />
+            <div
+              key={i}
+              className="h-36 animate-og-pulse rounded-og-lg border border-og-border bg-og-surface-1"
+            />
           ))}
         </div>
       ) : isEmpty ? (
@@ -153,7 +156,10 @@ export function MachinesDashboard({
           {machines.map((machine) => (
             <MachineCard
               key={machine.sandboxId}
-              machine={{ ...machine, active: machine.active || machine.sandboxId === activeSandboxId }}
+              machine={{
+                ...machine,
+                active: machine.active || machine.sandboxId === activeSandboxId,
+              }}
               onAttach={onAttach}
               attaching={attachingSandboxId === machine.sandboxId}
             />

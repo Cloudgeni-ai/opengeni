@@ -39,30 +39,40 @@ describe("contracts", () => {
   test("accepts MCP tool refs on create session", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }],
+      tools: [
+        { kind: "mcp", id: "docs" },
+        { kind: "mcp", id: "context7", optional: true },
+      ],
     });
-    expect(payload.tools).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }]);
+    expect(payload.tools).toEqual([
+      { kind: "mcp", id: "docs" },
+      { kind: "mcp", id: "context7", optional: true },
+    ]);
   });
 
   test("accepts per-session MCP servers and credential rotations without response value echo", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
       tools: [{ kind: "mcp", id: "crm" }],
-      mcpServers: [{
-        id: "crm",
-        name: "CRM MCP",
-        url: "https://crm.example/mcp",
-        allowedTools: ["workouts.list"],
-        timeoutMs: 1500,
-        cacheToolsList: false,
-        headers: { Authorization: "Bearer create-secret" },
-      }],
+      mcpServers: [
+        {
+          id: "crm",
+          name: "CRM MCP",
+          url: "https://crm.example/mcp",
+          allowedTools: ["workouts.list"],
+          timeoutMs: 1500,
+          cacheToolsList: false,
+          headers: { Authorization: "Bearer create-secret" },
+        },
+      ],
     });
     expect(payload.mcpServers[0]?.headers).toEqual({ Authorization: "Bearer create-secret" });
-    expect(() => CreateSessionRequest.parse({
-      initialMessage: "bad url",
-      mcpServers: [{ id: "bad", url: "http://example.com/mcp" }],
-    })).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "bad url",
+        mcpServers: [{ id: "bad", url: "http://example.com/mcp" }],
+      }),
+    ).toThrow();
 
     const event = ClientSessionEvent.parse({
       type: "user.message",
@@ -75,7 +85,9 @@ describe("contracts", () => {
     if (event.type !== "user.message") {
       throw new Error("expected user.message");
     }
-    expect(event.payload.mcpCredentialUpdates?.[0]?.headers.Authorization).toBe("Bearer rotated-secret");
+    expect(event.payload.mcpCredentialUpdates?.[0]?.headers.Authorization).toBe(
+      "Bearer rotated-secret",
+    );
 
     const metadata = SessionMcpServerMetadata.parse({
       id: "crm",
@@ -91,15 +103,19 @@ describe("contracts", () => {
       headerNames: ["Authorization"],
       credentialVersion: 2,
     });
-    expect(() => SessionMcpServerMetadata.parse({
-      ...metadata,
-      headers: { Authorization: "Bearer must-not-echo" },
-    })).toThrow();
+    expect(() =>
+      SessionMcpServerMetadata.parse({
+        ...metadata,
+        headers: { Authorization: "Bearer must-not-echo" },
+      }),
+    ).toThrow();
   });
 
   test("OAuth start request rejects non-URL resources", () => {
     expect(() => OAuthStartRequest.parse({ resource: "example.com" })).toThrow();
-    expect(OAuthStartRequest.parse({ resource: "https://mcp.example.com/mcp" }).resource).toBe("https://mcp.example.com/mcp");
+    expect(OAuthStartRequest.parse({ resource: "https://mcp.example.com/mcp" }).resource).toBe(
+      "https://mcp.example.com/mcp",
+    );
   });
 
   test("accepts repository and file resources on create session", () => {
@@ -118,18 +134,22 @@ describe("contracts", () => {
   });
 
   test("rejects old metadata-based resources", () => {
-    expect(() => ResourceRef.parse({
-      kind: "repository",
-      uri: "https://github.com/acme/app.git",
-      metadata: { ref: "main" },
-    })).toThrow();
+    expect(() =>
+      ResourceRef.parse({
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        metadata: { ref: "main" },
+      }),
+    ).toThrow();
   });
 
   test("rejects invalid tool refs", () => {
-    expect(() => CreateSessionRequest.parse({
-      initialMessage: "inspect repo",
-      tools: [{ kind: "document", id: "docs" }],
-    })).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        tools: [{ kind: "document", id: "docs" }],
+      }),
+    ).toThrow();
   });
 
   test("accepts model and reasoning effort on create session", () => {
@@ -156,21 +176,27 @@ describe("contracts", () => {
   });
 
   test("rejects empty / whitespace-only per-session instructions", () => {
-    expect(() => CreateSessionRequest.parse({
-      initialMessage: "inspect repo",
-      instructions: "",
-    })).toThrow();
-    expect(() => CreateSessionRequest.parse({
-      initialMessage: "inspect repo",
-      instructions: "   ",
-    })).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        instructions: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        instructions: "   ",
+      }),
+    ).toThrow();
   });
 
   test("rejects per-session instructions over the 32768-char cap", () => {
-    expect(() => CreateSessionRequest.parse({
-      initialMessage: "inspect repo",
-      instructions: "x".repeat(32769),
-    })).toThrow();
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        instructions: "x".repeat(32769),
+      }),
+    ).toThrow();
     // Exactly at the cap is accepted.
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
@@ -235,18 +261,20 @@ describe("contracts", () => {
   });
 
   test("rejects a client model with an unknown wire api", () => {
-    expect(() => ClientModel.parse({
-      id: "m",
-      label: "m",
-      provider: "p",
-      providerLabel: "P",
-      api: "grpc",
-    })).toThrow();
+    expect(() =>
+      ClientModel.parse({
+        id: "m",
+        label: "m",
+        provider: "p",
+        providerLabel: "P",
+        api: "grpc",
+      }),
+    ).toThrow();
   });
 
   test("accepts checkout requests that use the caller default account", () => {
-    const payload = CreateCheckoutRequest.parse({ amountUsd: 25.50 });
-    expect(payload.amountUsd).toBe(25.50);
+    const payload = CreateCheckoutRequest.parse({ amountUsd: 25.5 });
+    expect(payload.amountUsd).toBe(25.5);
     expect(payload.accountId).toBeUndefined();
     expect(CreateCheckoutRequest.parse({ amountUsd: 5 }).amountUsd).toBe(5);
     expect(CreateCheckoutRequest.parse({ amountUsd: 19.99 }).amountUsd).toBe(19.99);
@@ -311,14 +339,16 @@ describe("contracts", () => {
     expect(create.tags).toEqual([]);
 
     const catalog = CapabilityCatalogResponse.parse({
-      items: [{
-        id: "mcp:example",
-        kind: "mcp",
-        source: "public_registry",
-        name: "Example MCP",
-        endpointUrl: "https://example.com/mcp",
-        runtime: { available: true, mcpServerId: "example", transport: "streamable-http" },
-      }],
+      items: [
+        {
+          id: "mcp:example",
+          kind: "mcp",
+          source: "public_registry",
+          name: "Example MCP",
+          endpointUrl: "https://example.com/mcp",
+          runtime: { available: true, mcpServerId: "example", transport: "streamable-http" },
+        },
+      ],
       installations: [],
     });
     expect(catalog.items[0]?.runtime.mcpServerId).toBe("example");
@@ -326,10 +356,12 @@ describe("contracts", () => {
   });
 
   test("rejects empty user message command", () => {
-    expect(() => ClientSessionEvent.parse({
-      type: "user.message",
-      payload: { text: "" },
-    })).toThrow();
+    expect(() =>
+      ClientSessionEvent.parse({
+        type: "user.message",
+        payload: { text: "" },
+      }),
+    ).toThrow();
   });
 
   test("accepts per-turn resources, tools, and model settings on user messages", () => {
@@ -367,15 +399,17 @@ describe("contracts", () => {
     const message = SessionBusMessage.parse({
       workspaceId: "00000000-0000-4000-8000-000000000100",
       sessionId: "00000000-0000-4000-8000-000000000001",
-      events: [{
-        id: "00000000-0000-4000-8000-000000000002",
-        workspaceId: "00000000-0000-4000-8000-000000000100",
-        sessionId: "00000000-0000-4000-8000-000000000001",
-        sequence: 1,
-        type: "agent.message.delta",
-        payload: { text: "hi" },
-        occurredAt: new Date().toISOString(),
-      }],
+      events: [
+        {
+          id: "00000000-0000-4000-8000-000000000002",
+          workspaceId: "00000000-0000-4000-8000-000000000100",
+          sessionId: "00000000-0000-4000-8000-000000000001",
+          sequence: 1,
+          type: "agent.message.delta",
+          payload: { text: "hi" },
+          occurredAt: new Date().toISOString(),
+        },
+      ],
     });
     expect(message.events[0]?.type).toBe("agent.message.delta");
   });
@@ -387,7 +421,14 @@ describe("contracts", () => {
       description: "Ops docs",
     });
     expect(AddDocumentRequest.parse({ fileId })).toEqual({ fileId });
-    expect(DocumentSearchRequest.parse({ query: "network policy", limit: 20, mode: "hybrid", sourceKinds: ["repository"] })).toEqual({
+    expect(
+      DocumentSearchRequest.parse({
+        query: "network policy",
+        limit: 20,
+        mode: "hybrid",
+        sourceKinds: ["repository"],
+      }),
+    ).toEqual({
       query: "network policy",
       limit: 20,
       mode: "hybrid",
@@ -396,11 +437,13 @@ describe("contracts", () => {
   });
 
   test("accepts knowledge memory contracts", () => {
-    expect(CreateKnowledgeMemoryRequest.parse({
-      text: "Prefer Azure Blob for production object storage.",
-      kind: "decision",
-      confidence: 0.9,
-    })).toEqual({
+    expect(
+      CreateKnowledgeMemoryRequest.parse({
+        text: "Prefer Azure Blob for production object storage.",
+        kind: "decision",
+        confidence: 0.9,
+      }),
+    ).toEqual({
       text: "Prefer Azure Blob for production object storage.",
       status: "active",
       kind: "decision",
@@ -426,20 +469,26 @@ describe("contracts", () => {
     // A server that is both optional and strict must end up STRICT. This keeps
     // explicit strict selections fail-loud when they collide with optional pack
     // refs or auto-attached capability MCP defaults.
-    expect(mergeToolRefs(
-      [{ kind: "mcp", id: "cap-notebook", optional: true }],
-      [{ kind: "mcp", id: "cap-notebook" }],
-    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+        [{ kind: "mcp", id: "cap-notebook" }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
     // Order-independent: explicit first, optional second → still strict.
-    expect(mergeToolRefs(
-      [{ kind: "mcp", id: "cap-notebook" }],
-      [{ kind: "mcp", id: "cap-notebook", optional: true }],
-    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "cap-notebook" }],
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
     // Both optional → stays optional (non-fatal on connect).
-    expect(mergeToolRefs(
-      [{ kind: "mcp", id: "cap-notebook", optional: true }],
-      [{ kind: "mcp", id: "cap-notebook", optional: true }],
-    )).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+        [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
   });
 });
 
@@ -455,7 +504,10 @@ describe("capability pack runtime manifest fields", () => {
   const skill = {
     name: "infra-ops",
     files: [
-      { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate infra.\n---\n# Infra ops\n" },
+      {
+        path: "SKILL.md",
+        content: "---\nname: infra-ops\ndescription: Operate infra.\n---\n# Infra ops\n",
+      },
       { path: "references/runbook.md", content: "Runbook." },
     ],
   };
@@ -469,48 +521,87 @@ describe("capability pack runtime manifest fields", () => {
   test("accepts a sandbox image ref and inline skills", () => {
     const pack = CapabilityPack.parse({
       ...baseManifest,
-      sandboxImage: "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      sandboxImage:
+        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       skills: [skill],
     });
     expect(pack.sandboxImage).toContain("@sha256:");
     expect(pack.skills).toHaveLength(1);
-    expect(pack.skills[0]?.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+    expect(pack.skills[0]?.files.map((file) => file.path)).toEqual([
+      "SKILL.md",
+      "references/runbook.md",
+    ]);
   });
 
   test("requires every skill to include a top-level SKILL.md", () => {
-    expect(() => CapabilityPack.parse({
-      ...baseManifest,
-      skills: [{ name: "infra-ops", files: [{ path: "references/runbook.md", content: "Runbook." }] }],
-    })).toThrow();
+    expect(() =>
+      CapabilityPack.parse({
+        ...baseManifest,
+        skills: [
+          { name: "infra-ops", files: [{ path: "references/runbook.md", content: "Runbook." }] },
+        ],
+      }),
+    ).toThrow();
   });
 
   test("rejects unsafe skill file paths", () => {
-    for (const path of ["../escape.md", "/absolute.md", "a//b.md", "./SKILL.md", "refs/../SKILL.md", "refs\\windows.md"]) {
-      expect(() => CapabilityPack.parse({
-        ...baseManifest,
-        skills: [{ name: "infra-ops", files: [{ path: "SKILL.md", content: "x" }, { path, content: "x" }] }],
-      })).toThrow();
+    for (const path of [
+      "../escape.md",
+      "/absolute.md",
+      "a//b.md",
+      "./SKILL.md",
+      "refs/../SKILL.md",
+      "refs\\windows.md",
+    ]) {
+      expect(() =>
+        CapabilityPack.parse({
+          ...baseManifest,
+          skills: [
+            {
+              name: "infra-ops",
+              files: [
+                { path: "SKILL.md", content: "x" },
+                { path, content: "x" },
+              ],
+            },
+          ],
+        }),
+      ).toThrow();
     }
   });
 
   test("rejects skill names that are not a single safe path segment", () => {
     for (const name of ["infra/ops", "..", ".hidden", "-leading", ""]) {
-      expect(() => CapabilityPack.parse({
-        ...baseManifest,
-        skills: [{ name, files: [{ path: "SKILL.md", content: "x" }] }],
-      })).toThrow();
+      expect(() =>
+        CapabilityPack.parse({
+          ...baseManifest,
+          skills: [{ name, files: [{ path: "SKILL.md", content: "x" }] }],
+        }),
+      ).toThrow();
     }
   });
 
   test("rejects duplicate skill names and duplicate file paths", () => {
-    expect(() => CapabilityPack.parse({
-      ...baseManifest,
-      skills: [skill, { ...skill, description: "duplicate" }],
-    })).toThrow();
-    expect(() => CapabilityPack.parse({
-      ...baseManifest,
-      skills: [{ name: "infra-ops", files: [{ path: "SKILL.md", content: "a" }, { path: "SKILL.md", content: "b" }] }],
-    })).toThrow();
+    expect(() =>
+      CapabilityPack.parse({
+        ...baseManifest,
+        skills: [skill, { ...skill, description: "duplicate" }],
+      }),
+    ).toThrow();
+    expect(() =>
+      CapabilityPack.parse({
+        ...baseManifest,
+        skills: [
+          {
+            name: "infra-ops",
+            files: [
+              { path: "SKILL.md", content: "a" },
+              { path: "SKILL.md", content: "b" },
+            ],
+          },
+        ],
+      }),
+    ).toThrow();
   });
 });
 
@@ -518,17 +609,25 @@ describe("cleared run-state sentinel", () => {
   test("the canonical blob is recognized as cleared", () => {
     expect(isClearedRunStateBlob(CLEARED_RUN_STATE_BLOB)).toBe(true);
     // Tolerant of extra fields so a future sentinel addition can't resurrect context.
-    expect(isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: true, note: "x" }))).toBe(true);
+    expect(
+      isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: true, note: "x" })),
+    ).toBe(true);
   });
 
   test("real run-state blobs and junk are NOT treated as cleared", () => {
     // A real Agents-SDK serialized run state (carries $schemaVersion/history).
-    expect(isClearedRunStateBlob(JSON.stringify({ $schemaVersion: "1.11", currentTurn: 1, generatedItems: [] }))).toBe(false);
+    expect(
+      isClearedRunStateBlob(
+        JSON.stringify({ $schemaVersion: "1.11", currentTurn: 1, generatedItems: [] }),
+      ),
+    ).toBe(false);
     expect(isClearedRunStateBlob(null)).toBe(false);
     expect(isClearedRunStateBlob(undefined)).toBe(false);
     expect(isClearedRunStateBlob("")).toBe(false);
     expect(isClearedRunStateBlob("not json")).toBe(false);
-    expect(isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: false }))).toBe(false);
+    expect(isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: false }))).toBe(
+      false,
+    );
     expect(isClearedRunStateBlob("null")).toBe(false);
   });
 });

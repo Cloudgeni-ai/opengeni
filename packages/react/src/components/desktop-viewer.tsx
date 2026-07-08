@@ -1,4 +1,8 @@
-import type { CapabilityUnavailableReason, DesktopRfbFactory, DesktopStreamCapability } from "@opengeni/sdk";
+import type {
+  CapabilityUnavailableReason,
+  DesktopRfbFactory,
+  DesktopStreamCapability,
+} from "@opengeni/sdk";
 import { LoaderCircleIcon, MonitorIcon, MousePointerClickIcon, WifiOffIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
@@ -214,8 +218,7 @@ export function DesktopViewer({
   // Do NOT open a socket while the viewer-cap (429) notice is showing — the slot
   // is already exhausted, so connecting would only burn a doomed attempt (and in
   // tests leak an unhandled ws error from the never-resolving tunnel URL).
-  const connectCapability =
-    !transportNull && !needsAck && !viewerCapReached ? capability : null;
+  const connectCapability = !transportNull && !needsAck && !viewerCapReached ? capability : null;
   const stream = useDesktopStream({
     capability: connectCapability,
     containerRef,
@@ -309,7 +312,14 @@ export function DesktopViewer({
     if (!hasLiveUrl || connected || stream.error || connectTimeoutMs <= 0) return;
     const timer = setTimeout(() => setConnectTimedOut(true), connectTimeoutMs);
     return () => clearTimeout(timer);
-  }, [hasLiveUrl, connected, connectTimeoutMs, connectCapability?.url, stream.error, reconnectNonce]);
+  }, [
+    hasLiveUrl,
+    connected,
+    connectTimeoutMs,
+    connectCapability?.url,
+    stream.error,
+    reconnectNonce,
+  ]);
 
   const reconnect = () => {
     setConnectTimedOut(false);
@@ -338,11 +348,15 @@ export function DesktopViewer({
     case "viewer_cap":
       overlay =
         renderViewerCap?.() ??
-        defaultNotice("Too many viewers", "This session has reached its live-viewer limit. Try again shortly.");
+        defaultNotice(
+          "Too many viewers",
+          "This session has reached its live-viewer limit. Try again shortly.",
+        );
       break;
     case "unavailable":
       overlay =
-        renderUnavailable?.(reason) ?? defaultNotice("Desktop unavailable", unavailableCopy(reason));
+        renderUnavailable?.(reason) ??
+        defaultNotice("Desktop unavailable", unavailableCopy(reason));
       break;
     case "consent":
       overlay = renderConsentGate ? (
@@ -362,7 +376,11 @@ export function DesktopViewer({
       );
       break;
     case "error":
-      overlay = defaultNotice("Desktop disconnected", stream.error?.message ?? "The stream dropped.", reconnect);
+      overlay = defaultNotice(
+        "Desktop disconnected",
+        stream.error?.message ?? "The stream dropped.",
+        reconnect,
+      );
       break;
     case "connecting":
     case "connected":
@@ -511,9 +529,7 @@ function TakeControlCallToAction({
           <MousePointerClickIcon className="size-5" strokeWidth={2} />
         </span>
         <span className="flex flex-col items-start leading-tight">
-          <span className="text-og-base font-semibold text-og-fg">
-            Take control
-          </span>
+          <span className="text-og-base font-semibold text-og-fg">Take control</span>
           <span className="text-og-xs text-og-fg-subtle">
             {disabled && disabledReason ? disabledReason : "Drive the mouse & keyboard"}
           </span>
@@ -594,10 +610,7 @@ function unavailableCopy(reason: CapabilityUnavailableReason | null): string {
 function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
   return (
     <div className="flex max-w-sm flex-col items-center gap-3 rounded-og-lg border border-og-border bg-og-bg/90 p-5 text-center text-og-base text-og-fg backdrop-blur-sm">
-      <LoaderCircleIcon
-        className="size-7 animate-og-spin text-og-accent"
-        strokeWidth={1.5}
-      />
+      <LoaderCircleIcon className="size-7 animate-og-spin text-og-accent" strokeWidth={1.5} />
       <div className="space-y-1">
         <div className="font-medium">Warming the sandbox…</div>
         <p className="text-og-sm text-og-fg-subtle">
@@ -622,8 +635,8 @@ function DefaultConsentGate({ shared, onAccept }: { shared: boolean; onAccept: (
     <div className="max-w-sm rounded-og-lg border border-og-border bg-og-bg p-4 text-center text-og-base text-og-fg">
       <div className="mb-1 font-medium">Watch the live desktop?</div>
       <p className="mb-3 text-og-sm text-og-fg-subtle">
-        The desktop pixel stream is <strong>un-redacted</strong> — it can show secrets the agent prints
-        on screen.
+        The desktop pixel stream is <strong>un-redacted</strong> — it can show secrets the agent
+        prints on screen.
         {shared
           ? " This sandbox is shared: you'll also see other sessions' agents on the same screen."
           : ""}

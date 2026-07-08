@@ -439,7 +439,9 @@ export function goingOfflineReasonFromJSON(object: any): GoingOfflineReason {
     case "GOING_OFFLINE_REASON_HOST_SHUTDOWN":
       return GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN;
     default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum GoingOfflineReason");
+      throw new globalThis.Error(
+        "Unrecognized enum value " + object + " for enum GoingOfflineReason",
+      );
   }
 }
 
@@ -454,7 +456,9 @@ export function goingOfflineReasonToJSON(object: GoingOfflineReason): string {
     case GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN:
       return "GOING_OFFLINE_REASON_HOST_SHUTDOWN";
     default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum GoingOfflineReason");
+      throw new globalThis.Error(
+        "Unrecognized enum value " + object + " for enum GoingOfflineReason",
+      );
   }
 }
 
@@ -530,7 +534,9 @@ export function streamCloseReasonFromJSON(object: any): StreamCloseReason {
     case "STREAM_CLOSE_REASON_RATE_LIMITED":
       return StreamCloseReason.STREAM_CLOSE_REASON_RATE_LIMITED;
     default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum StreamCloseReason");
+      throw new globalThis.Error(
+        "Unrecognized enum value " + object + " for enum StreamCloseReason",
+      );
   }
 }
 
@@ -549,7 +555,9 @@ export function streamCloseReasonToJSON(object: StreamCloseReason): string {
     case StreamCloseReason.STREAM_CLOSE_REASON_RATE_LIMITED:
       return "STREAM_CLOSE_REASON_RATE_LIMITED";
     default:
-      throw new globalThis.Error("Unrecognized enum value " + object + " for enum StreamCloseReason");
+      throw new globalThis.Error(
+        "Unrecognized enum value " + object + " for enum StreamCloseReason",
+      );
   }
 }
 
@@ -724,9 +732,7 @@ export interface Hello {
   /** The agent-reported working root the control plane treats as the sandbox cwd. */
   workspaceRoot: string;
   /** Capabilities the agent can serve given its platform + consent grants. */
-  capabilities:
-    | Capabilities
-    | undefined;
+  capabilities: Capabilities | undefined;
   /** The update channel this agent follows (stable|beta), for fleet-pinning. */
   updateChannel: string;
   /**
@@ -755,9 +761,7 @@ export interface Capabilities {
   /** The user consented to screen capture + synthetic input (computer-use). */
   consentedScreenControl: boolean;
   /** Display detail (absent => headless / no display). */
-  display:
-    | Display
-    | undefined;
+  display: Display | undefined;
   /**
    * When a display physically EXISTS but the OS withholds the screen-CAPTURE grant
    * (macOS Screen Recording / TCC), `desktop` is reported false and this carries a
@@ -956,8 +960,7 @@ export interface FsMkdirRequest {
   mode: number;
 }
 
-export interface FsMkdirResponse {
-}
+export interface FsMkdirResponse {}
 
 export interface FsMoveRequest {
   from: string;
@@ -966,8 +969,7 @@ export interface FsMoveRequest {
   overwrite: boolean;
 }
 
-export interface FsMoveResponse {
-}
+export interface FsMoveResponse {}
 
 export interface FsStatRequest {
   path: string;
@@ -985,8 +987,7 @@ export interface FsRemoveRequest {
   recursive: boolean;
 }
 
-export interface FsRemoveResponse {
-}
+export interface FsRemoveResponse {}
 
 /**
  * A single git operation. The agent runs git against the repo rooted at `cwd`
@@ -1074,8 +1075,7 @@ export interface PtyResizeRequest {
   rows: number;
 }
 
-export interface PtyResizeResponse {
-}
+export interface PtyResizeResponse {}
 
 export interface PtyCloseRequest {
   ptyId: string;
@@ -1110,14 +1110,17 @@ export interface DesktopEnsureResponse {
  * an ungated call fails with ERROR_CODE_CONSENT_REQUIRED and never touches the OS.
  */
 export interface DesktopInputRequest {
-  event: { $case: "pointer"; pointer: PointerEvent } | { $case: "key"; key: KeyEvent } | {
-    $case: "scroll";
-    scroll: ScrollEvent;
-  } | undefined;
+  event:
+    | { $case: "pointer"; pointer: PointerEvent }
+    | { $case: "key"; key: KeyEvent }
+    | {
+        $case: "scroll";
+        scroll: ScrollEvent;
+      }
+    | undefined;
 }
 
-export interface DesktopInputResponse {
-}
+export interface DesktopInputResponse {}
 
 /**
  * Capture a single screenshot of the machine's desktop as a PNG. A VIEW op: it
@@ -1125,8 +1128,7 @@ export interface DesktopInputResponse {
  * it is not consent-gated. Returns the encoded image plus its geometry so the
  * caller can size a canvas without decoding.
  */
-export interface DesktopScreenshotRequest {
-}
+export interface DesktopScreenshotRequest {}
 
 export interface DesktopScreenshotResponse {
   png: Uint8Array;
@@ -1164,9 +1166,7 @@ export interface Heartbeat {
    * agent sees it; the authoritative count lives in Postgres).
    */
   activeSessions: number;
-  metrics:
-    | MetricsSample
-    | undefined;
+  metrics: MetricsSample | undefined;
   /**
    * True when the agent is draining for a pending self-update (prefer other
    * sandboxes for new work).
@@ -1182,8 +1182,7 @@ export interface HeartbeatAck {
 }
 
 /** On-demand metrics request (the dashboard force-poll path). */
-export interface MetricsRequest {
-}
+export interface MetricsRequest {}
 
 /** A point-in-time machine metrics sample. */
 export interface MetricsSample {
@@ -1431,9 +1430,7 @@ export interface StreamChannel {
  * attaches) as the first frame of a relay connection.
  */
 export interface StreamOpen {
-  channel:
-    | StreamChannel
-    | undefined;
+  channel: StreamChannel | undefined;
   /**
    * The scoped stream token (`ogs_` envelope) authorizing this channel; the
    * relay validates authenticity + the lease/active-epoch fence.
@@ -1451,9 +1448,7 @@ export interface StreamOpen {
 /** The relay's acknowledgement of a StreamOpen. */
 export interface StreamOpenAck {
   accepted: boolean;
-  error:
-    | AgentError
-    | undefined;
+  error: AgentError | undefined;
   /** The sequence the peer will resume sending from. */
   resumeFromSeq: string;
 }
@@ -1490,10 +1485,14 @@ export interface StreamClose {
  */
 export interface DesktopInput {
   channelId: string;
-  event: { $case: "pointer"; pointer: PointerEvent } | { $case: "key"; key: KeyEvent } | {
-    $case: "scroll";
-    scroll: ScrollEvent;
-  } | undefined;
+  event:
+    | { $case: "pointer"; pointer: PointerEvent }
+    | { $case: "key"; key: KeyEvent }
+    | {
+        $case: "scroll";
+        scroll: ScrollEvent;
+      }
+    | undefined;
 }
 
 export interface PointerEvent {
@@ -1596,12 +1595,12 @@ export const AgentError: MessageFns<AgentError> = {
       retryable: isSet(object.retryable) ? globalThis.Boolean(object.retryable) : false,
       detail: isObject(object.detail)
         ? (globalThis.Object.entries(object.detail) as [string, any][]).reduce(
-          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
-            acc[key] = globalThis.String(value);
-            return acc;
-          },
-          {},
-        )
+            (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+              acc[key] = globalThis.String(value);
+              return acc;
+            },
+            {},
+          )
         : {},
     };
   },
@@ -1715,10 +1714,14 @@ export const AgentError_DetailEntry: MessageFns<AgentError_DetailEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(base?: I): AgentError_DetailEntry {
+  create<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(
+    base?: I,
+  ): AgentError_DetailEntry {
     return AgentError_DetailEntry.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(object: I): AgentError_DetailEntry {
+  fromPartial<I extends Exact<DeepPartial<AgentError_DetailEntry>, I>>(
+    object: I,
+  ): AgentError_DetailEntry {
     const message = createBaseAgentError_DetailEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -1877,41 +1880,43 @@ export const Hello: MessageFns<Hello> = {
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
-        ? globalThis.String(object.workspace_id)
-        : "",
+          ? globalThis.String(object.workspace_id)
+          : "",
       agentVersion: isSet(object.agentVersion)
         ? globalThis.String(object.agentVersion)
         : isSet(object.agent_version)
-        ? globalThis.String(object.agent_version)
-        : "",
+          ? globalThis.String(object.agent_version)
+          : "",
       os: isSet(object.os) ? osFromJSON(object.os) : 0,
       arch: isSet(object.arch) ? archFromJSON(object.arch) : 0,
       machineName: isSet(object.machineName)
         ? globalThis.String(object.machineName)
         : isSet(object.machine_name)
-        ? globalThis.String(object.machine_name)
-        : "",
+          ? globalThis.String(object.machine_name)
+          : "",
       workspaceRoot: isSet(object.workspaceRoot)
         ? globalThis.String(object.workspaceRoot)
         : isSet(object.workspace_root)
-        ? globalThis.String(object.workspace_root)
-        : "",
-      capabilities: isSet(object.capabilities) ? Capabilities.fromJSON(object.capabilities) : undefined,
+          ? globalThis.String(object.workspace_root)
+          : "",
+      capabilities: isSet(object.capabilities)
+        ? Capabilities.fromJSON(object.capabilities)
+        : undefined,
       updateChannel: isSet(object.updateChannel)
         ? globalThis.String(object.updateChannel)
         : isSet(object.update_channel)
-        ? globalThis.String(object.update_channel)
-        : "",
+          ? globalThis.String(object.update_channel)
+          : "",
       resumeToken: isSet(object.resumeToken)
         ? globalThis.String(object.resumeToken)
         : isSet(object.resume_token)
-        ? globalThis.String(object.resume_token)
-        : "",
+          ? globalThis.String(object.resume_token)
+          : "",
     };
   },
 
@@ -1962,9 +1967,10 @@ export const Hello: MessageFns<Hello> = {
     message.arch = object.arch ?? 0;
     message.machineName = object.machineName ?? "";
     message.workspaceRoot = object.workspaceRoot ?? "";
-    message.capabilities = (object.capabilities !== undefined && object.capabilities !== null)
-      ? Capabilities.fromPartial(object.capabilities)
-      : undefined;
+    message.capabilities =
+      object.capabilities !== undefined && object.capabilities !== null
+        ? Capabilities.fromPartial(object.capabilities)
+        : undefined;
     message.updateChannel = object.updateChannel ?? "";
     message.resumeToken = object.resumeToken ?? "";
     return message;
@@ -2115,19 +2121,19 @@ export const Capabilities: MessageFns<Capabilities> = {
       consentedWholeMachine: isSet(object.consentedWholeMachine)
         ? globalThis.Boolean(object.consentedWholeMachine)
         : isSet(object.consented_whole_machine)
-        ? globalThis.Boolean(object.consented_whole_machine)
-        : false,
+          ? globalThis.Boolean(object.consented_whole_machine)
+          : false,
       consentedScreenControl: isSet(object.consentedScreenControl)
         ? globalThis.Boolean(object.consentedScreenControl)
         : isSet(object.consented_screen_control)
-        ? globalThis.Boolean(object.consented_screen_control)
-        : false,
+          ? globalThis.Boolean(object.consented_screen_control)
+          : false,
       display: isSet(object.display) ? Display.fromJSON(object.display) : undefined,
       desktopUnavailableReason: isSet(object.desktopUnavailableReason)
         ? globalThis.String(object.desktopUnavailableReason)
         : isSet(object.desktop_unavailable_reason)
-        ? globalThis.String(object.desktop_unavailable_reason)
-        : "",
+          ? globalThis.String(object.desktop_unavailable_reason)
+          : "",
     };
   },
 
@@ -2175,9 +2181,10 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.desktop = object.desktop ?? false;
     message.consentedWholeMachine = object.consentedWholeMachine ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
-    message.display = (object.display !== undefined && object.display !== null)
-      ? Display.fromPartial(object.display)
-      : undefined;
+    message.display =
+      object.display !== undefined && object.display !== null
+        ? Display.fromPartial(object.display)
+        : undefined;
     message.desktopUnavailableReason = object.desktopUnavailableReason ?? "";
     return message;
   },
@@ -2376,20 +2383,20 @@ export const DeviceAuthStartRequest: MessageFns<DeviceAuthStartRequest> = {
       installFingerprint: isSet(object.installFingerprint)
         ? globalThis.String(object.installFingerprint)
         : isSet(object.install_fingerprint)
-        ? globalThis.String(object.install_fingerprint)
-        : "",
+          ? globalThis.String(object.install_fingerprint)
+          : "",
       os: isSet(object.os) ? osFromJSON(object.os) : 0,
       arch: isSet(object.arch) ? archFromJSON(object.arch) : 0,
       machineName: isSet(object.machineName)
         ? globalThis.String(object.machineName)
         : isSet(object.machine_name)
-        ? globalThis.String(object.machine_name)
-        : "",
+          ? globalThis.String(object.machine_name)
+          : "",
       updateChannel: isSet(object.updateChannel)
         ? globalThis.String(object.updateChannel)
         : isSet(object.update_channel)
-        ? globalThis.String(object.update_channel)
-        : "",
+          ? globalThis.String(object.update_channel)
+          : "",
     };
   },
 
@@ -2413,10 +2420,14 @@ export const DeviceAuthStartRequest: MessageFns<DeviceAuthStartRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(base?: I): DeviceAuthStartRequest {
+  create<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(
+    base?: I,
+  ): DeviceAuthStartRequest {
     return DeviceAuthStartRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(object: I): DeviceAuthStartRequest {
+  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartRequest>, I>>(
+    object: I,
+  ): DeviceAuthStartRequest {
     const message = createBaseDeviceAuthStartRequest();
     message.installFingerprint = object.installFingerprint ?? "";
     message.os = object.os ?? 0;
@@ -2439,7 +2450,10 @@ function createBaseDeviceAuthStartResponse(): DeviceAuthStartResponse {
 }
 
 export const DeviceAuthStartResponse: MessageFns<DeviceAuthStartResponse> = {
-  encode(message: DeviceAuthStartResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(
+    message: DeviceAuthStartResponse,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
     if (message.userCode !== "") {
       writer.uint32(10).string(message.userCode);
     }
@@ -2530,33 +2544,33 @@ export const DeviceAuthStartResponse: MessageFns<DeviceAuthStartResponse> = {
       userCode: isSet(object.userCode)
         ? globalThis.String(object.userCode)
         : isSet(object.user_code)
-        ? globalThis.String(object.user_code)
-        : "",
+          ? globalThis.String(object.user_code)
+          : "",
       deviceCode: isSet(object.deviceCode)
         ? globalThis.String(object.deviceCode)
         : isSet(object.device_code)
-        ? globalThis.String(object.device_code)
-        : "",
+          ? globalThis.String(object.device_code)
+          : "",
       verificationUri: isSet(object.verificationUri)
         ? globalThis.String(object.verificationUri)
         : isSet(object.verification_uri)
-        ? globalThis.String(object.verification_uri)
-        : "",
+          ? globalThis.String(object.verification_uri)
+          : "",
       verificationUriComplete: isSet(object.verificationUriComplete)
         ? globalThis.String(object.verificationUriComplete)
         : isSet(object.verification_uri_complete)
-        ? globalThis.String(object.verification_uri_complete)
-        : "",
+          ? globalThis.String(object.verification_uri_complete)
+          : "",
       expiresInSeconds: isSet(object.expiresInSeconds)
         ? globalThis.Number(object.expiresInSeconds)
         : isSet(object.expires_in_seconds)
-        ? globalThis.Number(object.expires_in_seconds)
-        : 0,
+          ? globalThis.Number(object.expires_in_seconds)
+          : 0,
       pollIntervalSeconds: isSet(object.pollIntervalSeconds)
         ? globalThis.Number(object.pollIntervalSeconds)
         : isSet(object.poll_interval_seconds)
-        ? globalThis.Number(object.poll_interval_seconds)
-        : 0,
+          ? globalThis.Number(object.poll_interval_seconds)
+          : 0,
     };
   },
 
@@ -2583,10 +2597,14 @@ export const DeviceAuthStartResponse: MessageFns<DeviceAuthStartResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(base?: I): DeviceAuthStartResponse {
+  create<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(
+    base?: I,
+  ): DeviceAuthStartResponse {
     return DeviceAuthStartResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(object: I): DeviceAuthStartResponse {
+  fromPartial<I extends Exact<DeepPartial<DeviceAuthStartResponse>, I>>(
+    object: I,
+  ): DeviceAuthStartResponse {
     const message = createBaseDeviceAuthStartResponse();
     message.userCode = object.userCode ?? "";
     message.deviceCode = object.deviceCode ?? "";
@@ -2639,8 +2657,8 @@ export const DeviceAuthPollRequest: MessageFns<DeviceAuthPollRequest> = {
       deviceCode: isSet(object.deviceCode)
         ? globalThis.String(object.deviceCode)
         : isSet(object.device_code)
-        ? globalThis.String(object.device_code)
-        : "",
+          ? globalThis.String(object.device_code)
+          : "",
     };
   },
 
@@ -2655,7 +2673,9 @@ export const DeviceAuthPollRequest: MessageFns<DeviceAuthPollRequest> = {
   create<I extends Exact<DeepPartial<DeviceAuthPollRequest>, I>>(base?: I): DeviceAuthPollRequest {
     return DeviceAuthPollRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollRequest>, I>>(object: I): DeviceAuthPollRequest {
+  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollRequest>, I>>(
+    object: I,
+  ): DeviceAuthPollRequest {
     const message = createBaseDeviceAuthPollRequest();
     message.deviceCode = object.deviceCode ?? "";
     return message;
@@ -2712,7 +2732,9 @@ export const DeviceAuthPollResponse: MessageFns<DeviceAuthPollResponse> = {
   fromJSON(object: any): DeviceAuthPollResponse {
     return {
       state: isSet(object.state) ? deviceAuthStateFromJSON(object.state) : 0,
-      credentials: isSet(object.credentials) ? EnrollmentCredentials.fromJSON(object.credentials) : undefined,
+      credentials: isSet(object.credentials)
+        ? EnrollmentCredentials.fromJSON(object.credentials)
+        : undefined,
     };
   },
 
@@ -2727,15 +2749,20 @@ export const DeviceAuthPollResponse: MessageFns<DeviceAuthPollResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(base?: I): DeviceAuthPollResponse {
+  create<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(
+    base?: I,
+  ): DeviceAuthPollResponse {
     return DeviceAuthPollResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(object: I): DeviceAuthPollResponse {
+  fromPartial<I extends Exact<DeepPartial<DeviceAuthPollResponse>, I>>(
+    object: I,
+  ): DeviceAuthPollResponse {
     const message = createBaseDeviceAuthPollResponse();
     message.state = object.state ?? 0;
-    message.credentials = (object.credentials !== undefined && object.credentials !== null)
-      ? EnrollmentCredentials.fromPartial(object.credentials)
-      : undefined;
+    message.credentials =
+      object.credentials !== undefined && object.credentials !== null
+        ? EnrollmentCredentials.fromPartial(object.credentials)
+        : undefined;
     return message;
   },
 };
@@ -2879,48 +2906,48 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
-        ? globalThis.String(object.workspace_id)
-        : "",
+          ? globalThis.String(object.workspace_id)
+          : "",
       natsCredentials: isSet(object.natsCredentials)
         ? globalThis.String(object.natsCredentials)
         : isSet(object.nats_credentials)
-        ? globalThis.String(object.nats_credentials)
-        : "",
+          ? globalThis.String(object.nats_credentials)
+          : "",
       natsUrls: globalThis.Array.isArray(object?.natsUrls)
         ? object.natsUrls.map((e: any) => globalThis.String(e))
         : globalThis.Array.isArray(object?.nats_urls)
-        ? object.nats_urls.map((e: any) => globalThis.String(e))
-        : [],
+          ? object.nats_urls.map((e: any) => globalThis.String(e))
+          : [],
       relayUrl: isSet(object.relayUrl)
         ? globalThis.String(object.relayUrl)
         : isSet(object.relay_url)
-        ? globalThis.String(object.relay_url)
-        : "",
+          ? globalThis.String(object.relay_url)
+          : "",
       updatePubkey: isSet(object.updatePubkey)
         ? globalThis.String(object.updatePubkey)
         : isSet(object.update_pubkey)
-        ? globalThis.String(object.update_pubkey)
-        : "",
+          ? globalThis.String(object.update_pubkey)
+          : "",
       consentedWholeMachine: isSet(object.consentedWholeMachine)
         ? globalThis.Boolean(object.consentedWholeMachine)
         : isSet(object.consented_whole_machine)
-        ? globalThis.Boolean(object.consented_whole_machine)
-        : false,
+          ? globalThis.Boolean(object.consented_whole_machine)
+          : false,
       consentedScreenControl: isSet(object.consentedScreenControl)
         ? globalThis.Boolean(object.consentedScreenControl)
         : isSet(object.consented_screen_control)
-        ? globalThis.Boolean(object.consented_screen_control)
-        : false,
+          ? globalThis.Boolean(object.consented_screen_control)
+          : false,
       relayToken: isSet(object.relayToken)
         ? globalThis.String(object.relayToken)
         : isSet(object.relay_token)
-        ? globalThis.String(object.relay_token)
-        : "",
+          ? globalThis.String(object.relay_token)
+          : "",
     };
   },
 
@@ -2959,7 +2986,9 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
   create<I extends Exact<DeepPartial<EnrollmentCredentials>, I>>(base?: I): EnrollmentCredentials {
     return EnrollmentCredentials.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<EnrollmentCredentials>, I>>(object: I): EnrollmentCredentials {
+  fromPartial<I extends Exact<DeepPartial<EnrollmentCredentials>, I>>(
+    object: I,
+  ): EnrollmentCredentials {
     const message = createBaseEnrollmentCredentials();
     message.agentId = object.agentId ?? "";
     message.workspaceId = object.workspaceId ?? "";
@@ -3070,24 +3099,26 @@ export const ExecRequest: MessageFns<ExecRequest> = {
 
   fromJSON(object: any): ExecRequest {
     return {
-      command: globalThis.Array.isArray(object?.command) ? object.command.map((e: any) => globalThis.String(e)) : [],
+      command: globalThis.Array.isArray(object?.command)
+        ? object.command.map((e: any) => globalThis.String(e))
+        : [],
       shell: isSet(object.shell) ? globalThis.Boolean(object.shell) : false,
       cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
       env: isObject(object.env)
         ? (globalThis.Object.entries(object.env) as [string, any][]).reduce(
-          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
-            acc[key] = globalThis.String(value);
-            return acc;
-          },
-          {},
-        )
+            (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+              acc[key] = globalThis.String(value);
+              return acc;
+            },
+            {},
+          )
         : {},
       stdin: isSet(object.stdin) ? bytesFromBase64(object.stdin) : new Uint8Array(0),
       timeoutMs: isSet(object.timeoutMs)
         ? globalThis.Number(object.timeoutMs)
         : isSet(object.timeout_ms)
-        ? globalThis.Number(object.timeout_ms)
-        : 0,
+          ? globalThis.Number(object.timeout_ms)
+          : 0,
     };
   },
 
@@ -3211,7 +3242,9 @@ export const ExecRequest_EnvEntry: MessageFns<ExecRequest_EnvEntry> = {
   create<I extends Exact<DeepPartial<ExecRequest_EnvEntry>, I>>(base?: I): ExecRequest_EnvEntry {
     return ExecRequest_EnvEntry.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<ExecRequest_EnvEntry>, I>>(object: I): ExecRequest_EnvEntry {
+  fromPartial<I extends Exact<DeepPartial<ExecRequest_EnvEntry>, I>>(
+    object: I,
+  ): ExecRequest_EnvEntry {
     const message = createBaseExecRequest_EnvEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -3220,7 +3253,13 @@ export const ExecRequest_EnvEntry: MessageFns<ExecRequest_EnvEntry> = {
 };
 
 function createBaseExecResponse(): ExecResponse {
-  return { exitCode: 0, stdout: new Uint8Array(0), stderr: new Uint8Array(0), timedOut: false, durationMs: "0" };
+  return {
+    exitCode: 0,
+    stdout: new Uint8Array(0),
+    stderr: new Uint8Array(0),
+    timedOut: false,
+    durationMs: "0",
+  };
 }
 
 export const ExecResponse: MessageFns<ExecResponse> = {
@@ -3304,20 +3343,20 @@ export const ExecResponse: MessageFns<ExecResponse> = {
       exitCode: isSet(object.exitCode)
         ? globalThis.Number(object.exitCode)
         : isSet(object.exit_code)
-        ? globalThis.Number(object.exit_code)
-        : 0,
+          ? globalThis.Number(object.exit_code)
+          : 0,
       stdout: isSet(object.stdout) ? bytesFromBase64(object.stdout) : new Uint8Array(0),
       stderr: isSet(object.stderr) ? bytesFromBase64(object.stderr) : new Uint8Array(0),
       timedOut: isSet(object.timedOut)
         ? globalThis.Boolean(object.timedOut)
         : isSet(object.timed_out)
-        ? globalThis.Boolean(object.timed_out)
-        : false,
+          ? globalThis.Boolean(object.timed_out)
+          : false,
       durationMs: isSet(object.durationMs)
         ? globalThis.String(object.durationMs)
         : isSet(object.duration_ms)
-        ? globalThis.String(object.duration_ms)
-        : "0",
+          ? globalThis.String(object.duration_ms)
+          : "0",
     };
   },
 
@@ -3500,8 +3539,8 @@ export const FsReadResponse: MessageFns<FsReadResponse> = {
       totalSize: isSet(object.totalSize)
         ? globalThis.String(object.totalSize)
         : isSet(object.total_size)
-        ? globalThis.String(object.total_size)
-        : "0",
+          ? globalThis.String(object.total_size)
+          : "0",
     };
   },
 
@@ -3614,8 +3653,8 @@ export const FsWriteRequest: MessageFns<FsWriteRequest> = {
       createParents: isSet(object.createParents)
         ? globalThis.Boolean(object.createParents)
         : isSet(object.create_parents)
-        ? globalThis.Boolean(object.create_parents)
-        : false,
+          ? globalThis.Boolean(object.create_parents)
+          : false,
       append: isSet(object.append) ? globalThis.Boolean(object.append) : false,
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
     };
@@ -3696,8 +3735,8 @@ export const FsWriteResponse: MessageFns<FsWriteResponse> = {
       bytesWritten: isSet(object.bytesWritten)
         ? globalThis.String(object.bytesWritten)
         : isSet(object.bytes_written)
-        ? globalThis.String(object.bytes_written)
-        : "0",
+          ? globalThis.String(object.bytes_written)
+          : "0",
     };
   },
 
@@ -3833,7 +3872,9 @@ export const FsListResponse: MessageFns<FsListResponse> = {
 
   fromJSON(object: any): FsListResponse {
     return {
-      entries: globalThis.Array.isArray(object?.entries) ? object.entries.map((e: any) => FsEntry.fromJSON(e)) : [],
+      entries: globalThis.Array.isArray(object?.entries)
+        ? object.entries.map((e: any) => FsEntry.fromJSON(e))
+        : [],
     };
   },
 
@@ -3955,8 +3996,8 @@ export const FsEntry: MessageFns<FsEntry> = {
       modifiedMs: isSet(object.modifiedMs)
         ? globalThis.String(object.modifiedMs)
         : isSet(object.modified_ms)
-        ? globalThis.String(object.modified_ms)
-        : "0",
+          ? globalThis.String(object.modified_ms)
+          : "0",
       mode: isSet(object.mode) ? globalThis.Number(object.mode) : 0,
     };
   },
@@ -4398,9 +4439,10 @@ export const FsStatResponse: MessageFns<FsStatResponse> = {
   fromPartial<I extends Exact<DeepPartial<FsStatResponse>, I>>(object: I): FsStatResponse {
     const message = createBaseFsStatResponse();
     message.exists = object.exists ?? false;
-    message.entry = (object.entry !== undefined && object.entry !== null)
-      ? FsEntry.fromPartial(object.entry)
-      : undefined;
+    message.entry =
+      object.entry !== undefined && object.entry !== null
+        ? FsEntry.fromPartial(object.entry)
+        : undefined;
     return message;
   },
 };
@@ -4586,7 +4628,9 @@ export const GitRequest: MessageFns<GitRequest> = {
     return {
       op: isSet(object.op) ? gitOpFromJSON(object.op) : 0,
       cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
-      args: globalThis.Array.isArray(object?.args) ? object.args.map((e: any) => globalThis.String(e)) : [],
+      args: globalThis.Array.isArray(object?.args)
+        ? object.args.map((e: any) => globalThis.String(e))
+        : [],
     };
   },
 
@@ -4690,8 +4734,8 @@ export const GitResponse: MessageFns<GitResponse> = {
       exitCode: isSet(object.exitCode)
         ? globalThis.Number(object.exitCode)
         : isSet(object.exit_code)
-        ? globalThis.Number(object.exit_code)
-        : 0,
+          ? globalThis.Number(object.exit_code)
+          : 0,
       stdout: isSet(object.stdout) ? bytesFromBase64(object.stdout) : new Uint8Array(0),
       stderr: isSet(object.stderr) ? bytesFromBase64(object.stderr) : new Uint8Array(0),
       status: isSet(object.status) ? GitStatus.fromJSON(object.status) : undefined,
@@ -4723,9 +4767,10 @@ export const GitResponse: MessageFns<GitResponse> = {
     message.exitCode = object.exitCode ?? 0;
     message.stdout = object.stdout ?? new Uint8Array(0);
     message.stderr = object.stderr ?? new Uint8Array(0);
-    message.status = (object.status !== undefined && object.status !== null)
-      ? GitStatus.fromPartial(object.status)
-      : undefined;
+    message.status =
+      object.status !== undefined && object.status !== null
+        ? GitStatus.fromPartial(object.status)
+        : undefined;
     return message;
   },
 };
@@ -4827,7 +4872,9 @@ export const GitStatus: MessageFns<GitStatus> = {
       upstream: isSet(object.upstream) ? globalThis.String(object.upstream) : "",
       ahead: isSet(object.ahead) ? globalThis.Number(object.ahead) : 0,
       behind: isSet(object.behind) ? globalThis.Number(object.behind) : 0,
-      files: globalThis.Array.isArray(object?.files) ? object.files.map((e: any) => GitFileStatus.fromJSON(e)) : [],
+      files: globalThis.Array.isArray(object?.files)
+        ? object.files.map((e: any) => GitFileStatus.fromJSON(e))
+        : [],
       clean: isSet(object.clean) ? globalThis.Boolean(object.clean) : false,
     };
   },
@@ -5058,16 +5105,18 @@ export const PtyOpenRequest: MessageFns<PtyOpenRequest> = {
 
   fromJSON(object: any): PtyOpenRequest {
     return {
-      command: globalThis.Array.isArray(object?.command) ? object.command.map((e: any) => globalThis.String(e)) : [],
+      command: globalThis.Array.isArray(object?.command)
+        ? object.command.map((e: any) => globalThis.String(e))
+        : [],
       cwd: isSet(object.cwd) ? globalThis.String(object.cwd) : "",
       env: isObject(object.env)
         ? (globalThis.Object.entries(object.env) as [string, any][]).reduce(
-          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
-            acc[key] = globalThis.String(value);
-            return acc;
-          },
-          {},
-        )
+            (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+              acc[key] = globalThis.String(value);
+              return acc;
+            },
+            {},
+          )
         : {},
       cols: isSet(object.cols) ? globalThis.Number(object.cols) : 0,
       rows: isSet(object.rows) ? globalThis.Number(object.rows) : 0,
@@ -5132,7 +5181,10 @@ function createBasePtyOpenRequest_EnvEntry(): PtyOpenRequest_EnvEntry {
 }
 
 export const PtyOpenRequest_EnvEntry: MessageFns<PtyOpenRequest_EnvEntry> = {
-  encode(message: PtyOpenRequest_EnvEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(
+    message: PtyOpenRequest_EnvEntry,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
     if (message.key !== "") {
       writer.uint32(10).string(message.key);
     }
@@ -5192,10 +5244,14 @@ export const PtyOpenRequest_EnvEntry: MessageFns<PtyOpenRequest_EnvEntry> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(base?: I): PtyOpenRequest_EnvEntry {
+  create<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(
+    base?: I,
+  ): PtyOpenRequest_EnvEntry {
     return PtyOpenRequest_EnvEntry.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(object: I): PtyOpenRequest_EnvEntry {
+  fromPartial<I extends Exact<DeepPartial<PtyOpenRequest_EnvEntry>, I>>(
+    object: I,
+  ): PtyOpenRequest_EnvEntry {
     const message = createBasePtyOpenRequest_EnvEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "";
@@ -5255,8 +5311,8 @@ export const PtyOpenResponse: MessageFns<PtyOpenResponse> = {
       ptyId: isSet(object.ptyId)
         ? globalThis.String(object.ptyId)
         : isSet(object.pty_id)
-        ? globalThis.String(object.pty_id)
-        : "",
+          ? globalThis.String(object.pty_id)
+          : "",
       channel: isSet(object.channel) ? StreamChannel.fromJSON(object.channel) : undefined,
     };
   },
@@ -5278,9 +5334,10 @@ export const PtyOpenResponse: MessageFns<PtyOpenResponse> = {
   fromPartial<I extends Exact<DeepPartial<PtyOpenResponse>, I>>(object: I): PtyOpenResponse {
     const message = createBasePtyOpenResponse();
     message.ptyId = object.ptyId ?? "";
-    message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
-      : undefined;
+    message.channel =
+      object.channel !== undefined && object.channel !== null
+        ? StreamChannel.fromPartial(object.channel)
+        : undefined;
     return message;
   },
 };
@@ -5337,8 +5394,8 @@ export const PtyWriteRequest: MessageFns<PtyWriteRequest> = {
       ptyId: isSet(object.ptyId)
         ? globalThis.String(object.ptyId)
         : isSet(object.pty_id)
-        ? globalThis.String(object.pty_id)
-        : "",
+          ? globalThis.String(object.pty_id)
+          : "",
       data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
     };
   },
@@ -5406,8 +5463,8 @@ export const PtyWriteResponse: MessageFns<PtyWriteResponse> = {
       bytesWritten: isSet(object.bytesWritten)
         ? globalThis.String(object.bytesWritten)
         : isSet(object.bytes_written)
-        ? globalThis.String(object.bytes_written)
-        : "0",
+          ? globalThis.String(object.bytes_written)
+          : "0",
     };
   },
 
@@ -5492,8 +5549,8 @@ export const PtyResizeRequest: MessageFns<PtyResizeRequest> = {
       ptyId: isSet(object.ptyId)
         ? globalThis.String(object.ptyId)
         : isSet(object.pty_id)
-        ? globalThis.String(object.pty_id)
-        : "",
+          ? globalThis.String(object.pty_id)
+          : "",
       cols: isSet(object.cols) ? globalThis.Number(object.cols) : 0,
       rows: isSet(object.rows) ? globalThis.Number(object.rows) : 0,
     };
@@ -5609,8 +5666,8 @@ export const PtyCloseRequest: MessageFns<PtyCloseRequest> = {
       ptyId: isSet(object.ptyId)
         ? globalThis.String(object.ptyId)
         : isSet(object.pty_id)
-        ? globalThis.String(object.pty_id)
-        : "",
+          ? globalThis.String(object.pty_id)
+          : "",
     };
   },
 
@@ -5673,8 +5730,8 @@ export const PtyCloseResponse: MessageFns<PtyCloseResponse> = {
       exitCode: isSet(object.exitCode)
         ? globalThis.Number(object.exitCode)
         : isSet(object.exit_code)
-        ? globalThis.Number(object.exit_code)
-        : 0,
+          ? globalThis.Number(object.exit_code)
+          : 0,
     };
   },
 
@@ -5764,7 +5821,9 @@ export const DesktopEnsureRequest: MessageFns<DesktopEnsureRequest> = {
   create<I extends Exact<DeepPartial<DesktopEnsureRequest>, I>>(base?: I): DesktopEnsureRequest {
     return DesktopEnsureRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopEnsureRequest>, I>>(object: I): DesktopEnsureRequest {
+  fromPartial<I extends Exact<DeepPartial<DesktopEnsureRequest>, I>>(
+    object: I,
+  ): DesktopEnsureRequest {
     const message = createBaseDesktopEnsureRequest();
     message.width = object.width ?? 0;
     message.height = object.height ?? 0;
@@ -5840,14 +5899,18 @@ export const DesktopEnsureResponse: MessageFns<DesktopEnsureResponse> = {
   create<I extends Exact<DeepPartial<DesktopEnsureResponse>, I>>(base?: I): DesktopEnsureResponse {
     return DesktopEnsureResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopEnsureResponse>, I>>(object: I): DesktopEnsureResponse {
+  fromPartial<I extends Exact<DeepPartial<DesktopEnsureResponse>, I>>(
+    object: I,
+  ): DesktopEnsureResponse {
     const message = createBaseDesktopEnsureResponse();
-    message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
-      : undefined;
-    message.display = (object.display !== undefined && object.display !== null)
-      ? Display.fromPartial(object.display)
-      : undefined;
+    message.channel =
+      object.channel !== undefined && object.channel !== null
+        ? StreamChannel.fromPartial(object.channel)
+        : undefined;
+    message.display =
+      object.display !== undefined && object.display !== null
+        ? Display.fromPartial(object.display)
+        : undefined;
     return message;
   },
 };
@@ -5884,7 +5947,10 @@ export const DesktopInputRequest: MessageFns<DesktopInputRequest> = {
             break;
           }
 
-          message.event = { $case: "pointer", pointer: PointerEvent.decode(reader, reader.uint32()) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 2: {
@@ -5917,10 +5983,10 @@ export const DesktopInputRequest: MessageFns<DesktopInputRequest> = {
       event: isSet(object.pointer)
         ? { $case: "pointer", pointer: PointerEvent.fromJSON(object.pointer) }
         : isSet(object.key)
-        ? { $case: "key", key: KeyEvent.fromJSON(object.key) }
-        : isSet(object.scroll)
-        ? { $case: "scroll", scroll: ScrollEvent.fromJSON(object.scroll) }
-        : undefined,
+          ? { $case: "key", key: KeyEvent.fromJSON(object.key) }
+          : isSet(object.scroll)
+            ? { $case: "scroll", scroll: ScrollEvent.fromJSON(object.scroll) }
+            : undefined,
     };
   },
 
@@ -5939,12 +6005,17 @@ export const DesktopInputRequest: MessageFns<DesktopInputRequest> = {
   create<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(base?: I): DesktopInputRequest {
     return DesktopInputRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(object: I): DesktopInputRequest {
+  fromPartial<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(
+    object: I,
+  ): DesktopInputRequest {
     const message = createBaseDesktopInputRequest();
     switch (object.event?.$case) {
       case "pointer": {
         if (object.event?.pointer !== undefined && object.event?.pointer !== null) {
-          message.event = { $case: "pointer", pointer: PointerEvent.fromPartial(object.event.pointer) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.fromPartial(object.event.pointer),
+          };
         }
         break;
       }
@@ -6042,10 +6113,14 @@ export const DesktopScreenshotRequest: MessageFns<DesktopScreenshotRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(base?: I): DesktopScreenshotRequest {
+  create<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(
+    base?: I,
+  ): DesktopScreenshotRequest {
     return DesktopScreenshotRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(_: I): DesktopScreenshotRequest {
+  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(
+    _: I,
+  ): DesktopScreenshotRequest {
     const message = createBaseDesktopScreenshotRequest();
     return message;
   },
@@ -6056,7 +6131,10 @@ function createBaseDesktopScreenshotResponse(): DesktopScreenshotResponse {
 }
 
 export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = {
-  encode(message: DesktopScreenshotResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(
+    message: DesktopScreenshotResponse,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
     if (message.png.length !== 0) {
       writer.uint32(10).bytes(message.png);
     }
@@ -6139,13 +6217,13 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
       nativeWidth: isSet(object.nativeWidth)
         ? globalThis.Number(object.nativeWidth)
         : isSet(object.native_width)
-        ? globalThis.Number(object.native_width)
-        : 0,
+          ? globalThis.Number(object.native_width)
+          : 0,
       nativeHeight: isSet(object.nativeHeight)
         ? globalThis.Number(object.nativeHeight)
         : isSet(object.native_height)
-        ? globalThis.Number(object.native_height)
-        : 0,
+          ? globalThis.Number(object.native_height)
+          : 0,
     };
   },
 
@@ -6169,10 +6247,14 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(base?: I): DesktopScreenshotResponse {
+  create<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(
+    base?: I,
+  ): DesktopScreenshotResponse {
     return DesktopScreenshotResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(object: I): DesktopScreenshotResponse {
+  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(
+    object: I,
+  ): DesktopScreenshotResponse {
     const message = createBaseDesktopScreenshotResponse();
     message.png = object.png ?? new Uint8Array(0);
     message.width = object.width ?? 0;
@@ -6269,13 +6351,13 @@ export const Heartbeat: MessageFns<Heartbeat> = {
       uptimeMs: isSet(object.uptimeMs)
         ? globalThis.String(object.uptimeMs)
         : isSet(object.uptime_ms)
-        ? globalThis.String(object.uptime_ms)
-        : "0",
+          ? globalThis.String(object.uptime_ms)
+          : "0",
       activeSessions: isSet(object.activeSessions)
         ? globalThis.Number(object.activeSessions)
         : isSet(object.active_sessions)
-        ? globalThis.Number(object.active_sessions)
-        : 0,
+          ? globalThis.Number(object.active_sessions)
+          : 0,
       metrics: isSet(object.metrics) ? MetricsSample.fromJSON(object.metrics) : undefined,
       draining: isSet(object.draining) ? globalThis.Boolean(object.draining) : false,
     };
@@ -6309,9 +6391,10 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     message.seq = object.seq ?? "0";
     message.uptimeMs = object.uptimeMs ?? "0";
     message.activeSessions = object.activeSessions ?? 0;
-    message.metrics = (object.metrics !== undefined && object.metrics !== null)
-      ? MetricsSample.fromPartial(object.metrics)
-      : undefined;
+    message.metrics =
+      object.metrics !== undefined && object.metrics !== null
+        ? MetricsSample.fromPartial(object.metrics)
+        : undefined;
     message.draining = object.draining ?? false;
     return message;
   },
@@ -6369,13 +6452,13 @@ export const HeartbeatAck: MessageFns<HeartbeatAck> = {
       nextIntervalMs: isSet(object.nextIntervalMs)
         ? globalThis.Number(object.nextIntervalMs)
         : isSet(object.next_interval_ms)
-        ? globalThis.Number(object.next_interval_ms)
-        : 0,
+          ? globalThis.Number(object.next_interval_ms)
+          : 0,
       updateAvailable: isSet(object.updateAvailable)
         ? globalThis.Boolean(object.updateAvailable)
         : isSet(object.update_available)
-        ? globalThis.Boolean(object.update_available)
-        : false,
+          ? globalThis.Boolean(object.update_available)
+          : false,
     };
   },
 
@@ -6607,41 +6690,41 @@ export const MetricsSample: MessageFns<MetricsSample> = {
       sampledAtMs: isSet(object.sampledAtMs)
         ? globalThis.String(object.sampledAtMs)
         : isSet(object.sampled_at_ms)
-        ? globalThis.String(object.sampled_at_ms)
-        : "0",
+          ? globalThis.String(object.sampled_at_ms)
+          : "0",
       cpuPercent: isSet(object.cpuPercent)
         ? globalThis.Number(object.cpuPercent)
         : isSet(object.cpu_percent)
-        ? globalThis.Number(object.cpu_percent)
-        : 0,
+          ? globalThis.Number(object.cpu_percent)
+          : 0,
       load1: isSet(object.load1) ? globalThis.Number(object.load1) : 0,
       load5: isSet(object.load5) ? globalThis.Number(object.load5) : 0,
       load15: isSet(object.load15) ? globalThis.Number(object.load15) : 0,
       memUsedBytes: isSet(object.memUsedBytes)
         ? globalThis.String(object.memUsedBytes)
         : isSet(object.mem_used_bytes)
-        ? globalThis.String(object.mem_used_bytes)
-        : "0",
+          ? globalThis.String(object.mem_used_bytes)
+          : "0",
       memTotalBytes: isSet(object.memTotalBytes)
         ? globalThis.String(object.memTotalBytes)
         : isSet(object.mem_total_bytes)
-        ? globalThis.String(object.mem_total_bytes)
-        : "0",
+          ? globalThis.String(object.mem_total_bytes)
+          : "0",
       diskUsedBytes: isSet(object.diskUsedBytes)
         ? globalThis.String(object.diskUsedBytes)
         : isSet(object.disk_used_bytes)
-        ? globalThis.String(object.disk_used_bytes)
-        : "0",
+          ? globalThis.String(object.disk_used_bytes)
+          : "0",
       diskTotalBytes: isSet(object.diskTotalBytes)
         ? globalThis.String(object.diskTotalBytes)
         : isSet(object.disk_total_bytes)
-        ? globalThis.String(object.disk_total_bytes)
-        : "0",
+          ? globalThis.String(object.disk_total_bytes)
+          : "0",
       runQueue: isSet(object.runQueue)
         ? globalThis.Number(object.runQueue)
         : isSet(object.run_queue)
-        ? globalThis.Number(object.run_queue)
-        : 0,
+          ? globalThis.Number(object.run_queue)
+          : 0,
       gpus: globalThis.Array.isArray(object?.gpus)
         ? object.gpus.map((e: any) => GpuSample.fromJSON(e))
         : [],
@@ -6781,18 +6864,18 @@ export const GpuSample: MessageFns<GpuSample> = {
       utilPercent: isSet(object.utilPercent)
         ? globalThis.Number(object.utilPercent)
         : isSet(object.util_percent)
-        ? globalThis.Number(object.util_percent)
-        : 0,
+          ? globalThis.Number(object.util_percent)
+          : 0,
       memUsedBytes: isSet(object.memUsedBytes)
         ? globalThis.String(object.memUsedBytes)
         : isSet(object.mem_used_bytes)
-        ? globalThis.String(object.mem_used_bytes)
-        : "0",
+          ? globalThis.String(object.mem_used_bytes)
+          : "0",
       memTotalBytes: isSet(object.memTotalBytes)
         ? globalThis.String(object.memTotalBytes)
         : isSet(object.mem_total_bytes)
-        ? globalThis.String(object.mem_total_bytes)
-        : "0",
+          ? globalThis.String(object.mem_total_bytes)
+          : "0",
     };
   },
 
@@ -6937,8 +7020,8 @@ export const PingResponse: MessageFns<PingResponse> = {
       agentMonotonicMs: isSet(object.agentMonotonicMs)
         ? globalThis.String(object.agentMonotonicMs)
         : isSet(object.agent_monotonic_ms)
-        ? globalThis.String(object.agent_monotonic_ms)
-        : "0",
+          ? globalThis.String(object.agent_monotonic_ms)
+          : "0",
     };
   },
 
@@ -7103,18 +7186,18 @@ export const ResumeRequest: MessageFns<ResumeRequest> = {
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       resumeToken: isSet(object.resumeToken)
         ? globalThis.String(object.resumeToken)
         : isSet(object.resume_token)
-        ? globalThis.String(object.resume_token)
-        : "",
+          ? globalThis.String(object.resume_token)
+          : "",
       lastKnownEpoch: isSet(object.lastKnownEpoch)
         ? globalThis.Number(object.lastKnownEpoch)
         : isSet(object.last_known_epoch)
-        ? globalThis.Number(object.last_known_epoch)
-        : 0,
+          ? globalThis.Number(object.last_known_epoch)
+          : 0,
     };
   },
 
@@ -7209,8 +7292,8 @@ export const ResumeResponse: MessageFns<ResumeResponse> = {
       resumeToken: isSet(object.resumeToken)
         ? globalThis.String(object.resumeToken)
         : isSet(object.resume_token)
-        ? globalThis.String(object.resume_token)
-        : "",
+          ? globalThis.String(object.resume_token)
+          : "",
     };
   },
 
@@ -7314,8 +7397,8 @@ export const UpdateCheckRequest: MessageFns<UpdateCheckRequest> = {
       currentVersion: isSet(object.currentVersion)
         ? globalThis.String(object.currentVersion)
         : isSet(object.current_version)
-        ? globalThis.String(object.current_version)
-        : "",
+          ? globalThis.String(object.current_version)
+          : "",
       channel: isSet(object.channel) ? globalThis.String(object.channel) : "",
       os: isSet(object.os) ? osFromJSON(object.os) : 0,
       arch: isSet(object.arch) ? archFromJSON(object.arch) : 0,
@@ -7404,8 +7487,8 @@ export const UpdateCheckResponse: MessageFns<UpdateCheckResponse> = {
       updateAvailable: isSet(object.updateAvailable)
         ? globalThis.Boolean(object.updateAvailable)
         : isSet(object.update_available)
-        ? globalThis.Boolean(object.update_available)
-        : false,
+          ? globalThis.Boolean(object.update_available)
+          : false,
       manifest: isSet(object.manifest) ? UpdateManifest.fromJSON(object.manifest) : undefined,
     };
   },
@@ -7424,12 +7507,15 @@ export const UpdateCheckResponse: MessageFns<UpdateCheckResponse> = {
   create<I extends Exact<DeepPartial<UpdateCheckResponse>, I>>(base?: I): UpdateCheckResponse {
     return UpdateCheckResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateCheckResponse>, I>>(object: I): UpdateCheckResponse {
+  fromPartial<I extends Exact<DeepPartial<UpdateCheckResponse>, I>>(
+    object: I,
+  ): UpdateCheckResponse {
     const message = createBaseUpdateCheckResponse();
     message.updateAvailable = object.updateAvailable ?? false;
-    message.manifest = (object.manifest !== undefined && object.manifest !== null)
-      ? UpdateManifest.fromPartial(object.manifest)
-      : undefined;
+    message.manifest =
+      object.manifest !== undefined && object.manifest !== null
+        ? UpdateManifest.fromPartial(object.manifest)
+        : undefined;
     return message;
   },
 };
@@ -7575,31 +7661,31 @@ export const UpdateManifest: MessageFns<UpdateManifest> = {
       minSupported: isSet(object.minSupported)
         ? globalThis.String(object.minSupported)
         : isSet(object.min_supported)
-        ? globalThis.String(object.min_supported)
-        : "",
+          ? globalThis.String(object.min_supported)
+          : "",
       rolloutPercent: isSet(object.rolloutPercent)
         ? globalThis.Number(object.rolloutPercent)
         : isSet(object.rollout_percent)
-        ? globalThis.Number(object.rollout_percent)
-        : 0,
+          ? globalThis.Number(object.rollout_percent)
+          : 0,
       cohortSalt: isSet(object.cohortSalt)
         ? globalThis.String(object.cohortSalt)
         : isSet(object.cohort_salt)
-        ? globalThis.String(object.cohort_salt)
-        : "",
+          ? globalThis.String(object.cohort_salt)
+          : "",
       artifacts: globalThis.Array.isArray(object?.artifacts)
         ? object.artifacts.map((e: any) => UpdateArtifact.fromJSON(e))
         : [],
       notesUrl: isSet(object.notesUrl)
         ? globalThis.String(object.notesUrl)
         : isSet(object.notes_url)
-        ? globalThis.String(object.notes_url)
-        : "",
+          ? globalThis.String(object.notes_url)
+          : "",
       signedAtMs: isSet(object.signedAtMs)
         ? globalThis.String(object.signedAtMs)
         : isSet(object.signed_at_ms)
-        ? globalThis.String(object.signed_at_ms)
-        : "0",
+          ? globalThis.String(object.signed_at_ms)
+          : "0",
       force: isSet(object.force) ? globalThis.Boolean(object.force) : false,
     };
   },
@@ -7743,8 +7829,8 @@ export const UpdateArtifact: MessageFns<UpdateArtifact> = {
       minisigUrl: isSet(object.minisigUrl)
         ? globalThis.String(object.minisigUrl)
         : isSet(object.minisig_url)
-        ? globalThis.String(object.minisig_url)
-        : "",
+          ? globalThis.String(object.minisig_url)
+          : "",
     };
   },
 
@@ -7787,7 +7873,10 @@ function createBaseUpdateMayProceedRequest(): UpdateMayProceedRequest {
 }
 
 export const UpdateMayProceedRequest: MessageFns<UpdateMayProceedRequest> = {
-  encode(message: UpdateMayProceedRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(
+    message: UpdateMayProceedRequest,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
     if (message.agentId !== "") {
       writer.uint32(10).string(message.agentId);
     }
@@ -7834,13 +7923,13 @@ export const UpdateMayProceedRequest: MessageFns<UpdateMayProceedRequest> = {
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       targetVersion: isSet(object.targetVersion)
         ? globalThis.String(object.targetVersion)
         : isSet(object.target_version)
-        ? globalThis.String(object.target_version)
-        : "",
+          ? globalThis.String(object.target_version)
+          : "",
     };
   },
 
@@ -7855,10 +7944,14 @@ export const UpdateMayProceedRequest: MessageFns<UpdateMayProceedRequest> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(base?: I): UpdateMayProceedRequest {
+  create<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(
+    base?: I,
+  ): UpdateMayProceedRequest {
     return UpdateMayProceedRequest.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(object: I): UpdateMayProceedRequest {
+  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedRequest>, I>>(
+    object: I,
+  ): UpdateMayProceedRequest {
     const message = createBaseUpdateMayProceedRequest();
     message.agentId = object.agentId ?? "";
     message.targetVersion = object.targetVersion ?? "";
@@ -7871,7 +7964,10 @@ function createBaseUpdateMayProceedResponse(): UpdateMayProceedResponse {
 }
 
 export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
-  encode(message: UpdateMayProceedResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+  encode(
+    message: UpdateMayProceedResponse,
+    writer: BinaryWriter = new BinaryWriter(),
+  ): BinaryWriter {
     if (message.mayProceed !== false) {
       writer.uint32(8).bool(message.mayProceed);
     }
@@ -7918,13 +8014,13 @@ export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
       mayProceed: isSet(object.mayProceed)
         ? globalThis.Boolean(object.mayProceed)
         : isSet(object.may_proceed)
-        ? globalThis.Boolean(object.may_proceed)
-        : false,
+          ? globalThis.Boolean(object.may_proceed)
+          : false,
       activeSessions: isSet(object.activeSessions)
         ? globalThis.Number(object.activeSessions)
         : isSet(object.active_sessions)
-        ? globalThis.Number(object.active_sessions)
-        : 0,
+          ? globalThis.Number(object.active_sessions)
+          : 0,
     };
   },
 
@@ -7939,10 +8035,14 @@ export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
     return obj;
   },
 
-  create<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(base?: I): UpdateMayProceedResponse {
+  create<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(
+    base?: I,
+  ): UpdateMayProceedResponse {
     return UpdateMayProceedResponse.fromPartial(base ?? ({} as any));
   },
-  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(object: I): UpdateMayProceedResponse {
+  fromPartial<I extends Exact<DeepPartial<UpdateMayProceedResponse>, I>>(
+    object: I,
+  ): UpdateMayProceedResponse {
     const message = createBaseUpdateMayProceedResponse();
     message.mayProceed = object.mayProceed ?? false;
     message.activeSessions = object.activeSessions ?? 0;
@@ -8018,13 +8118,19 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         MetricsRequest.encode(message.op.metrics, writer.uint32(218).fork()).join();
         break;
       case "updateMayProceed":
-        UpdateMayProceedRequest.encode(message.op.updateMayProceed, writer.uint32(226).fork()).join();
+        UpdateMayProceedRequest.encode(
+          message.op.updateMayProceed,
+          writer.uint32(226).fork(),
+        ).join();
         break;
       case "desktopInput":
         DesktopInputRequest.encode(message.op.desktopInput, writer.uint32(234).fork()).join();
         break;
       case "desktopScreenshot":
-        DesktopScreenshotRequest.encode(message.op.desktopScreenshot, writer.uint32(242).fork()).join();
+        DesktopScreenshotRequest.encode(
+          message.op.desktopScreenshot,
+          writer.uint32(242).fork(),
+        ).join();
         break;
     }
     return writer;
@@ -8098,7 +8204,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "fsWrite", fsWrite: FsWriteRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "fsWrite",
+            fsWrite: FsWriteRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 16: {
@@ -8114,7 +8223,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "fsMkdir", fsMkdir: FsMkdirRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "fsMkdir",
+            fsMkdir: FsMkdirRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 18: {
@@ -8138,7 +8250,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "fsRemove", fsRemove: FsRemoveRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 21: {
@@ -8154,7 +8269,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "ptyOpen", ptyOpen: PtyOpenRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "ptyOpen",
+            ptyOpen: PtyOpenRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 23: {
@@ -8162,7 +8280,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "ptyWrite", ptyWrite: PtyWriteRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 24: {
@@ -8170,7 +8291,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "ptyResize", ptyResize: PtyResizeRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 25: {
@@ -8178,7 +8302,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "ptyClose", ptyClose: PtyCloseRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 26: {
@@ -8186,7 +8313,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "desktopEnsure", desktopEnsure: DesktopEnsureRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "desktopEnsure",
+            desktopEnsure: DesktopEnsureRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 27: {
@@ -8194,7 +8324,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "metrics", metrics: MetricsRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "metrics",
+            metrics: MetricsRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 28: {
@@ -8213,7 +8346,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
             break;
           }
 
-          message.op = { $case: "desktopInput", desktopInput: DesktopInputRequest.decode(reader, reader.uint32()) };
+          message.op = {
+            $case: "desktopInput",
+            desktopInput: DesktopInputRequest.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 30: {
@@ -8241,85 +8377,202 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       requestId: isSet(object.requestId)
         ? globalThis.String(object.requestId)
         : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
+          ? globalThis.String(object.request_id)
+          : "",
       epoch: isSet(object.epoch) ? globalThis.Number(object.epoch) : 0,
       op: isSet(object.ping)
         ? { $case: "ping", ping: PingRequest.fromJSON(object.ping) }
         : isSet(object.hello)
-        ? { $case: "hello", hello: Hello.fromJSON(object.hello) }
-        : isSet(object.resume)
-        ? { $case: "resume", resume: ResumeRequest.fromJSON(object.resume) }
-        : isSet(object.exec)
-        ? { $case: "exec", exec: ExecRequest.fromJSON(object.exec) }
-        : isSet(object.fsRead)
-        ? { $case: "fsRead", fsRead: FsReadRequest.fromJSON(object.fsRead) }
-        : isSet(object.fs_read)
-        ? { $case: "fsRead", fsRead: FsReadRequest.fromJSON(object.fs_read) }
-        : isSet(object.fsWrite)
-        ? { $case: "fsWrite", fsWrite: FsWriteRequest.fromJSON(object.fsWrite) }
-        : isSet(object.fs_write)
-        ? { $case: "fsWrite", fsWrite: FsWriteRequest.fromJSON(object.fs_write) }
-        : isSet(object.fsList)
-        ? { $case: "fsList", fsList: FsListRequest.fromJSON(object.fsList) }
-        : isSet(object.fs_list)
-        ? { $case: "fsList", fsList: FsListRequest.fromJSON(object.fs_list) }
-        : isSet(object.fsMkdir)
-        ? { $case: "fsMkdir", fsMkdir: FsMkdirRequest.fromJSON(object.fsMkdir) }
-        : isSet(object.fs_mkdir)
-        ? { $case: "fsMkdir", fsMkdir: FsMkdirRequest.fromJSON(object.fs_mkdir) }
-        : isSet(object.fsMove)
-        ? { $case: "fsMove", fsMove: FsMoveRequest.fromJSON(object.fsMove) }
-        : isSet(object.fs_move)
-        ? { $case: "fsMove", fsMove: FsMoveRequest.fromJSON(object.fs_move) }
-        : isSet(object.fsStat)
-        ? { $case: "fsStat", fsStat: FsStatRequest.fromJSON(object.fsStat) }
-        : isSet(object.fs_stat)
-        ? { $case: "fsStat", fsStat: FsStatRequest.fromJSON(object.fs_stat) }
-        : isSet(object.fsRemove)
-        ? { $case: "fsRemove", fsRemove: FsRemoveRequest.fromJSON(object.fsRemove) }
-        : isSet(object.fs_remove)
-        ? { $case: "fsRemove", fsRemove: FsRemoveRequest.fromJSON(object.fs_remove) }
-        : isSet(object.git)
-        ? { $case: "git", git: GitRequest.fromJSON(object.git) }
-        : isSet(object.ptyOpen)
-        ? { $case: "ptyOpen", ptyOpen: PtyOpenRequest.fromJSON(object.ptyOpen) }
-        : isSet(object.pty_open)
-        ? { $case: "ptyOpen", ptyOpen: PtyOpenRequest.fromJSON(object.pty_open) }
-        : isSet(object.ptyWrite)
-        ? { $case: "ptyWrite", ptyWrite: PtyWriteRequest.fromJSON(object.ptyWrite) }
-        : isSet(object.pty_write)
-        ? { $case: "ptyWrite", ptyWrite: PtyWriteRequest.fromJSON(object.pty_write) }
-        : isSet(object.ptyResize)
-        ? { $case: "ptyResize", ptyResize: PtyResizeRequest.fromJSON(object.ptyResize) }
-        : isSet(object.pty_resize)
-        ? { $case: "ptyResize", ptyResize: PtyResizeRequest.fromJSON(object.pty_resize) }
-        : isSet(object.ptyClose)
-        ? { $case: "ptyClose", ptyClose: PtyCloseRequest.fromJSON(object.ptyClose) }
-        : isSet(object.pty_close)
-        ? { $case: "ptyClose", ptyClose: PtyCloseRequest.fromJSON(object.pty_close) }
-        : isSet(object.desktopEnsure)
-        ? { $case: "desktopEnsure", desktopEnsure: DesktopEnsureRequest.fromJSON(object.desktopEnsure) }
-        : isSet(object.desktop_ensure)
-        ? { $case: "desktopEnsure", desktopEnsure: DesktopEnsureRequest.fromJSON(object.desktop_ensure) }
-        : isSet(object.metrics)
-        ? { $case: "metrics", metrics: MetricsRequest.fromJSON(object.metrics) }
-        : isSet(object.updateMayProceed)
-        ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedRequest.fromJSON(object.updateMayProceed) }
-        : isSet(object.update_may_proceed)
-        ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedRequest.fromJSON(object.update_may_proceed) }
-        : isSet(object.desktopInput)
-        ? { $case: "desktopInput", desktopInput: DesktopInputRequest.fromJSON(object.desktopInput) }
-        : isSet(object.desktop_input)
-        ? { $case: "desktopInput", desktopInput: DesktopInputRequest.fromJSON(object.desktop_input) }
-        : isSet(object.desktopScreenshot)
-        ? { $case: "desktopScreenshot", desktopScreenshot: DesktopScreenshotRequest.fromJSON(object.desktopScreenshot) }
-        : isSet(object.desktop_screenshot)
-        ? {
-          $case: "desktopScreenshot",
-          desktopScreenshot: DesktopScreenshotRequest.fromJSON(object.desktop_screenshot),
-        }
-        : undefined,
+          ? { $case: "hello", hello: Hello.fromJSON(object.hello) }
+          : isSet(object.resume)
+            ? { $case: "resume", resume: ResumeRequest.fromJSON(object.resume) }
+            : isSet(object.exec)
+              ? { $case: "exec", exec: ExecRequest.fromJSON(object.exec) }
+              : isSet(object.fsRead)
+                ? { $case: "fsRead", fsRead: FsReadRequest.fromJSON(object.fsRead) }
+                : isSet(object.fs_read)
+                  ? { $case: "fsRead", fsRead: FsReadRequest.fromJSON(object.fs_read) }
+                  : isSet(object.fsWrite)
+                    ? { $case: "fsWrite", fsWrite: FsWriteRequest.fromJSON(object.fsWrite) }
+                    : isSet(object.fs_write)
+                      ? { $case: "fsWrite", fsWrite: FsWriteRequest.fromJSON(object.fs_write) }
+                      : isSet(object.fsList)
+                        ? { $case: "fsList", fsList: FsListRequest.fromJSON(object.fsList) }
+                        : isSet(object.fs_list)
+                          ? { $case: "fsList", fsList: FsListRequest.fromJSON(object.fs_list) }
+                          : isSet(object.fsMkdir)
+                            ? { $case: "fsMkdir", fsMkdir: FsMkdirRequest.fromJSON(object.fsMkdir) }
+                            : isSet(object.fs_mkdir)
+                              ? {
+                                  $case: "fsMkdir",
+                                  fsMkdir: FsMkdirRequest.fromJSON(object.fs_mkdir),
+                                }
+                              : isSet(object.fsMove)
+                                ? { $case: "fsMove", fsMove: FsMoveRequest.fromJSON(object.fsMove) }
+                                : isSet(object.fs_move)
+                                  ? {
+                                      $case: "fsMove",
+                                      fsMove: FsMoveRequest.fromJSON(object.fs_move),
+                                    }
+                                  : isSet(object.fsStat)
+                                    ? {
+                                        $case: "fsStat",
+                                        fsStat: FsStatRequest.fromJSON(object.fsStat),
+                                      }
+                                    : isSet(object.fs_stat)
+                                      ? {
+                                          $case: "fsStat",
+                                          fsStat: FsStatRequest.fromJSON(object.fs_stat),
+                                        }
+                                      : isSet(object.fsRemove)
+                                        ? {
+                                            $case: "fsRemove",
+                                            fsRemove: FsRemoveRequest.fromJSON(object.fsRemove),
+                                          }
+                                        : isSet(object.fs_remove)
+                                          ? {
+                                              $case: "fsRemove",
+                                              fsRemove: FsRemoveRequest.fromJSON(object.fs_remove),
+                                            }
+                                          : isSet(object.git)
+                                            ? { $case: "git", git: GitRequest.fromJSON(object.git) }
+                                            : isSet(object.ptyOpen)
+                                              ? {
+                                                  $case: "ptyOpen",
+                                                  ptyOpen: PtyOpenRequest.fromJSON(object.ptyOpen),
+                                                }
+                                              : isSet(object.pty_open)
+                                                ? {
+                                                    $case: "ptyOpen",
+                                                    ptyOpen: PtyOpenRequest.fromJSON(
+                                                      object.pty_open,
+                                                    ),
+                                                  }
+                                                : isSet(object.ptyWrite)
+                                                  ? {
+                                                      $case: "ptyWrite",
+                                                      ptyWrite: PtyWriteRequest.fromJSON(
+                                                        object.ptyWrite,
+                                                      ),
+                                                    }
+                                                  : isSet(object.pty_write)
+                                                    ? {
+                                                        $case: "ptyWrite",
+                                                        ptyWrite: PtyWriteRequest.fromJSON(
+                                                          object.pty_write,
+                                                        ),
+                                                      }
+                                                    : isSet(object.ptyResize)
+                                                      ? {
+                                                          $case: "ptyResize",
+                                                          ptyResize: PtyResizeRequest.fromJSON(
+                                                            object.ptyResize,
+                                                          ),
+                                                        }
+                                                      : isSet(object.pty_resize)
+                                                        ? {
+                                                            $case: "ptyResize",
+                                                            ptyResize: PtyResizeRequest.fromJSON(
+                                                              object.pty_resize,
+                                                            ),
+                                                          }
+                                                        : isSet(object.ptyClose)
+                                                          ? {
+                                                              $case: "ptyClose",
+                                                              ptyClose: PtyCloseRequest.fromJSON(
+                                                                object.ptyClose,
+                                                              ),
+                                                            }
+                                                          : isSet(object.pty_close)
+                                                            ? {
+                                                                $case: "ptyClose",
+                                                                ptyClose: PtyCloseRequest.fromJSON(
+                                                                  object.pty_close,
+                                                                ),
+                                                              }
+                                                            : isSet(object.desktopEnsure)
+                                                              ? {
+                                                                  $case: "desktopEnsure",
+                                                                  desktopEnsure:
+                                                                    DesktopEnsureRequest.fromJSON(
+                                                                      object.desktopEnsure,
+                                                                    ),
+                                                                }
+                                                              : isSet(object.desktop_ensure)
+                                                                ? {
+                                                                    $case: "desktopEnsure",
+                                                                    desktopEnsure:
+                                                                      DesktopEnsureRequest.fromJSON(
+                                                                        object.desktop_ensure,
+                                                                      ),
+                                                                  }
+                                                                : isSet(object.metrics)
+                                                                  ? {
+                                                                      $case: "metrics",
+                                                                      metrics:
+                                                                        MetricsRequest.fromJSON(
+                                                                          object.metrics,
+                                                                        ),
+                                                                    }
+                                                                  : isSet(object.updateMayProceed)
+                                                                    ? {
+                                                                        $case: "updateMayProceed",
+                                                                        updateMayProceed:
+                                                                          UpdateMayProceedRequest.fromJSON(
+                                                                            object.updateMayProceed,
+                                                                          ),
+                                                                      }
+                                                                    : isSet(
+                                                                          object.update_may_proceed,
+                                                                        )
+                                                                      ? {
+                                                                          $case: "updateMayProceed",
+                                                                          updateMayProceed:
+                                                                            UpdateMayProceedRequest.fromJSON(
+                                                                              object.update_may_proceed,
+                                                                            ),
+                                                                        }
+                                                                      : isSet(object.desktopInput)
+                                                                        ? {
+                                                                            $case: "desktopInput",
+                                                                            desktopInput:
+                                                                              DesktopInputRequest.fromJSON(
+                                                                                object.desktopInput,
+                                                                              ),
+                                                                          }
+                                                                        : isSet(
+                                                                              object.desktop_input,
+                                                                            )
+                                                                          ? {
+                                                                              $case: "desktopInput",
+                                                                              desktopInput:
+                                                                                DesktopInputRequest.fromJSON(
+                                                                                  object.desktop_input,
+                                                                                ),
+                                                                            }
+                                                                          : isSet(
+                                                                                object.desktopScreenshot,
+                                                                              )
+                                                                            ? {
+                                                                                $case:
+                                                                                  "desktopScreenshot",
+                                                                                desktopScreenshot:
+                                                                                  DesktopScreenshotRequest.fromJSON(
+                                                                                    object.desktopScreenshot,
+                                                                                  ),
+                                                                              }
+                                                                            : isSet(
+                                                                                  object.desktop_screenshot,
+                                                                                )
+                                                                              ? {
+                                                                                  $case:
+                                                                                    "desktopScreenshot",
+                                                                                  desktopScreenshot:
+                                                                                    DesktopScreenshotRequest.fromJSON(
+                                                                                      object.desktop_screenshot,
+                                                                                    ),
+                                                                                }
+                                                                              : undefined,
     };
   },
 
@@ -8447,7 +8700,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       }
       case "fsRemove": {
         if (object.op?.fsRemove !== undefined && object.op?.fsRemove !== null) {
-          message.op = { $case: "fsRemove", fsRemove: FsRemoveRequest.fromPartial(object.op.fsRemove) };
+          message.op = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveRequest.fromPartial(object.op.fsRemove),
+          };
         }
         break;
       }
@@ -8465,19 +8721,28 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       }
       case "ptyWrite": {
         if (object.op?.ptyWrite !== undefined && object.op?.ptyWrite !== null) {
-          message.op = { $case: "ptyWrite", ptyWrite: PtyWriteRequest.fromPartial(object.op.ptyWrite) };
+          message.op = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteRequest.fromPartial(object.op.ptyWrite),
+          };
         }
         break;
       }
       case "ptyResize": {
         if (object.op?.ptyResize !== undefined && object.op?.ptyResize !== null) {
-          message.op = { $case: "ptyResize", ptyResize: PtyResizeRequest.fromPartial(object.op.ptyResize) };
+          message.op = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeRequest.fromPartial(object.op.ptyResize),
+          };
         }
         break;
       }
       case "ptyClose": {
         if (object.op?.ptyClose !== undefined && object.op?.ptyClose !== null) {
-          message.op = { $case: "ptyClose", ptyClose: PtyCloseRequest.fromPartial(object.op.ptyClose) };
+          message.op = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseRequest.fromPartial(object.op.ptyClose),
+          };
         }
         break;
       }
@@ -8507,7 +8772,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       }
       case "desktopInput": {
         if (object.op?.desktopInput !== undefined && object.op?.desktopInput !== null) {
-          message.op = { $case: "desktopInput", desktopInput: DesktopInputRequest.fromPartial(object.op.desktopInput) };
+          message.op = {
+            $case: "desktopInput",
+            desktopInput: DesktopInputRequest.fromPartial(object.op.desktopInput),
+          };
         }
         break;
       }
@@ -8587,19 +8855,28 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         PtyCloseResponse.encode(message.result.ptyClose, writer.uint32(202).fork()).join();
         break;
       case "desktopEnsure":
-        DesktopEnsureResponse.encode(message.result.desktopEnsure, writer.uint32(210).fork()).join();
+        DesktopEnsureResponse.encode(
+          message.result.desktopEnsure,
+          writer.uint32(210).fork(),
+        ).join();
         break;
       case "metrics":
         MetricsSample.encode(message.result.metrics, writer.uint32(218).fork()).join();
         break;
       case "updateMayProceed":
-        UpdateMayProceedResponse.encode(message.result.updateMayProceed, writer.uint32(226).fork()).join();
+        UpdateMayProceedResponse.encode(
+          message.result.updateMayProceed,
+          writer.uint32(226).fork(),
+        ).join();
         break;
       case "desktopInput":
         DesktopInputResponse.encode(message.result.desktopInput, writer.uint32(234).fork()).join();
         break;
       case "desktopScreenshot":
-        DesktopScreenshotResponse.encode(message.result.desktopScreenshot, writer.uint32(242).fork()).join();
+        DesktopScreenshotResponse.encode(
+          message.result.desktopScreenshot,
+          writer.uint32(242).fork(),
+        ).join();
         break;
     }
     return writer;
@@ -8649,7 +8926,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "resume", resume: ResumeResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "resume",
+            resume: ResumeResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 13: {
@@ -8665,7 +8945,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsRead", fsRead: FsReadResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsRead",
+            fsRead: FsReadResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 15: {
@@ -8673,7 +8956,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsWrite", fsWrite: FsWriteResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsWrite",
+            fsWrite: FsWriteResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 16: {
@@ -8681,7 +8967,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsList", fsList: FsListResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsList",
+            fsList: FsListResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 17: {
@@ -8689,7 +8978,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsMkdir", fsMkdir: FsMkdirResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsMkdir",
+            fsMkdir: FsMkdirResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 18: {
@@ -8697,7 +8989,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsMove", fsMove: FsMoveResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsMove",
+            fsMove: FsMoveResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 19: {
@@ -8705,7 +9000,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsStat", fsStat: FsStatResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsStat",
+            fsStat: FsStatResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 20: {
@@ -8713,7 +9011,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "fsRemove", fsRemove: FsRemoveResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 21: {
@@ -8729,7 +9030,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "ptyOpen", ptyOpen: PtyOpenResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "ptyOpen",
+            ptyOpen: PtyOpenResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 23: {
@@ -8737,7 +9041,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "ptyWrite", ptyWrite: PtyWriteResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 24: {
@@ -8745,7 +9052,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "ptyResize", ptyResize: PtyResizeResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 25: {
@@ -8753,7 +9063,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "ptyClose", ptyClose: PtyCloseResponse.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseResponse.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 26: {
@@ -8772,7 +9085,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
             break;
           }
 
-          message.result = { $case: "metrics", metrics: MetricsSample.decode(reader, reader.uint32()) };
+          message.result = {
+            $case: "metrics",
+            metrics: MetricsSample.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 28: {
@@ -8822,88 +9138,211 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       requestId: isSet(object.requestId)
         ? globalThis.String(object.requestId)
         : isSet(object.request_id)
-        ? globalThis.String(object.request_id)
-        : "",
+          ? globalThis.String(object.request_id)
+          : "",
       error: isSet(object.error) ? AgentError.fromJSON(object.error) : undefined,
       result: isSet(object.ping)
         ? { $case: "ping", ping: PingResponse.fromJSON(object.ping) }
         : isSet(object.hello)
-        ? { $case: "hello", hello: HelloAck.fromJSON(object.hello) }
-        : isSet(object.resume)
-        ? { $case: "resume", resume: ResumeResponse.fromJSON(object.resume) }
-        : isSet(object.exec)
-        ? { $case: "exec", exec: ExecResponse.fromJSON(object.exec) }
-        : isSet(object.fsRead)
-        ? { $case: "fsRead", fsRead: FsReadResponse.fromJSON(object.fsRead) }
-        : isSet(object.fs_read)
-        ? { $case: "fsRead", fsRead: FsReadResponse.fromJSON(object.fs_read) }
-        : isSet(object.fsWrite)
-        ? { $case: "fsWrite", fsWrite: FsWriteResponse.fromJSON(object.fsWrite) }
-        : isSet(object.fs_write)
-        ? { $case: "fsWrite", fsWrite: FsWriteResponse.fromJSON(object.fs_write) }
-        : isSet(object.fsList)
-        ? { $case: "fsList", fsList: FsListResponse.fromJSON(object.fsList) }
-        : isSet(object.fs_list)
-        ? { $case: "fsList", fsList: FsListResponse.fromJSON(object.fs_list) }
-        : isSet(object.fsMkdir)
-        ? { $case: "fsMkdir", fsMkdir: FsMkdirResponse.fromJSON(object.fsMkdir) }
-        : isSet(object.fs_mkdir)
-        ? { $case: "fsMkdir", fsMkdir: FsMkdirResponse.fromJSON(object.fs_mkdir) }
-        : isSet(object.fsMove)
-        ? { $case: "fsMove", fsMove: FsMoveResponse.fromJSON(object.fsMove) }
-        : isSet(object.fs_move)
-        ? { $case: "fsMove", fsMove: FsMoveResponse.fromJSON(object.fs_move) }
-        : isSet(object.fsStat)
-        ? { $case: "fsStat", fsStat: FsStatResponse.fromJSON(object.fsStat) }
-        : isSet(object.fs_stat)
-        ? { $case: "fsStat", fsStat: FsStatResponse.fromJSON(object.fs_stat) }
-        : isSet(object.fsRemove)
-        ? { $case: "fsRemove", fsRemove: FsRemoveResponse.fromJSON(object.fsRemove) }
-        : isSet(object.fs_remove)
-        ? { $case: "fsRemove", fsRemove: FsRemoveResponse.fromJSON(object.fs_remove) }
-        : isSet(object.git)
-        ? { $case: "git", git: GitResponse.fromJSON(object.git) }
-        : isSet(object.ptyOpen)
-        ? { $case: "ptyOpen", ptyOpen: PtyOpenResponse.fromJSON(object.ptyOpen) }
-        : isSet(object.pty_open)
-        ? { $case: "ptyOpen", ptyOpen: PtyOpenResponse.fromJSON(object.pty_open) }
-        : isSet(object.ptyWrite)
-        ? { $case: "ptyWrite", ptyWrite: PtyWriteResponse.fromJSON(object.ptyWrite) }
-        : isSet(object.pty_write)
-        ? { $case: "ptyWrite", ptyWrite: PtyWriteResponse.fromJSON(object.pty_write) }
-        : isSet(object.ptyResize)
-        ? { $case: "ptyResize", ptyResize: PtyResizeResponse.fromJSON(object.ptyResize) }
-        : isSet(object.pty_resize)
-        ? { $case: "ptyResize", ptyResize: PtyResizeResponse.fromJSON(object.pty_resize) }
-        : isSet(object.ptyClose)
-        ? { $case: "ptyClose", ptyClose: PtyCloseResponse.fromJSON(object.ptyClose) }
-        : isSet(object.pty_close)
-        ? { $case: "ptyClose", ptyClose: PtyCloseResponse.fromJSON(object.pty_close) }
-        : isSet(object.desktopEnsure)
-        ? { $case: "desktopEnsure", desktopEnsure: DesktopEnsureResponse.fromJSON(object.desktopEnsure) }
-        : isSet(object.desktop_ensure)
-        ? { $case: "desktopEnsure", desktopEnsure: DesktopEnsureResponse.fromJSON(object.desktop_ensure) }
-        : isSet(object.metrics)
-        ? { $case: "metrics", metrics: MetricsSample.fromJSON(object.metrics) }
-        : isSet(object.updateMayProceed)
-        ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedResponse.fromJSON(object.updateMayProceed) }
-        : isSet(object.update_may_proceed)
-        ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedResponse.fromJSON(object.update_may_proceed) }
-        : isSet(object.desktopInput)
-        ? { $case: "desktopInput", desktopInput: DesktopInputResponse.fromJSON(object.desktopInput) }
-        : isSet(object.desktop_input)
-        ? { $case: "desktopInput", desktopInput: DesktopInputResponse.fromJSON(object.desktop_input) }
-        : isSet(object.desktopScreenshot)
-        ? {
-          $case: "desktopScreenshot",
-          desktopScreenshot: DesktopScreenshotResponse.fromJSON(object.desktopScreenshot),
-        }
-        : isSet(object.desktop_screenshot)
-        ? {
-          $case: "desktopScreenshot",
-          desktopScreenshot: DesktopScreenshotResponse.fromJSON(object.desktop_screenshot),
-        }
-        : undefined,
+          ? { $case: "hello", hello: HelloAck.fromJSON(object.hello) }
+          : isSet(object.resume)
+            ? { $case: "resume", resume: ResumeResponse.fromJSON(object.resume) }
+            : isSet(object.exec)
+              ? { $case: "exec", exec: ExecResponse.fromJSON(object.exec) }
+              : isSet(object.fsRead)
+                ? { $case: "fsRead", fsRead: FsReadResponse.fromJSON(object.fsRead) }
+                : isSet(object.fs_read)
+                  ? { $case: "fsRead", fsRead: FsReadResponse.fromJSON(object.fs_read) }
+                  : isSet(object.fsWrite)
+                    ? { $case: "fsWrite", fsWrite: FsWriteResponse.fromJSON(object.fsWrite) }
+                    : isSet(object.fs_write)
+                      ? { $case: "fsWrite", fsWrite: FsWriteResponse.fromJSON(object.fs_write) }
+                      : isSet(object.fsList)
+                        ? { $case: "fsList", fsList: FsListResponse.fromJSON(object.fsList) }
+                        : isSet(object.fs_list)
+                          ? { $case: "fsList", fsList: FsListResponse.fromJSON(object.fs_list) }
+                          : isSet(object.fsMkdir)
+                            ? {
+                                $case: "fsMkdir",
+                                fsMkdir: FsMkdirResponse.fromJSON(object.fsMkdir),
+                              }
+                            : isSet(object.fs_mkdir)
+                              ? {
+                                  $case: "fsMkdir",
+                                  fsMkdir: FsMkdirResponse.fromJSON(object.fs_mkdir),
+                                }
+                              : isSet(object.fsMove)
+                                ? {
+                                    $case: "fsMove",
+                                    fsMove: FsMoveResponse.fromJSON(object.fsMove),
+                                  }
+                                : isSet(object.fs_move)
+                                  ? {
+                                      $case: "fsMove",
+                                      fsMove: FsMoveResponse.fromJSON(object.fs_move),
+                                    }
+                                  : isSet(object.fsStat)
+                                    ? {
+                                        $case: "fsStat",
+                                        fsStat: FsStatResponse.fromJSON(object.fsStat),
+                                      }
+                                    : isSet(object.fs_stat)
+                                      ? {
+                                          $case: "fsStat",
+                                          fsStat: FsStatResponse.fromJSON(object.fs_stat),
+                                        }
+                                      : isSet(object.fsRemove)
+                                        ? {
+                                            $case: "fsRemove",
+                                            fsRemove: FsRemoveResponse.fromJSON(object.fsRemove),
+                                          }
+                                        : isSet(object.fs_remove)
+                                          ? {
+                                              $case: "fsRemove",
+                                              fsRemove: FsRemoveResponse.fromJSON(object.fs_remove),
+                                            }
+                                          : isSet(object.git)
+                                            ? {
+                                                $case: "git",
+                                                git: GitResponse.fromJSON(object.git),
+                                              }
+                                            : isSet(object.ptyOpen)
+                                              ? {
+                                                  $case: "ptyOpen",
+                                                  ptyOpen: PtyOpenResponse.fromJSON(object.ptyOpen),
+                                                }
+                                              : isSet(object.pty_open)
+                                                ? {
+                                                    $case: "ptyOpen",
+                                                    ptyOpen: PtyOpenResponse.fromJSON(
+                                                      object.pty_open,
+                                                    ),
+                                                  }
+                                                : isSet(object.ptyWrite)
+                                                  ? {
+                                                      $case: "ptyWrite",
+                                                      ptyWrite: PtyWriteResponse.fromJSON(
+                                                        object.ptyWrite,
+                                                      ),
+                                                    }
+                                                  : isSet(object.pty_write)
+                                                    ? {
+                                                        $case: "ptyWrite",
+                                                        ptyWrite: PtyWriteResponse.fromJSON(
+                                                          object.pty_write,
+                                                        ),
+                                                      }
+                                                    : isSet(object.ptyResize)
+                                                      ? {
+                                                          $case: "ptyResize",
+                                                          ptyResize: PtyResizeResponse.fromJSON(
+                                                            object.ptyResize,
+                                                          ),
+                                                        }
+                                                      : isSet(object.pty_resize)
+                                                        ? {
+                                                            $case: "ptyResize",
+                                                            ptyResize: PtyResizeResponse.fromJSON(
+                                                              object.pty_resize,
+                                                            ),
+                                                          }
+                                                        : isSet(object.ptyClose)
+                                                          ? {
+                                                              $case: "ptyClose",
+                                                              ptyClose: PtyCloseResponse.fromJSON(
+                                                                object.ptyClose,
+                                                              ),
+                                                            }
+                                                          : isSet(object.pty_close)
+                                                            ? {
+                                                                $case: "ptyClose",
+                                                                ptyClose: PtyCloseResponse.fromJSON(
+                                                                  object.pty_close,
+                                                                ),
+                                                              }
+                                                            : isSet(object.desktopEnsure)
+                                                              ? {
+                                                                  $case: "desktopEnsure",
+                                                                  desktopEnsure:
+                                                                    DesktopEnsureResponse.fromJSON(
+                                                                      object.desktopEnsure,
+                                                                    ),
+                                                                }
+                                                              : isSet(object.desktop_ensure)
+                                                                ? {
+                                                                    $case: "desktopEnsure",
+                                                                    desktopEnsure:
+                                                                      DesktopEnsureResponse.fromJSON(
+                                                                        object.desktop_ensure,
+                                                                      ),
+                                                                  }
+                                                                : isSet(object.metrics)
+                                                                  ? {
+                                                                      $case: "metrics",
+                                                                      metrics:
+                                                                        MetricsSample.fromJSON(
+                                                                          object.metrics,
+                                                                        ),
+                                                                    }
+                                                                  : isSet(object.updateMayProceed)
+                                                                    ? {
+                                                                        $case: "updateMayProceed",
+                                                                        updateMayProceed:
+                                                                          UpdateMayProceedResponse.fromJSON(
+                                                                            object.updateMayProceed,
+                                                                          ),
+                                                                      }
+                                                                    : isSet(
+                                                                          object.update_may_proceed,
+                                                                        )
+                                                                      ? {
+                                                                          $case: "updateMayProceed",
+                                                                          updateMayProceed:
+                                                                            UpdateMayProceedResponse.fromJSON(
+                                                                              object.update_may_proceed,
+                                                                            ),
+                                                                        }
+                                                                      : isSet(object.desktopInput)
+                                                                        ? {
+                                                                            $case: "desktopInput",
+                                                                            desktopInput:
+                                                                              DesktopInputResponse.fromJSON(
+                                                                                object.desktopInput,
+                                                                              ),
+                                                                          }
+                                                                        : isSet(
+                                                                              object.desktop_input,
+                                                                            )
+                                                                          ? {
+                                                                              $case: "desktopInput",
+                                                                              desktopInput:
+                                                                                DesktopInputResponse.fromJSON(
+                                                                                  object.desktop_input,
+                                                                                ),
+                                                                            }
+                                                                          : isSet(
+                                                                                object.desktopScreenshot,
+                                                                              )
+                                                                            ? {
+                                                                                $case:
+                                                                                  "desktopScreenshot",
+                                                                                desktopScreenshot:
+                                                                                  DesktopScreenshotResponse.fromJSON(
+                                                                                    object.desktopScreenshot,
+                                                                                  ),
+                                                                              }
+                                                                            : isSet(
+                                                                                  object.desktop_screenshot,
+                                                                                )
+                                                                              ? {
+                                                                                  $case:
+                                                                                    "desktopScreenshot",
+                                                                                  desktopScreenshot:
+                                                                                    DesktopScreenshotResponse.fromJSON(
+                                                                                      object.desktop_screenshot,
+                                                                                    ),
+                                                                                }
+                                                                              : undefined,
     };
   },
 
@@ -8967,9 +9406,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
   fromPartial<I extends Exact<DeepPartial<ControlResponse>, I>>(object: I): ControlResponse {
     const message = createBaseControlResponse();
     message.requestId = object.requestId ?? "";
-    message.error = (object.error !== undefined && object.error !== null)
-      ? AgentError.fromPartial(object.error)
-      : undefined;
+    message.error =
+      object.error !== undefined && object.error !== null
+        ? AgentError.fromPartial(object.error)
+        : undefined;
     switch (object.result?.$case) {
       case "ping": {
         if (object.result?.ping !== undefined && object.result?.ping !== null) {
@@ -8985,7 +9425,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       }
       case "resume": {
         if (object.result?.resume !== undefined && object.result?.resume !== null) {
-          message.result = { $case: "resume", resume: ResumeResponse.fromPartial(object.result.resume) };
+          message.result = {
+            $case: "resume",
+            resume: ResumeResponse.fromPartial(object.result.resume),
+          };
         }
         break;
       }
@@ -8997,43 +9440,64 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       }
       case "fsRead": {
         if (object.result?.fsRead !== undefined && object.result?.fsRead !== null) {
-          message.result = { $case: "fsRead", fsRead: FsReadResponse.fromPartial(object.result.fsRead) };
+          message.result = {
+            $case: "fsRead",
+            fsRead: FsReadResponse.fromPartial(object.result.fsRead),
+          };
         }
         break;
       }
       case "fsWrite": {
         if (object.result?.fsWrite !== undefined && object.result?.fsWrite !== null) {
-          message.result = { $case: "fsWrite", fsWrite: FsWriteResponse.fromPartial(object.result.fsWrite) };
+          message.result = {
+            $case: "fsWrite",
+            fsWrite: FsWriteResponse.fromPartial(object.result.fsWrite),
+          };
         }
         break;
       }
       case "fsList": {
         if (object.result?.fsList !== undefined && object.result?.fsList !== null) {
-          message.result = { $case: "fsList", fsList: FsListResponse.fromPartial(object.result.fsList) };
+          message.result = {
+            $case: "fsList",
+            fsList: FsListResponse.fromPartial(object.result.fsList),
+          };
         }
         break;
       }
       case "fsMkdir": {
         if (object.result?.fsMkdir !== undefined && object.result?.fsMkdir !== null) {
-          message.result = { $case: "fsMkdir", fsMkdir: FsMkdirResponse.fromPartial(object.result.fsMkdir) };
+          message.result = {
+            $case: "fsMkdir",
+            fsMkdir: FsMkdirResponse.fromPartial(object.result.fsMkdir),
+          };
         }
         break;
       }
       case "fsMove": {
         if (object.result?.fsMove !== undefined && object.result?.fsMove !== null) {
-          message.result = { $case: "fsMove", fsMove: FsMoveResponse.fromPartial(object.result.fsMove) };
+          message.result = {
+            $case: "fsMove",
+            fsMove: FsMoveResponse.fromPartial(object.result.fsMove),
+          };
         }
         break;
       }
       case "fsStat": {
         if (object.result?.fsStat !== undefined && object.result?.fsStat !== null) {
-          message.result = { $case: "fsStat", fsStat: FsStatResponse.fromPartial(object.result.fsStat) };
+          message.result = {
+            $case: "fsStat",
+            fsStat: FsStatResponse.fromPartial(object.result.fsStat),
+          };
         }
         break;
       }
       case "fsRemove": {
         if (object.result?.fsRemove !== undefined && object.result?.fsRemove !== null) {
-          message.result = { $case: "fsRemove", fsRemove: FsRemoveResponse.fromPartial(object.result.fsRemove) };
+          message.result = {
+            $case: "fsRemove",
+            fsRemove: FsRemoveResponse.fromPartial(object.result.fsRemove),
+          };
         }
         break;
       }
@@ -9045,25 +9509,37 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       }
       case "ptyOpen": {
         if (object.result?.ptyOpen !== undefined && object.result?.ptyOpen !== null) {
-          message.result = { $case: "ptyOpen", ptyOpen: PtyOpenResponse.fromPartial(object.result.ptyOpen) };
+          message.result = {
+            $case: "ptyOpen",
+            ptyOpen: PtyOpenResponse.fromPartial(object.result.ptyOpen),
+          };
         }
         break;
       }
       case "ptyWrite": {
         if (object.result?.ptyWrite !== undefined && object.result?.ptyWrite !== null) {
-          message.result = { $case: "ptyWrite", ptyWrite: PtyWriteResponse.fromPartial(object.result.ptyWrite) };
+          message.result = {
+            $case: "ptyWrite",
+            ptyWrite: PtyWriteResponse.fromPartial(object.result.ptyWrite),
+          };
         }
         break;
       }
       case "ptyResize": {
         if (object.result?.ptyResize !== undefined && object.result?.ptyResize !== null) {
-          message.result = { $case: "ptyResize", ptyResize: PtyResizeResponse.fromPartial(object.result.ptyResize) };
+          message.result = {
+            $case: "ptyResize",
+            ptyResize: PtyResizeResponse.fromPartial(object.result.ptyResize),
+          };
         }
         break;
       }
       case "ptyClose": {
         if (object.result?.ptyClose !== undefined && object.result?.ptyClose !== null) {
-          message.result = { $case: "ptyClose", ptyClose: PtyCloseResponse.fromPartial(object.result.ptyClose) };
+          message.result = {
+            $case: "ptyClose",
+            ptyClose: PtyCloseResponse.fromPartial(object.result.ptyClose),
+          };
         }
         break;
       }
@@ -9078,12 +9554,18 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       }
       case "metrics": {
         if (object.result?.metrics !== undefined && object.result?.metrics !== null) {
-          message.result = { $case: "metrics", metrics: MetricsSample.fromPartial(object.result.metrics) };
+          message.result = {
+            $case: "metrics",
+            metrics: MetricsSample.fromPartial(object.result.metrics),
+          };
         }
         break;
       }
       case "updateMayProceed": {
-        if (object.result?.updateMayProceed !== undefined && object.result?.updateMayProceed !== null) {
+        if (
+          object.result?.updateMayProceed !== undefined &&
+          object.result?.updateMayProceed !== null
+        ) {
           message.result = {
             $case: "updateMayProceed",
             updateMayProceed: UpdateMayProceedResponse.fromPartial(object.result.updateMayProceed),
@@ -9101,10 +9583,15 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         break;
       }
       case "desktopScreenshot": {
-        if (object.result?.desktopScreenshot !== undefined && object.result?.desktopScreenshot !== null) {
+        if (
+          object.result?.desktopScreenshot !== undefined &&
+          object.result?.desktopScreenshot !== null
+        ) {
           message.result = {
             $case: "desktopScreenshot",
-            desktopScreenshot: DesktopScreenshotResponse.fromPartial(object.result.desktopScreenshot),
+            desktopScreenshot: DesktopScreenshotResponse.fromPartial(
+              object.result.desktopScreenshot,
+            ),
           };
         }
         break;
@@ -9178,13 +9665,13 @@ export const HelloAck: MessageFns<HelloAck> = {
       resumeToken: isSet(object.resumeToken)
         ? globalThis.String(object.resumeToken)
         : isSet(object.resume_token)
-        ? globalThis.String(object.resume_token)
-        : "",
+          ? globalThis.String(object.resume_token)
+          : "",
       heartbeatIntervalMs: isSet(object.heartbeatIntervalMs)
         ? globalThis.Number(object.heartbeatIntervalMs)
         : isSet(object.heartbeat_interval_ms)
-        ? globalThis.Number(object.heartbeat_interval_ms)
-        : 0,
+          ? globalThis.Number(object.heartbeat_interval_ms)
+          : 0,
     };
   },
 
@@ -9254,7 +9741,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
             break;
           }
 
-          message.event = { $case: "heartbeat", heartbeat: Heartbeat.decode(reader, reader.uint32()) };
+          message.event = {
+            $case: "heartbeat",
+            heartbeat: Heartbeat.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 11: {
@@ -9262,7 +9752,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
             break;
           }
 
-          message.event = { $case: "goingOffline", goingOffline: GoingOffline.decode(reader, reader.uint32()) };
+          message.event = {
+            $case: "goingOffline",
+            goingOffline: GoingOffline.decode(reader, reader.uint32()),
+          };
           continue;
         }
       }
@@ -9279,15 +9772,15 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       event: isSet(object.heartbeat)
         ? { $case: "heartbeat", heartbeat: Heartbeat.fromJSON(object.heartbeat) }
         : isSet(object.goingOffline)
-        ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.goingOffline) }
-        : isSet(object.going_offline)
-        ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.going_offline) }
-        : undefined,
+          ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.goingOffline) }
+          : isSet(object.going_offline)
+            ? { $case: "goingOffline", goingOffline: GoingOffline.fromJSON(object.going_offline) }
+            : undefined,
     };
   },
 
@@ -9313,13 +9806,19 @@ export const AgentEvent: MessageFns<AgentEvent> = {
     switch (object.event?.$case) {
       case "heartbeat": {
         if (object.event?.heartbeat !== undefined && object.event?.heartbeat !== null) {
-          message.event = { $case: "heartbeat", heartbeat: Heartbeat.fromPartial(object.event.heartbeat) };
+          message.event = {
+            $case: "heartbeat",
+            heartbeat: Heartbeat.fromPartial(object.event.heartbeat),
+          };
         }
         break;
       }
       case "goingOffline": {
         if (object.event?.goingOffline !== undefined && object.event?.goingOffline !== null) {
-          message.event = { $case: "goingOffline", goingOffline: GoingOffline.fromPartial(object.event.goingOffline) };
+          message.event = {
+            $case: "goingOffline",
+            goingOffline: GoingOffline.fromPartial(object.event.goingOffline),
+          };
         }
         break;
       }
@@ -9354,7 +9853,10 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
             break;
           }
 
-          message.ack = { $case: "heartbeat", heartbeat: HeartbeatAck.decode(reader, reader.uint32()) };
+          message.ack = {
+            $case: "heartbeat",
+            heartbeat: HeartbeatAck.decode(reader, reader.uint32()),
+          };
           continue;
         }
       }
@@ -9390,7 +9892,10 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     switch (object.ack?.$case) {
       case "heartbeat": {
         if (object.ack?.heartbeat !== undefined && object.ack?.heartbeat !== null) {
-          message.ack = { $case: "heartbeat", heartbeat: HeartbeatAck.fromPartial(object.ack.heartbeat) };
+          message.ack = {
+            $case: "heartbeat",
+            heartbeat: HeartbeatAck.fromPartial(object.ack.heartbeat),
+          };
         }
         break;
       }
@@ -9484,18 +9989,18 @@ export const StreamChannel: MessageFns<StreamChannel> = {
       channelId: isSet(object.channelId)
         ? globalThis.String(object.channelId)
         : isSet(object.channel_id)
-        ? globalThis.String(object.channel_id)
-        : "",
+          ? globalThis.String(object.channel_id)
+          : "",
       workspaceId: isSet(object.workspaceId)
         ? globalThis.String(object.workspaceId)
         : isSet(object.workspace_id)
-        ? globalThis.String(object.workspace_id)
-        : "",
+          ? globalThis.String(object.workspace_id)
+          : "",
       agentId: isSet(object.agentId)
         ? globalThis.String(object.agentId)
         : isSet(object.agent_id)
-        ? globalThis.String(object.agent_id)
-        : "",
+          ? globalThis.String(object.agent_id)
+          : "",
       kind: isSet(object.kind) ? streamKindFromJSON(object.kind) : 0,
       port: isSet(object.port) ? globalThis.Number(object.port) : 0,
     };
@@ -9612,8 +10117,8 @@ export const StreamOpen: MessageFns<StreamOpen> = {
       resumeFromSeq: isSet(object.resumeFromSeq)
         ? globalThis.String(object.resumeFromSeq)
         : isSet(object.resume_from_seq)
-        ? globalThis.String(object.resume_from_seq)
-        : "0",
+          ? globalThis.String(object.resume_from_seq)
+          : "0",
     };
   },
 
@@ -9639,9 +10144,10 @@ export const StreamOpen: MessageFns<StreamOpen> = {
   },
   fromPartial<I extends Exact<DeepPartial<StreamOpen>, I>>(object: I): StreamOpen {
     const message = createBaseStreamOpen();
-    message.channel = (object.channel !== undefined && object.channel !== null)
-      ? StreamChannel.fromPartial(object.channel)
-      : undefined;
+    message.channel =
+      object.channel !== undefined && object.channel !== null
+        ? StreamChannel.fromPartial(object.channel)
+        : undefined;
     message.token = object.token ?? "";
     message.role = object.role ?? 0;
     message.resumeFromSeq = object.resumeFromSeq ?? "0";
@@ -9714,8 +10220,8 @@ export const StreamOpenAck: MessageFns<StreamOpenAck> = {
       resumeFromSeq: isSet(object.resumeFromSeq)
         ? globalThis.String(object.resumeFromSeq)
         : isSet(object.resume_from_seq)
-        ? globalThis.String(object.resume_from_seq)
-        : "0",
+          ? globalThis.String(object.resume_from_seq)
+          : "0",
     };
   },
 
@@ -9739,9 +10245,10 @@ export const StreamOpenAck: MessageFns<StreamOpenAck> = {
   fromPartial<I extends Exact<DeepPartial<StreamOpenAck>, I>>(object: I): StreamOpenAck {
     const message = createBaseStreamOpenAck();
     message.accepted = object.accepted ?? false;
-    message.error = (object.error !== undefined && object.error !== null)
-      ? AgentError.fromPartial(object.error)
-      : undefined;
+    message.error =
+      object.error !== undefined && object.error !== null
+        ? AgentError.fromPartial(object.error)
+        : undefined;
     message.resumeFromSeq = object.resumeFromSeq ?? "0";
     return message;
   },
@@ -9821,15 +10328,15 @@ export const StreamFrame: MessageFns<StreamFrame> = {
       channelId: isSet(object.channelId)
         ? globalThis.String(object.channelId)
         : isSet(object.channel_id)
-        ? globalThis.String(object.channel_id)
-        : "",
+          ? globalThis.String(object.channel_id)
+          : "",
       seq: isSet(object.seq) ? globalThis.String(object.seq) : "0",
       data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
       producedAtMs: isSet(object.producedAtMs)
         ? globalThis.String(object.producedAtMs)
         : isSet(object.produced_at_ms)
-        ? globalThis.String(object.produced_at_ms)
-        : "0",
+          ? globalThis.String(object.produced_at_ms)
+          : "0",
     };
   },
 
@@ -9926,8 +10433,8 @@ export const StreamClose: MessageFns<StreamClose> = {
       channelId: isSet(object.channelId)
         ? globalThis.String(object.channelId)
         : isSet(object.channel_id)
-        ? globalThis.String(object.channel_id)
-        : "",
+          ? globalThis.String(object.channel_id)
+          : "",
       reason: isSet(object.reason) ? streamCloseReasonFromJSON(object.reason) : 0,
       message: isSet(object.message) ? globalThis.String(object.message) : "",
     };
@@ -10002,7 +10509,10 @@ export const DesktopInput: MessageFns<DesktopInput> = {
             break;
           }
 
-          message.event = { $case: "pointer", pointer: PointerEvent.decode(reader, reader.uint32()) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.decode(reader, reader.uint32()),
+          };
           continue;
         }
         case 3: {
@@ -10035,15 +10545,15 @@ export const DesktopInput: MessageFns<DesktopInput> = {
       channelId: isSet(object.channelId)
         ? globalThis.String(object.channelId)
         : isSet(object.channel_id)
-        ? globalThis.String(object.channel_id)
-        : "",
+          ? globalThis.String(object.channel_id)
+          : "",
       event: isSet(object.pointer)
         ? { $case: "pointer", pointer: PointerEvent.fromJSON(object.pointer) }
         : isSet(object.key)
-        ? { $case: "key", key: KeyEvent.fromJSON(object.key) }
-        : isSet(object.scroll)
-        ? { $case: "scroll", scroll: ScrollEvent.fromJSON(object.scroll) }
-        : undefined,
+          ? { $case: "key", key: KeyEvent.fromJSON(object.key) }
+          : isSet(object.scroll)
+            ? { $case: "scroll", scroll: ScrollEvent.fromJSON(object.scroll) }
+            : undefined,
     };
   },
 
@@ -10071,7 +10581,10 @@ export const DesktopInput: MessageFns<DesktopInput> = {
     switch (object.event?.$case) {
       case "pointer": {
         if (object.event?.pointer !== undefined && object.event?.pointer !== null) {
-          message.event = { $case: "pointer", pointer: PointerEvent.fromPartial(object.event.pointer) };
+          message.event = {
+            $case: "pointer",
+            pointer: PointerEvent.fromPartial(object.event.pointer),
+          };
         }
         break;
       }
@@ -10264,8 +10777,8 @@ export const KeyEvent: MessageFns<KeyEvent> = {
       isText: isSet(object.isText)
         ? globalThis.Boolean(object.isText)
         : isSet(object.is_text)
-        ? globalThis.Boolean(object.is_text)
-        : false,
+          ? globalThis.Boolean(object.is_text)
+          : false,
       action: isSet(object.action) ? keyActionFromJSON(object.action) : 0,
     };
   },
@@ -10372,13 +10885,13 @@ export const ScrollEvent: MessageFns<ScrollEvent> = {
       deltaX: isSet(object.deltaX)
         ? globalThis.Number(object.deltaX)
         : isSet(object.delta_x)
-        ? globalThis.Number(object.delta_x)
-        : 0,
+          ? globalThis.Number(object.delta_x)
+          : 0,
       deltaY: isSet(object.deltaY)
         ? globalThis.Number(object.deltaY)
         : isSet(object.delta_y)
-        ? globalThis.Number(object.delta_y)
-        : 0,
+          ? globalThis.Number(object.delta_y)
+          : 0,
     };
   },
 
@@ -10439,15 +10952,21 @@ function base64FromBytes(arr: Uint8Array): string {
 
 type Builtin = Date | Function | Uint8Array | string | number | boolean | undefined;
 
-export type DeepPartial<T> = T extends Builtin ? T
-  : T extends globalThis.Array<infer U> ? globalThis.Array<DeepPartial<U>>
-  : T extends ReadonlyArray<infer U> ? ReadonlyArray<DeepPartial<U>>
-  : T extends { $case: string } ? { [K in keyof Omit<T, "$case">]?: DeepPartial<T[K]> } & { $case: T["$case"] }
-  : T extends {} ? { [K in keyof T]?: DeepPartial<T[K]> }
-  : Partial<T>;
+export type DeepPartial<T> = T extends Builtin
+  ? T
+  : T extends globalThis.Array<infer U>
+    ? globalThis.Array<DeepPartial<U>>
+    : T extends ReadonlyArray<infer U>
+      ? ReadonlyArray<DeepPartial<U>>
+      : T extends { $case: string }
+        ? { [K in keyof Omit<T, "$case">]?: DeepPartial<T[K]> } & { $case: T["$case"] }
+        : T extends {}
+          ? { [K in keyof T]?: DeepPartial<T[K]> }
+          : Partial<T>;
 
 type KeysOfUnion<T> = T extends T ? keyof T : never;
-export type Exact<P, I extends P> = P extends Builtin ? P
+export type Exact<P, I extends P> = P extends Builtin
+  ? P
   : P & { [K in keyof P]: Exact<P[K], I[K]> } & { [K in Exclude<keyof I, KeysOfUnion<P>>]: never };
 
 function isObject(value: any): boolean {

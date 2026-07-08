@@ -52,7 +52,9 @@ export const CapabilityTile = memo(function CapabilityTile({
         <span className="truncate">{capabilityKindLabel(item.kind)}</span>
         {authHint ? (
           <>
-            <span aria-hidden className="text-fg-subtle/50">·</span>
+            <span aria-hidden className="text-fg-subtle/50">
+              ·
+            </span>
             <span className="truncate">{authHint}</span>
           </>
         ) : null}

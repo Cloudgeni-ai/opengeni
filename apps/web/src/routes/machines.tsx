@@ -64,7 +64,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     const online = new Set(
       machines.machines
-        .filter((machine) => !machine.isSessionGroup && connectionStatusForState(machine.state) === "online")
+        .filter(
+          (machine) =>
+            !machine.isSessionGroup && connectionStatusForState(machine.state) === "online",
+        )
         .map((machine) => machine.sandboxId),
     );
     const previous = onlineSeenRef.current;
@@ -75,7 +78,9 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           connectionStatusForState(machine.state) === "online" &&
           !previous.has(machine.sandboxId)
         ) {
-          toast.success(`${machine.name} connected`, { description: "It's ready to run sessions." });
+          toast.success(`${machine.name} connected`, {
+            description: "It's ready to run sessions.",
+          });
         }
       }
     }
@@ -90,7 +95,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   // machines at all. That's a configuration fact, not a failure — render a calm
   // explanation instead of a red load error with a pointless retry (mirrors the
   // composer's handling in sessions-index).
-  const featureUnavailable = machines.error instanceof OpenGeniApiError && machines.error.status === 404;
+  const featureUnavailable =
+    machines.error instanceof OpenGeniApiError && machines.error.status === 404;
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
@@ -103,7 +109,8 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <div className="mt-5">
         {featureUnavailable ? (
           <Notice tone="muted">
-            Connected machines aren't enabled on this deployment. Sessions run on the managed sandbox.
+            Connected machines aren't enabled on this deployment. Sessions run on the managed
+            sandbox.
           </Notice>
         ) : (
           <MachinesDashboard
@@ -114,7 +121,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onRefresh={() => void machines.refresh()}
             onEnroll={() => setEnrollOpen(true)}
             {...(machines.canAttach
-              ? { onAttach: (m) => void machines.attach(m.sandboxId), attachingSandboxId: machines.attachingSandboxId }
+              ? {
+                  onAttach: (m) => void machines.attach(m.sandboxId),
+                  attachingSandboxId: machines.attachingSandboxId,
+                }
               : {})}
           />
         )}
@@ -167,11 +177,17 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
       setMinting(true);
       setError(null);
       try {
-        const result = await client.mintEnrollToken(workspaceId, { allowScreenControl: screenControl });
+        const result = await client.mintEnrollToken(workspaceId, {
+          allowScreenControl: screenControl,
+        });
         if (seq !== mintSeq.current) {
           return;
         }
-        setToken({ value: result.token, expiresAt: result.expiresAt, expiresInSeconds: result.expiresInSeconds });
+        setToken({
+          value: result.token,
+          expiresAt: result.expiresAt,
+          expiresInSeconds: result.expiresInSeconds,
+        });
         setCopied(false);
       } catch (err) {
         if (seq !== mintSeq.current) {
@@ -245,7 +261,8 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs leading-4 text-fg-muted">
-        Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no approval step.
+        Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no
+        approval step.
       </p>
 
       <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">
@@ -262,14 +279,15 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
             Allow screen control
           </span>
           <span className="text-2xs text-fg-muted">
-            Let agents view and control this machine&apos;s screen (mouse + keyboard). Leave off for a headless sandbox.
+            Let agents view and control this machine&apos;s screen (mouse + keyboard). Leave off for
+            a headless sandbox.
           </span>
         </span>
       </label>
 
       <Notice tone="waiting" title="Secret — copy it now">
-        This command embeds a one-time enroll token that grants enrollment into this workspace until it expires. Anyone
-        who has it can enroll a machine here.
+        This command embeds a one-time enroll token that grants enrollment into this workspace until
+        it expires. Anyone who has it can enroll a machine here.
       </Notice>
 
       {minting ? (
@@ -280,12 +298,17 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         <Notice
           tone="failed"
           title="Could not create an enroll token"
-          action={(
-            <Button type="button" variant="outline" size="sm" onClick={() => void mint(allowScreenControl)}>
+          action={
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void mint(allowScreenControl)}
+            >
               <TerminalIcon className="size-4" />
               Try again
             </Button>
-          )}
+          }
         >
           {error}
         </Notice>
@@ -293,7 +316,13 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         <>
           <div className="flex items-center justify-between rounded-md border border-border bg-surface-2/60 px-2.5 py-1.5 text-2xs text-fg-muted">
             <span>Expires {formatExpiry(token.expiresAt, token.expiresInSeconds)}</span>
-            <Button type="button" variant="ghost" size="xs" onClick={() => void mint(allowScreenControl)} disabled={minting}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="xs"
+              onClick={() => void mint(allowScreenControl)}
+              disabled={minting}
+            >
               Regenerate
             </Button>
           </div>
@@ -302,7 +331,13 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
               {command}
             </pre>
           </div>
-          <Button type="button" variant="secondary" size="sm" className="w-full" onClick={copyCommand}>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="w-full"
+            onClick={copyCommand}
+          >
             {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
             {copied ? "Copied" : "Copy install command"}
           </Button>

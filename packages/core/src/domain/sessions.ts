@@ -68,13 +68,19 @@ type ValidatedSessionMcpServers = {
   metadata: SessionMcpServerMetadata[];
 };
 
-function normalizedSessionMcpCredentialHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+function normalizedSessionMcpCredentialHeaders(
+  headers: Record<string, string> | undefined,
+): Record<string, string> {
   if (!headers) {
     return {};
   }
-  const entries = Object.entries(headers).map(([name, value]) => [name.trim(), value] as const).filter(([name]) => name.length > 0);
+  const entries = Object.entries(headers)
+    .map(([name, value]) => [name.trim(), value] as const)
+    .filter(([name]) => name.length > 0);
   if (entries.length > maxSessionMcpCredentialHeaders) {
-    throw new HTTPException(422, { message: `a session MCP server supports at most ${maxSessionMcpCredentialHeaders} credential headers` });
+    throw new HTTPException(422, {
+      message: `a session MCP server supports at most ${maxSessionMcpCredentialHeaders} credential headers`,
+    });
   }
   const seen = new Set<string>();
   for (const [name, value] of entries) {
@@ -87,12 +93,16 @@ function normalizedSessionMcpCredentialHeaders(headers: Record<string, string> |
     }
     seen.add(lower);
     if (value.length === 0 || value.length > maxSessionMcpCredentialHeaderValueLength) {
-      throw new HTTPException(422, { message: `credential header ${name} must be 1-${maxSessionMcpCredentialHeaderValueLength} characters` });
+      throw new HTTPException(422, {
+        message: `credential header ${name} must be 1-${maxSessionMcpCredentialHeaderValueLength} characters`,
+      });
     }
     // RFC 9110 §5.5: field values are HTAB / printable characters.
     // eslint-disable-next-line no-control-regex
     if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(value)) {
-      throw new HTTPException(422, { message: `credential header ${name} contains forbidden control characters` });
+      throw new HTTPException(422, {
+        message: `credential header ${name} contains forbidden control characters`,
+      });
     }
   }
   return Object.fromEntries(entries);
@@ -110,7 +120,9 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
   };
 }
 
-function mcpServerConfigFromMetadata(server: SessionMcpServerMetadata): Settings["mcpServers"][number] {
+function mcpServerConfigFromMetadata(
+  server: SessionMcpServerMetadata,
+): Settings["mcpServers"][number] {
   return {
     id: server.id,
     ...(server.name ? { name: server.name } : {}),
@@ -119,21 +131,24 @@ function mcpServerConfigFromMetadata(server: SessionMcpServerMetadata): Settings
   };
 }
 
-function settingsWithSessionMcpServerConfigs(settings: Settings, servers: Settings["mcpServers"]): Settings {
+function settingsWithSessionMcpServerConfigs(
+  settings: Settings,
+  servers: Settings["mcpServers"],
+): Settings {
   if (servers.length === 0) {
     return settings;
   }
   const sessionIds = new Set(servers.map((server) => server.id));
   return {
     ...settings,
-    mcpServers: [
-      ...settings.mcpServers.filter((server) => !sessionIds.has(server.id)),
-      ...servers,
-    ],
+    mcpServers: [...settings.mcpServers.filter((server) => !sessionIds.has(server.id)), ...servers],
   };
 }
 
-export function settingsWithSessionMcpServerMetadata(settings: Settings, servers: SessionMcpServerMetadata[]): Settings {
+export function settingsWithSessionMcpServerMetadata(
+  settings: Settings,
+  servers: SessionMcpServerMetadata[],
+): Settings {
   return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
 }
 
@@ -162,7 +177,10 @@ function validateSessionMcpServersForCreate(
     }
     const headers = normalizedSessionMcpCredentialHeaders(server.headers);
     const headersEncrypted = Object.fromEntries(
-      Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+      Object.entries(headers).map(([name, value]) => [
+        name,
+        encryptEnvironmentValue(encryptionKey, value),
+      ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
     dbServers.push({
@@ -201,7 +219,9 @@ function validateSessionMcpCredentialUpdates(input: {
   const seenIds = new Set<string>();
   const encryptedUpdates = input.updates.map((update) => {
     if (seenIds.has(update.id)) {
-      throw new HTTPException(422, { message: `duplicate session MCP credential update id: ${update.id}` });
+      throw new HTTPException(422, {
+        message: `duplicate session MCP credential update id: ${update.id}`,
+      });
     }
     seenIds.add(update.id);
     if (!knownIds.has(update.id)) {
@@ -211,7 +231,10 @@ function validateSessionMcpCredentialUpdates(input: {
     return {
       id: update.id,
       headersEncrypted: Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+        Object.entries(headers).map(([name, value]) => [
+          name,
+          encryptEnvironmentValue(encryptionKey, value),
+        ]),
       ),
     };
   });
@@ -282,7 +305,11 @@ export async function createAndStartSession(input: {
   // Fast path with a key: return a session already created under this key
   // (the sequential retry / double-submit case) without inserting again.
   if (input.createIdempotencyKey) {
-    const existing = await getSessionByCreateIdempotencyKey(input.db, input.workspaceId, input.createIdempotencyKey);
+    const existing = await getSessionByCreateIdempotencyKey(
+      input.db,
+      input.workspaceId,
+      input.createIdempotencyKey,
+    );
     if (existing) {
       return existing;
     }
@@ -340,67 +367,86 @@ export async function createAndStartSession(input: {
  * idempotency-key winner and the key-less create share one body, and the
  * idempotency-key loser/dup can skip it entirely.
  */
-async function finishStartSession(input: {
-  db: Database;
-  bus: EventBus;
-  workflowClient: SessionWorkflowClient;
-  initialMessage: string;
-  resources: ResourceRef[];
-  tools: ToolRef[];
-  clientEventId?: string;
-  model: string;
-  reasoningEffort: Settings["openaiReasoningEffort"];
-  sandboxBackend: Settings["sandboxBackend"];
-  environment?: { id: string; name: string } | null;
-  goal?: GoalSpec | null;
-  sessionMcpServers?: SessionMcpServerMetadata[];
-  seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
-}, session: Session): Promise<Session> {
+async function finishStartSession(
+  input: {
+    db: Database;
+    bus: EventBus;
+    workflowClient: SessionWorkflowClient;
+    initialMessage: string;
+    resources: ResourceRef[];
+    tools: ToolRef[];
+    clientEventId?: string;
+    model: string;
+    reasoningEffort: Settings["openaiReasoningEffort"];
+    sandboxBackend: Settings["sandboxBackend"];
+    environment?: { id: string; name: string } | null;
+    goal?: GoalSpec | null;
+    sessionMcpServers?: SessionMcpServerMetadata[];
+    seedTargetSandbox?: {
+      sandboxId: string;
+      settings: Settings;
+      workingDir?: string | null;
+    } | null;
+  },
+  session: Session,
+): Promise<Session> {
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
   const goal = input.goal
     ? await createSessionGoal(input.db, {
-      accountId: session.accountId,
-      workspaceId: session.workspaceId,
-      sessionId: session.id,
-      text: input.goal.text,
-      successCriteria: input.goal.successCriteria ?? null,
-      maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
-      createdBy: "api",
-    })
+        accountId: session.accountId,
+        workspaceId: session.workspaceId,
+        sessionId: session.id,
+        text: input.goal.text,
+        successCriteria: input.goal.successCriteria ?? null,
+        maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
+        createdBy: "api",
+      })
     : null;
   const initialPayload = {
     text: input.initialMessage,
     ...(input.resources.length ? { resources: input.resources } : {}),
     ...(input.tools.length ? { tools: input.tools } : {}),
   };
-  const events = await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [
-    {
-      type: "session.created",
-      payload: {
-        status: "queued",
-        ...(input.environment ? { environmentId: input.environment.id, environmentName: input.environment.name } : {}),
-        ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
+  const events = await appendAndPublishEvents(
+    input.db,
+    input.bus,
+    session.workspaceId,
+    session.id,
+    [
+      {
+        type: "session.created",
+        payload: {
+          status: "queued",
+          ...(input.environment
+            ? { environmentId: input.environment.id, environmentName: input.environment.name }
+            : {}),
+          ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
+        },
       },
-    },
-    ...(goal ? [{
-      type: "goal.set" as const,
-      payload: {
-        goalId: goal.id,
-        text: goal.text,
-        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-        version: goal.version,
-        actor: "api",
-        replaced: false,
+      ...(goal
+        ? [
+            {
+              type: "goal.set" as const,
+              payload: {
+                goalId: goal.id,
+                text: goal.text,
+                ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                version: goal.version,
+                actor: "api",
+                replaced: false,
+              },
+            },
+          ]
+        : []),
+      {
+        type: "user.message",
+        payload: initialPayload,
+        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
       },
-    }] : []),
-    {
-      type: "user.message",
-      payload: initialPayload,
-      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-    },
-    { type: "session.status.changed", payload: { status: "queued" } },
-  ]);
+      { type: "session.status.changed", payload: { status: "queued" } },
+    ],
+  );
   const userEvent = events.find((event) => event.type === "user.message");
   if (!userEvent) {
     throw new HTTPException(500, { message: "failed to append initial user event" });
@@ -455,12 +501,19 @@ async function finishStartSession(input: {
     sandboxBackend: input.sandboxBackend,
     metadata: {},
   });
-  await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [{
-    type: "turn.queued",
-    turnId: turn.id,
-    payload: { turnId: turn.id, triggerEventId: userEvent.id, source: turn.source },
-  }]);
-  await input.workflowClient.wakeSessionWorkflow({ accountId: session.accountId, workspaceId: session.workspaceId, sessionId: session.id, workflowId });
+  await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [
+    {
+      type: "turn.queued",
+      turnId: turn.id,
+      payload: { turnId: turn.id, triggerEventId: userEvent.id, source: turn.source },
+    },
+  ]);
+  await input.workflowClient.wakeSessionWorkflow({
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    workflowId,
+  });
   return await requireSession(input.db, session.workspaceId, session.id);
 }
 
@@ -503,18 +556,28 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   throw new HTTPException(422, { message: `model is not available: ${model}` });
 }
 
-export async function requireQueuedTurnForApi(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
+export async function requireQueuedTurnForApi(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<SessionTurn> {
   const turn = await getSessionTurn(db, workspaceId, turnId);
   if (!turn || turn.sessionId !== sessionId) {
     throw new HTTPException(404, { message: "session turn not found" });
   }
   if (turn.status !== "queued") {
-    throw new HTTPException(409, { message: `turn is ${turn.status}; only queued turns can be changed` });
+    throw new HTTPException(409, {
+      message: `turn is ${turn.status}; only queued turns can be changed`,
+    });
   }
   return turn;
 }
 
-export function reasoningEffortForSession(metadata: Record<string, unknown>, fallback: Settings["openaiReasoningEffort"]): Settings["openaiReasoningEffort"] {
+export function reasoningEffortForSession(
+  metadata: Record<string, unknown>,
+  fallback: Settings["openaiReasoningEffort"],
+): Settings["openaiReasoningEffort"] {
   return reasoningEffortForMetadata(metadata, fallback);
 }
 
@@ -547,49 +610,63 @@ export async function postUserMessageTurn(input: {
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, async (lockedSession, lockedUpdate) => {
-    // Cancelled is the one terminal state: an explicit user act. A FAILED
-    // session stays revivable by talking to it — conversation truth lives in
-    // session_history_items, so a failed turn does not invalidate history,
-    // and the manager channel of record must always answer when spoken to.
-    // The new message transitions failed -> queued (clearing the stale
-    // activeTurnId) and the signalWithStart below starts a fresh workflow
-    // run for the completed (failed) one, exactly as for idle sessions.
-    if (lockedSession.status === "cancelled") {
-      throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
-    }
-    const mcpCredentialUpdates = input.mcpCredentialUpdates?.length
-      ? await lockedUpdate.updateSessionMcpServerCredentials(input.mcpCredentialUpdates)
-      : { servers: [], missingIds: [] };
-    if (mcpCredentialUpdates.missingIds.length > 0) {
-      throw new HTTPException(422, { message: `unknown session MCP server id: ${mcpCredentialUpdates.missingIds[0]}` });
-    }
-    const nextResources = mergeResourceRefs(lockedSession.resources, input.resources);
-    const nextTools = mergeToolRefs(lockedSession.tools, input.tools);
-    const shouldQueueSession = lockedSession.status === "idle" || lockedSession.status === "failed";
-    return {
-      events: [
-        {
-          type: "user.message",
-          payload: {
-            text: input.text,
-            ...(input.resources.length ? { resources: input.resources } : {}),
-            ...(input.tools.length ? { tools: input.tools } : {}),
-            ...(requestedModel ? { model: requestedModel } : {}),
-            ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
-            ...(mcpCredentialUpdates.servers.length ? { mcpCredentialUpdates: mcpCredentialUpdates.servers } : {}),
+  const appended = await appendSessionEventsWithLockedSessionUpdate(
+    db,
+    workspaceId,
+    sessionId,
+    async (lockedSession, lockedUpdate) => {
+      // Cancelled is the one terminal state: an explicit user act. A FAILED
+      // session stays revivable by talking to it — conversation truth lives in
+      // session_history_items, so a failed turn does not invalidate history,
+      // and the manager channel of record must always answer when spoken to.
+      // The new message transitions failed -> queued (clearing the stale
+      // activeTurnId) and the signalWithStart below starts a fresh workflow
+      // run for the completed (failed) one, exactly as for idle sessions.
+      if (lockedSession.status === "cancelled") {
+        throw new HTTPException(409, {
+          message: `session is ${lockedSession.status}; cannot accept a new user message`,
+        });
+      }
+      const mcpCredentialUpdates = input.mcpCredentialUpdates?.length
+        ? await lockedUpdate.updateSessionMcpServerCredentials(input.mcpCredentialUpdates)
+        : { servers: [], missingIds: [] };
+      if (mcpCredentialUpdates.missingIds.length > 0) {
+        throw new HTTPException(422, {
+          message: `unknown session MCP server id: ${mcpCredentialUpdates.missingIds[0]}`,
+        });
+      }
+      const nextResources = mergeResourceRefs(lockedSession.resources, input.resources);
+      const nextTools = mergeToolRefs(lockedSession.tools, input.tools);
+      const shouldQueueSession =
+        lockedSession.status === "idle" || lockedSession.status === "failed";
+      return {
+        events: [
+          {
+            type: "user.message",
+            payload: {
+              text: input.text,
+              ...(input.resources.length ? { resources: input.resources } : {}),
+              ...(input.tools.length ? { tools: input.tools } : {}),
+              ...(requestedModel ? { model: requestedModel } : {}),
+              ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
+              ...(mcpCredentialUpdates.servers.length
+                ? { mcpCredentialUpdates: mcpCredentialUpdates.servers }
+                : {}),
+            },
+            ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
           },
-          ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+          ...(shouldQueueSession
+            ? [{ type: "session.status.changed" as const, payload: { status: "queued" } }]
+            : []),
+        ],
+        update: {
+          resources: nextResources,
+          tools: nextTools,
+          ...(shouldQueueSession ? { status: "queued" as const, activeTurnId: null } : {}),
         },
-        ...(shouldQueueSession ? [{ type: "session.status.changed" as const, payload: { status: "queued" } }] : []),
-      ],
-      update: {
-        resources: nextResources,
-        tools: nextTools,
-        ...(shouldQueueSession ? { status: "queued" as const, activeTurnId: null } : {}),
-      },
-    };
-  }).then(async (events) => {
+      };
+    },
+  ).then(async (events) => {
     await bus.publish(workspaceId, sessionId, events);
     return events;
   });
@@ -610,15 +687,19 @@ export async function postUserMessageTurn(input: {
     resources: input.resources,
     tools: input.tools,
     model: requestedModel ?? session.model,
-    reasoningEffort: requestedReasoningEffort ?? reasoningEffortForSession(session.metadata, settings.openaiReasoningEffort),
+    reasoningEffort:
+      requestedReasoningEffort ??
+      reasoningEffortForSession(session.metadata, settings.openaiReasoningEffort),
     sandboxBackend: session.sandboxBackend,
     metadata: {},
   });
-  await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-    type: "turn.queued",
-    turnId: turn.id,
-    payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
-  }]);
+  await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+    {
+      type: "turn.queued",
+      turnId: turn.id,
+      payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
+    },
+  ]);
   await workflowClient.wakeSessionWorkflow({ accountId, workspaceId, sessionId, workflowId });
   return { accepted, turn };
 }
@@ -638,9 +719,20 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
-  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
-  const sessionMcpServers = validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
-  const runtimeSettings = settingsWithSessionMcpServerConfigs(capabilityRuntimeSettings, sessionMcpServers.runtimeServers);
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    db,
+    workspaceId,
+    settings,
+  );
+  const sessionMcpServers = validateSessionMcpServersForCreate(
+    capabilityRuntimeSettings,
+    grant,
+    payload.mcpServers,
+  );
+  const runtimeSettings = settingsWithSessionMcpServerConfigs(
+    capabilityRuntimeSettings,
+    sessionMcpServers.runtimeServers,
+  );
   const resources = normalizeResources(payload.resources);
   const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
   const defaultedTools = hasOwnProperty(rawPayload, "tools")
@@ -662,7 +754,12 @@ export async function createSessionForRequest(
   // (validateEnvironmentAttachment enforces it), preserving the invariant
   // that sandboxed agents cannot self-attach workspace secrets.
   const environment = payload.environmentId
-    ? await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId)
+    ? await validateEnvironmentAttachment(
+        { settings, db },
+        grant,
+        workspaceId,
+        payload.environmentId,
+      )
     : null;
   assertConfiguredModel(settings, payload.model);
   const model = payload.model ?? settings.openaiModel;
@@ -675,11 +772,16 @@ export async function createSessionForRequest(
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
-    throw new HTTPException(422, { message: "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set" });
+    throw new HTTPException(422, {
+      message:
+        "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
+    });
   }
   for (const permission of firstPartyMcpPermissions ?? []) {
     if (!hasPermission(grant.permissions, permission)) {
-      throw new HTTPException(403, { message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}` });
+      throw new HTTPException(403, {
+        message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}`,
+      });
     }
   }
   // Invariant: a goal-bearing session always carries goals:manage in its
@@ -691,7 +793,11 @@ export async function createSessionForRequest(
   // spawned session itself via the worker-signed sessionId claim, so a
   // worker managing its OWN goal is not an escalation of the spawner's
   // authority.
-  if (payload.goal && firstPartyMcpPermissions && !firstPartyMcpPermissions.includes("goals:manage")) {
+  if (
+    payload.goal &&
+    firstPartyMcpPermissions &&
+    !firstPartyMcpPermissions.includes("goals:manage")
+  ) {
     firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
   }
   // Parent linkage: a worker is linked to its manager ONLY from the
@@ -705,7 +811,10 @@ export async function createSessionForRequest(
   // its completion wake injects a user.message + queued turn into that session
   // without holding sessions:control on it (a cross-session write escalation).
   // The claim is the only trustworthy parent source.
-  const parentSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  const parentSessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
   // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
   //
   // The DEFAULT rule is context-dependent and resolved server-side from the
@@ -747,17 +856,28 @@ export async function createSessionForRequest(
     memberEnvironmentId === requestedEnvironmentId;
   if (sandboxChoice === "shared") {
     if (!parentSessionId) {
-      throw new HTTPException(422, { message: "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create." });
+      throw new HTTPException(422, {
+        message:
+          "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create.",
+      });
     }
     const parent = await getSession(db, workspaceId, parentSessionId);
     if (!parent) {
-      throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
+      throw new HTTPException(404, {
+        message: `parent session not found in workspace: ${parentSessionId}`,
+      });
     }
-    if (parent.sandboxBackend !== "none" && !environmentMatchesGroup(parent.environmentId ?? null)) {
+    if (
+      parent.sandboxBackend !== "none" &&
+      !environmentMatchesGroup(parent.environmentId ?? null)
+    ) {
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
         // Environment — surface the conflict at create time, not turn time.
-        throw new HTTPException(422, { message: "sandbox:'shared' requires the same environment as the creator's box (the box environment is fixed at creation); omit sandbox or pass 'new' when attaching a different environment." });
+        throw new HTTPException(422, {
+          message:
+            "sandbox:'shared' requires the same environment as the creator's box (the box environment is fixed at creation); omit sandbox or pass 'new' when attaching a different environment.",
+        });
       }
       // Inherited default: deterministic separation on the genuine shared-state
       // conflict — the worker gets its own box (resolved like a top-level
@@ -770,7 +890,9 @@ export async function createSessionForRequest(
   } else if (typeof sandboxChoice === "object") {
     const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
     if (!member) {
-      throw new HTTPException(404, { message: `sandbox group not found in workspace: ${sandboxChoice.groupId}` });
+      throw new HTTPException(404, {
+        message: `sandbox group not found in workspace: ${sandboxChoice.groupId}`,
+      });
     }
     if (member.sandboxBackend !== "none") {
       // Compare against EVERY member, not one arbitrary row: a legacy env-blind
@@ -778,9 +900,19 @@ export async function createSessionForRequest(
       // the join verdict nondeterministic. Post-env-aware groups are homogeneous
       // (both join paths enforce equality), so this reads one distinct value in
       // the common case; a mixed legacy group deterministically rejects.
-      const memberEnvironmentIds = await listDistinctEnvironmentIdsInGroup(db, workspaceId, sandboxChoice.groupId);
-      if (!memberEnvironmentIds.every((memberEnvironmentId) => environmentMatchesGroup(memberEnvironmentId))) {
-        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.` });
+      const memberEnvironmentIds = await listDistinctEnvironmentIdsInGroup(
+        db,
+        workspaceId,
+        sandboxChoice.groupId,
+      );
+      if (
+        !memberEnvironmentIds.every((memberEnvironmentId) =>
+          environmentMatchesGroup(memberEnvironmentId),
+        )
+      ) {
+        throw new HTTPException(422, {
+          message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.`,
+        });
       }
     }
     sandboxGroupId = sandboxChoice.groupId;
@@ -792,7 +924,10 @@ export async function createSessionForRequest(
   // — reject it at the edge (mirrors the backend:'none' guard) rather than silently
   // dropping it, since the default group box has no working-dir seam yet.
   if (payload.workingDir !== undefined && !payload.targetSandboxId) {
-    throw new HTTPException(422, { message: "workingDir requires targetSandboxId (it is the targeted machine's working directory)" });
+    throw new HTTPException(422, {
+      message:
+        "workingDir requires targetSandboxId (it is the targeted machine's working directory)",
+    });
   }
   // Honest-label (Stage-D closure): a top-level session TARGETED at a Connected
   // Machine (a selfhosted sandbox) runs machine-primary every turn, so its HOME
@@ -822,23 +957,32 @@ export async function createSessionForRequest(
   let machineHomeBackend: Session["sandboxBackend"] | undefined;
   let machineHomeOs: Session["sandboxOs"] | undefined;
   if (
-    payload.targetSandboxId
-    && inheritedBackend === undefined
-    && settings.sandboxOwnershipEnabled
-    && settings.sandboxSelfhostedEnabled
+    payload.targetSandboxId &&
+    inheritedBackend === undefined &&
+    settings.sandboxOwnershipEnabled &&
+    settings.sandboxSelfhostedEnabled
   ) {
     const targetSandbox = await getSandbox(db, workspaceId, payload.targetSandboxId);
     if (targetSandbox?.kind === "selfhosted") {
       machineHomeBackend = "selfhosted";
       if (targetSandbox.enrollmentId) {
         const enrollment = await getEnrollment(db, workspaceId, targetSandbox.enrollmentId);
-        if (enrollment && (enrollment.os === "macos" || enrollment.os === "windows" || enrollment.os === "linux")) {
+        if (
+          enrollment &&
+          (enrollment.os === "macos" || enrollment.os === "windows" || enrollment.os === "linux")
+        ) {
           machineHomeOs = enrollment.os;
         }
       }
     }
   }
-  await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model });
+  await requireLimit(deps, {
+    accountId: grant.accountId,
+    workspaceId,
+    action: "agent_run:create",
+    quantity: 1,
+    model,
+  });
   const session = await createAndStartSession({
     db,
     bus,
@@ -856,7 +1000,8 @@ export async function createSessionForRequest(
     // machine-targeted top-level create labels the home "selfhosted"
     // (machineHomeBackend), overriding the caller/deployment default so the row
     // matches where the session actually runs.
-    sandboxBackend: inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+    sandboxBackend:
+      inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
     // Mirror the backend relabel on the OS axis: only a machine-targeted
     // top-level create carries a derived OS; everything else is omitted and the
     // "linux" default holds (shared spawns keep the parent-box behavior).
@@ -920,12 +1065,19 @@ export async function acceptSessionUserMessage(
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
-  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    db,
+    workspaceId,
+    settings,
+  );
   // Hoisted above requireLimit so the codex-billed predicate can resolve the
   // turn's effective model (a follow-up turn inherits the session's model). A
   // pure read with no side effects.
   const existingSession = await requireSession(db, workspaceId, sessionId);
-  const runtimeSettings = settingsWithSessionMcpServerMetadata(capabilityRuntimeSettings, existingSession.mcpServers);
+  const runtimeSettings = settingsWithSessionMcpServerMetadata(
+    capabilityRuntimeSettings,
+    existingSession.mcpServers,
+  );
   const requestedResources = normalizeResources(input.resources ?? []);
   const validatedTools = validateToolRefs(input.tools ?? [], runtimeSettings);
   const requestedTools = input.toolsProvided
@@ -942,7 +1094,10 @@ export async function acceptSessionUserMessage(
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(db, workspaceId, requestedResources);
-  await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
+  await validateGitHubRepositorySelection(db, workspaceId, [
+    ...existingSession.resources,
+    ...requestedResources,
+  ]);
   const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
     settings,
     grant,
@@ -998,13 +1153,15 @@ export async function updateSessionTitle(
   const { db, bus } = deps;
   const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
   if (result.updated) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "session.title_set",
-      payload: {
-        title: result.title ?? title,
-        source,
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
+      {
+        type: "session.title_set",
+        payload: {
+          title: result.title ?? title,
+          source,
+        },
       },
-    }]);
+    ]);
   }
   return result;
 }
@@ -1017,7 +1174,10 @@ export async function readSessionLineage(db: Database, workspaceId: string, sess
   return lineage;
 }
 
-function withFirstPartyTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
+function withFirstPartyTools(
+  tools: ToolRef[],
+  runtimeSettings: { mcpServers: Array<{ id: string }> },
+): ToolRef[] {
   if (!runtimeSettings.mcpServers.some((server) => server.id === "opengeni")) {
     return tools;
   }
@@ -1025,5 +1185,7 @@ function withFirstPartyTools(tools: ToolRef[], runtimeSettings: { mcpServers: Ar
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {
-  return Boolean(value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key));
+  return Boolean(
+    value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key),
+  );
 }

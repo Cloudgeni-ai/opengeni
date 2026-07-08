@@ -121,17 +121,32 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
-  updateWorkspaceSettings: (workspaceId: string, settings: UpdateWorkspaceSettingsRequest) => Promise<Workspace | null>;
-  updateSessionTitle: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
+  updateWorkspaceSettings: (
+    workspaceId: string,
+    settings: UpdateWorkspaceSettingsRequest,
+  ) => Promise<Workspace | null>;
+  updateSessionTitle: (
+    workspaceId: string,
+    sessionId: string,
+    title: string,
+  ) => Promise<Session | null>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
-  refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
+  refreshGitHub: (
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: { sync?: boolean },
+  ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null; workingDir?: string | null; omitWorkspaceResources?: boolean },
+    options?: {
+      targetSandboxId?: string | null;
+      workingDir?: string | null;
+      omitWorkspaceResources?: boolean;
+    },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
@@ -185,11 +200,17 @@ export function RootRouteComponent() {
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
-  const [githubStatus, setGithubStatus] = useState<{ configured: boolean; missing: string[]; installUrl: string | null } | null>(null);
+  const [githubStatus, setGithubStatus] = useState<{
+    configured: boolean;
+    missing: string[];
+    installUrl: string | null;
+  } | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
-  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(() => new Set());
+  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   // Seed "docs" as already-seen so Document Search is not auto-selected on first
   // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
   // including the first-party "opengeni", is auto-selected when it first appears.
@@ -209,12 +230,17 @@ export function RootRouteComponent() {
   const [hasAccessKey, setHasAccessKey] = useState(() => getStoredAccessKey() !== null);
   const [accessKeyDraft, setAccessKeyDraft] = useState("");
   const [accessKeyVersion, setAccessKeyVersion] = useState(0);
-  const keyAuthRequired = clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
+  const keyAuthRequired =
+    clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
-  const defaultWorkspaceId = accessContext?.defaultWorkspaceId ?? workspaces[0]?.id ?? accessContext?.workspaceGrants[0]?.workspaceId ?? null;
+  const defaultWorkspaceId =
+    accessContext?.defaultWorkspaceId ??
+    workspaces[0]?.id ??
+    accessContext?.workspaceGrants[0]?.workspaceId ??
+    null;
   const navigate = useNavigate();
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
@@ -227,9 +253,10 @@ export function RootRouteComponent() {
   const client = useMemo(() => createOpenGeniClient(), [accessKeyVersion]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
-      const next = typeof value === "function"
-        ? (value as (previous: Session | null) => Session | null)(current)
-        : value;
+      const next =
+        typeof value === "function"
+          ? (value as (previous: Session | null) => Session | null)(current)
+          : value;
       return sameSessionForContext(current, next) ? current : next;
     });
   }, []);
@@ -344,7 +371,9 @@ export function RootRouteComponent() {
       return;
     }
     const availableIds = toolMcpServers.map((server) => server.id);
-    setSelectedCapabilityToolIds((current) => selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current));
+    setSelectedCapabilityToolIds((current) =>
+      selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current),
+    );
     previousCapabilityToolIds.current = new Set(availableIds);
   }, [clientConfig, toolMcpServers]);
 
@@ -355,16 +384,23 @@ export function RootRouteComponent() {
     try {
       created = await client.createWorkspace(request);
     } catch (error) {
-      toast.error("Failed to create workspace", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to create workspace", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
     setWorkspaces((current) => upsertWorkspace(current, created));
     // Refresh grants so the new workspace's owner permissions apply at once;
     // the workspace itself is already usable if this refresh fails — surface a
     // soft warning so a stale permission set doesn't fail silently.
-    await client.getAccessContext().then(setAccessContext).catch(() => {
-      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
-    });
+    await client
+      .getAccessContext()
+      .then(setAccessContext)
+      .catch(() => {
+        toast.warning("Permissions may be out of date", {
+          description: "Reload if something looks off.",
+        });
+      });
     return created;
   }
 
@@ -374,7 +410,9 @@ export function RootRouteComponent() {
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
-      toast.error("Failed to rename workspace", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to rename workspace", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -382,13 +420,18 @@ export function RootRouteComponent() {
   // Settings PATCH deep-merges server-side; upsert the returned workspace so the
   // cached list (and any settings-derived UI, e.g. the Documents memory pane)
   // reflects the change without a reload.
-  async function updateWorkspaceSettings(workspaceId: string, settings: UpdateWorkspaceSettingsRequest): Promise<Workspace | null> {
+  async function updateWorkspaceSettings(
+    workspaceId: string,
+    settings: UpdateWorkspaceSettingsRequest,
+  ): Promise<Workspace | null> {
     try {
       const updated = await client.updateWorkspaceSettings(workspaceId, settings);
       setWorkspaces((current) => upsertWorkspace(current, updated));
       return updated;
     } catch (error) {
-      toast.error("Failed to update workspace settings", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to update workspace settings", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -397,13 +440,23 @@ export function RootRouteComponent() {
   // PATCH route, then patches the open session in-place so the header reflects
   // it at once. The rail list (its own polled hook) and any cross-client view
   // pick the change up via the session.title_set SSE event / next poll.
-  async function updateSessionTitle(workspaceId: string, sessionId: string, title: string): Promise<Session | null> {
+  async function updateSessionTitle(
+    workspaceId: string,
+    sessionId: string,
+    title: string,
+  ): Promise<Session | null> {
     try {
       const updated = await client.updateSession(workspaceId, sessionId, { title });
-      setSession((current) => (current && current.id === updated.id ? { ...current, title: updated.title, titleSource: updated.titleSource } : current));
+      setSession((current) =>
+        current && current.id === updated.id
+          ? { ...current, title: updated.title, titleSource: updated.titleSource }
+          : current,
+      );
       return updated;
     } catch (error) {
-      toast.error("Failed to rename session", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to rename session", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }
@@ -414,17 +467,28 @@ export function RootRouteComponent() {
     try {
       await client.deleteWorkspace(workspaceId);
     } catch (error) {
-      toast.error("Failed to delete workspace", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to delete workspace", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return false;
     }
     setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-    await client.getAccessContext().then(setAccessContext).catch(() => {
-      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
-    });
+    await client
+      .getAccessContext()
+      .then(setAccessContext)
+      .catch(() => {
+        toast.warning("Permissions may be out of date", {
+          description: "Reload if something looks off.",
+        });
+      });
     return true;
   }
 
-  async function refreshGitHub(workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) {
+  async function refreshGitHub(
+    workspaceId: string,
+    signal?: AbortSignal,
+    options?: { sync?: boolean },
+  ) {
     const refreshId = githubRefreshId.current + 1;
     githubRefreshId.current = refreshId;
     setRepoBusy(true);
@@ -433,7 +497,11 @@ export function RootRouteComponent() {
       if (signal?.aborted || githubRefreshId.current !== refreshId) {
         return;
       }
-      setGithubStatus({ configured: status.configured, missing: status.missing, installUrl: status.installUrl });
+      setGithubStatus({
+        configured: status.configured,
+        missing: status.missing,
+        installUrl: status.installUrl,
+      });
       setGithubAppOpen(!status.configured);
       if (status.configured) {
         // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
@@ -476,7 +544,11 @@ export function RootRouteComponent() {
   async function startSession(
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null; workingDir?: string | null; omitWorkspaceResources?: boolean },
+    options?: {
+      targetSandboxId?: string | null;
+      workingDir?: string | null;
+      omitWorkspaceResources?: boolean;
+    },
   ): Promise<Session | null> {
     setBusy(true);
     // Reuse the in-flight key if one survives a prior failed/double-fired
@@ -490,7 +562,10 @@ export function RootRouteComponent() {
         // Workspace repo selection is excluded when the create targets a
         // connected machine (D3: the machine uses its own checkout & git auth);
         // uploaded file attachments (submission.resources) still flow through.
-        resources: [...(options?.omitWorkspaceResources ? [] : currentResources), ...(submission.resources ?? [])],
+        resources: [
+          ...(options?.omitWorkspaceResources ? [] : currentResources),
+          ...(submission.resources ?? []),
+        ],
         tools: selectedTools,
         model: submission.model ?? model,
         reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
@@ -499,7 +574,9 @@ export function RootRouteComponent() {
         ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
         ...(submission.environmentId ? { environmentId: submission.environmentId } : {}),
         ...(submission.goal ? { goal: submission.goal } : {}),
-        ...(submission.firstPartyMcpPermissions ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions } : {}),
+        ...(submission.firstPartyMcpPermissions
+          ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions }
+          : {}),
         // Seed the active-sandbox pointer at create (race-free) when a machine was
         // picked. The contract accepts `targetSandboxId`; the SDK's request type
         // doesn't yet surface it, so cast the field through.
@@ -518,7 +595,9 @@ export function RootRouteComponent() {
     } catch (error) {
       // Keep the key on failure so a manual retry reuses it and dedups against
       // a create that may have actually landed server-side.
-      toast.error("Failed to start session", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to start session", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       return null;
     } finally {
       setBusy(false);
@@ -535,13 +614,19 @@ export function RootRouteComponent() {
       });
       submitGitHubManifest(result.actionUrl, result.manifest);
     } catch (error) {
-      toast.error("GitHub App setup failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("GitHub App setup failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       setGithubAppBusy(false);
     }
   }
 
   function toggleGitHubRepository(repo: GitHubRepository) {
-    if (selectedInstallationId !== null && selectedInstallationId !== repo.installationId && !selectedRepoIds.has(repo.id)) {
+    if (
+      selectedInstallationId !== null &&
+      selectedInstallationId !== repo.installationId &&
+      !selectedRepoIds.has(repo.id)
+    ) {
       toast.info("This session uses one GitHub token", {
         description: "Clear selected repositories to choose repositories from another account.",
       });
@@ -556,7 +641,10 @@ export function RootRouteComponent() {
       }
       return next;
     });
-    setSelectedRepoRefs((current) => ({ ...current, [repo.id]: current[repo.id] ?? repo.defaultBranch }));
+    setSelectedRepoRefs((current) => ({
+      ...current,
+      [repo.id]: current[repo.id] ?? repo.defaultBranch,
+    }));
   }
 
   function addManualRepository() {
@@ -588,7 +676,10 @@ export function RootRouteComponent() {
     setAccessKeyVersion((version) => version + 1);
   }
 
-  async function handleManagedAuth(mode: "signin" | "signup", input: { name: string; email: string; password: string }) {
+  async function handleManagedAuth(
+    mode: "signin" | "signup",
+    input: { name: string; email: string; password: string },
+  ) {
     if (mode === "signup") {
       await signUpEmail(input);
     } else {
@@ -634,65 +725,68 @@ export function RootRouteComponent() {
     setWorkspaceMcpServers([]);
   }
 
-  const appContext = clientConfig && accessContext ? {
-    client,
-    clientConfig,
-    authSession: authSession ?? null,
-    accessContext,
-    workspaces,
-    accessKeyVersion,
-    keyAuthRequired: keyAuthRequired === true,
-    model,
-    setModel,
-    modelForSession,
-    setModelForSession,
-    reasoningEffort,
-    setReasoningEffort,
-    inspectorOpen,
-    setInspectorOpen,
-    session,
-    setSession,
-    connectionState,
-    setConnectionState,
-    manualRepos,
-    setManualRepos,
-    manualReposOpen,
-    setManualReposOpen,
-    selectedRepoIds,
-    setSelectedRepoIds,
-    selectedRepoRefs,
-    setSelectedRepoRefs,
-    githubRepos,
-    githubStatus,
-    githubAppOpen,
-    setGithubAppOpen,
-    githubOrg,
-    setGithubOrg,
-    selectedCapabilityToolIds,
-    setSelectedCapabilityToolIds,
-    busy,
-    repoBusy,
-    githubAppBusy,
-    selectedInstallationId,
-    repositoryGroups,
-    toolMcpServers,
-    currentResources,
-    addManualRepository,
-    forgetAccessKey,
-    handleManagedSignOut,
-    createWorkspace,
-    renameWorkspace,
-    updateWorkspaceSettings,
-    updateSessionTitle,
-    deleteWorkspace,
-    refreshGitHub,
-    refreshWorkspaceMcpServers,
-    startGitHubAppManifestFlow,
-    toggleGitHubRepository,
-    startSession,
-    resetSessionView,
-    resetWorkspaceIntegrations,
-  } satisfies AppContextValue : null;
+  const appContext =
+    clientConfig && accessContext
+      ? ({
+          client,
+          clientConfig,
+          authSession: authSession ?? null,
+          accessContext,
+          workspaces,
+          accessKeyVersion,
+          keyAuthRequired: keyAuthRequired === true,
+          model,
+          setModel,
+          modelForSession,
+          setModelForSession,
+          reasoningEffort,
+          setReasoningEffort,
+          inspectorOpen,
+          setInspectorOpen,
+          session,
+          setSession,
+          connectionState,
+          setConnectionState,
+          manualRepos,
+          setManualRepos,
+          manualReposOpen,
+          setManualReposOpen,
+          selectedRepoIds,
+          setSelectedRepoIds,
+          selectedRepoRefs,
+          setSelectedRepoRefs,
+          githubRepos,
+          githubStatus,
+          githubAppOpen,
+          setGithubAppOpen,
+          githubOrg,
+          setGithubOrg,
+          selectedCapabilityToolIds,
+          setSelectedCapabilityToolIds,
+          busy,
+          repoBusy,
+          githubAppBusy,
+          selectedInstallationId,
+          repositoryGroups,
+          toolMcpServers,
+          currentResources,
+          addManualRepository,
+          forgetAccessKey,
+          handleManagedSignOut,
+          createWorkspace,
+          renameWorkspace,
+          updateWorkspaceSettings,
+          updateSessionTitle,
+          deleteWorkspace,
+          refreshGitHub,
+          refreshWorkspaceMcpServers,
+          startGitHubAppManifestFlow,
+          toggleGitHubRepository,
+          startSession,
+          resetSessionView,
+          resetWorkspaceIntegrations,
+        } satisfies AppContextValue)
+      : null;
 
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
@@ -721,16 +815,23 @@ export function RootRouteComponent() {
         <ProblemPanel
           title="Workspace access unavailable"
           description={accessError}
-          action={(
-            <Button type="button" variant="secondary" onClick={() => setAccessKeyVersion((version) => version + 1)}>
+          action={
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setAccessKeyVersion((version) => version + 1)}
+            >
               Retry
             </Button>
-          )}
+          }
         />
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
       ) : !defaultWorkspaceId ? (
-        <ProblemPanel title="No workspace access" description="You don't have access to any workspace yet." />
+        <ProblemPanel
+          title="No workspace access"
+          description="You don't have access to any workspace yet."
+        />
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
@@ -780,7 +881,9 @@ function AccessKeyPanel(props: {
           <div>
             <h1 className="text-base font-semibold">Access key required</h1>
             <p className="text-sm text-fg-subtle">
-              Enter the {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"} for this OpenGeni instance.
+              Enter the{" "}
+              {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
+              for this OpenGeni instance.
             </p>
           </div>
         </div>
@@ -794,7 +897,11 @@ function AccessKeyPanel(props: {
           className="mt-2"
           autoFocus
         />
-        <Button type="submit" className="mt-4 w-full" disabled={props.accessKeyDraft.trim().length === 0}>
+        <Button
+          type="submit"
+          className="mt-4 w-full"
+          disabled={props.accessKeyDraft.trim().length === 0}
+        >
           <CheckIcon className="size-4" />
           Continue
         </Button>
@@ -804,7 +911,10 @@ function AccessKeyPanel(props: {
 }
 
 function ManagedAuthPanel(props: {
-  onSubmit: (mode: "signin" | "signup", input: { name: string; email: string; password: string }) => Promise<void>;
+  onSubmit: (
+    mode: "signin" | "signup",
+    input: { name: string; email: string; password: string },
+  ) => Promise<void>;
 }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [name, setName] = useState("");
@@ -820,9 +930,15 @@ function ManagedAuthPanel(props: {
     }
     setBusy(true);
     try {
-      await props.onSubmit(mode, { name: name.trim() || email.trim(), email: email.trim(), password });
+      await props.onSubmit(mode, {
+        name: name.trim() || email.trim(),
+        email: email.trim(),
+        password,
+      });
     } catch (error) {
-      toast.error(mode === "signup" ? "Sign up failed" : "Sign in failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error(mode === "signup" ? "Sign up failed" : "Sign in failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setBusy(false);
     }
@@ -839,7 +955,9 @@ function ManagedAuthPanel(props: {
       await sendVerificationEmail({ email: normalizedEmail });
       toast.success("Verification email sent");
     } catch (error) {
-      toast.error("Failed to send verification email", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Failed to send verification email", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       setResendBusy(false);
     }
@@ -859,34 +977,87 @@ function ManagedAuthPanel(props: {
             <UserIcon className="size-4" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">{mode === "signup" ? "Create account" : "Sign in"}</h1>
-            <p className="text-sm text-fg-subtle">Email and password access for the managed console.</p>
+            <h1 className="text-base font-semibold">
+              {mode === "signup" ? "Create account" : "Sign in"}
+            </h1>
+            <p className="text-sm text-fg-subtle">
+              Email and password access for the managed console.
+            </p>
           </div>
         </div>
         <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
-          <Button type="button" size="sm" variant={mode === "signin" ? "secondary" : "ghost"} onClick={() => setMode("signin")}>Sign in</Button>
-          <Button type="button" size="sm" variant={mode === "signup" ? "secondary" : "ghost"} onClick={() => setMode("signup")}>Sign up</Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "signin" ? "secondary" : "ghost"}
+            onClick={() => setMode("signin")}
+          >
+            Sign in
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "signup" ? "secondary" : "ghost"}
+            onClick={() => setMode("signup")}
+          >
+            Sign up
+          </Button>
         </div>
         {mode === "signup" ? (
           <div className="mb-3">
             <Label htmlFor="managed-auth-name">Name</Label>
-            <Input id="managed-auth-name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" className="mt-2" />
+            <Input
+              id="managed-auth-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              autoComplete="name"
+              className="mt-2"
+            />
           </div>
         ) : null}
         <div className="mb-3">
           <Label htmlFor="managed-auth-email">Email</Label>
-          <Input id="managed-auth-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" className="mt-2" autoFocus />
+          <Input
+            id="managed-auth-email"
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            autoComplete="email"
+            className="mt-2"
+            autoFocus
+          />
         </div>
         <div>
           <Label htmlFor="managed-auth-password">Password</Label>
-          <Input id="managed-auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "signin" ? "current-password" : "new-password"} className="mt-2" />
+          <Input
+            id="managed-auth-password"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete={mode === "signin" ? "current-password" : "new-password"}
+            className="mt-2"
+          />
         </div>
         <Button type="submit" className="mt-4 w-full" disabled={busy}>
-          {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
+          {busy ? (
+            <Loader2Icon className="size-4 animate-spin" />
+          ) : (
+            <CheckIcon className="size-4" />
+          )}
           {mode === "signup" ? "Create account" : "Sign in"}
         </Button>
-        <Button type="button" variant="ghost" className="mt-2 w-full" disabled={resendBusy || busy} onClick={() => void resendVerification()}>
-          {resendBusy ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+        <Button
+          type="button"
+          variant="ghost"
+          className="mt-2 w-full"
+          disabled={resendBusy || busy}
+          onClick={() => void resendVerification()}
+        >
+          {resendBusy ? (
+            <Loader2Icon className="size-4 animate-spin" />
+          ) : (
+            <RefreshCwIcon className="size-4" />
+          )}
           Resend verification email
         </Button>
       </form>

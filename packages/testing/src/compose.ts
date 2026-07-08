@@ -26,7 +26,9 @@ export type TestServices = {
   down: () => Promise<void>;
 };
 
-export async function startTestServices(options: { temporal?: boolean; objectStorage?: boolean } = {}): Promise<TestServices> {
+export async function startTestServices(
+  options: { temporal?: boolean; objectStorage?: boolean } = {},
+): Promise<TestServices> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
@@ -42,7 +44,9 @@ export async function startTestServices(options: { temporal?: boolean; objectSto
   throw lastError;
 }
 
-async function startTestServicesAttempt(options: { temporal?: boolean; objectStorage?: boolean } = {}): Promise<TestServices> {
+async function startTestServicesAttempt(
+  options: { temporal?: boolean; objectStorage?: boolean } = {},
+): Promise<TestServices> {
   const cwd = await makeTempDir("opengeni-compose-");
   const projectName = `opengeni_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
   const ports = {
@@ -54,13 +58,22 @@ async function startTestServicesAttempt(options: { temporal?: boolean; objectSto
     minioConsole: await freePort(),
   };
   const composeFile = join(cwd, "compose.yml");
-  await writeFile(composeFile, composeYaml(ports, {
-    temporal: options.temporal ?? true,
-    objectStorage: options.objectStorage ?? false,
-  }));
-  const up = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "up", "-d"], { timeoutMs: 180_000 });
+  await writeFile(
+    composeFile,
+    composeYaml(ports, {
+      temporal: options.temporal ?? true,
+      objectStorage: options.objectStorage ?? false,
+    }),
+  );
+  const up = await runCommand(
+    ["docker", "compose", "-p", projectName, "-f", composeFile, "up", "-d"],
+    { timeoutMs: 180_000 },
+  );
   if (up.exitCode !== 0) {
-    await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "down", "-v", "--remove-orphans"], { timeoutMs: 60_000 }).catch(() => undefined);
+    await runCommand(
+      ["docker", "compose", "-p", projectName, "-f", composeFile, "down", "-v", "--remove-orphans"],
+      { timeoutMs: 60_000 },
+    ).catch(() => undefined);
     await removeTempDir(cwd);
     throw new Error(`docker compose up failed\n${up.stdout}\n${up.stderr}`);
   }
@@ -73,20 +86,37 @@ async function startTestServicesAttempt(options: { temporal?: boolean; objectSto
     natsPort: ports.nats,
     natsMonitorPort: ports.natsMonitor,
     temporalPort: ports.temporal,
-    ...(options.objectStorage ? { minioPort: ports.minio, minioConsolePort: ports.minioConsole } : {}),
+    ...(options.objectStorage
+      ? { minioPort: ports.minio, minioConsolePort: ports.minioConsole }
+      : {}),
     databaseUrl: `postgres://opengeni:opengeni@127.0.0.1:${ports.postgres}/opengeni`,
     natsUrl: `nats://127.0.0.1:${ports.nats}`,
     temporalHost: `127.0.0.1:${ports.temporal}`,
     dockerNetwork: `${projectName}_default`,
-    ...(options.objectStorage ? {
-      objectStorageEndpoint: `http://127.0.0.1:${ports.minio}`,
-      objectStorageSandboxEndpoint: "http://minio:9000",
-    } : {}),
+    ...(options.objectStorage
+      ? {
+          objectStorageEndpoint: `http://127.0.0.1:${ports.minio}`,
+          objectStorageSandboxEndpoint: "http://minio:9000",
+        }
+      : {}),
     migrate: async () => {
       await migrate(services.databaseUrl);
     },
     down: async () => {
-      await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "down", "-v", "--remove-orphans"], { timeoutMs: 60_000 }).catch(() => undefined);
+      await runCommand(
+        [
+          "docker",
+          "compose",
+          "-p",
+          projectName,
+          "-f",
+          composeFile,
+          "down",
+          "-v",
+          "--remove-orphans",
+        ],
+        { timeoutMs: 60_000 },
+      ).catch(() => undefined);
       await removeTempDir(cwd);
     },
   };
@@ -105,22 +135,33 @@ async function startTestServicesAttempt(options: { temporal?: boolean; objectSto
   } catch (error) {
     const logs = await composeLogs(projectName, composeFile);
     await services.down();
-    throw new Error(`test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}`, { cause: error });
+    throw new Error(
+      `test services failed to become ready: ${error instanceof Error ? error.message : String(error)}\n${logs}`,
+      { cause: error },
+    );
   }
 }
 
 function isRetryableComposeStartupError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return message.includes("address already in use") ||
+  return (
+    message.includes("address already in use") ||
     message.includes("port is already allocated") ||
-    message.includes("failed to bind host port");
+    message.includes("failed to bind host port")
+  );
 }
 
-export async function buildSandboxImage(tag = "opengeni-sandbox:local", cwd = process.cwd()): Promise<void> {
-  const result = await runCommand(["docker", "build", "-f", "docker/sandbox.Dockerfile", "-t", tag, "."], {
-    cwd,
-    timeoutMs: 300_000,
-  });
+export async function buildSandboxImage(
+  tag = "opengeni-sandbox:local",
+  cwd = process.cwd(),
+): Promise<void> {
+  const result = await runCommand(
+    ["docker", "build", "-f", "docker/sandbox.Dockerfile", "-t", tag, "."],
+    {
+      cwd,
+      timeoutMs: 300_000,
+    },
+  );
   if (result.exitCode !== 0) {
     throw new Error(`sandbox image build failed\n${result.stdout}\n${result.stderr}`);
   }
@@ -143,42 +184,54 @@ export async function applyRawSql(databaseUrl: string, sqlText: string): Promise
 }
 
 async function waitForPostgres(databaseUrl: string): Promise<void> {
-  await waitFor(async () => {
-    const sql = postgres(databaseUrl, { max: 1 });
-    try {
-      await sql`select 1`;
-      return true;
-    } finally {
-      await sql.end().catch(() => undefined);
-    }
-  }, { timeoutMs: 90_000, intervalMs: 500 });
+  await waitFor(
+    async () => {
+      const sql = postgres(databaseUrl, { max: 1 });
+      try {
+        await sql`select 1`;
+        return true;
+      } finally {
+        await sql.end().catch(() => undefined);
+      }
+    },
+    { timeoutMs: 90_000, intervalMs: 500 },
+  );
 }
 
 async function waitForNats(natsUrl: string): Promise<void> {
-  await waitFor(async () => {
-    const nc = await connectNats({ servers: natsUrl, timeout: 1_000 });
-    await nc.drain();
-    return true;
-  }, { timeoutMs: 60_000, intervalMs: 500 });
+  await waitFor(
+    async () => {
+      const nc = await connectNats({ servers: natsUrl, timeout: 1_000 });
+      await nc.drain();
+      return true;
+    },
+    { timeoutMs: 60_000, intervalMs: 500 },
+  );
 }
 
 async function waitForTemporal(address: string): Promise<void> {
-  await waitFor(async () => {
-    const connection = await Connection.connect({ address, connectTimeout: 1_000 });
-    try {
-      await connection.workflowService.describeNamespace({ namespace: "default" });
-      await connection.workflowService.countWorkflowExecutions({ namespace: "default" });
-      return true;
-    } finally {
-      await connection.close();
-    }
-  }, { timeoutMs: 240_000, intervalMs: 1_000 });
+  await waitFor(
+    async () => {
+      const connection = await Connection.connect({ address, connectTimeout: 1_000 });
+      try {
+        await connection.workflowService.describeNamespace({ namespace: "default" });
+        await connection.workflowService.countWorkflowExecutions({ namespace: "default" });
+        return true;
+      } finally {
+        await connection.close();
+      }
+    },
+    { timeoutMs: 240_000, intervalMs: 1_000 },
+  );
 }
 
 async function composeLogs(projectName: string, composeFile: string): Promise<string> {
-  const result = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "logs", "--no-color"], {
-    timeoutMs: 30_000,
-  }).catch((error) => ({ stdout: "", stderr: String(error) }));
+  const result = await runCommand(
+    ["docker", "compose", "-p", projectName, "-f", composeFile, "logs", "--no-color"],
+    {
+      timeoutMs: 30_000,
+    },
+  ).catch((error) => ({ stdout: "", stderr: String(error) }));
   return `${result.stdout}\n${result.stderr}`;
 }
 
@@ -196,25 +249,43 @@ export async function freePort(): Promise<number> {
 }
 
 async function waitForMinio(endpoint: string): Promise<void> {
-  await waitFor(async () => {
-    const response = await fetch(`${endpoint}/minio/health/ready`).catch(() => null);
-    return response?.ok === true;
-  }, { timeoutMs: 90_000, intervalMs: 500 });
+  await waitFor(
+    async () => {
+      const response = await fetch(`${endpoint}/minio/health/ready`).catch(() => null);
+      return response?.ok === true;
+    },
+    { timeoutMs: 90_000, intervalMs: 500 },
+  );
 }
 
 async function bootstrapMinioBucket(projectName: string, composeFile: string): Promise<void> {
   let lastResult: Awaited<ReturnType<typeof runCommand>> | null = null;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
-    lastResult = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"], { timeoutMs: 60_000 });
+    lastResult = await runCommand(
+      ["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"],
+      { timeoutMs: 60_000 },
+    );
     if (lastResult.exitCode === 0) {
       return;
     }
     await Bun.sleep(attempt * 1_000);
   }
-  throw new Error(`minio bucket bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`);
+  throw new Error(
+    `minio bucket bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`,
+  );
 }
 
-function composeYaml(ports: { postgres: number; nats: number; natsMonitor: number; temporal: number; minio: number; minioConsole: number }, options: { temporal: boolean; objectStorage: boolean }): string {
+function composeYaml(
+  ports: {
+    postgres: number;
+    nats: number;
+    natsMonitor: number;
+    temporal: number;
+    minio: number;
+    minioConsole: number;
+  },
+  options: { temporal: boolean; objectStorage: boolean },
+): string {
   return `services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -237,7 +308,9 @@ function composeYaml(ports: { postgres: number; nats: number; natsMonitor: numbe
       - "127.0.0.1:${ports.nats}:4222"
       - "127.0.0.1:${ports.natsMonitor}:8222"
 
-${options.temporal ? `  temporal:
+${
+  options.temporal
+    ? `  temporal:
     image: temporalio/auto-setup:1.28
     environment:
       HTTP_PROXY: ""
@@ -260,8 +333,12 @@ ${options.temporal ? `  temporal:
         condition: service_healthy
     ports:
       - "127.0.0.1:${ports.temporal}:7233"
-` : ""}
-${options.objectStorage ? `  minio:
+`
+    : ""
+}
+${
+  options.objectStorage
+    ? `  minio:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -299,6 +376,8 @@ ${options.objectStorage ? `  minio:
          sleep 2;
        done;
        exit 1"
-` : ""}
+`
+    : ""
+}
 `;
 }

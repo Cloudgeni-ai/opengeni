@@ -101,8 +101,10 @@ describe("live Fireworks GLM 5.2 (multi-provider path)", () => {
         model: resolved!.model,
         compactionMode: resolved!.provider.compactionMode,
         hostedWebSearch: resolved!.configured.hostedWebSearch,
-        encryptedReasoning: resolved!.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-        contextWindowTokens: resolved!.configured.contextWindowTokens ?? settings.contextWindowTokens,
+        encryptedReasoning:
+          resolved!.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+        contextWindowTokens:
+          resolved!.configured.contextWindowTokens ?? settings.contextWindowTokens,
       });
 
       // Fireworks does NOT execute the hosted web_search tool, so the agent must

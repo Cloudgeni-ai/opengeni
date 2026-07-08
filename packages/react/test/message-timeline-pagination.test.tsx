@@ -67,10 +67,21 @@ describe("MessageTimeline pagination affordances", () => {
     };
 
     let calls = 0;
-    const r = await renderComponent(<MessageTimeline events={[event(1)]} hasOlder onLoadOlder={() => { calls += 1; }} />);
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[event(1)]}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
     await flush();
     expect(observed).toHaveLength(1);
-    callback([{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry], instance!);
+    callback(
+      [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
+      instance!,
+    );
     expect(calls).toBe(1);
     await r.unmount();
   });

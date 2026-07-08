@@ -11,7 +11,11 @@
 // sends `sandboxBackend`/`environmentId`; a connected machine still sends the
 // top-level `targetSandboxId` (+ Stage A's `workingDir`). Only the form shape and
 // the gating change.
-import { CAPABILITY_DESCRIPTORS, type CapabilityDescriptor, type MachineView } from "@opengeni/contracts";
+import {
+  CAPABILITY_DESCRIPTORS,
+  type CapabilityDescriptor,
+  type MachineView,
+} from "@opengeni/contracts";
 
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type { GoalSpec, SandboxBackend, TurnSubmission } from "@/types";
@@ -28,9 +32,7 @@ export type ManagedSandboxTarget = {
 /** The working folder on a connected machine. PR-1 ships `root` (the agent's
  *  launch dir → no `workingDir` sent) and `path` (a free-form host path → sent as
  *  Stage A's `workingDir`). A named Project (D4) is a future third variant. */
-export type MachineFolder =
-  | { kind: "root" }
-  | { kind: "path"; path: string };
+export type MachineFolder = { kind: "root" } | { kind: "path"; path: string };
 
 /** A user-owned enrolled machine the platform attaches to (no clone, no teardown,
  *  the machine's own env & git auth). `sandboxId` is `null` until one is picked. */
@@ -89,7 +91,9 @@ export type SessionDraftSubmission = {
  *  branching on the compute kind (the one discriminant). */
 export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSubmission {
   const goal = goalFromDraft(draft);
-  const mcp = draft.customMcpPermissions ? { firstPartyMcpPermissions: [...draft.mcpPermissions] } : {};
+  const mcp = draft.customMcpPermissions
+    ? { firstPartyMcpPermissions: [...draft.mcpPermissions] }
+    : {};
 
   if (draft.compute.kind === "machine") {
     return {
@@ -133,7 +137,9 @@ function goalFromDraft(draft: SessionDraft): GoalSpec | null {
   const maxAutoContinuations = nonNegativeInteger(draft.goalMaxAutoContinuations);
   return {
     text: draft.goalText.trim(),
-    ...(draft.goalSuccessCriteria.trim() ? { successCriteria: draft.goalSuccessCriteria.trim() } : {}),
+    ...(draft.goalSuccessCriteria.trim()
+      ? { successCriteria: draft.goalSuccessCriteria.trim() }
+      : {}),
     ...(maxAutoContinuations !== null ? { maxAutoContinuations } : {}),
   };
 }
@@ -202,7 +208,9 @@ function formatLifetime(ms: number): string {
  *  led by the deployment default. Excludes `selfhosted` (the Connected Machine
  *  kind). */
 export function managedBackendOptions(): ManagedBackendOption[] {
-  const managed = (Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>)
+  const managed = (
+    Object.entries(CAPABILITY_DESCRIPTORS) as Array<[SandboxBackend, CapabilityDescriptor]>
+  )
     .filter(([backend]) => backend !== "selfhosted")
     .map(([backend, descriptor]) => ({
       value: backend,

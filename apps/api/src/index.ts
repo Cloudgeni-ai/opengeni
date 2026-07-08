@@ -1,9 +1,26 @@
-import { dbSearchPath, getSettings, resolveNatsCalloutConfig, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions } from "@opengeni/config";
-import type { ScheduledTask, ScheduledTaskOverlapPolicy, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
+import {
+  dbSearchPath,
+  getSettings,
+  resolveNatsCalloutConfig,
+  resolveNatsControlPlaneAuth,
+  retryStartupDependency,
+  startupRetryOptions,
+} from "@opengeni/config";
+import type {
+  ScheduledTask,
+  ScheduledTaskOverlapPolicy,
+  ScheduledTaskScheduleSpec,
+} from "@opengeni/contracts";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
-import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
+import {
+  Connection,
+  Client as TemporalClient,
+  ScheduleNotFoundError,
+  ScheduleOverlapPolicy,
+  WorkflowExecutionAlreadyStartedError,
+} from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 import { observabilityEventLogger } from "./observability";
@@ -35,7 +52,9 @@ const TEMPORAL_MONTHS = [
   "DECEMBER",
 ] as const;
 
-export async function createTemporalWorkflowClient(settings: ReturnType<typeof getSettings>): Promise<{
+export async function createTemporalWorkflowClient(
+  settings: ReturnType<typeof getSettings>,
+): Promise<{
   client: SessionWorkflowClient;
   documentIndexer: DocumentIndexClient;
   close: () => Promise<void>;
@@ -91,33 +110,39 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
       }
     },
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
-      await temporal.schedule.getHandle(temporalScheduleId).delete().catch(() => undefined);
+      await temporal.schedule
+        .getHandle(temporalScheduleId)
+        .delete()
+        .catch(() => undefined);
     },
     triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
-	      // Deterministic workflowId (derived from the trigger token by the
-	      // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
-	      // the second start collides on the id and is rejected instead of
-	      // spawning a second run. The shared idempotency key dedupes the charge.
-	      const workflowId = triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
-	      try {
-	        await temporal.workflow.start("scheduledTaskFireWorkflow", {
-	          taskQueue: settings.temporalTaskQueue,
-	          workflowId,
-	          workflowIdReusePolicy: "REJECT_DUPLICATE",
-	          args: [{
-	            accountId: task.accountId,
-	            workspaceId: task.workspaceId,
-	            taskId: task.id,
-	            triggerType: "manual",
-	            agentRunUsageIdempotencyKey,
-	          }],
-	        });
-	      } catch (error) {
-	        // A duplicate trigger token started this run already; treat the retry
-	        // as a no-op so the (idempotent) usage charge stays the only effect.
-	        if (isWorkflowAlreadyStarted(error)) {
-	          return;
-	        }
+      // Deterministic workflowId (derived from the trigger token by the
+      // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
+      // the second start collides on the id and is rejected instead of
+      // spawning a second run. The shared idempotency key dedupes the charge.
+      const workflowId =
+        triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
+      try {
+        await temporal.workflow.start("scheduledTaskFireWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId,
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [
+            {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              taskId: task.id,
+              triggerType: "manual",
+              agentRunUsageIdempotencyKey,
+            },
+          ],
+        });
+      } catch (error) {
+        // A duplicate trigger token started this run already; treat the retry
+        // as a no-op so the (idempotent) usage charge stays the only effect.
+        if (isWorkflowAlreadyStarted(error)) {
+          return;
+        }
         throw error;
       }
     },
@@ -158,7 +183,8 @@ export async function startApi() {
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
   const retryOptions = startupRetryOptions(settings);
-  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) => logStartupDependencyRetry(observability, event);
+  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
+    logStartupDependencyRetry(observability, event);
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
@@ -169,7 +195,9 @@ export async function startApi() {
       () =>
         createNatsEventBus(
           settings.natsUrl,
-          controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+          controlPlaneAuth
+            ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
+            : undefined,
           { logger: observabilityEventLogger(observability) },
         ),
       {
@@ -177,16 +205,16 @@ export async function startApi() {
         onRetry,
       },
     );
-    workflowClient = await retryStartupDependency("Temporal", () => createTemporalWorkflowClient(settings), {
-      ...retryOptions,
-      onRetry,
-    });
+    workflowClient = await retryStartupDependency(
+      "Temporal",
+      () => createTemporalWorkflowClient(settings),
+      {
+        ...retryOptions,
+        onRetry,
+      },
+    );
   } catch (error) {
-    await Promise.allSettled([
-      bus?.close(),
-      workflowClient?.close(),
-      dbClient.close(),
-    ]);
+    await Promise.allSettled([bus?.close(), workflowClient?.close(), dbClient.close()]);
     throw error;
   }
   if (!bus || !workflowClient) {
@@ -295,25 +323,29 @@ export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): Sched
   }
   if (schedule.type === "calendar") {
     return {
-      calendars: [{
-        hour: schedule.hour,
-        minute: schedule.minute,
-        second: 0,
-        ...(schedule.daysOfWeek ? { dayOfWeek: schedule.daysOfWeek } : {}),
-      }],
+      calendars: [
+        {
+          hour: schedule.hour,
+          minute: schedule.minute,
+          second: 0,
+          ...(schedule.daysOfWeek ? { dayOfWeek: schedule.daysOfWeek } : {}),
+        },
+      ],
       timezone: schedule.timeZone,
     };
   }
   const runAt = new Date(schedule.runAt);
   return {
-    calendars: [{
-      year: runAt.getUTCFullYear(),
-      month: temporalMonth(runAt.getUTCMonth()),
-      dayOfMonth: runAt.getUTCDate(),
-      hour: runAt.getUTCHours(),
-      minute: runAt.getUTCMinutes(),
-      second: runAt.getUTCSeconds(),
-    }],
+    calendars: [
+      {
+        year: runAt.getUTCFullYear(),
+        month: temporalMonth(runAt.getUTCMonth()),
+        dayOfMonth: runAt.getUTCDate(),
+        hour: runAt.getUTCHours(),
+        minute: runAt.getUTCMinutes(),
+        second: runAt.getUTCSeconds(),
+      },
+    ],
     timezone: "UTC",
   };
 }
@@ -330,12 +362,14 @@ function temporalScheduleOptions(task: ScheduledTask, taskQueue: string): Schedu
       type: "startWorkflow",
       workflowType: "scheduledTaskFireWorkflow",
       taskQueue,
-      args: [{
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-      }],
+      args: [
+        {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          triggerType: "scheduled",
+        },
+      ],
     },
     policies: {
       overlap: temporalOverlapPolicy(task.overlapPolicy),
@@ -362,6 +396,8 @@ function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdate
     ...(options.policies ? { policies: options.policies } : {}),
     state: options.state ?? {},
     ...(options.searchAttributes ? { searchAttributes: options.searchAttributes } : {}),
-    ...(options.typedSearchAttributes ? { typedSearchAttributes: options.typedSearchAttributes } : {}),
+    ...(options.typedSearchAttributes
+      ? { typedSearchAttributes: options.typedSearchAttributes }
+      : {}),
   };
 }

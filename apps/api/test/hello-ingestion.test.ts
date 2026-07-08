@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { acquireSharedTestDatabase, MemoryEventBus, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  MemoryEventBus,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hello } from "@opengeni/agent-proto";
 import {
   createDb,
@@ -29,7 +33,10 @@ import {
 
 describe("parseAgentHelloSubject", () => {
   test("extracts workspaceId + agentId from agent.<ws>.<id>.hello", () => {
-    expect(parseAgentHelloSubject("agent.ws-1.ag-2.hello")).toEqual({ workspaceId: "ws-1", agentId: "ag-2" });
+    expect(parseAgentHelloSubject("agent.ws-1.ag-2.hello")).toEqual({
+      workspaceId: "ws-1",
+      agentId: "ag-2",
+    });
   });
   test("the wildcard subscription subject is agent.*.*.hello", () => {
     expect(AGENT_HELLO_SUBJECT).toBe("agent.*.*.hello");
@@ -46,11 +53,20 @@ describe("helloReportsDisplay", () => {
   });
   test("a present Display detail (even if desktop=false) → has display", () => {
     expect(
-      helloReportsDisplay(Hello.fromPartial({ capabilities: { desktop: false, display: { id: ":99", width: 1920, height: 1080, virtual: true } } })),
+      helloReportsDisplay(
+        Hello.fromPartial({
+          capabilities: {
+            desktop: false,
+            display: { id: ":99", width: 1920, height: 1080, virtual: true },
+          },
+        }),
+      ),
     ).toBe(true);
   });
   test("headless (desktop=false, no display) → no display", () => {
-    expect(helloReportsDisplay(Hello.fromPartial({ capabilities: { desktop: false } }))).toBe(false);
+    expect(helloReportsDisplay(Hello.fromPartial({ capabilities: { desktop: false } }))).toBe(
+      false,
+    );
   });
   test("absent Capabilities → no display", () => {
     expect(helloReportsDisplay(Hello.fromPartial({}))).toBe(false);
@@ -75,7 +91,11 @@ describe("helloReportsDisplay", () => {
     expect(
       helloReportsDisplay(
         Hello.fromPartial({
-          capabilities: { desktop: true, display: { id: "0", width: 2560, height: 1440, virtual: false }, desktopUnavailableReason: "" },
+          capabilities: {
+            desktop: true,
+            display: { id: "0", width: 2560, height: 1440, virtual: false },
+            desktopUnavailableReason: "",
+          },
         }),
       ),
     ).toBe(true);
@@ -86,12 +106,16 @@ describe("helloDesktopUnavailableReason", () => {
   test("a set reason is returned verbatim", () => {
     expect(
       helloDesktopUnavailableReason(
-        Hello.fromPartial({ capabilities: { desktopUnavailableReason: "Screen Recording not granted" } }),
+        Hello.fromPartial({
+          capabilities: { desktopUnavailableReason: "Screen Recording not granted" },
+        }),
       ),
     ).toBe("Screen Recording not granted");
   });
   test("the proto's non-optional empty string normalizes to null (capture permitted / headless)", () => {
-    expect(helloDesktopUnavailableReason(Hello.fromPartial({ capabilities: { desktop: true } }))).toBeNull();
+    expect(
+      helloDesktopUnavailableReason(Hello.fromPartial({ capabilities: { desktop: true } })),
+    ).toBeNull();
   });
   test("absent Capabilities → null", () => {
     expect(helloDesktopUnavailableReason(Hello.fromPartial({}))).toBeNull();
@@ -107,16 +131,26 @@ let client: DbClient;
 let db: Database;
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  const [a] = await admin<{ id: string }[]>`insert into managed_accounts (name) values ('acct') returning id`;
-  const [w] = await admin<{ id: string }[]>`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  const [a] = await admin<
+    { id: string }[]
+  >`insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<
+    { id: string }[]
+  >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
 async function seedEnrollment(hasDisplay: boolean) {
   const { accountId, workspaceId } = await freshWorkspace();
   const enrollment = await createEnrollment(db, {
-    accountId, workspaceId, pubkey: `ed25519:${crypto.randomUUID()}`,
-    exposure: "whole-machine", hasDisplay, allowScreenControl: true, os: "linux", arch: "x86_64",
+    accountId,
+    workspaceId,
+    pubkey: `ed25519:${crypto.randomUUID()}`,
+    exposure: "whole-machine",
+    hasDisplay,
+    allowScreenControl: true,
+    os: "linux",
+    arch: "x86_64",
   });
   return { accountId, workspaceId, enrollment };
 }
@@ -124,7 +158,11 @@ async function seedEnrollment(hasDisplay: boolean) {
 function helloPayload(
   agentId: string,
   workspaceId: string,
-  opts: { desktop: boolean; desktopUnavailableReason?: string; display?: { id: string; width: number; height: number; virtual: boolean } },
+  opts: {
+    desktop: boolean;
+    desktopUnavailableReason?: string;
+    display?: { id: string; width: number; height: number; virtual: boolean };
+  },
 ): Uint8Array {
   return Hello.encode(
     Hello.fromPartial({
@@ -132,7 +170,9 @@ function helloPayload(
       workspaceId,
       capabilities: {
         desktop: opts.desktop,
-        ...(opts.desktopUnavailableReason ? { desktopUnavailableReason: opts.desktopUnavailableReason } : {}),
+        ...(opts.desktopUnavailableReason
+          ? { desktopUnavailableReason: opts.desktopUnavailableReason }
+          : {}),
         ...(opts.display ? { display: opts.display } : {}),
       },
     }),
@@ -155,7 +195,9 @@ beforeAll(async () => {
 afterAll(async () => {
   try {
     await client?.close();
-  } catch { /* noop */ }
+  } catch {
+    /* noop */
+  }
   await shared?.release();
 });
 
@@ -164,7 +206,12 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     if (!available) return;
     const { workspaceId, enrollment } = await seedEnrollment(false);
 
-    await handleHelloPayload(db, undefined, helloPayload(enrollment.id, workspaceId, { desktop: true }), `agent.${workspaceId}.${enrollment.id}.hello`);
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, { desktop: true }),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+    );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
     expect(after?.hasDisplay).toBe(true);
@@ -174,7 +221,12 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     if (!available) return;
     const { workspaceId, enrollment } = await seedEnrollment(true);
 
-    await handleHelloPayload(db, undefined, helloPayload(enrollment.id, workspaceId, { desktop: false }), `agent.${workspaceId}.${enrollment.id}.hello`);
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, { desktop: false }),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+    );
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
     expect(after?.hasDisplay).toBe(false);
@@ -186,7 +238,11 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     const before = await getEnrollment(db, workspaceId, enrollment.id);
 
     // refreshEnrollmentDisplay short-circuits before issuing any UPDATE.
-    const result = await refreshEnrollmentDisplay(db, { workspaceId, agentId: enrollment.id, hasDisplay: true });
+    const result = await refreshEnrollmentDisplay(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      hasDisplay: true,
+    });
     expect(result.updated).toBe(false);
 
     const after = await getEnrollment(db, workspaceId, enrollment.id);
@@ -197,7 +253,11 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
   test("an unknown agentId is a no-op (no row → no write)", async () => {
     if (!available) return;
     const { workspaceId } = await seedEnrollment(false);
-    const result = await refreshEnrollmentDisplay(db, { workspaceId, agentId: crypto.randomUUID(), hasDisplay: true });
+    const result = await refreshEnrollmentDisplay(db, {
+      workspaceId,
+      agentId: crypto.randomUUID(),
+      hasDisplay: true,
+    });
     expect(result.updated).toBe(false);
   });
 
@@ -230,11 +290,23 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     const { workspaceId, enrollment } = await seedEnrollment(true);
     const reason = "Screen Recording permission not granted.";
     // First, the blocked state.
-    await refreshEnrollmentDisplay(db, { workspaceId, agentId: enrollment.id, hasDisplay: false, desktopUnavailableReason: reason });
-    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe(reason);
+    await refreshEnrollmentDisplay(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      hasDisplay: false,
+      desktopUnavailableReason: reason,
+    });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe(
+      reason,
+    );
 
     // Then the user grants it: has_display true again, reason cleared.
-    const result = await refreshEnrollmentDisplay(db, { workspaceId, agentId: enrollment.id, hasDisplay: true, desktopUnavailableReason: null });
+    const result = await refreshEnrollmentDisplay(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      hasDisplay: true,
+      desktopUnavailableReason: null,
+    });
     expect(result.updated).toBe(true);
     const after = await getEnrollment(db, workspaceId, enrollment.id);
     expect(after?.hasDisplay).toBe(true);
@@ -247,11 +319,15 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     // persist even though has_display doesn't move — the change-guard keys on BOTH fields.
     const { workspaceId, enrollment } = await seedEnrollment(false);
     const result = await refreshEnrollmentDisplay(db, {
-      workspaceId, agentId: enrollment.id, hasDisplay: false,
+      workspaceId,
+      agentId: enrollment.id,
+      hasDisplay: false,
       desktopUnavailableReason: "Screen Recording not granted.",
     });
     expect(result.updated).toBe(true);
-    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe("Screen Recording not granted.");
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe(
+      "Screen Recording not granted.",
+    );
   });
 
   test("the live consumer wiring: a Hello on agent.*.*.hello flips has_display via startHelloIngestion", async () => {

@@ -13,18 +13,20 @@ export type TestMcpServer = {
   close: () => void;
 };
 
-export function startTestMcpServer(options: {
-  requiredAuthorization?: string;
-  requiredHeaders?: Record<string, string>;
-  // Permission-scoped tool registration: returns the extra tool names that the
-  // calling request's bearer token is authorized to see, in addition to the
-  // always-present base tools. Mirrors the production first-party MCP server,
-  // whose tools/list response varies by the delegated token's grant.
-  toolsForAuthorization?: (authorization: string | null) => string[];
-  forbiddenTools?: string[];
-  unauthorizedAuthenticateHeader?: string;
-  forbiddenAuthenticateHeader?: string;
-} = {}): TestMcpServer {
+export function startTestMcpServer(
+  options: {
+    requiredAuthorization?: string;
+    requiredHeaders?: Record<string, string>;
+    // Permission-scoped tool registration: returns the extra tool names that the
+    // calling request's bearer token is authorized to see, in addition to the
+    // always-present base tools. Mirrors the production first-party MCP server,
+    // whose tools/list response varies by the delegated token's grant.
+    toolsForAuthorization?: (authorization: string | null) => string[];
+    forbiddenTools?: string[];
+    unauthorizedAuthenticateHeader?: string;
+    forbiddenAuthenticateHeader?: string;
+  } = {},
+): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -34,12 +36,17 @@ export function startTestMcpServer(options: {
       if (url.pathname !== "/mcp") {
         return new Response("not found", { status: 404 });
       }
-      if (options.requiredAuthorization && request.headers.get("authorization") !== options.requiredAuthorization) {
+      if (
+        options.requiredAuthorization &&
+        request.headers.get("authorization") !== options.requiredAuthorization
+      ) {
         return new Response(JSON.stringify({ error: "unauthorized" }), {
           status: 401,
           headers: {
             "content-type": "application/json",
-            ...(options.unauthorizedAuthenticateHeader ? { "www-authenticate": options.unauthorizedAuthenticateHeader } : {}),
+            ...(options.unauthorizedAuthenticateHeader
+              ? { "www-authenticate": options.unauthorizedAuthenticateHeader }
+              : {}),
           },
         });
       }
@@ -49,7 +56,9 @@ export function startTestMcpServer(options: {
             status: 401,
             headers: {
               "content-type": "application/json",
-              ...(options.unauthorizedAuthenticateHeader ? { "www-authenticate": options.unauthorizedAuthenticateHeader } : {}),
+              ...(options.unauthorizedAuthenticateHeader
+                ? { "www-authenticate": options.unauthorizedAuthenticateHeader }
+                : {}),
             },
           });
         }
@@ -60,7 +69,9 @@ export function startTestMcpServer(options: {
           status: 403,
           headers: {
             "content-type": "application/json",
-            ...(options.forbiddenAuthenticateHeader ? { "www-authenticate": options.forbiddenAuthenticateHeader } : {}),
+            ...(options.forbiddenAuthenticateHeader
+              ? { "www-authenticate": options.forbiddenAuthenticateHeader }
+              : {}),
           },
         });
       }
@@ -82,13 +93,22 @@ export function startTestMcpServer(options: {
   };
 }
 
-async function forbiddenToolName(request: Request, forbiddenTools: string[]): Promise<string | null> {
+async function forbiddenToolName(
+  request: Request,
+  forbiddenTools: string[],
+): Promise<string | null> {
   if (forbiddenTools.length === 0 || request.method !== "POST") {
     return null;
   }
   try {
-    const body = await request.clone().json() as { method?: unknown; params?: { name?: unknown } };
-    const name = body.method === "tools/call" && typeof body.params?.name === "string" ? body.params.name : null;
+    const body = (await request.clone().json()) as {
+      method?: unknown;
+      params?: { name?: unknown };
+    };
+    const name =
+      body.method === "tools/call" && typeof body.params?.name === "string"
+        ? body.params.name
+        : null;
     return name && forbiddenTools.includes(name) ? name : null;
   } catch {
     return null;
@@ -100,41 +120,53 @@ function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServe
     name: "test-document-search",
     version: "1.0.0",
   });
-  server.registerTool("search_documents", {
-    description: "Search indexed documents.",
-    inputSchema: {
-      query: z.string(),
+  server.registerTool(
+    "search_documents",
+    {
+      description: "Search indexed documents.",
+      inputSchema: {
+        query: z.string(),
+      },
     },
-  }, async ({ query }) => {
-    calls.push({ tool: "search_documents", args: { query } });
-    return {
-      content: [{ type: "text", text: `found document for ${query}` }],
-    };
-  });
-  server.registerTool("fetch_document", {
-    description: "Fetch one indexed document.",
-    inputSchema: {
-      id: z.string(),
+    async ({ query }) => {
+      calls.push({ tool: "search_documents", args: { query } });
+      return {
+        content: [{ type: "text", text: `found document for ${query}` }],
+      };
     },
-  }, async ({ id }) => {
-    calls.push({ tool: "fetch_document", args: { id } });
-    return {
-      content: [{ type: "text", text: `document ${id}` }],
-    };
-  });
+  );
+  server.registerTool(
+    "fetch_document",
+    {
+      description: "Fetch one indexed document.",
+      inputSchema: {
+        id: z.string(),
+      },
+    },
+    async ({ id }) => {
+      calls.push({ tool: "fetch_document", args: { id } });
+      return {
+        content: [{ type: "text", text: `document ${id}` }],
+      };
+    },
+  );
   // Permission-scoped tools, registered only when the caller's grant includes
   // them. The base tools above are always present, mirroring tools that every
   // grant can see.
   for (const toolName of scopedTools ?? []) {
-    server.registerTool(toolName, {
-      description: `Scoped tool ${toolName}.`,
-      inputSchema: {},
-    }, async () => {
-      calls.push({ tool: toolName, args: {} });
-      return {
-        content: [{ type: "text", text: `ran ${toolName}` }],
-      };
-    });
+    server.registerTool(
+      toolName,
+      {
+        description: `Scoped tool ${toolName}.`,
+        inputSchema: {},
+      },
+      async () => {
+        calls.push({ tool: toolName, args: {} });
+        return {
+          content: [{ type: "text", text: `ran ${toolName}` }],
+        };
+      },
+    );
   }
   return server;
 }
