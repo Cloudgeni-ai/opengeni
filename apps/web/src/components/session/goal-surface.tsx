@@ -194,7 +194,7 @@ export function GoalSurface({
                 aria-label={record.status === "paused" ? "Resume goal" : "Pause goal"}
                 disabled={goal.updating}
                 onClick={() => void (record.status === "paused" ? goal.resume() : goal.pause("Paused from the console"))}
-                className="ml-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-fg-subtle outline-none transition-colors hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+                className="ml-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full text-fg-subtle outline-none transition-colors hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60"
               >
                 {goal.updating ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
@@ -210,7 +210,7 @@ export function GoalSurface({
               <button
                 type="button"
                 aria-label={open ? "Hide goal detail" : "Show goal detail"}
-                className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-fg-subtle outline-none transition-colors hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-surface-3 data-[state=open]:text-fg"
+                className="inline-flex size-6 shrink-0 items-center justify-center rounded-full text-fg-subtle outline-none transition-colors hover:bg-surface-3 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-surface-3 data-[state=open]:text-fg"
               >
                 <ChevronDownIcon className="size-3.5 transition-transform data-[state=open]:rotate-180" />
               </button>
