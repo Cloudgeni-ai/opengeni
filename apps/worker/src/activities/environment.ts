@@ -189,7 +189,9 @@ export async function sandboxEnvironmentForRun(
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
       token = minted.token;
-      if (selection.provider === "github") {
+      if (minted.identity) {
+        identity = minted.identity;
+      } else if (selection.provider === "github") {
         identity = minted.identity ?? githubAppBotIdentity(settings);
       }
     } else if (selection.provider === "github" && selection.installationId > 0) {

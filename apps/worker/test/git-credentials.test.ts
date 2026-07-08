@@ -8,11 +8,13 @@ const scope = {
   workspaceId: "00000000-0000-4000-8000-000000000002",
 };
 
+const provisionedSettings = () => testSettings({ sandboxBackend: "docker" });
+
 describe("sandbox git credentials", () => {
   test("keeps GitHub host credential legacy fields unchanged and adds repositoryRefs", async () => {
     const calls: GitCredentialsRequest[] = [];
     const result = await sandboxEnvironmentForRun(
-      testSettings(),
+      provisionedSettings(),
       [{
         kind: "repository",
         uri: "https://github.com/acme/private.git",
@@ -74,14 +76,20 @@ describe("sandbox git credentials", () => {
     ];
 
     const result = await sandboxEnvironmentForRun(
-      testSettings(),
+      provisionedSettings(),
       resources,
       {},
       {
         scope,
         gitCredentials: async (input) => {
           calls.push(input);
-          return { token: `${input.provider}-token`, workspaceId: input.workspaceId };
+          return {
+            token: `${input.provider}-token`,
+            workspaceId: input.workspaceId,
+            ...(input.provider === "gitlab"
+              ? { identity: { name: "GitLab Bot", email: "gitlab-bot@example.com" } }
+              : {}),
+          };
         },
       },
     );
@@ -122,6 +130,10 @@ describe("sandbox git credentials", () => {
       gitlab: "gitlab-token",
       azure_devops: "azure_devops-token",
     });
+    expect(result.environment.GIT_AUTHOR_NAME).toBe("GitLab Bot");
+    expect(result.environment.GIT_AUTHOR_EMAIL).toBe("gitlab-bot@example.com");
+    expect(result.environment.GIT_COMMITTER_NAME).toBe("GitLab Bot");
+    expect(result.environment.GIT_COMMITTER_EMAIL).toBe("gitlab-bot@example.com");
     expect(result.environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
     expect(result.environment.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
     expect(Object.values(result.environment)).not.toContain("gitlab-token");
