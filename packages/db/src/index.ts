@@ -4162,6 +4162,18 @@ export async function getRigVersion(db: Database, workspaceId: string, rigId: st
   });
 }
 
+export async function getRigVersionById(db: Database, workspaceId: string, versionId: string): Promise<RigVersion | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.rigVersions)
+      .where(and(
+        eq(schema.rigVersions.workspaceId, workspaceId),
+        eq(schema.rigVersions.id, versionId),
+      ))
+      .limit(1);
+    return row ? mapRigVersion(row) : null;
+  });
+}
+
 // M3 runtime: the rig's display name only (for the turn's doctrine block + setup
 // events/errors), without the extra active-version + count reads getRig does.
 export async function getRigName(db: Database, workspaceId: string, rigId: string): Promise<string | null> {

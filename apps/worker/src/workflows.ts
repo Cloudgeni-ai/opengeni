@@ -17,3 +17,7 @@ export {
 export {
   sandboxReaperWorkflow,
 } from "./workflows/sandbox-reaper";
+export {
+  rigVerificationWorkflow,
+  type RigVerificationWorkflowInput,
+} from "./workflows/rig-verification";

@@ -1942,8 +1942,8 @@ async function codexAppsMcpRequestInit(settings: Settings): Promise<{ requestIni
 // The first-party MCP permission set signed into a worker's delegated token
 // when the session does not specify its own. POWERFUL BY DEFAULT: it carries
 // every permission that unlocks a first-party tool — session orchestration
-// (sessions:*), workspace variable sets (variable-sets:*), and GitHub
-// (github:use) — so agents are fully capable out of the box. A user DEMOTES a
+// (sessions:*), workspace variable sets (variable-sets:*), rigs:use
+// (list/get/propose/verify only), and GitHub (github:use) — so agents are fully capable out of the box. A user DEMOTES a
 // specific session by setting a narrower session.firstPartyMcpPermissions (the
 // create-session permission picker), which the worker uses instead. Account-
 // level scopes (billing/account/members/api_keys/workspace:admin) are
@@ -1961,6 +1961,7 @@ const firstPartyMcpPermissions: Permission[] = [
   "sessions:control",
   "variable-sets:use",
   "variable-sets:manage",
+  "rigs:use",
   "github:use",
 ];
 

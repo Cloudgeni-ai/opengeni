@@ -23,6 +23,7 @@ import {
   listScheduledTasks,
   listSessionEvents,
   listSessions,
+  listRigs,
   listSocialConnections,
   listSocialPosts,
   listVariableSets,
@@ -55,6 +56,12 @@ import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  listRigChangesForApi,
+  listRigVersionsForApi,
+  promoteVerifiedDefinitionEditChangeForApi,
+  proposeRigChangeForApi,
+  requireRigChangeForApi,
+  requireRigForApi,
   assertAllowedVariableSetVariableName,
   MAX_ENVIRONMENTS_PER_WORKSPACE,
   MAX_VARIABLES_PER_ENVIRONMENT,
@@ -138,6 +145,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // pointer + swap are only meaningful when bring-your-own-compute is enabled.
   if (!toolspaceMode && sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
     registerFleetTools(server, deps, grant, sessionId, json);
+  }
+  if (!toolspaceMode) {
+    registerRigTools(server, deps, grant, can, sessionId, json);
   }
 
   // Orchestration, variableSet, and GitHub-connect tools are permission-gated
@@ -722,6 +732,100 @@ function registerFleetTools(
       name: z4.string().min(1).max(120).optional(),
     },
   }, async ({ kind, name }) => json(await provisionSandbox(services, await fleetContext(), { kind, ...(name ? { name } : {}) })));
+}
+
+function registerRigTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  sessionId: string | null,
+  json: JsonResult,
+): void {
+  if (can("rigs:use")) {
+    server.registerTool("rig_list", {
+      description: "List workspace rigs and their active versions.",
+      inputSchema: {},
+    }, async () => json({ rigs: await listRigs(deps.db, grant.workspaceId) }));
+
+    server.registerTool("rig_get", {
+      description: "Get a rig, its versions, and recent changes.",
+      inputSchema: {
+        rigId: z4.string().uuid(),
+        changeLimit: z4.number().int().positive().optional(),
+      },
+    }, async ({ rigId, changeLimit }) => {
+      const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+      return json({
+        rig,
+        versions: await listRigVersionsForApi({ db: deps.db }, grant.workspaceId, rig.id),
+        changes: await listRigChangesForApi({ db: deps.db }, grant.workspaceId, rig.id, boundedMcpLimit(changeLimit)),
+      });
+    });
+
+    server.registerTool("rig_propose_change", {
+      description: "Propose an additive rig setup command for clean verification. Use the exact command that already worked in this sandbox.",
+      inputSchema: {
+        rigId: z4.string().uuid(),
+        command: z4.string().min(1).max(8192),
+        note: z4.string().max(2000).optional(),
+      },
+    }, async ({ rigId, command, note }) => {
+      const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+      const change = await proposeRigChangeForApi({ db: deps.db }, grant, rig, {
+        kind: "setup_append",
+        payload: { command, ...(note ? { note } : {}) },
+      }, sessionId ? { proposedBy: `session:${sessionId}` } : {});
+      await deps.workflowClient.startRigVerification({
+        workspaceId: grant.workspaceId,
+        changeId: change.id,
+        workflowId: `rig-verification-change-${change.id}`,
+      });
+      return json({ change, verificationStarted: true });
+    });
+
+    server.registerTool("rig_verify", {
+      description: "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+      inputSchema: {
+        rigId: z4.string().uuid(),
+        changeId: z4.string().uuid().optional(),
+      },
+    }, async ({ rigId, changeId }) => {
+      const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+      if (changeId) {
+        const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+        await deps.workflowClient.startRigVerification({
+          workspaceId: grant.workspaceId,
+          changeId: change.id,
+          workflowId: `rig-verification-change-${change.id}`,
+        });
+        return json({ ok: true, changeId: change.id });
+      }
+      if (!rig.activeVersion) {
+        throw new Error("rig has no active version");
+      }
+      await deps.workflowClient.startRigVerification({
+        workspaceId: grant.workspaceId,
+        versionId: rig.activeVersion.id,
+        workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
+      });
+      return json({ ok: true, versionId: rig.activeVersion.id });
+    });
+  }
+
+  if (can("rigs:manage")) {
+    server.registerTool("rig_promote", {
+      description: "Promote a verified definition_edit rig change to a new active immutable version. Requires rigs:manage.",
+      inputSchema: {
+        rigId: z4.string().uuid(),
+        changeId: z4.string().uuid(),
+      },
+    }, async ({ rigId, changeId }) => {
+      const rig = await requireRigForApi(deps.db, grant.workspaceId, rigId);
+      const change = await requireRigChangeForApi(deps.db, grant.workspaceId, rig.id, changeId);
+      return json(await promoteVerifiedDefinitionEditChangeForApi({ db: deps.db }, grant, rig, change));
+    });
+  }
 }
 
 // Workspace orchestration for manager-style agents: sessions are listed,

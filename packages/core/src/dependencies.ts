@@ -24,6 +24,7 @@ export type SessionWorkflowClient = {
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }) => Promise<void>;
+  startRigVerification: (input: { workspaceId: string; changeId?: string; versionId?: string; workflowId?: string }) => Promise<void>;
   check?: () => Promise<void>;
 };
 
