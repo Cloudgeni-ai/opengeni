@@ -135,3 +135,18 @@ export function settingsWithRigImage(settings: Settings, rigImage: string | null
     modalImageRef: rigImage,
   };
 }
+
+/**
+ * Layers the rig version's default variable sets BELOW the session's own set:
+ * the session's values WIN on any key collision (explicit precedence). Both maps
+ * are already the decrypted-and-merged values (rig defaults merged in listed
+ * order upstream). Pure and deterministic — given the same inputs it returns the
+ * same env, which is what keeps a session's box-manifest env stable across turns
+ * (the rig version is frozen per session, so its default-set list is fixed).
+ */
+export function mergeRigDefaultVariableSetEnvironment(
+  rigDefaultValues: Record<string, string>,
+  sessionValues: Record<string, string>,
+): Record<string, string> {
+  return { ...rigDefaultValues, ...sessionValues };
+}

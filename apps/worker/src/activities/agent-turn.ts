@@ -89,7 +89,7 @@ import {
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRunWithCredentials, sandboxEnvironmentForRun } from "./environment";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
-import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage, settingsWithRigImage } from "./packs";
+import { mergeRigDefaultVariableSetEnvironment, resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage, settingsWithRigImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
@@ -1156,10 +1156,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
       }
       // Session set wins collisions with the rig defaults (explicit precedence).
-      const sandboxWorkspaceEnvironmentValues: Record<string, string> = {
-        ...rigDefaultEnvironmentValues,
-        ...(workspaceVariableSet?.values ?? {}),
-      };
+      const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
+        rigDefaultEnvironmentValues,
+        workspaceVariableSet?.values ?? {},
+      );
       // Redact EVERY exported secret value (rig defaults + session set) from turn
       // output, not just the session set's.
       redact = createSecretRedactor(

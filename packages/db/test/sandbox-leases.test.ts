@@ -14,6 +14,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
   SandboxImageConflictError,
+  SandboxRigConflictError,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -513,6 +514,82 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const [row] = await admin<{ image: string | null; liveness: string }[]>`
       select image, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.image).toBe("img-A");
+    expect(row?.liveness).toBe("warm");
+  });
+
+  // RIG IS SHARED STATE (M3): the lease also stamps the frozen rig version; a resume
+  // resolving a DIFFERENT rig version conflicts exactly like a different image.
+  test("(14) rig M3: cold-create stamps rig_version_id on the warming row", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("spawner");
+    const [row] = await admin<{ rig_version_id: string | null; liveness: string }[]>`
+      select rig_version_id, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.rig_version_id).toBe("aaaa1111-1111-4111-8111-111111111111");
+    expect(row?.liveness).toBe("warming");
+  });
+
+  test("(15) rig M3: warm box + SOLO holder + DIFFERENT rig -> recreate (cold, re-stamped, spawner)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-A", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" } } }, leaseTtlMs: 45_000 });
+    // SAME solo holder, SAME image, DIFFERENT rig -> recreate cold, re-stamp the rig,
+    // and CAS back in as spawner. The image (unchanged) is preserved by the
+    // conditional re-stamp; the rig column moves to the new version.
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-A", rigVersionId: "bbbb2222-2222-4222-8222-222222222222", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("spawner");
+    const [row] = await admin<{ liveness: string; image: string | null; rig_version_id: string | null; instance_id: string | null; resume_state: unknown }[]>`
+      select liveness, image, rig_version_id, instance_id, resume_state from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("warming");
+    expect(row?.image).toBe("img-A");       // image-only re-stamp did NOT clobber the image
+    expect(row?.rig_version_id).toBe("bbbb2222-2222-4222-8222-222222222222");
+    expect(row?.instance_id).toBeNull();
+    expect(row?.resume_state).toBeNull();
+  });
+
+  test("(16) rig M3: warm box + OTHER holders + DIFFERENT rig -> SandboxRigConflictError (box untouched)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    await expect(
+      acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "newcomer", backend: "modal", rigVersionId: "bbbb2222-2222-4222-8222-222222222222", leaseTtlMs: 45_000 }),
+    ).rejects.toThrow(SandboxRigConflictError);
+    const [row] = await admin<{ liveness: string; rig_version_id: string | null; instance_id: string | null }[]>`
+      select liveness, rig_version_id, instance_id from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("warm");
+    expect(row?.rig_version_id).toBe("aaaa1111-1111-4111-8111-111111111111");
+    expect(row?.instance_id).toBe("sb-live");
+  });
+
+  test("(17) rig M3: SAME rig on a warm box = plain attach (no recreate)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "spawner", backend: "modal", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "v2", backend: "modal", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("attached");
+    const [row] = await admin<{ liveness: string; rig_version_id: string | null; instance_id: string | null; refcount: number }[]>`
+      select liveness, rig_version_id, instance_id, refcount from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("warm");
+    expect(row?.rig_version_id).toBe("aaaa1111-1111-4111-8111-111111111111");
+    expect(row?.instance_id).toBe("sb-live");
+    expect(row?.refcount).toBe(2);
+  });
+
+  test("(18) rig M3: a null input rig (rig-less session) NEVER conflicts + never stamps", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", rigVersionId: "aaaa1111-1111-4111-8111-111111111111", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    // A rig-less acquire (no rigVersionId) attaches and leaves the rig column intact.
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "rigless", backend: "modal", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("attached");
+    const [row] = await admin<{ rig_version_id: string | null; liveness: string }[]>`
+      select rig_version_id, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.rig_version_id).toBe("aaaa1111-1111-4111-8111-111111111111");
     expect(row?.liveness).toBe("warm");
   });
 });

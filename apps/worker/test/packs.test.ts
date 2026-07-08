@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
-import { settingsWithPackSandboxImage, settingsWithRigImage, workspacePackRuntimeFromPacks } from "../src/activities/packs";
+import { mergeRigDefaultVariableSetEnvironment, settingsWithPackSandboxImage, settingsWithRigImage, workspacePackRuntimeFromPacks } from "../src/activities/packs";
 
 function pack(overrides: Record<string, unknown>): CapabilityPack {
   return CapabilityPack.parse({
@@ -134,5 +134,29 @@ describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
   test("a rig with no image is a pass-through (pack/deployment chain unchanged)", () => {
     const base = { dockerImage: DEPLOYMENT, modalImageRef: undefined } as unknown as Settings;
     expect(settingsWithRigImage(base, null)).toBe(base);
+  });
+});
+
+describe("rig default variable-set env layering (M3): session wins", () => {
+  test("session values override rig defaults on a key collision; rig-only keys survive", () => {
+    const rigDefaults = { SHARED: "rig", RIG_ONLY: "r" };
+    const sessionValues = { SHARED: "session", SESSION_ONLY: "s" };
+    expect(mergeRigDefaultVariableSetEnvironment(rigDefaults, sessionValues)).toEqual({
+      SHARED: "session", // session wins the collision
+      RIG_ONLY: "r",
+      SESSION_ONLY: "s",
+    });
+  });
+
+  test("is deterministic — identical inputs across turns produce identical env (stability)", () => {
+    const rigDefaults = { A: "1", B: "2" };
+    const sessionValues = { C: "3" };
+    expect(mergeRigDefaultVariableSetEnvironment(rigDefaults, sessionValues))
+      .toEqual(mergeRigDefaultVariableSetEnvironment(rigDefaults, sessionValues));
+  });
+
+  test("a rig-less turn (empty rig defaults) yields exactly the session values", () => {
+    const sessionValues = { ONLY: "x" };
+    expect(mergeRigDefaultVariableSetEnvironment({}, sessionValues)).toEqual(sessionValues);
   });
 });
