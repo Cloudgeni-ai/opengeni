@@ -757,7 +757,7 @@ export async function createSessionForRequest(
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
         // VariableSet — surface the conflict at create time, not turn time.
-        throw new HTTPException(422, { message: "sandbox:'shared' requires the same variableSet as the creator's box (the box variable set is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet." });
+        throw new HTTPException(422, { message: "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment." });
       }
       // Inherited default: deterministic separation on the genuine shared-state
       // conflict — the worker gets its own box (resolved like a top-level
@@ -780,7 +780,7 @@ export async function createSessionForRequest(
       // the common case; a mixed legacy group deterministically rejects.
       const memberVariableSetIds = await listDistinctVariableSetIdsInGroup(db, workspaceId, sandboxChoice.groupId);
       if (!memberVariableSetIds.every((memberVariableSetId) => variableSetMatchesGroup(memberVariableSetId))) {
-        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet (the box variable set is fixed at creation); create with the group's variableSet or omit sandbox for an own box.` });
+        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet / different environment (the box variable set/environment is fixed at creation); create with the group's variableSet/environment or omit sandbox for an own box.` });
       }
     }
     sandboxGroupId = sandboxChoice.groupId;
