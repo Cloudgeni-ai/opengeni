@@ -28,6 +28,8 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "github:manage": "GitHub",
   "github:use": "GitHub",
   "goals:manage": "Goals",
+  "rigs:use": "Rigs",
+  "rigs:manage": "Rigs",
   "enrollments:read": "Machines",
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
@@ -51,6 +53,7 @@ const permissionGroupOrder = [
   "Machines",
   "GitHub",
   "Goals",
+  "Rigs",
   "Admin & account",
 ];
 

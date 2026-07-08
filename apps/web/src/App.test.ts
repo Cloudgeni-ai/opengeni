@@ -246,6 +246,7 @@ describe("api key permission options", () => {
       "Machines",
       "GitHub",
       "Goals",
+      "Rigs",
       "Admin & account",
     ]);
   });
@@ -966,6 +967,8 @@ function session(patch: Partial<Session> = {}): Session {
     activeSandboxId: null,
     activeEpoch: 0,
     parentSessionId: null,
+    rigId: null,
+    rigVersionId: null,
     variableSetId: null,
     environmentId: null,
     firstPartyMcpPermissions: null,
@@ -1004,6 +1007,7 @@ function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<Sched
     overlapPolicy: "allow_concurrent",
     agentConfig: scheduledTaskAgentConfig(),
     reusableSessionId: null,
+    rigId: null,
     variableSetId: null,
     environmentId: null,
     metadata: {},
