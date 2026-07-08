@@ -498,6 +498,7 @@ export function RootRouteComponent() {
         idempotencyKey,
         ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
         ...(submission.variableSetId ? { variableSetId: submission.variableSetId } : {}),
+        ...(submission.rigId ? { rigId: submission.rigId } : {}),
         ...(submission.goal ? { goal: submission.goal } : {}),
         ...(submission.firstPartyMcpPermissions ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions } : {}),
         // Seed the active-sandbox pointer at create (race-free) when a machine was

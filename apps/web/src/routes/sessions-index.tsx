@@ -15,11 +15,11 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { FILE_ONLY_MESSAGE_TEXT, useVariableSets, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
+import { FILE_ONLY_MESSAGE_TEXT, useRigs, useVariableSets, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerCogIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
@@ -489,6 +489,7 @@ function ManagedSandboxFields(props: {
 }) {
   const { draft, compute, onChange } = props;
   const variableSets = useVariableSets();
+  const rigs = useRigs();
   const selectedBackend = BACKEND_OPTIONS.find((option) => option.value === compute.backend) ?? BACKEND_OPTIONS[0];
   const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])].filter(Boolean).join(" · ");
 
@@ -505,6 +506,44 @@ function ManagedSandboxFields(props: {
           <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled={props.disabled} />
         </div>
       </div>
+
+      {/* Rig picker — offered only when the workspace has at least one rig.
+          Picking a rig preselects its default variable sets in the control
+          below (still user-overridable). Empty ⇒ the workspace default rig,
+          resolved server-side. */}
+      {rigs.rigs.length > 0 ? (
+        <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-2">
+          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
+            <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
+            Rig
+          </Label>
+          <Select
+            value={draft.rigId}
+            disabled={props.disabled}
+            onChange={(event) => {
+              const rigId = event.target.value;
+              const picked = rigs.rigs.find((rig) => rig.id === rigId);
+              const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
+              onChange({
+                ...draft,
+                rigId,
+                // Preselect the rig's first default variable set into the single
+                // session-level control; the rest still apply server-side.
+                ...(defaultVariableSetId ? { variableSetId: defaultVariableSetId } : {}),
+              });
+            }}
+            className="h-8 w-auto max-w-56 text-xs"
+          >
+            <option value="">Workspace default</option>
+            {rigs.rigs.map((rig) => (
+              <option key={rig.id} value={rig.id}>
+                {rig.name}
+                {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ) : null}
 
       {/* Offer variableSets only when some exist — configuration UI for
           resources you don't have is clutter (same rule as machines). */}

@@ -61,6 +61,9 @@ export type SessionClientLike = Pick<
   | "listRigChanges"
   | "proposeRigChange"
   | "getRigChange"
+  | "verifyRigChange"
+  | "promoteRigChange"
+  | "verifyRig"
   // Packs
   | "listPacks"
   | "registerPack"

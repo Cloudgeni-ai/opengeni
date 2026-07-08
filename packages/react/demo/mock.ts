@@ -555,6 +555,52 @@ export class MockOpenGeniClient implements SessionClientLike {
     return change;
   }
 
+  async verifyRigChange(_workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    const change = await this.getRigChange(_workspaceId, rigId, changeId);
+    change.status = "verifying";
+    change.updatedAt = new Date().toISOString();
+    return change;
+  }
+
+  async promoteRigChange(_workspaceId: string, rigId: string, changeId: string): Promise<RigVersion> {
+    const change = await this.getRigChange(_workspaceId, rigId, changeId);
+    const rig = this.rigs.find((candidate) => candidate.id === rigId);
+    const base = rig?.activeVersion ?? null;
+    const now = new Date().toISOString();
+    const version: RigVersion = {
+      id: `${rigId}-v${this.rigVersions.filter((candidate) => candidate.rigId === rigId).length + 1}`,
+      rigId,
+      version: (base?.version ?? 0) + 1,
+      image: base?.image ?? null,
+      setupScript: base?.setupScript ?? null,
+      checks: base?.checks ?? [],
+      credentialHooks: base?.credentialHooks ?? [],
+      defaultVariableSetIds: base?.defaultVariableSetIds ?? [],
+      changelog: "Promoted from a verified change",
+      createdBy: "user:demo",
+      active: true,
+      createdAt: now,
+    };
+    this.rigVersions = this.rigVersions.map((candidate) =>
+      candidate.rigId === rigId ? { ...candidate, active: false } : candidate,
+    );
+    this.rigVersions.push(version);
+    if (rig) {
+      rig.activeVersion = version;
+      rig.versionCount += 1;
+      rig.updatedAt = now;
+    }
+    change.status = "merged";
+    change.resultVersionId = version.id;
+    change.updatedAt = now;
+    return version;
+  }
+
+  async verifyRig(_workspaceId: string, rigId: string): Promise<{ ok: boolean; versionId: string }> {
+    const rig = await this.getRig(_workspaceId, rigId);
+    return { ok: true, versionId: rig.activeVersion?.id ?? "" };
+  }
+
   private registeredPacks: WorkspaceRegisteredPack[] = [];
   private packInstallations: PackInstallation[] = [];
 

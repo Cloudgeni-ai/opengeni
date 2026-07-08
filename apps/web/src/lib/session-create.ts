@@ -48,6 +48,10 @@ export type SessionDraft = {
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
   // (a connected machine uses its own variable set & git credentials — D2).
   variableSetId: string;
+  // The rig the session materializes (managed sandbox only; a connected machine
+  // is the user's own box, so it never rides a rig). "" ⇒ the workspace default
+  // rig, resolved server-side.
+  rigId: string;
   goalText: string;
   goalSuccessCriteria: string;
   goalMaxAutoContinuations: string;
@@ -59,6 +63,7 @@ export function emptySessionDraft(): SessionDraft {
   return {
     compute: { kind: "sandbox", backend: "" },
     variableSetId: "",
+    rigId: "",
     goalText: "",
     goalSuccessCriteria: "",
     goalMaxAutoContinuations: "",
@@ -111,6 +116,7 @@ export function submissionFromSessionDraft(draft: SessionDraft): SessionDraftSub
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
       ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+      ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
     },

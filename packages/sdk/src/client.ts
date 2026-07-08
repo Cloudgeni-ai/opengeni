@@ -976,6 +976,42 @@ export class OpenGeniClient {
     return await this.requestJson<RigChange>("GET", `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}`);
   }
 
+  /**
+   * Re-run verification for a change (rigs:use). Verification is asynchronous:
+   * this returns the change immediately with status `verifying`; poll
+   * `getRigChange`/`listRigChanges` for the terminal outcome + logs.
+   */
+  async verifyRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigChange> {
+    return await this.requestJson<RigChange>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}/verify`,
+    );
+  }
+
+  /**
+   * Promote a verified `definition_edit` change into a new active rig version
+   * (rigs:manage). Only valid once the change's verification passed; returns the
+   * newly minted version.
+   */
+  async promoteRigChange(workspaceId: string, rigId: string, changeId: string): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/changes/${changeId}/promote`,
+    );
+  }
+
+  /**
+   * Re-run the active version's checks in a clean throwaway sandbox (rigs:use).
+   * Asynchronous — returns the version id being verified; the outcome lands on
+   * the version's audit trail.
+   */
+  async verifyRig(workspaceId: string, rigId: string): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/verify`,
+    );
+  }
+
   /** @deprecated use listVariableSets */
   async listEnvironments(workspaceId: string): Promise<VariableSet[]> {
     return await this.listVariableSets(workspaceId);

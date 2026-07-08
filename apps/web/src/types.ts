@@ -21,6 +21,8 @@ export type {
   ConnectionStatus,
   CreateConnectionRequest,
   CreateFileUploadResponse,
+  CreateRigRequest,
+  ProposeRigChangeRequest,
   McpServerConnectionRef,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -45,6 +47,14 @@ export type {
   Permission as SdkPermission,
   ReasoningEffort,
   ResourceRef,
+  Rig,
+  RigChange,
+  RigChangeKind,
+  RigChangeStatus,
+  RigChangeVerification,
+  RigCheck,
+  RigCheckResult,
+  RigVersion,
   SandboxBackend,
   ScheduledTask,
   ScheduledTaskAgentConfig,
@@ -87,6 +97,8 @@ export type TurnSubmission = {
   variableSetId?: string;
   /**  use variableSetId */
   environmentId?: string;
+  /** The rig this session rides (resolved + frozen at create). */
+  rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
 };

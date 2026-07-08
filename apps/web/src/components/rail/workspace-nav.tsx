@@ -9,6 +9,7 @@ import {
   FileSearchIcon,
   LaptopIcon,
   PlugIcon,
+  ServerCogIcon,
   SettingsIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -20,6 +21,7 @@ import { cn } from "@/lib/utils";
 
 type NavTarget =
   | "/workspaces/$workspaceId/variable-sets"
+  | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/capabilities"
   | "/workspaces/$workspaceId/schedules"
@@ -28,6 +30,7 @@ type NavTarget =
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> = [
   { to: "/workspaces/$workspaceId/variable-sets", icon: BoxIcon, label: "Variable sets", description: "Secret variableSets for sandboxes" },
+  { to: "/workspaces/$workspaceId/rigs", icon: ServerCogIcon, label: "Rigs", description: "Versioned sandbox machine definitions" },
   { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines", description: "Your own connected computers" },
   { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities", description: "Packs, MCP servers, and tools" },
   { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules", description: "Run agents on a schedule" },
