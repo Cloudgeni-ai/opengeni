@@ -4,6 +4,7 @@ import {
   applyCreditDebitUpToBalance,
   finishTurn,
   getBillingBalance,
+  getRigVersion,
   getSandbox,
   readActiveSandbox,
   requireFile,
@@ -87,7 +88,7 @@ import {
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRunWithCredentials, sandboxEnvironmentForRun } from "./environment";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
-import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
+import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage, settingsWithRigImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
@@ -1029,6 +1030,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // packs declaring images) fails the turn with its plain error instead
       // of failing the activity opaquely.
       const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+      // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
+      // at create). Everything rig-derived below (image precedence, env default
+      // sets, setup hook, credential hooks, doctrine, lease/telemetry stamps) is
+      // gated on this being non-null, so a rig-less session takes a zero-cost
+      // branch that is byte-for-byte today's turn. Both ids are frozen together;
+      // a defensive null (e.g. a since-deleted rig FK-nulled the columns) simply
+      // runs the turn rig-less.
+      const rigVersion = session.rigId && session.rigVersionId
+        ? await getRigVersion(db, input.workspaceId, session.rigId, session.rigVersionId)
+        : null;
       // Workspace tier of the agent-persona resolution (session > workspace >
       // deployment default). null means the workspace has no override, so the
       // runtime falls back to runSettings.agentInstructionsTemplate (the
@@ -1036,7 +1047,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
       const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
       const baseRunSettings = {
-        ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
+        // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
+        // OUTERMOST so a rig-pinned image overrides both the pack image and the
+        // deployment default; a rig with no image (or a rig-less turn) is a
+        // pass-through, leaving the pack/deployment chain exactly as today.
+        ...settingsWithRigImage(
+          settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
+          rigVersion?.image ?? null,
+        ),
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
@@ -1102,8 +1120,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         connectionCredentials?.sandboxSecrets,
       );
       variableSetId = workspaceVariableSet?.id ?? "";
+      // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
+      // variable sets and layer them BELOW the session's own set — the session's
+      // values WIN on any key collision. Loaded through the SAME host-secrets
+      // provider path as the session set (embedded-topology parity). Precedence
+      // WITHIN the rig defaults is listed order (a later set overrides an earlier
+      // one), then the session set overrides all. STABLE-ENV INVARIANT: the rig
+      // VERSION is frozen per session, so the SET of default variable sets is
+      // fixed for the session's life — the merged manifest env is therefore stable
+      // across the session's turns (the same guarantee the session's own variable
+      // set already relies on), keeping validateNoEnvironmentDelta empty.
+      const rigDefaultEnvironmentValues: Record<string, string> = {};
+      for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
+        const rigDefaultSet = await loadWorkspaceEnvironmentForRunWithCredentials(
+          db,
+          runSettings,
+          connectionScope,
+          rigDefaultVariableSetId,
+          connectionCredentials?.sandboxSecrets,
+        );
+        Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
+      }
+      // Session set wins collisions with the rig defaults (explicit precedence).
+      const sandboxWorkspaceEnvironmentValues: Record<string, string> = {
+        ...rigDefaultEnvironmentValues,
+        ...(workspaceVariableSet?.values ?? {}),
+      };
+      // Redact EVERY exported secret value (rig defaults + session set) from turn
+      // output, not just the session set's.
       redact = createSecretRedactor(
-        Object.entries(workspaceVariableSet?.values ?? {}).map(([name, value]) => ({ name, value })),
+        Object.entries(sandboxWorkspaceEnvironmentValues).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
       // D1-lite) and reused for EVERY downstream decision: the env mint (skip the
@@ -1175,7 +1221,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } = await sandboxEnvironmentForRun(
         runSettings,
         turnResources,
-        workspaceVariableSet?.values ?? {},
+        // Rig default sets merged BELOW the session set (session wins); rig-less
+        // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
+        sandboxWorkspaceEnvironmentValues,
         {
           skipGitHubToken: activeSandboxBackend === "selfhosted",
           scope: connectionScope,
@@ -1288,6 +1336,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ...((runSettings.modalImageRef ?? runSettings.dockerImage)
                 ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
                 : {}),
+              // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+              // conflicts on a live shared box set up under a different rig (solo
+              // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
+              // turn -> never stamped or enforced (shares exactly as today).
+              ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
             },
             "turn",
             sandboxHolderId,

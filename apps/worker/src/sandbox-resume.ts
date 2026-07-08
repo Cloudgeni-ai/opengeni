@@ -97,6 +97,14 @@ export type ResumeBoxIds = {
    * selfhosted path never passes it; a legacy/null-image box never conflicts).
    */
   image?: string;
+  /**
+   * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
+   * acquireLease, which stamps it on the cold-create and conflicts on a live box
+   * set up under a DIFFERENT rig version (solo holder recreates cold on the new
+   * rig; N-holders throw SandboxRigConflictError). Omitted for a rig-less session
+   * -> rig is never stamped or enforced (shares exactly as today).
+   */
+  rigVersionId?: string;
 };
 
 /** What resumeBoxForTurn returns: the live NON-OWNED session to inject, the
@@ -352,6 +360,10 @@ export async function resumeBoxForTurn(
     // propagates to the turn activity (an actionable error); a solo image change is handled
     // by acquireLease recreating the box cold on the new image.
     ...(ids.image ? { image: ids.image } : {}),
+    // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
+    // + conflicts on a live box under a different rig. A SandboxRigConflictError
+    // propagates to the turn activity (actionable); a solo rig change recreates cold.
+    ...(ids.rigVersionId ? { rigVersionId: ids.rigVersionId } : {}),
     leaseTtlMs,
   });
 
