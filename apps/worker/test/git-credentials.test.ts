@@ -9,7 +9,7 @@ const scope = {
 };
 
 describe("sandbox git credentials", () => {
-  test("keeps GitHub host credential requests legacy-shaped for back-compat", async () => {
+  test("keeps GitHub host credential legacy fields unchanged and adds repositoryRefs", async () => {
     const calls: GitCredentialsRequest[] = [];
     const result = await sandboxEnvironmentForRun(
       testSettings(),
@@ -17,8 +17,10 @@ describe("sandbox git credentials", () => {
         kind: "repository",
         uri: "https://github.com/acme/private.git",
         ref: "main",
+        provider: "github",
         githubInstallationId: 123,
         githubRepositoryId: 456,
+        connectionId: "github-connection",
       }],
       {},
       {
@@ -35,6 +37,14 @@ describe("sandbox git credentials", () => {
       workspaceId: scope.workspaceId,
       installationId: 123,
       repositoryIds: [456],
+      repositoryRefs: [{
+        provider: "github",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        repositoryId: 456,
+        installationId: 123,
+        connectionId: "github-connection",
+      }],
     }]);
     expect(result.gitToken).toBe("ghs_brokered");
     expect(result.gitTokens).toEqual({ github: "ghs_brokered" });

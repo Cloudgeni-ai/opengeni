@@ -240,7 +240,10 @@ function gitCredentialsRequestForSelection(
     repositoryIds: selection.repositoryIds,
   };
   if (selection.provider === "github") {
-    return legacy;
+    return {
+      ...legacy,
+      repositoryRefs: selection.repositoryRefs,
+    };
   }
   return {
     ...legacy,
