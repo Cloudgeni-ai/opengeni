@@ -46,7 +46,6 @@ import {
   DisplayStackUnsupportedError,
   buildStreamUrl,
   StreamPortUnavailableError,
-  modalSandboxAttributionEnvironment,
   tagModalSandbox,
   type EstablishedSandboxSession,
   type ExposedPortEndpoint,
@@ -451,13 +450,6 @@ export async function resumeBoxForTurn(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
-    if (ids.environment && ids.backend === "modal") {
-      Object.assign(ids.environment, modalSandboxAttributionEnvironment({
-        leaseId: acquired.lease.id,
-        workspaceId: ids.workspaceId,
-        sandboxGroupId: ids.sandboxGroupId,
-      }));
-    }
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
