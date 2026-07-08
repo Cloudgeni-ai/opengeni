@@ -46,7 +46,7 @@ sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
 another ignored private path.
 
-Inspect required modes, variable set variables, and checks:
+Inspect required modes, variable-set variables, and checks:
 
 ```bash
 bun run deployment:preflight -- --profile azure-existing-services
@@ -645,7 +645,7 @@ Minimum production alerts:
 - Storage health: object-storage conformance cannot create, complete, presign, and read a file.
 - Streaming health: SSE replay conformance does not return persisted events after reconnect.
 - Collector health: collector pod is not ready or its configured OTLP exporter reports failures.
-- Secret/sandbox hygiene: conformance detects unintended sandbox variable set variables or sandbox backend startup failures.
+- Secret/sandbox hygiene: conformance detects unintended sandbox variable-set variables or sandbox backend startup failures.
 
 ## Azure Reference
 
