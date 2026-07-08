@@ -110,6 +110,35 @@ export type SandboxItem = {
   occurredAt: string;
 };
 
+/**
+ * A first-party workspace-memory write the agent made mid-turn — a `memory.saved`
+ * (it committed a new preference / fact / procedure / decision / history) or a
+ * `memory.corrected` (it updated or archived an existing one). A settled save is
+ * ordinary progress, not an exceptional state, so it renders as a calm NEUTRAL
+ * step on the rail (never accent/color). When the host app supplies an
+ * `onMemoryClick` handler the row also deep-links to the record in its memory
+ * pane; without one it is non-interactive rich content.
+ */
+export type MemoryItem = {
+  kind: "memory";
+  id: string;
+  turnId: string | null;
+  variant: "saved" | "corrected";
+  /** The memory's kind enum (`"preference" | "semantic" | …`); mapped to a human label at render. */
+  memoryKind: string;
+  /** The memory text, ellipsized to ≤120 chars server-side. For a supersede this is the OLD text. */
+  preview: string;
+  /** The save collapsed into an existing memory (no new row was written). Saved variant only. */
+  deduped?: boolean;
+  /** The NEW text when a correction superseded the memory with a replacement; absent = updated-in-place or archived. */
+  replacementPreview?: string;
+  /** The saved / corrected memory's id — the deep-link target for a save. */
+  memoryId: string;
+  /** The replacement memory's id when a correction produced one — the LIVE record the deep-link targets. */
+  replacementMemoryId?: string;
+  occurredAt: string;
+};
+
 export type SessionStatusItem = {
   kind: "session-status";
   id: string;
@@ -186,10 +215,11 @@ export type TimelineItem =
   | GoalItem
   | NoticeItem
   | AuthNeededItem
+  | MemoryItem
   | TurnEndItem;
 
-/** Activity items cluster between chat messages (reasoning, tools, workers, sandbox). */
-export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem;
+/** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
+export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem | MemoryItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }

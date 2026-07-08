@@ -141,7 +141,19 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   let files = 0;
   let commands = 0;
   let screenshots = 0;
+  let memoriesSaved = 0;
+  let memoriesUpdated = 0;
   for (const item of items) {
+    if (item.kind === "memory") {
+      // A memory write is a first-class facet — the "wrote 1 memory" signal the
+      // fold should make prominent — counted saved vs updated separately.
+      if (item.variant === "corrected") {
+        memoriesUpdated += 1;
+      } else {
+        memoriesSaved += 1;
+      }
+      continue;
+    }
     if (item.kind !== "tool-call") {
       continue;
     }
@@ -165,6 +177,12 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   }
   if (screenshots) {
     parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
+  }
+  if (memoriesSaved) {
+    parts.push(`${memoriesSaved} ${memoriesSaved === 1 ? "memory" : "memories"} saved`);
+  }
+  if (memoriesUpdated) {
+    parts.push(`${memoriesUpdated} ${memoriesUpdated === 1 ? "memory" : "memories"} updated`);
   }
   const duration = formatDurationFacet(durationMs);
   if (duration) {

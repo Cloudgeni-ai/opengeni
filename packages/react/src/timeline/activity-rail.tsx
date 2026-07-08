@@ -1,12 +1,12 @@
-import { ArrowRightIcon, BotIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
+import { ArrowRightIcon, BotIcon, BrainCircuitIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
 import { useEntranceAnimation } from "./entrance";
 import type { ToolRegistry } from "./registry";
-import { PayloadBlock, ActivityDisclosure } from "./shared";
+import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./projection";
-import type { ActivityItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
+import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -25,6 +25,12 @@ export type ActivityRailProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * Deep-link a memory row to its record in the host's memory pane. Opt-in: the
+   * library draws no "View in memory" affordance without a handler (the memory
+   * row is then non-interactive rich content). See {@link MessageTimelineProps}.
+   */
+  onMemoryClick?: ((memoryId: string) => void) | undefined;
   /** Drop the left rule + indent (used inside a folded turn summary). */
   bare?: boolean | undefined;
   className?: string | undefined;
@@ -42,7 +48,7 @@ function familyOf(item: ActivityItem): string {
   return item.kind;
 }
 
-export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpenSession, bare, className }: ActivityRailProps) {
+export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpenSession, onMemoryClick, bare, className }: ActivityRailProps) {
   const enter = useEntranceAnimation();
   return (
     <div
@@ -58,7 +64,7 @@ export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpen
     >
       {items.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(items[index - 1]!);
-        const row = renderActivity(item, toolRegistry, onOpenSession);
+        const row = renderActivity(item, toolRegistry, onOpenSession, onMemoryClick);
         return (
           <div key={item.id} className={cn(newFamily && "mt-3")}>
             {row}
@@ -78,6 +84,7 @@ function renderActivity(
   item: ActivityItem,
   toolRegistry: ToolRegistry,
   onOpenSession: ((sessionId: string) => void) | undefined,
+  onMemoryClick: ((memoryId: string) => void) | undefined,
 ) {
   switch (item.kind) {
     case "reasoning":
@@ -90,6 +97,8 @@ function renderActivity(
       return <WorkerRow item={item} onOpenSession={onOpenSession} />;
     case "sandbox":
       return <SandboxRow item={item} />;
+    case "memory":
+      return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     default:
       return assertNever(item);
   }
@@ -113,6 +122,83 @@ function ReasoningRow({ item }: { item: ReasoningItem }) {
       preview={truncate(item.text, 110)}
     >
       <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.text}</p>
+    </ActivityDisclosure>
+  );
+}
+
+/**
+ * Human labels for the memory kinds, translated at the SDK boundary so a raw
+ * enum slug never renders as UI. Kept local to the library (the app has its own
+ * `KIND_LABEL`); an unknown kind simply omits the chip rather than showing a slug.
+ */
+const MEMORY_KIND_LABEL: Record<string, string> = {
+  preference: "Preference",
+  semantic: "Fact",
+  procedural: "Procedure",
+  decision: "Decision",
+  episodic: "History",
+};
+
+/**
+ * A memory write the agent made mid-turn. A calm, NEUTRAL step (a successful save
+ * is ordinary progress, never an exceptional state, so no accent/color): a brain-
+ * circuit glyph, "Saved to memory" / "Updated memory", a human kind chip, and the
+ * memory text. Expanding reveals the full text; a supersede shows the old text
+ * struck through above the new one. When the host opts in with `onMemoryClick`,
+ * a quiet "View in memory" affordance deep-links to the LIVE record.
+ */
+function MemoryRow({ item, onMemoryClick }: { item: MemoryItem; onMemoryClick?: ((memoryId: string) => void) | undefined }) {
+  const corrected = item.variant === "corrected";
+  const kindLabel = MEMORY_KIND_LABEL[item.memoryKind];
+  // A supersede carries both the old text (`preview`) and the new (`replacementPreview`);
+  // an in-place update / archive carries only `preview`.
+  const superseded = corrected && Boolean(item.replacementPreview);
+  // Link to the LIVE record: a supersede's replacement when present, else the memory itself.
+  const targetId = corrected ? (item.replacementMemoryId ?? item.memoryId) : item.memoryId;
+  const deepLink = Boolean(onMemoryClick);
+  return (
+    <ActivityDisclosure
+      icon={<BrainCircuitIcon className="size-3.5" />}
+      iconTone="muted"
+      title={
+        <span className="inline-flex min-w-0 items-center gap-2">
+          <span className="shrink-0">{corrected ? "Updated memory" : "Saved to memory"}</span>
+          {kindLabel ? (
+            <span className="shrink-0 rounded-og-xs bg-og-surface-2 px-1.5 py-px text-og-xs font-normal leading-tight text-og-fg-subtle">
+              {kindLabel}
+            </span>
+          ) : null}
+        </span>
+      }
+      preview={superseded ? item.replacementPreview : item.preview}
+    >
+      {superseded ? (
+        // The correction as a before → after: the old memory struck through and
+        // dimmed, the new text in the ordinary body weight below it.
+        <div className="flex flex-col gap-1.5">
+          <p className="whitespace-pre-wrap text-og-sm leading-6 text-og-fg-subtle line-through">{item.preview}</p>
+          <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.replacementPreview}</p>
+        </div>
+      ) : corrected ? (
+        // A correction with no replacement archived the record.
+        <BodyNote tone="muted">Archived.</BodyNote>
+      ) : (
+        <p className="whitespace-pre-wrap text-og-base leading-6 text-og-fg-muted">{item.preview}</p>
+      )}
+      {item.deduped ? <BodyNote tone="muted">Merged into an existing memory.</BodyNote> : null}
+      {deepLink ? (
+        <button
+          type="button"
+          onClick={() => onMemoryClick?.(targetId)}
+          className={cn(
+            "group/memlink -mx-1 inline-flex w-fit items-center gap-1 rounded-og-sm px-1 py-0.5 text-left text-og-sm text-og-fg-subtle",
+            "outline-none transition-colors duration-150 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent",
+          )}
+        >
+          View in memory
+          <ArrowRightIcon className="size-3.5 transition-transform duration-150 group-hover/memlink:translate-x-0.5" />
+        </button>
+      ) : null}
     </ActivityDisclosure>
   );
 }

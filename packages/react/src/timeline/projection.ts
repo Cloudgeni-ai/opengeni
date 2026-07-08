@@ -5,6 +5,7 @@ import type {
   ActivityItem,
   AuthNeededItem,
   GoalItem,
+  MemoryItem,
   SandboxItem,
   SessionStatusItem,
   TimelineGroup,
@@ -436,6 +437,19 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "memory.saved":
+      case "memory.corrected": {
+        // A first-party memory write is a discrete step, not streamed text, so it
+        // ends whatever was streaming (mirrors tool/sandbox pushes). A payload
+        // missing the memory id is malformed and dropped rather than shown blank.
+        const memory = memoryItem(event.id, event.type, turnId, payload, event.occurredAt);
+        if (memory) {
+          closeStreamingTail();
+          items.push(memory);
+        }
+        break;
+      }
+
       case "goal.set":
       case "goal.updated":
       case "goal.completed":
@@ -520,6 +534,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "tool-call":
     case "worker":
     case "sandbox":
+    case "memory":
       return true;
     default:
       return false;
@@ -949,6 +964,39 @@ function goalText(payload: Record<string, unknown>): string | null {
     return payload.prompt;
   }
   return null;
+}
+
+/**
+ * Fold a `memory.saved` / `memory.corrected` event into a {@link MemoryItem}.
+ * Reads DEFENSIVELY (the payload is untyped `unknown`, no Zod schema): a missing
+ * memory id means a malformed event, so we return null and the case drops it.
+ */
+function memoryItem(
+  id: string,
+  type: string,
+  turnId: string | null,
+  payload: Record<string, unknown>,
+  occurredAt: string,
+): MemoryItem | null {
+  const memoryId = typeof payload.memoryId === "string" && payload.memoryId ? payload.memoryId : null;
+  if (!memoryId) {
+    return null;
+  }
+  const replacementPreview = typeof payload.replacementPreview === "string" ? payload.replacementPreview : undefined;
+  const replacementMemoryId = typeof payload.replacementMemoryId === "string" ? payload.replacementMemoryId : undefined;
+  return {
+    kind: "memory",
+    id,
+    turnId,
+    variant: type === "memory.corrected" ? "corrected" : "saved",
+    memoryKind: typeof payload.kind === "string" ? payload.kind : "",
+    preview: typeof payload.preview === "string" ? payload.preview : "",
+    ...(payload.deduped === true ? { deduped: true } : {}),
+    ...(replacementPreview ? { replacementPreview } : {}),
+    memoryId,
+    ...(replacementMemoryId ? { replacementMemoryId } : {}),
+    occurredAt,
+  };
 }
 
 const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]);

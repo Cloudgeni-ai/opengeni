@@ -3,7 +3,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { ToolCallItem, SandboxItem } from "../src/timeline";
+import type { MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
 import { MessageTimeline } from "../src";
 
 /* ----------------------------------------------------------------------------
@@ -841,6 +841,146 @@ describe("SandboxRow — failed chip", () => {
     // No failure chip for a successful op.
     expect(text.toLowerCase()).not.toContain("failed");
 
+    await r.unmount();
+  });
+});
+
+function memoryItem(overrides: Partial<MemoryItem>): MemoryItem {
+  return {
+    kind: "memory",
+    id: "mem-item-1",
+    turnId: "turn-1",
+    variant: "saved",
+    memoryKind: "preference",
+    preview: "Prefers concise prose.",
+    memoryId: "mem-1",
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("MemoryRow", () => {
+  test("renders a neutral saved row with a human kind chip and the memory text on expand", async () => {
+    const r = await renderComponent(<ActivityRail items={[memoryItem({})]} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Saved to memory");
+    // Human kind label, never the raw enum slug.
+    expect(text).toContain("Preference");
+    expect(text).not.toContain("preference");
+    // A save is ordinary progress — no failure affordance.
+    expect(text.toLowerCase()).not.toContain("failed");
+    await r.unmount();
+  });
+
+  test("without an onMemoryClick handler the row draws no deep-link affordance", async () => {
+    const r = await renderComponent(<ActivityRail items={[memoryItem({})]} />);
+    await flush();
+    // Expand the row so any body affordance would be present.
+    const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(r.container.textContent ?? "").not.toContain("View in memory");
+    await r.unmount();
+  });
+
+  test("with a handler, expanding shows 'View in memory' and clicking it links the saved record", async () => {
+    const clicked: string[] = [];
+    const r = await renderComponent(
+      <ActivityRail items={[memoryItem({ memoryId: "mem-saved" })]} onMemoryClick={(id) => clicked.push(id)} />,
+    );
+    await flush();
+    const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const link = Array.from(r.container.querySelectorAll("button")).find((button) =>
+      (button.textContent ?? "").includes("View in memory"),
+    );
+    expect(link).toBeTruthy();
+    await act(async () => {
+      link?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(clicked).toEqual(["mem-saved"]);
+    await r.unmount();
+  });
+
+  test("a supersede shows old text struck vs new and deep-links the LIVE replacement record", async () => {
+    const clicked: string[] = [];
+    const item = memoryItem({
+      variant: "corrected",
+      preview: "Deploy from the release branch.",
+      replacementPreview: "Deploy from main after staging.",
+      memoryId: "mem-old",
+      replacementMemoryId: "mem-new",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} onMemoryClick={(id) => clicked.push(id)} />);
+    await flush();
+    expect(r.container.textContent ?? "").toContain("Updated memory");
+    const row = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    await act(async () => {
+      row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Deploy from the release branch.");
+    expect(text).toContain("Deploy from main after staging.");
+    const link = Array.from(r.container.querySelectorAll("button")).find((button) =>
+      (button.textContent ?? "").includes("View in memory"),
+    );
+    await act(async () => {
+      link?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    // Links to the replacement (the live record), never the archived original.
+    expect(clicked).toEqual(["mem-new"]);
+    await r.unmount();
+  });
+});
+
+describe("turn fold — memory facet", () => {
+  async function foldedTrigger(events: SessionEvent[]) {
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+    return { r, trigger: turnSummaryTrigger(r.container) };
+  }
+
+  test("one saved memory reads '1 memory saved'", async () => {
+    resetTimelineEvents();
+    const { r, trigger } = await foldedTrigger([
+      timelineEvent("user.message", { text: "note it" }),
+      timelineEvent("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
+      timelineEvent("turn.completed", {}),
+    ]);
+    expect(trigger?.textContent).toContain("1 memory saved");
+    expect(trigger?.textContent).not.toContain("memories saved");
+    await r.unmount();
+  });
+
+  test("multiple saved memories pluralize to 'N memories saved'", async () => {
+    resetTimelineEvents();
+    const { r, trigger } = await foldedTrigger([
+      timelineEvent("user.message", { text: "note them" }),
+      timelineEvent("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "One." }),
+      timelineEvent("memory.saved", { memoryId: "mem-2", kind: "semantic", preview: "Two." }),
+      timelineEvent("turn.completed", {}),
+    ]);
+    expect(trigger?.textContent).toContain("2 memories saved");
+    await r.unmount();
+  });
+
+  test("a correction reads '1 memory updated'", async () => {
+    resetTimelineEvents();
+    const { r, trigger } = await foldedTrigger([
+      timelineEvent("user.message", { text: "fix it" }),
+      timelineEvent("memory.corrected", { memoryId: "mem-1", kind: "decision", preview: "Old.", action: "archived" }),
+      timelineEvent("turn.completed", {}),
+    ]);
+    expect(trigger?.textContent).toContain("1 memory updated");
     await r.unmount();
   });
 });

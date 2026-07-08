@@ -24,6 +24,7 @@ export type {
   AgentMessageItem,
   AuthNeededItem,
   GoalItem,
+  MemoryItem,
   NoticeItem,
   ReasoningItem,
   SandboxItem,

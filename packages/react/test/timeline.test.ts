@@ -9,6 +9,7 @@ import {
   sessionStatusFromEvents,
   toolDisplayName,
   type AgentMessageItem,
+  type MemoryItem,
   type SandboxItem,
   type TimelineGroup,
   type TurnEndItem,
@@ -1238,3 +1239,85 @@ function collectActivityGroups(groups: ReturnType<typeof groupTimeline>) {
   }
   return out;
 }
+
+describe("buildTimeline — memory writes", () => {
+  test("projects memory.saved into a neutral MemoryItem carrying id, kind, preview", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", {
+        memoryId: "mem-1",
+        kind: "preference",
+        preview: "Prefers concise prose over bullet lists.",
+        deduped: false,
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["memory"]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("saved");
+    expect(memory.memoryKind).toBe("preference");
+    expect(memory.preview).toBe("Prefers concise prose over bullet lists.");
+    expect(memory.memoryId).toBe("mem-1");
+    expect(memory.deduped).toBeUndefined();
+    expect(memory.replacementPreview).toBeUndefined();
+  });
+
+  test("carries a deduped flag through only when the save collapsed into an existing memory", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", { memoryId: "mem-2", kind: "semantic", preview: "Ships on Fridays.", deduped: true }),
+    ]);
+    expect((items[0] as MemoryItem).deduped).toBe(true);
+  });
+
+  test("projects memory.corrected supersede into a MemoryItem with old preview, new replacement, and both ids", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", {
+        memoryId: "mem-old",
+        kind: "decision",
+        preview: "Deploy from the release branch.",
+        action: "superseded",
+        replacementMemoryId: "mem-new",
+        replacementPreview: "Deploy from main after a green staging run.",
+      }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.kind).toBe("memory");
+    expect(memory.variant).toBe("corrected");
+    expect(memory.preview).toBe("Deploy from the release branch.");
+    expect(memory.replacementPreview).toBe("Deploy from main after a green staging run.");
+    expect(memory.memoryId).toBe("mem-old");
+    expect(memory.replacementMemoryId).toBe("mem-new");
+  });
+
+  test("projects an archive (corrected, no replacement) with only the preview", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.corrected", { memoryId: "mem-3", kind: "episodic", preview: "Tried the beta once.", action: "archived" }),
+    ]);
+    const memory = items[0] as MemoryItem;
+    expect(memory.variant).toBe("corrected");
+    expect(memory.replacementPreview).toBeUndefined();
+    expect(memory.replacementMemoryId).toBeUndefined();
+  });
+
+  test("drops a malformed memory event with no memory id rather than rendering a blank row", () => {
+    reset();
+    const items = buildTimeline([
+      event("memory.saved", { kind: "preference", preview: "no id here" }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("clusters memory writes as activity steps alongside tool calls", () => {
+    reset();
+    const groups = groupTimeline(buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "memory_save", arguments: {} }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      event("memory.saved", { memoryId: "mem-1", kind: "preference", preview: "A preference." }),
+    ]));
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
+  });
+});
