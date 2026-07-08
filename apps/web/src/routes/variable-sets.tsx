@@ -74,7 +74,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<BoxIcon className="size-4" />}
         title="Variable sets"
-        description="Named secret sets injected into the sandbox as variable set variables at session start. Values are write-only: set or rotate them here; nothing ever reads them back."
+        description="Named secret sets injected into the sandbox as environment variables at session start. Values are write-only: set or rotate them here; nothing ever reads them back."
         actions={(
           <>
             <Button type="button" variant="ghost" size="sm" onClick={() => void variableSets.refresh()} disabled={variableSets.loading} className="h-9">
