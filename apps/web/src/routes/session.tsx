@@ -266,10 +266,12 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   );
   // One lineage read for the whole session view: it gates the dock's "Agents"
   // tab AND feeds the composer-anchored agents pill, so both stay a single
-  // source of truth (event-derived off the shared feed — no extra poll). Must
-  // sit above the loading/error early-returns — it's a hook, so it has to run
-  // unconditionally on every render.
-  const lineage = useSessionLineage(sessionId, { events });
+  // source of truth. Events refresh it instantly on spawn/worker-completion, and
+  // a 30s poll (matching the old header chip) is the fallback so the pill's
+  // "running" count doesn't go stale on CHILD-side status changes that emit no
+  // event on this parent's feed. Must sit above the loading/error early-returns
+  // — it's a hook, so it has to run unconditionally on every render.
+  const lineage = useSessionLineage(sessionId, { events, pollIntervalMs: 30_000 });
   const agentNodes = lineage.lineage?.children ?? [];
 
   if (loading || !session) {
