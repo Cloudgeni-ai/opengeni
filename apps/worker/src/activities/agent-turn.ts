@@ -3,6 +3,7 @@ import {
   createTurn,
   applyCreditDebitUpToBalance,
   finishTurn,
+  cancelTurnFromDyingDispatch,
   getBillingBalance,
   getSandbox,
   readActiveSandbox,
@@ -753,6 +754,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let turnId: string | undefined;
+    // Worker-death redispatch counter observed when THIS dispatch claimed the
+    // turn. If a dying-attempt cancel later fences on this and the turn's
+    // current value differs, recovery already re-queued/re-dispatched the turn
+    // and the zombie must not clobber it.
+    let redispatchesAtDispatch = 0;
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
     // the one box by id from the group lease and injects it NON-OWNED into the
@@ -1072,6 +1078,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      redispatchesAtDispatch = Number((turn.metadata as { workerDeathRedispatches?: number } | null)?.workerDeathRedispatches ?? 0);
       turnLifecycleMetricsFor(observability).start(turnId);
       // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
       // workspace credential). Computed once and threaded through every billing
@@ -2485,16 +2492,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityError = error;
         await flushRuntimeBatcher();
         if (preemptTurnId) {
-          await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
-            turnId: preemptTurnId,
-            type: "turn.cancelled",
-            payload: {
-              triggerEventId: input.triggerEventId,
-              reason: error.message || "activity_cancelled",
-            },
-          }]).catch(() => undefined);
-          await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
-          turnMetricOutcome = "cancelled";
+          // FENCED settle: a heartbeat-timeout death lands here too (it is a
+          // CancelledFailure that is not WORKER_SHUTDOWN), and its zombie must
+          // NOT overwrite a turn worker-death recovery already re-queued or
+          // re-dispatched — that reintroduces the exact orphan stall this
+          // change fixes, in the reverse event order. cancelTurnFromDyingDispatch
+          // only settles a still-live turn whose redispatch counter is unchanged
+          // since this dispatch claimed it; a deliberate user interrupt (turn
+          // still running, counter unchanged) still settles as before.
+          const settled = await cancelTurnFromDyingDispatch(db, input.workspaceId, preemptTurnId, redispatchesAtDispatch).catch(() => false);
+          if (settled) {
+            await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
+              turnId: preemptTurnId,
+              type: "turn.cancelled",
+              payload: {
+                triggerEventId: input.triggerEventId,
+                reason: error.message || "activity_cancelled",
+              },
+            }]).catch(() => undefined);
+            turnMetricOutcome = "cancelled";
+          }
         }
         throw error;
       }

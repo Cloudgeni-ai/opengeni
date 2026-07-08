@@ -9773,6 +9773,37 @@ export async function incrementTurnWorkerDeathRedispatches(db: Database, workspa
   });
 }
 
+/**
+ * Settle a turn `cancelled` from a DYING attempt (the generic CancelledFailure
+ * cleanup of a worker that lost its heartbeat), fenced so a zombie can never
+ * clobber a turn that worker-death recovery has already moved on. It only
+ * writes when BOTH hold:
+ *   • the turn is still live (running / requires_action) — not a turn recovery
+ *     already reset to `queued`; and
+ *   • the redispatch counter is unchanged since this dispatch started —
+ *     requeueTurnAfterWorkerDeath bumps it BEFORE re-queuing, so a mismatch
+ *     means a successor dispatch owns the turn now (do not touch it).
+ * Returns true when it actually settled (caller emits turn.cancelled only then).
+ */
+export async function cancelTurnFromDyingDispatch(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  expectedRedispatches: number,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute(sql`
+      update session_turns
+      set status = 'cancelled', finished_at = now(), updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${turnId}
+        and status in ('running', 'requires_action')
+        and coalesce((metadata->>'workerDeathRedispatches')::int, 0) = ${expectedRedispatches}
+      returning id
+    `);
+    return rows.length > 0;
+  });
+}
+
 export async function getSessionTurn(db: Database, workspaceId: string, turnId: string): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.sessionTurns).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId))).limit(1);
