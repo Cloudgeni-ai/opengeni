@@ -21,11 +21,12 @@ import {
 } from "@opengeni/react";
 import { MachineDockBar, SharedMachineDisclosure, useMachines, type MachineView } from "@opengeni/react/machines";
 import { Loader2Icon, RefreshCwIcon } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { sandboxProvisionInFlight } from "@/lib/events";
 import type { SessionEvent } from "@/types";
 
 /**
@@ -96,6 +97,23 @@ export function useSandboxWorkspaceTabs({
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
+
+  // Lazy provisioning creates the box mid-turn on the first sandbox tool call,
+  // emitting sandbox.provision started→completed/failed on the live stream. While
+  // it's in flight the workbench shows a calm "Starting sandbox…" affordance
+  // instead of the boxless idle state; when it settles the box is warm, so
+  // renegotiate to swap the cold capability doc for the warm one (Files/Terminal
+  // fill in, Desktop unlocks) — the on-demand resting hook doesn't poll, so this
+  // event-edge is what wakes it.
+  const provisioning = sandboxProvisionInFlight(events);
+  const renegotiate = caps.renegotiate;
+  const provisioningRef = useRef(provisioning);
+  useEffect(() => {
+    if (provisioningRef.current && !provisioning) {
+      renegotiate();
+    }
+    provisioningRef.current = provisioning;
+  }, [provisioning, renegotiate]);
 
   const files = useSandboxFiles(sessionId, {
     events,
@@ -265,21 +283,38 @@ export function useSandboxWorkspaceTabs({
     }
 
     // No surface is advertised yet: instead of silently hiding Files/Terminal/
-    // Desktop, show why — a quiet "Connecting sandbox…" tab while capabilities
-    // negotiate, or an unavailable state with retry when negotiation failed. So
-    // the "watch and steer" promise is visibly in flight, never just absent.
+    // Desktop, show WHY, keyed on the negotiation state — never a false error.
+    //   - warming    : a box is genuinely coming up (negotiating, an in-flight
+    //                  viewer warm-up, or a live sandbox.provision) → spinner.
+    //   - on-demand  : boxless & idle — a chat-only turn that hasn't needed a box.
+    //                  Calm copy, NO spinner, NO "offline". A box starts when the
+    //                  agent first needs one; the workbench opening never forces it.
+    //   - error      : a real failure (a warm-up that stalled, a permission/network
+    //                  fault) → the unavailable state with Retry.
     if (tabs.length === 0) {
-      const pending = caps.state === "negotiating" || caps.state === "cold";
-      if (pending || caps.state === "error") {
+      const warming = caps.state === "negotiating" || caps.state === "cold" || provisioning;
+      if (warming) {
+        tabs.push({
+          // Named for its state, not a noun: "Starting sandbox" says exactly why
+          // Files/Terminal/Desktop aren't here yet.
+          id: "sandbox",
+          label: "Starting sandbox",
+          content: withMachineBar(<SandboxStatusPanel status="warming" onRetry={renegotiate} />),
+        });
+      } else if (caps.state === "error") {
         tabs.push({
           id: "sandbox",
-          // Named for its state, not a noun: a cold user reading "Sandbox"
-          // learns nothing; "Connecting…" / "Sandbox offline" say exactly why
-          // Files/Terminal/Desktop aren't here yet.
-          label: caps.state === "error" ? "Sandbox offline" : "Connecting…",
+          label: "Sandbox offline",
           content: withMachineBar(
-            <SandboxStatusPanel isError={caps.state === "error"} error={caps.error} onRetry={caps.renegotiate} />,
+            <SandboxStatusPanel status="error" error={caps.error} onRetry={renegotiate} />,
           ),
+        });
+      } else {
+        // "on-demand" (or a settled session with no surfaces): the benign idle.
+        tabs.push({
+          id: "sandbox",
+          label: "Sandbox",
+          content: withMachineBar(<SandboxStatusPanel status="on-demand" onRetry={renegotiate} />),
         });
       }
     }
@@ -303,24 +338,33 @@ export function useSandboxWorkspaceTabs({
     caps.state,
     caps.error,
     caps.viewerCapReached,
+    provisioning,
+    renegotiate,
     machines.loading,
     machines.error,
     activeMachine,
   ]);
 }
 
-/** The Sandbox tab's stand-in while capabilities are negotiating or after a
- *  negotiation failure — a quiet placeholder, never a silently missing surface. */
+/**
+ * The Sandbox tab's stand-in when no live surface is on screen yet. Three calm
+ * states, never a silently missing surface and never a false error:
+ *   - "warming"   : a box is genuinely coming up → spinner + "Starting sandbox…".
+ *   - "on-demand" : boxless & idle — no box exists and none is needed yet. A quiet
+ *                   explanation, NO spinner, NO error: one starts automatically the
+ *                   first time the agent needs it.
+ *   - "error"     : a real failure → the message + a Retry.
+ */
 function SandboxStatusPanel({
-  isError,
+  status,
   error,
   onRetry,
 }: {
-  isError: boolean;
-  error: Error | null;
+  status: "warming" | "on-demand" | "error";
+  error?: Error | null;
   onRetry: () => void;
 }) {
-  if (isError) {
+  if (status === "error") {
     return (
       <div className="grid h-full place-items-center p-6 text-center">
         <div className="max-w-sm space-y-3">
@@ -336,11 +380,24 @@ function SandboxStatusPanel({
       </div>
     );
   }
+  if (status === "on-demand") {
+    return (
+      <div className="grid h-full place-items-center p-6 text-center">
+        <div className="max-w-sm space-y-1.5">
+          <p className="text-sm font-medium text-fg">Sandbox starts on demand</p>
+          <p className="text-sm leading-5 text-fg-muted">
+            A sandbox spins up automatically the first time the agent runs a command, edits files, or opens a
+            desktop. Nothing to start here.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="grid h-full place-items-center p-6 text-center">
       <div className="flex items-center gap-2 text-sm text-fg-muted">
         <Loader2Icon className="size-4 animate-spin" />
-        Connecting sandbox…
+        Starting sandbox…
       </div>
     </div>
   );
