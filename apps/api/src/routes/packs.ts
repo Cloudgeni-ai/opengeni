@@ -120,10 +120,14 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     // case the variableSet was deleted or its variables changed since. The
     // inherited attachment was authorized with variableSets:use when it was
     // first attached, so only a fresh attachment re-checks that permission.
-    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId : undefined;
+    // Back-compat: installations enabled before the Variable Set rename stored
+    // the attachment under `metadata.environmentId`; read it as a fallback so a
+    // re-enable without an explicit id still inherits the existing attachment.
+    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId
+      : typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
     const variableSetId = payload.variableSetId ?? storedVariableSetId;
     if (pack.variableSet?.required && !variableSetId) {
-      throw new HTTPException(422, { message: "this pack requires an variableSet attachment; pass variableSetId" });
+      throw new HTTPException(422, { message: "this pack requires a variableSet attachment; pass variableSetId" });
     }
     if (variableSetId) {
       const variableSet = await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId, { preauthorized: !payload.variableSetId });
@@ -171,7 +175,9 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     // caller here is not re-checked for that permission.
     const installationVariableSetId = typeof installation.metadata.variableSetId === "string"
       ? installation.metadata.variableSetId
-      : undefined;
+      : typeof installation.metadata.environmentId === "string"
+        ? installation.metadata.environmentId
+        : undefined;
     const task = await createValidatedScheduledTask({
       settings,
       db,

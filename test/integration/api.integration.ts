@@ -5443,6 +5443,22 @@ describe("API component integration", () => {
     expect(reenabled.status).toBe(200);
     const reenabledInstallation = await reenabled.json() as { metadata: Record<string, unknown> };
     expect(reenabledInstallation.metadata.variableSetId).toBe(environment.id);
+
+    // Back-compat: an installation enabled BEFORE the Variable Set rename stored
+    // the attachment under the legacy `metadata.environmentId` key. Simulate that
+    // legacy row, then re-enable empty and assert the attachment is still
+    // inherited (the environmentId fallback), not silently dropped.
+    await dbClient.db.execute(dbSql`
+      update pack_installations set metadata = ${JSON.stringify({ environmentId: environment.id })}::jsonb
+      where workspace_id = ${workspaceId} and pack_id = 'marketing-social-daily-analysis'`);
+    const reenabledLegacy = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(reenabledLegacy.status).toBe(200);
+    const reenabledLegacyInstallation = await reenabledLegacy.json() as { metadata: Record<string, unknown> };
+    expect(reenabledLegacyInstallation.metadata.variableSetId).toBe(environment.id);
   });
 
   test("file download MCP tool reports unconfigured object storage", async () => {

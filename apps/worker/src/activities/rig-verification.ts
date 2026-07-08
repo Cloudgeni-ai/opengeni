@@ -212,7 +212,12 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         verification.passed = passed;
         const classified = classifyRigVerificationOutcome({ kind: change.kind, passed });
         if (classified.action === "auto_promote") {
-          await updateRigChangeStatus(db, input.workspaceId, change.id, { status: "proposed", verification: scrubVerificationPayload(verification) });
+          // Keep the change `verifying` (NOT `proposed`) across the write→promote
+          // gap: promoteSetupAppendChange accepts `verifying`, and leaving it
+          // `verifying` keeps beginRigChangeVerificationAttempt blocking a
+          // concurrent /verify — resetting to `proposed` would reopen that race
+          // (a second run could reject a change whose first verification passed).
+          await updateRigChangeStatus(db, input.workspaceId, change.id, { status: "verifying", verification: scrubVerificationPayload(verification) });
           const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, { ...change, verification });
           await recordRigAuditEvent(db, { grant, action: "rig.verification.passed", rigId: rig.id, metadata: { changeId: change.id } });
           return merged;

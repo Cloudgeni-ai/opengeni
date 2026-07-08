@@ -178,7 +178,8 @@ export async function enableCapability(input: {
     // a request-supplied id is validated as a fresh attachment, otherwise the
     // attachment stored by a previous enable is preserved and re-validated.
     const existing = await getPackInstallation(input.db, input.workspaceId, packId);
-    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId : undefined;
+    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId
+      : typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
     const requestedVariableSetId = input.payload.variableSetId;
     const variableSetId = requestedVariableSetId ?? storedVariableSetId;
     if (pack.variableSet?.required && !variableSetId) {
