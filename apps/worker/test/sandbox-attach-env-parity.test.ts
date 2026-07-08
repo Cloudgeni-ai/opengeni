@@ -91,6 +91,19 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(attachEnv.HOME).toBe("/workspace");
   });
 
+  test("selfhosted stable env does not gain managed-sandbox git helper pointers", async () => {
+    const settings = testSettings({ sandboxBackend: "selfhosted" });
+    const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], {});
+    const attachEnv = stableSandboxEnvironmentForRun(settings, {});
+
+    expect(turnEnv).toEqual({ HOME: "/" });
+    expect(attachEnv).toEqual(turnEnv);
+    expect(turnEnv.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
+    expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
+    expect(turnEnv.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();
+    expect(turnEnv.PATH).toBeUndefined();
+  });
+
   test("FAILURE-SENSITIVITY: the OLD attach env (base allowlist only) DOES delta", async () => {
     // This reproduces the original bug: an attach-warmed box created with only the
     // base env (the pre-fix establishSandboxSessionFromEnvelope default) is missing

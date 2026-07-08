@@ -1500,13 +1500,16 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * reproducible value and must not be part of the shared base. Under the token-
  * broker (B1) token VALUES never ride the manifest at all — they are seeded to
  * FILES inside the box and git/provider CLI auth reads those files. What IS stable
- * and lives here are the token directory / GitHub alias FILE PATH and wrapper
- * PATH entries: constants derived from HOME, so they appear IDENTICALLY on BOTH
- * the turn AND every attach manifest (the SDK's per-turn provided-session env
- * delta stays empty even as tokens rotate). The attach surfaces have only the
- * `Session` (no repo resources) and so never seed a token, but unwritten files
- * simply yield no auth; the BLOCKING attach-vs-turn error this helper fixes is
- * for the common (no-repo) and workspace-environment-attached cases.
+ * and lives here for provisioned boxes are the token directory / GitHub alias
+ * FILE PATH and wrapper PATH entries: constants derived from HOME, so they
+ * appear IDENTICALLY on BOTH the turn AND every attach manifest (the SDK's
+ * per-turn provided-session env delta stays empty even as tokens rotate). These
+ * helper pointers are deliberately not added for selfhosted/local/none because
+ * the platform never mints or seeds git provider tokens there. The attach
+ * surfaces have only the `Session` (no repo resources) and so never seed a token,
+ * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
+ * this helper fixes is for the common (no-repo) and workspace-environment-attached
+ * provisioned-box cases.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
@@ -1525,17 +1528,20 @@ export function stableSandboxEnvironmentForRun(
   if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
     environment.HOME ??= descriptor.workspaceRoot;
   }
-  // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH.
-  // Constants derived from the resolved HOME (falling back to the descriptor
-  // workspaceRoot), so they are parity-safe — they join the shared base and
-  // therefore appear IDENTICALLY on BOTH the worker-turn manifest AND every API-
-  // direct attach manifest. Only PATHS are stable; token VALUES live exclusively
-  // in files that runtime seeds off-manifest.
-  const home = environment.HOME ?? descriptor.workspaceRoot;
-  environment.OPENGENI_GIT_CREDENTIALS_DIR ??= `${home}/.opengeni/git-credentials`;
-  environment.OPENGENI_GIT_TOKEN_FILE ??= `${home}/.opengeni/git-token`;
-  environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
-  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+  // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH for
+  // provisioned boxes only. Constants derived from the resolved HOME (falling
+  // back to the descriptor workspaceRoot), so they are parity-safe — they join
+  // the shared base and therefore appear IDENTICALLY on BOTH the worker-turn
+  // manifest AND every API-direct attach manifest. Only PATHS are stable; token
+  // VALUES live exclusively in files that runtime seeds off-manifest.
+  const provisionedGitHelperBackend = settings.sandboxBackend !== "none"
+    && settings.sandboxBackend !== "local"
+    && settings.sandboxBackend !== "selfhosted";
+  if (provisionedGitHelperBackend) {
+    const home = environment.HOME ?? descriptor.workspaceRoot;
+    environment.OPENGENI_GIT_CREDENTIALS_DIR ??= `${home}/.opengeni/git-credentials`;
+    environment.OPENGENI_GIT_TOKEN_FILE ??= `${home}/.opengeni/git-token`;
+    environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
     environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
   }
   if (settings.toolspaceEnabled) {

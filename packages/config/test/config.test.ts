@@ -409,6 +409,17 @@ describe("sandbox preparation profiles", () => {
     expect(Object.values(env)).not.toContain("ghs_liveToken123");
   });
 
+  test("does not add git credential pointers or wrapper PATH for selfhosted sandboxes", () => {
+    const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "selfhosted" }, () => getSettings());
+    const env = stableSandboxEnvironmentForRun(settings, {}, { workspaceId: "ws-1" });
+
+    expect(env).toEqual({ HOME: "/" });
+    expect(env.OPENGENI_GIT_CREDENTIALS_DIR).toBeUndefined();
+    expect(env.OPENGENI_GIT_TOKEN_FILE).toBeUndefined();
+    expect(env.OPENGENI_GIT_CLI_WRAPPER_DIR).toBeUndefined();
+    expect(env.PATH).toBeUndefined();
+  });
+
   test("requires a delegation secret when toolspace is enabled", () => {
     expect(() => withEnv({
       OPENGENI_TOOLSPACE_ENABLED: "true",
