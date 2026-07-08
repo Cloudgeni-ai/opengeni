@@ -324,6 +324,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       agentConfig: z4.unknown(),
       status: z4.string().optional(),
       variableSetId: z4.string().uuid().optional(),
+      // Deprecated alias of variableSetId; declared so MCP validation doesn't
+      // strip it before the contract parse maps it (rename back-compat).
+      environmentId: z4.string().uuid().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async (args) => {
@@ -346,6 +349,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       agentConfig: z4.unknown().optional(),
       status: z4.string().optional(),
       variableSetId: z4.string().uuid().nullable().optional(),
+      // Deprecated alias of variableSetId (rename back-compat); declared so MCP
+      // validation doesn't strip it before the contract parse maps it.
+      environmentId: z4.string().uuid().nullable().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async ({ id, ...raw }) => {
@@ -911,6 +917,9 @@ function registerWorkspaceOrchestrationTools(
         // accepted only at create and never appear in responses/events.
         mcpServers: z4.array(z4.unknown()).optional(),
         variableSetId: z4.string().uuid().optional(),
+        // Deprecated alias of variableSetId (rename back-compat); declared so MCP
+        // validation doesn't strip it before createSessionForRequest maps it.
+        environmentId: z4.string().uuid().optional(),
         model: z4.string().min(1).optional(),
         reasoningEffort: z4.string().optional(),
         sandboxBackend: z4.string().optional(),
