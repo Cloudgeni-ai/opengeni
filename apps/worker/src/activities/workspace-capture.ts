@@ -269,6 +269,16 @@ async function runCapture(
       if (boxExiting) throw boxExiting;
       diff = { files: [], revision: 0 };
     }
+    // Drop residue churn from the review diff too. On a desktop box the seed's
+    // `git add -A` in $HOME commits ~/.config/xfce4/* into HEAD, so `git diff HEAD`
+    // lists the continuously-rewritten desktop dotfiles as changed — noise the
+    // Changes tab must not show. The status/after-image loop already excludes them
+    // (isUnderResidueDir); exclude them here so the diff surface agrees.
+    const diffFiles = diff.files.filter((f) => !isUnderResidueDir(joinRepoPath(root, f.path)));
+    // Also drop residue-only status entries below; status.files is filtered in the
+    // touched loop (isUnderResidueDir), so `status: status.files` would still carry
+    // residue rows — filter for a consistent captured status surface.
+    const statusFiles = status.files.filter((f) => !isUnderResidueDir(joinRepoPath(root, f.path)));
     repos.push({
       root,
       head: status.head,
@@ -276,10 +286,10 @@ async function runCapture(
       upstream: status.upstream,
       ahead: status.ahead,
       behind: status.behind,
-      status: status.files,
-      diff: diff.files,
+      status: statusFiles,
+      diff: diffFiles,
     });
-    for (const f of diff.files) {
+    for (const f of diffFiles) {
       additions += f.additions;
       deletions += f.deletions;
     }
