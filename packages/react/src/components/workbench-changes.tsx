@@ -1,5 +1,5 @@
 import type { GitFileDiff } from "@opengeni/sdk";
-import { FileWarningIcon } from "lucide-react";
+import { FileWarningIcon, HistoryIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VList } from "virtua";
 import { cn } from "../lib/cn";
@@ -191,12 +191,7 @@ export function WorkbenchChanges({
         </span>
         <div className="flex shrink-0 items-center gap-2">
           <LayoutToggle layout={layout} onChange={setLayout} />
-          <span
-            className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle"
-            title={source === "capture" && capturedAt ? new Date(capturedAt).toLocaleString() : undefined}
-          >
-            {sourceBadge}
-          </span>
+          <SourceBadge source={source} capturedAt={capturedAt} label={sourceBadge} />
         </div>
       </div>
 
@@ -254,6 +249,35 @@ export function WorkbenchChanges({
       </div>
     </div>
   );
+}
+
+/**
+ * The data-source badge. "live" stays understated (the header chip already
+ * carries machine liveness) — but a capture-served diff is honestly labelled
+ * historical: a muted clock + the "as of turn N · <time>" so the reviewer always
+ * knows they are looking at a turn-end snapshot, not the live tree.
+ */
+function SourceBadge({
+  source,
+  capturedAt,
+  label,
+}: {
+  source: "live" | "capture" | null;
+  capturedAt: string | null;
+  label: string;
+}) {
+  if (source === "capture" && capturedAt) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-og-xs border border-og-border px-1.5 py-px text-2xs text-og-fg-muted"
+        title={new Date(capturedAt).toLocaleString()}
+      >
+        <HistoryIcon className="size-3 shrink-0 text-og-status-running" aria-hidden />
+        {label}
+      </span>
+    );
+  }
+  return <span className="rounded-og-xs bg-og-surface-2 px-1.5 py-px text-2xs text-og-fg-subtle">{label}</span>;
 }
 
 /** "live" · "as of turn 7 · 14:32" · "as of 14:32" (no revision). */

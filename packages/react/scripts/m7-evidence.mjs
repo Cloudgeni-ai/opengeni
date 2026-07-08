@@ -64,12 +64,22 @@ await mkdir(outDir, { recursive: true });
 const browser = await chromium.launch({ executablePath: CHROMIUM });
 const shots = [];
 
+const TAB_LABEL = { changes: "Changes", files: "Files", terminal: "Terminal", desktop: "Desktop" };
+
 async function shot(state, tab, theme, widthName) {
   const width = WIDTHS[widthName];
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   const url = `${base}?state=${state}&theme=${theme}&tab=${tab}`;
   await page.goto(url, { waitUntil: "networkidle" });
   await page.waitForTimeout(650);
+  // Capability-gated tabs (Terminal/Desktop) only appear after negotiation, so
+  // clicking the tab by label (once present) is more robust than an initialTab
+  // that gets reset before the tab exists. Falls through if the tab isn't there.
+  const tabBtn = page.locator(`[role="tab"]`, { hasText: TAB_LABEL[tab] }).first();
+  if (await tabBtn.count()) {
+    await tabBtn.click().catch(() => {});
+    await page.waitForTimeout(500);
+  }
   const name = `${state}__${tab}__${theme}__${widthName}.png`;
   await page.screenshot({ path: join(outDir, name) });
   shots.push(name);
