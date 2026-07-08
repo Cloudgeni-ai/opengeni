@@ -22,10 +22,10 @@ import {
   createSessionGoal,
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
-  encryptEnvironmentValue,
+  encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
-  listDistinctEnvironmentIdsInGroup,
+  listDistinctVariableSetIdsInGroup,
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
@@ -45,7 +45,7 @@ import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../dependencies";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { requireEnvironmentEncryption, validateEnvironmentAttachment } from "./environments";
+import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -146,7 +146,7 @@ function validateSessionMcpServersForCreate(
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
   requirePermission(grant, "mcp_servers:attach");
-  const encryptionKey = requireEnvironmentEncryption(settings);
+  const encryptionKey = requireVariableSetEncryption(settings);
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const runtimeServers: Settings["mcpServers"] = [];
@@ -162,7 +162,7 @@ function validateSessionMcpServersForCreate(
     }
     const headers = normalizedSessionMcpCredentialHeaders(server.headers);
     const headersEncrypted = Object.fromEntries(
-      Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+      Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(encryptionKey, value)]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
     dbServers.push({
@@ -196,7 +196,7 @@ function validateSessionMcpCredentialUpdates(input: {
     return [];
   }
   requirePermission(input.grant, "mcp_servers:attach");
-  const encryptionKey = requireEnvironmentEncryption(input.settings);
+  const encryptionKey = requireVariableSetEncryption(input.settings);
   const knownIds = new Set(input.session.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const encryptedUpdates = input.updates.map((update) => {
@@ -211,7 +211,7 @@ function validateSessionMcpCredentialUpdates(input: {
     return {
       id: update.id,
       headersEncrypted: Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(encryptionKey, value)]),
       ),
     };
   });
@@ -233,7 +233,7 @@ export async function createAndStartSession(input: {
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
   // Names/ids only; the session.created payload never carries variable values.
-  environment?: { id: string; name: string } | null;
+  variableSet?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Persisted on the session row and composed system-level AFTER the
@@ -299,7 +299,7 @@ export async function createAndStartSession(input: {
       metadata: sessionMetadata,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
-      environmentId: input.environment?.id ?? null,
+      variableSetId: input.variableSet?.id ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -322,7 +322,7 @@ export async function createAndStartSession(input: {
     metadata: sessionMetadata,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
-    environmentId: input.environment?.id ?? null,
+    variableSetId: input.variableSet?.id ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     instructions: input.instructions ?? null,
     parentSessionId: input.parentSessionId ?? null,
@@ -351,7 +351,7 @@ async function finishStartSession(input: {
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
   sandboxBackend: Settings["sandboxBackend"];
-  environment?: { id: string; name: string } | null;
+  variableSet?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
   sessionMcpServers?: SessionMcpServerMetadata[];
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
@@ -379,7 +379,7 @@ async function finishStartSession(input: {
       type: "session.created",
       payload: {
         status: "queued",
-        ...(input.environment ? { environmentId: input.environment.id, environmentName: input.environment.name } : {}),
+        ...(input.variableSet ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name } : {}),
         ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
       },
     },
@@ -625,7 +625,7 @@ export async function postUserMessageTurn(input: {
 
 /**
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
- * `session_create` tool: payload validation, resource/tool/environment
+ * `session_create` tool: payload validation, resource/tool/variableSet
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty `tools` keeps its meaning
  * (absent applies the workspace's default capability MCP tools).
@@ -648,7 +648,7 @@ export async function createSessionForRequest(
     : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
   // The first-party MCP server is attached to EVERY session. It hosts the
   // session's own metadata tool (set_session_title) + goal tools, and — only
-  // when the grant carries the permission — the orchestration/environment/
+  // when the grant carries the permission — the orchestration/variableSet/
   // github tools. Capability is gated per-tool by permission, never by whether
   // the server is attached, so a bare chat still gets titling while the
   // dangerous tools stay off by default.
@@ -658,11 +658,11 @@ export async function createSessionForRequest(
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(db, workspaceId, resources);
-  // Environment attachment requires environments:use on the calling grant
-  // (validateEnvironmentAttachment enforces it), preserving the invariant
+  // VariableSet attachment requires variable-sets:use on the calling grant
+  // (validateVariableSetAttachment enforces it), preserving the invariant
   // that sandboxed agents cannot self-attach workspace secrets.
-  const environment = payload.environmentId
-    ? await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId)
+  const variableSet = payload.variableSetId
+    ? await validateVariableSetAttachment({ settings, db }, grant, workspaceId, payload.variableSetId)
     : null;
   assertConfiguredModel(settings, payload.model);
   const model = payload.model ?? settings.openaiModel;
@@ -725,26 +725,26 @@ export async function createSessionForRequest(
   const sandboxChoice = payload.sandbox ?? (parentSessionId ? "shared" : "new");
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
-  // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace Environment is
+  // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
   // creation-time box state — the box's manifest env is fixed when it is cold-
   // created, and the SDK's provided-session guard rejects any manifest-env delta
-  // at attach. A session carrying a DIFFERENT Environment than the box it joins
+  // at attach. A session carrying a DIFFERENT VariableSet than the box it joins
   // is therefore a genuine shared-state conflict TODAY: its first turn on a warm
-  // box dies with "Live sandbox sessions cannot change manifest environment
-  // variables" (proven live, sessions 5aee77e9 + 63d18823). Until the Environment
+  // box dies with "Live sandbox sessions cannot change manifest variableSet
+  // variables" (proven live, sessions 5aee77e9 + 63d18823). Until the VariableSet
   // is evicted from the manifest (per-exec, like the git token), grouping must be
   // env-aware: the INHERITED default falls back to an own box on mismatch (a
   // credentialed worker spawned from a credential-less manager just works), and
-  // an EXPLICIT shared/{groupId} request with a mismatched Environment fails
+  // an EXPLICIT shared/{groupId} request with a mismatched VariableSet fails
   // fast at create (422) instead of poisoning the session's first turn.
   // The env conflict is a BOX property, so a boxless group is exempt: a
   // backend:"none" session runs in-process with no sandbox, no manifest, and no
   // provided-session attach — no shared box state exists to conflict, and
   // env-differing spawns from such parents shared safely before the env-aware
   // check. They keep sharing (and keep inheriting "none").
-  const requestedEnvironmentId = payload.environmentId ?? null;
-  const environmentMatchesGroup = (memberEnvironmentId: string | null): boolean =>
-    memberEnvironmentId === requestedEnvironmentId;
+  const requestedVariableSetId = payload.variableSetId ?? null;
+  const variableSetMatchesGroup = (memberVariableSetId: string | null): boolean =>
+    memberVariableSetId === requestedVariableSetId;
   if (sandboxChoice === "shared") {
     if (!parentSessionId) {
       throw new HTTPException(422, { message: "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create." });
@@ -753,11 +753,11 @@ export async function createSessionForRequest(
     if (!parent) {
       throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
     }
-    if (parent.sandboxBackend !== "none" && !environmentMatchesGroup(parent.environmentId ?? null)) {
+    if (parent.sandboxBackend !== "none" && !variableSetMatchesGroup(parent.variableSetId ?? null)) {
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
-        // Environment — surface the conflict at create time, not turn time.
-        throw new HTTPException(422, { message: "sandbox:'shared' requires the same environment as the creator's box (the box environment is fixed at creation); omit sandbox or pass 'new' when attaching a different environment." });
+        // VariableSet — surface the conflict at create time, not turn time.
+        throw new HTTPException(422, { message: "sandbox:'shared' requires the same variableSet as the creator's box (the box variable set is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet." });
       }
       // Inherited default: deterministic separation on the genuine shared-state
       // conflict — the worker gets its own box (resolved like a top-level
@@ -774,13 +774,13 @@ export async function createSessionForRequest(
     }
     if (member.sandboxBackend !== "none") {
       // Compare against EVERY member, not one arbitrary row: a legacy env-blind
-      // group can carry mixed environmentIds, and an any-member read would make
+      // group can carry mixed variableSetIds, and an any-member read would make
       // the join verdict nondeterministic. Post-env-aware groups are homogeneous
       // (both join paths enforce equality), so this reads one distinct value in
       // the common case; a mixed legacy group deterministically rejects.
-      const memberEnvironmentIds = await listDistinctEnvironmentIdsInGroup(db, workspaceId, sandboxChoice.groupId);
-      if (!memberEnvironmentIds.every((memberEnvironmentId) => environmentMatchesGroup(memberEnvironmentId))) {
-        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.` });
+      const memberVariableSetIds = await listDistinctVariableSetIdsInGroup(db, workspaceId, sandboxChoice.groupId);
+      if (!memberVariableSetIds.every((memberVariableSetId) => variableSetMatchesGroup(memberVariableSetId))) {
+        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different variableSet (the box variable set is fixed at creation); create with the group's variableSet or omit sandbox for an own box.` });
       }
     }
     sandboxGroupId = sandboxChoice.groupId;
@@ -863,7 +863,7 @@ export async function createSessionForRequest(
     ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
     sandboxGroupId,
     metadata: payload.metadata,
-    environment: environment ? { id: environment.id, name: environment.name } : null,
+    variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
     goal: payload.goal ?? null,
     // Per-session persona instructions (already trimmed/validated by the
     // contracts schema). Persisted on the row; composed system-level at turn

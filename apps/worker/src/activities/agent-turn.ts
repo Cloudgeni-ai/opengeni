@@ -779,10 +779,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         console.error("session history dual-write failed (run unaffected)", persistError);
       }
     };
-    // Reassigned after the workspace environment loads; the publish closure is
-    // created (and used for turn.started) before the environment is available.
+    // Reassigned after the variable set loads; the publish closure is
+    // created (and used for turn.started) before the variableSet is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
-    let environmentId = "";
+    let variableSetId = "";
     // The Codex account this turn runs on (pin > workspace active), resolved once
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
@@ -841,7 +841,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the local credit read). Unset port → today's local-ledger path.
       await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn, entitlements);
       const activityContext = currentActivityContext();
-      // Setup (environment load, MCP connects, sandbox restore) does not
+      // Setup (variableSet load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
       // checks let a graceful shutdown preempt the turn before the worker is
       // force-killed instead of riding the setup to a heartbeat timeout.
@@ -1091,19 +1091,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // resolved at connect time from the codex ALS (see the withCodex-wrapped
       // prepareTools call below).
       const turnTools = withCodexAppsTool(runSettings, withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)));
-      // §7.6 P4a — load (and decrypt) the workspace environment via the host
+      // §7.6 P4a — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
       const connectionScope = { accountId: input.accountId, workspaceId: input.workspaceId };
-      const workspaceEnvironment = await loadWorkspaceEnvironmentForRunWithCredentials(
+      const workspaceVariableSet = await loadWorkspaceEnvironmentForRunWithCredentials(
         db,
         runSettings,
         connectionScope,
-        session.environmentId,
+        session.variableSetId,
         connectionCredentials?.sandboxSecrets,
       );
-      environmentId = workspaceEnvironment?.id ?? "";
+      variableSetId = workspaceVariableSet?.id ?? "";
       redact = createSecretRedactor(
-        Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
+        Object.entries(workspaceVariableSet?.values ?? {}).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
       // D1-lite) and reused for EVERY downstream decision: the env mint (skip the
@@ -1169,13 +1169,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // from settings. gitToken is undefined on the selfhosted skip path (the machine
       // uses its own git creds).
       const {
-        environment: sandboxEnvironment,
+        variableSet: sandboxEnvironment,
         gitToken: sandboxGitToken,
         toolspaceToken: sandboxToolspaceToken,
       } = await sandboxEnvironmentForRun(
         runSettings,
         turnResources,
-        workspaceEnvironment?.values ?? {},
+        workspaceVariableSet?.values ?? {},
         {
           skipGitHubToken: activeSandboxBackend === "selfhosted",
           scope: connectionScope,
@@ -1193,9 +1193,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // backend is "none" -> never resolve (no box to touch).
       //
       // Established AFTER sandboxEnvironment is computed (not before) so the box's
-      // manifest is created with the SAME environment the agent declares — the SDK
+      // manifest is created with the SAME variableSet the agent declares — the SDK
       // applies the agent's manifest to this provided session and throws on ANY
-      // environment delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
+      // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
         sandboxHolderId = dispatchId ?? `turn:${turnId}`;
@@ -1225,7 +1225,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               agentId: activeSandboxRecord!.enrollmentId!,
               epoch: activeSandboxPointer!.activeEpoch,
-              environment: sandboxEnvironment,
+              variableSet: sandboxEnvironment,
               workingDir: activeSandboxPointer!.workingDir,
             },
           );
@@ -1252,7 +1252,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               {
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
-                environment: sandboxEnvironment,
+                variableSet: sandboxEnvironment,
                 pinnedSelfhosted: {
                   sandboxId: activeSandboxPointer!.activeSandboxId!,
                   epoch: activeSandboxPointer!.activeEpoch,
@@ -1277,7 +1277,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // for lack of a bound agentId).
               backend: groupBoxBackend,
               os: session.sandboxOs,
-              environment: sandboxEnvironment,
+              variableSet: sandboxEnvironment,
               // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
               // this run resolves. The lease stamps it + conflicts on a live shared box
               // running a DIFFERENT image (solo → recreate on the new image; N-holders →
@@ -1328,11 +1328,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ...resolvedSandbox,
               established: wrapTurnBoxWithRouting(
                 { db, settings, bus },
-                // Thread the SAME declared environment the group box was created with
+                // Thread the SAME declared variableSet the group box was created with
                 // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
                 // carries it too — the SDK's per-turn manifest-env delta stays empty
                 // (no "cannot change manifest environment variables" throw).
-                { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
+                { workspaceId: input.workspaceId, sessionId: input.sessionId, variableSet: sandboxEnvironment },
                 resolvedSandbox.established,
               ),
             };
@@ -1573,12 +1573,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
-        ...(workspaceEnvironment
+        ...(workspaceVariableSet
           ? {
-            workspaceEnvironment: {
-              name: workspaceEnvironment.name,
-              description: workspaceEnvironment.description,
-              variableNames: Object.keys(workspaceEnvironment.values),
+            workspaceVariableSet: {
+              name: workspaceVariableSet.name,
+              description: workspaceVariableSet.description,
+              variableNames: Object.keys(workspaceVariableSet.values),
             },
           }
           : {}),
@@ -2577,7 +2577,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attributes: {
           "opengeni.turn_id": turnId ?? "",
           "opengeni.status": activityStatus,
-          "opengeni.environment_id": environmentId,
+          "opengeni.variable_set_id": variableSetId,
           "opengeni.duration_ms": Math.round(durationSeconds * 1000),
         },
         error: activityError,

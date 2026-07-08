@@ -1,7 +1,7 @@
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { AccessGrant, WorkspaceEnvironment } from "@opengeni/contracts";
+import type { AccessGrant, VariableSet } from "@opengeni/contracts";
 import {
-  getWorkspaceEnvironment,
+  getVariableSet,
   recordAuditEvent,
   type Database,
 } from "@opengeni/db";
@@ -13,7 +13,7 @@ export const MAX_VARIABLES_PER_ENVIRONMENT = 100;
 
 // Names the platform itself injects into sandboxes (sandboxEnvironmentForRun,
 // collectGitIdentityEnvironment) plus loader/startup-injection vectors. These
-// can never be set as workspace environment variables, so the run-scoped
+// can never be set as variable set variables, so the run-scoped
 // GitHub auth block and git identity always win without silent collisions.
 const reservedExactNames = new Set([
   "HOME",
@@ -45,59 +45,59 @@ const reservedPrefixes = [
   "DYLD_",
 ];
 
-export function assertAllowedEnvironmentVariableName(name: string): void {
+export function assertAllowedVariableSetVariableName(name: string): void {
   if (reservedExactNames.has(name) || reservedPrefixes.some((prefix) => name.startsWith(prefix))) {
-    throw new HTTPException(422, { message: `reserved environment variable name: ${name}` });
+    throw new HTTPException(422, { message: `reserved variable set variable name: ${name}` });
   }
 }
 
-export function requireEnvironmentEncryption(settings: Settings): Uint8Array {
+export function requireVariableSetEncryption(settings: Settings): Uint8Array {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new HTTPException(503, { message: "workspace environments require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
+    throw new HTTPException(503, { message: "variable sets require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
   }
   return key;
 }
 
-export async function requireEnvironmentForApi(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment> {
-  const environment = await getWorkspaceEnvironment(db, workspaceId, environmentId);
-  if (!environment) {
-    throw new HTTPException(404, { message: "environment not found" });
+export async function requireVariableSetForApi(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSet> {
+  const variableSet = await getVariableSet(db, workspaceId, variableSetId);
+  if (!variableSet) {
+    throw new HTTPException(404, { message: "variableSet not found" });
   }
-  return environment;
+  return variableSet;
 }
 
 /**
- * Validates an environment attachment supplied in a request payload (session
+ * Validates an variableSet attachment supplied in a request payload (session
  * create, scheduled task create/update, pack enable). Requires the
- * `environments:use` permission unless the attachment was already authorized
+ * `variable-sets:use` permission unless the attachment was already authorized
  * (pack-installation-inherited attachments), and maps a missing or
- * cross-workspace environment to 422 because the id is payload, not the route
+ * cross-variable set to 422 because the id is payload, not the route
  * target. RLS plus the workspace_id clause make cross-workspace ids
  * indistinguishable from missing ones.
  */
-export async function validateEnvironmentAttachment(
+export async function validateVariableSetAttachment(
   deps: { settings: Settings; db: Database },
   grant: AccessGrant,
   workspaceId: string,
-  environmentId: string,
+  variableSetId: string,
   options: { preauthorized?: boolean } = {},
-): Promise<WorkspaceEnvironment> {
-  requireEnvironmentEncryption(deps.settings);
+): Promise<VariableSet> {
+  requireVariableSetEncryption(deps.settings);
   if (!options.preauthorized) {
-    requirePermission(grant, "environments:use");
+    requirePermission(grant, "variable-sets:use");
   }
-  const environment = await getWorkspaceEnvironment(deps.db, workspaceId, environmentId);
-  if (!environment) {
-    throw new HTTPException(422, { message: "unknown environmentId" });
+  const variableSet = await getVariableSet(deps.db, workspaceId, variableSetId);
+  if (!variableSet) {
+    throw new HTTPException(422, { message: "unknown variableSetId" });
   }
-  return environment;
+  return variableSet;
 }
 
-export async function recordEnvironmentAuditEvent(db: Database, input: {
+export async function recordVariableSetAuditEvent(db: Database, input: {
   grant: AccessGrant;
-  action: "environment.created" | "environment.updated" | "environment.deleted" | "environment.variable.set" | "environment.variable.deleted";
-  environmentId: string;
+  action: "variable_set.created" | "variable_set.updated" | "variable_set.deleted" | "variable_set.variable.set" | "variable_set.variable.deleted";
+  variableSetId: string;
   variableName?: string;
 }): Promise<void> {
   await recordAuditEvent(db, {
@@ -105,10 +105,10 @@ export async function recordEnvironmentAuditEvent(db: Database, input: {
     workspaceId: input.grant.workspaceId,
     subjectId: input.grant.subjectId,
     action: input.action,
-    targetType: "workspace_environment",
-    targetId: input.environmentId,
+    targetType: "workspace_variable_set",
+    targetId: input.variableSetId,
     metadata: {
-      environmentId: input.environmentId,
+      variableSetId: input.variableSetId,
       ...(input.variableName ? { name: input.variableName } : {}),
     },
   });

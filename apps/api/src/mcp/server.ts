@@ -1,7 +1,7 @@
 import {
   CreateScheduledTaskRequest,
   SessionMcpCredentialUpdateInput,
-  WorkspaceEnvironmentVariableName,
+  VariableSetVariableName,
   type AccessGrant,
   type GitHubRepository,
   type Permission,
@@ -10,14 +10,14 @@ import {
 } from "@opengeni/contracts";
 import {
   correctWorkspaceMemory,
-  countWorkspaceEnvironments,
-  createWorkspaceEnvironment,
+  countVariableSets,
+  createVariableSet,
   deleteScheduledTask,
-  encryptEnvironmentValue,
+  encryptVariableSetValue,
   getSession,
   getSessionGoal,
-  getWorkspaceEnvironment,
-  getWorkspaceEnvironmentByName,
+  getVariableSet,
+  getVariableSetByName,
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
@@ -25,7 +25,7 @@ import {
   listSessions,
   listSocialConnections,
   listSocialPosts,
-  listWorkspaceEnvironments,
+  listVariableSets,
   MEMORY_CORRECT_TOOL_DESCRIPTION,
   MEMORY_SAVE_TOOL_DESCRIPTION,
   MEMORY_SEARCH_TOOL_DESCRIPTION,
@@ -35,7 +35,7 @@ import {
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   setSessionGoalStatus,
-  setWorkspaceEnvironmentVariable,
+  setVariableSetVariable,
   updateScheduledTask,
   updateSessionGoal,
   upsertSessionGoal,
@@ -55,11 +55,11 @@ import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
-  assertAllowedEnvironmentVariableName,
+  assertAllowedVariableSetVariableName,
   MAX_ENVIRONMENTS_PER_WORKSPACE,
   MAX_VARIABLES_PER_ENVIRONMENT,
-  recordEnvironmentAuditEvent,
-  requireEnvironmentEncryption,
+  recordVariableSetAuditEvent,
+  requireVariableSetEncryption,
 } from "@opengeni/core";
 import {
   createValidatedScheduledTask,
@@ -140,17 +140,17 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     registerFleetTools(server, deps, grant, sessionId, json);
   }
 
-  // Orchestration, environment, and GitHub-connect tools are permission-gated
+  // Orchestration, variableSet, and GitHub-connect tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
-  // POWERFUL BY DEFAULT — it carries sessions:*, environments:*, and github:use,
-  // so agents can spawn/read sessions, manage workspace environment variables,
+  // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
+  // so agents can spawn/read sessions, manage variable set variables,
   // and mint GitHub install links out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, json);
-  registerEnvironmentTools(server, deps, grant, can, json);
+  registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
@@ -310,12 +310,12 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       overlapPolicy: z4.string().optional(),
       agentConfig: z4.unknown(),
       status: z4.string().optional(),
-      environmentId: z4.string().uuid().optional(),
+      variableSetId: z4.string().uuid().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async (args) => {
     const payload = CreateScheduledTaskRequest.parse(args);
-    requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
+    requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
     await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "schedule:create", quantity: 1 });
     const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, payload, toolsProvided: scheduledTaskToolsProvided(args) });
     await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
@@ -332,13 +332,13 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       overlapPolicy: z4.string().optional(),
       agentConfig: z4.unknown().optional(),
       status: z4.string().optional(),
-      environmentId: z4.string().uuid().nullable().optional(),
+      variableSetId: z4.string().uuid().nullable().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async ({ id, ...raw }) => {
     const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
     const payload = UpdateScheduledTaskRequest.parse(raw);
-    requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
+    requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
     const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, existing, payload, toolsProvided: scheduledTaskToolsProvided(raw) });
     const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
     await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
@@ -741,7 +741,7 @@ function registerWorkspaceOrchestrationTools(
     }, async ({ limit }) => json({ sessions: await listSessions(deps.db, grant.workspaceId, boundedMcpLimit(limit)) }));
 
     server.registerTool("session_get", {
-      description: "Get one session: status, goal-bearing metadata, resources, tools, and environment attachment (names/ids only, never variable values). Unbounded agent-set fields (metadata, initial message) are clamped so monitoring another session cannot flood this context.",
+      description: "Get one session: status, goal-bearing metadata, resources, tools, and variableSet attachment (names/ids only, never variable values). Unbounded agent-set fields (metadata, initial message) are clamped so monitoring another session cannot flood this context.",
       inputSchema: { sessionId: z4.string().uuid() },
     }, async ({ sessionId }) => {
       const session = await getSession(deps.db, grant.workspaceId, sessionId);
@@ -772,7 +772,7 @@ function registerWorkspaceOrchestrationTools(
 
   if (can("sessions:create")) {
     server.registerTool("session_create", {
-      description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and workspace environment attachment. Environment attachment happens at creation only — it cannot be added to a running session — and requires the environments:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
+      description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and variable set attachment. VariableSet attachment happens at creation only — it cannot be added to a running session — and requires the variable-sets:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
       inputSchema: {
         initialMessage: z4.string().min(1),
         // Per-session agent persona/system instructions for the spawned worker
@@ -786,7 +786,7 @@ function registerWorkspaceOrchestrationTools(
         // Per-session third-party MCP servers. Credential header values are
         // accepted only at create and never appear in responses/events.
         mcpServers: z4.array(z4.unknown()).optional(),
-        environmentId: z4.string().uuid().optional(),
+        variableSetId: z4.string().uuid().optional(),
         model: z4.string().min(1).optional(),
         reasoningEffort: z4.string().optional(),
         sandboxBackend: z4.string().optional(),
@@ -815,12 +815,12 @@ function registerWorkspaceOrchestrationTools(
         // session's `sandboxGroupId` from a prior session_create response) to join
         // that specific sibling's box.
         // Shared state must be compatible: a shared box requires the SAME image
-        // (rejected at the lease layer, B3) and — because the box's environment is
+        // (rejected at the lease layer, B3) and — because the box's variable set is
         // fixed at creation under the current mechanics — the SAME workspace
-        // Environment. The domain layer is env-aware: an inherited default with a
-        // different environmentId silently gets its OWN box (the spawn still works),
-        // while an explicit shared/{groupId} with a mismatched environment 422s at
-        // create. When the Environment is eventually evicted from the box manifest
+        // VariableSet. The domain layer is env-aware: an inherited default with a
+        // different variableSetId silently gets its OWN box (the spawn still works),
+        // while an explicit shared/{groupId} with a mismatched variableSet 422s at
+        // create. When the VariableSet is eventually evicted from the box manifest
         // (per-exec, like the git token), the env check dissolves on its own.
         // The description below is what the AGENT sees (this comment is invisible to
         // it); keep the two in sync.
@@ -829,7 +829,7 @@ function registerWorkspaceOrchestrationTools(
           z4.literal("new"),
           z4.object({ groupId: z4.string().uuid() }),
         ]).describe(
-          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT environment than the creator's box, the platform automatically gives it its own box (the box environment is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same environment (a mismatch is rejected at create) and the same image (a conflicting image is rejected when the box warms).",
+          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT variableSet than the creator's box, the platform automatically gives it its own box (the box variable set is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same variableSet (a mismatch is rejected at create) and the same image (a conflicting image is rejected when the box warms).",
         ).optional(),
         // The parent (manager) session is auto-inferred from the caller's
         // worker-signed sessionId claim, so a spawned worker's completion wakes
@@ -900,80 +900,80 @@ function registerWorkspaceOrchestrationTools(
   }
 }
 
-// Environment management for manager-style agents. v1 deliberately accepts
+// VariableSet management for manager-style agents. v1 deliberately accepts
 // variable VALUES in plain tool arguments: the calling model is trusted with
-// the secrets it is persisting (see docs/environments.md). Reads stay
+// the secrets it is persisting (see docs/variable-sets.md). Reads stay
 // write-only — responses carry names and metadata, never values.
-function registerEnvironmentTools(
+function registerVariableSetTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
   json: JsonResult,
 ): void {
-  if (can("environments:use")) {
-    server.registerTool("environment_list", {
-      description: "List workspace environments with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
+  if (can("variable-sets:use")) {
+    server.registerTool("variableSet_list", {
+      description: "List variable sets with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
       inputSchema: {},
-    }, async () => json({ environments: await listWorkspaceEnvironments(deps.db, grant.workspaceId) }));
+    }, async () => json({ variableSets: await listVariableSets(deps.db, grant.workspaceId) }));
   }
 
-  if (can("environments:manage")) {
-    server.registerTool("environment_set_variable", {
-      description: "Set or rotate one variable in a workspace environment. Target by environmentId, or by environmentName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the environment is attached to; it is never readable back through any API.",
+  if (can("variable-sets:manage")) {
+    server.registerTool("variableSet_set_variable", {
+      description: "Set or rotate one variable in a variable set. Target by variableSetId, or by variableSetName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the variable set is attached to; it is never readable back through any API.",
       inputSchema: {
-        environmentId: z4.string().uuid().optional(),
-        environmentName: z4.string().min(1).optional(),
+        variableSetId: z4.string().uuid().optional(),
+        variableSetName: z4.string().min(1).optional(),
         name: z4.string().min(1),
         value: z4.string().min(1).max(32768),
       },
-    }, async ({ environmentId, environmentName, name, value }) => {
-      const key = requireEnvironmentEncryption(deps.settings);
-      const parsedName = WorkspaceEnvironmentVariableName.safeParse(name);
+    }, async ({ variableSetId, variableSetName, name, value }) => {
+      const key = requireVariableSetEncryption(deps.settings);
+      const parsedName = VariableSetVariableName.safeParse(name);
       if (!parsedName.success) {
-        throw new Error("environment variable names must match ^[A-Z][A-Z0-9_]*$");
+        throw new Error("variable set variable names must match ^[A-Z][A-Z0-9_]*$");
       }
-      assertAllowedEnvironmentVariableName(parsedName.data);
-      if ((environmentId === undefined) === (environmentName === undefined)) {
-        throw new Error("provide exactly one of environmentId or environmentName");
+      assertAllowedVariableSetVariableName(parsedName.data);
+      if ((variableSetId === undefined) === (variableSetName === undefined)) {
+        throw new Error("provide exactly one of variableSetId or variableSetName");
       }
-      const trimmedEnvironmentName = environmentName?.trim();
-      if (environmentName !== undefined && !trimmedEnvironmentName) {
-        throw new Error("environment name is required");
+      const trimmedVariableSetName = variableSetName?.trim();
+      if (variableSetName !== undefined && !trimmedVariableSetName) {
+        throw new Error("variable set name is required");
       }
       let created = false;
-      let environment = environmentId !== undefined
-        ? await getWorkspaceEnvironment(deps.db, grant.workspaceId, environmentId)
-        : await getWorkspaceEnvironmentByName(deps.db, grant.workspaceId, trimmedEnvironmentName!);
-      if (!environment && environmentId !== undefined) {
-        throw new Error("environment not found");
+      let variableSet = variableSetId !== undefined
+        ? await getVariableSet(deps.db, grant.workspaceId, variableSetId)
+        : await getVariableSetByName(deps.db, grant.workspaceId, trimmedVariableSetName!);
+      if (!variableSet && variableSetId !== undefined) {
+        throw new Error("variableSet not found");
       }
-      if (!environment) {
-        if (await countWorkspaceEnvironments(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
-          throw new Error(`a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} environments`);
+      if (!variableSet) {
+        if (await countVariableSets(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+          throw new Error(`a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} variable sets`);
         }
-        environment = await createWorkspaceEnvironment(deps.db, {
+        variableSet = await createVariableSet(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
-          name: trimmedEnvironmentName!,
+          name: trimmedVariableSetName!,
         });
         created = true;
-        await recordEnvironmentAuditEvent(deps.db, { grant, action: "environment.created", environmentId: environment.id });
+        await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.created", variableSetId: variableSet.id });
       }
-      const exists = environment.variables.some((variable) => variable.name === parsedName.data);
-      if (!exists && environment.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
-        throw new Error(`an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
+      const exists = variableSet.variables.some((variable) => variable.name === parsedName.data);
+      if (!exists && variableSet.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
+        throw new Error(`an variable set supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
       }
-      const metadata = await setWorkspaceEnvironmentVariable(deps.db, {
+      const metadata = await setVariableSetVariable(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        environmentId: environment.id,
+        variableSetId: variableSet.id,
         name: parsedName.data,
-        valueEncrypted: encryptEnvironmentValue(key, value),
+        valueEncrypted: encryptVariableSetValue(key, value),
       });
-      await recordEnvironmentAuditEvent(deps.db, { grant, action: "environment.variable.set", environmentId: environment.id, variableName: parsedName.data });
+      await recordVariableSetAuditEvent(deps.db, { grant, action: "variable_set.variable.set", variableSetId: variableSet.id, variableName: parsedName.data });
       return json({
-        environment: { id: environment.id, name: environment.name, created },
+        variableSet: { id: variableSet.id, name: variableSet.name, created },
         variable: metadata,
       });
     });
@@ -1069,13 +1069,13 @@ function registerGitHubTokenTool(
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
-// first-party delegated token never carries environments:use, so sandboxed
-// agents calling these MCP tools cannot attach a workspace environment.
-// Explicit detach (environmentId: null) is also an attachment change and is
+// first-party delegated token never carries variable-sets:use, so sandboxed
+// agents calling these MCP tools cannot attach a variable set.
+// Explicit detach (variableSetId: null) is also an attachment change and is
 // blocked the same way.
-function requireEnvironmentsUseForMcpAttachment(grant: AccessGrant, environmentId: string | null | undefined): void {
-  if (environmentId !== undefined && !hasPermission(grant.permissions, "environments:use")) {
-    throw new Error("missing permission: environments:use");
+function requireVariableSetsUseForMcpAttachment(grant: AccessGrant, variableSetId: string | null | undefined): void {
+  if (variableSetId !== undefined && !hasPermission(grant.permissions, "variable-sets:use")) {
+    throw new Error("missing permission: variable-sets:use");
   }
 }
 

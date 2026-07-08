@@ -1,48 +1,48 @@
 import type {
-  CreateWorkspaceEnvironmentRequest,
-  UpdateWorkspaceEnvironmentRequest,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
+  CreateVariableSetRequest,
+  UpdateVariableSetRequest,
+  VariableSet,
+  VariableSetVariableMetadata,
 } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
-export type UseEnvironmentsOptions = ClientOverride & {
+export type UseVariableSetsOptions = ClientOverride & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
 
-export type UseEnvironmentsResult = {
-  environments: WorkspaceEnvironment[];
+export type UseVariableSetsResult = {
+  variableSets: VariableSet[];
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
-  create: (request: CreateWorkspaceEnvironmentRequest) => Promise<WorkspaceEnvironment | null>;
-  update: (environmentId: string, request: UpdateWorkspaceEnvironmentRequest) => Promise<WorkspaceEnvironment | null>;
-  remove: (environmentId: string) => Promise<boolean>;
+  create: (request: CreateVariableSetRequest) => Promise<VariableSet | null>;
+  update: (variableSetId: string, request: UpdateVariableSetRequest) => Promise<VariableSet | null>;
+  remove: (variableSetId: string) => Promise<boolean>;
   /** Set/rotate a variable. Values are write-only — reads expose metadata only. */
-  setVariable: (environmentId: string, name: string, value: string) => Promise<WorkspaceEnvironmentVariableMetadata | null>;
-  deleteVariable: (environmentId: string, name: string) => Promise<boolean>;
+  setVariable: (variableSetId: string, name: string, value: string) => Promise<VariableSetVariableMetadata | null>;
+  deleteVariable: (variableSetId: string, name: string) => Promise<boolean>;
   mutating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
 };
 
 /**
- * Workspace environments (named, encrypted variable sets attached to sessions
+ * Variable sets (named, encrypted variable sets attached to sessions
  * and scheduled tasks). Variable values are write-only end to end: this hook
  * never sees a value after it is sent.
  */
-export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnvironmentsResult {
+export function useVariableSets(options: UseVariableSetsOptions = {}): UseVariableSetsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(async () => await client.listEnvironments(workspaceId), [client, workspaceId]);
+  const load = useCallback(async () => await client.listVariableSets(workspaceId), [client, workspaceId]);
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
   const mutation = useMutationRunner();
 
   const create = useCallback(
-    async (request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment | null> => {
-      const result = await mutation.run(() => client.createEnvironment(workspaceId, request));
+    async (request: CreateVariableSetRequest): Promise<VariableSet | null> => {
+      const result = await mutation.run(() => client.createVariableSet(workspaceId, request));
       if (result) {
         await state.refresh();
       }
@@ -52,8 +52,8 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const update = useCallback(
-    async (environmentId: string, request: UpdateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment | null> => {
-      const result = await mutation.run(() => client.updateEnvironment(workspaceId, environmentId, request));
+    async (variableSetId: string, request: UpdateVariableSetRequest): Promise<VariableSet | null> => {
+      const result = await mutation.run(() => client.updateVariableSet(workspaceId, variableSetId, request));
       if (result) {
         await state.refresh();
       }
@@ -63,9 +63,9 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const remove = useCallback(
-    async (environmentId: string): Promise<boolean> => {
+    async (variableSetId: string): Promise<boolean> => {
       const result = await mutation.run(async () => {
-        await client.deleteEnvironment(workspaceId, environmentId);
+        await client.deleteVariableSet(workspaceId, variableSetId);
         return true;
       });
       if (result) {
@@ -77,8 +77,8 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const setVariable = useCallback(
-    async (environmentId: string, name: string, value: string): Promise<WorkspaceEnvironmentVariableMetadata | null> => {
-      const result = await mutation.run(() => client.setEnvironmentVariable(workspaceId, environmentId, name, value));
+    async (variableSetId: string, name: string, value: string): Promise<VariableSetVariableMetadata | null> => {
+      const result = await mutation.run(() => client.setVariableSetVariable(workspaceId, variableSetId, name, value));
       if (result) {
         await state.refresh();
       }
@@ -88,9 +88,9 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   const deleteVariable = useCallback(
-    async (environmentId: string, name: string): Promise<boolean> => {
+    async (variableSetId: string, name: string): Promise<boolean> => {
       const result = await mutation.run(async () => {
-        await client.deleteEnvironmentVariable(workspaceId, environmentId, name);
+        await client.deleteVariableSetVariable(workspaceId, variableSetId, name);
         return true;
       });
       if (result) {
@@ -102,7 +102,7 @@ export function useEnvironments(options: UseEnvironmentsOptions = {}): UseEnviro
   );
 
   return {
-    environments: state.data ?? [],
+    variableSets: state.data ?? [],
     loading: state.loading,
     error: state.error,
     refresh: state.refresh,

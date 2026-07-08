@@ -14,18 +14,18 @@ import {
   type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
-  decryptEnvironmentValue,
+  decryptVariableSetValue,
   decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
   enablePackInstallation,
-  encryptEnvironmentValue,
+  encryptVariableSetValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
   getPackInstallation,
   getStoredCapabilityHeaderCiphertext,
-  getWorkspaceEnvironment,
+  getVariableSet,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
   listEnabledMcpCapabilityServers,
@@ -37,7 +37,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { validateEnvironmentAttachment } from "./environments";
+import { validateVariableSetAttachment } from "./environments";
 import { assertPackSandboxImageCompatible, listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
@@ -162,7 +162,7 @@ export async function enableCapability(input: {
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
+        Object.entries(headers).map(([name, value]) => [name, encryptVariableSetValue(key, value)]),
       );
     }
   }
@@ -173,49 +173,49 @@ export async function enableCapability(input: {
       throw new HTTPException(404, { message: "pack not found" });
     }
     await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
-    // The unified capability-enable path accepts an initial environment
-    // attachment (`payload.environmentId`), mirroring POST /packs/:id/enable:
+    // The unified capability-enable path accepts an initial variableSet
+    // attachment (`payload.variableSetId`), mirroring POST /packs/:id/enable:
     // a request-supplied id is validated as a fresh attachment, otherwise the
     // attachment stored by a previous enable is preserved and re-validated.
     const existing = await getPackInstallation(input.db, input.workspaceId, packId);
-    const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
-    const requestedEnvironmentId = input.payload.environmentId;
-    const environmentId = requestedEnvironmentId ?? storedEnvironmentId;
-    if (pack.environment?.required && !environmentId) {
+    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId : undefined;
+    const requestedVariableSetId = input.payload.variableSetId;
+    const variableSetId = requestedVariableSetId ?? storedVariableSetId;
+    if (pack.variableSet?.required && !variableSetId) {
       throw new HTTPException(422, {
-        message: `pack ${packId} requires an environment attachment; pass environmentId`,
+        message: `pack ${packId} requires an variableSet attachment; pass variableSetId`,
       });
     }
-    if (environmentId) {
-      if (requestedEnvironmentId) {
+    if (variableSetId) {
+      if (requestedVariableSetId) {
         // A fresh attachment: validate it like the packs enable endpoint does.
-        // The grant holds workspace:admin here, which implies environments:use,
+        // The grant holds workspace:admin here, which implies variable-sets:use,
         // so the attachment authorization succeeds for this caller.
-        const environment = await validateEnvironmentAttachment(
+        const variableSet = await validateVariableSetAttachment(
           { settings: input.settings, db: input.db },
           input.grant,
           input.workspaceId,
-          requestedEnvironmentId,
+          requestedVariableSetId,
         );
-        const missing = (pack.environment?.requiredVariables ?? [])
-          .filter((name) => !environment.variables.some((variable) => variable.name === name));
+        const missing = (pack.variableSet?.requiredVariables ?? [])
+          .filter((name) => !variableSet.variables.some((variable) => variable.name === name));
         if (missing.length > 0) {
-          throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+          throw new HTTPException(422, { message: `variable set is missing required variable(s): ${missing.join(", ")}` });
         }
       } else {
         // The stored attachment was authorized at pack-enable time, but the
-        // environment may have been deleted or its variables changed since;
+        // variableSet may have been deleted or its variables changed since;
         // re-validate it like the packs enable endpoint does.
-        const environment = await getWorkspaceEnvironment(input.db, input.workspaceId, environmentId);
-        if (!environment) {
+        const variableSet = await getVariableSet(input.db, input.workspaceId, variableSetId);
+        if (!variableSet) {
           throw new HTTPException(422, {
-            message: `the stored environment attachment for pack ${packId} no longer exists; re-enable it with environmentId`,
+            message: `the stored variableSet attachment for pack ${packId} no longer exists; re-enable it with variableSetId`,
           });
         }
-        const missing = (pack.environment?.requiredVariables ?? [])
-          .filter((name) => !environment.variables.some((variable) => variable.name === name));
+        const missing = (pack.variableSet?.requiredVariables ?? [])
+          .filter((name) => !variableSet.variables.some((variable) => variable.name === name));
         if (missing.length > 0) {
-          throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+          throw new HTTPException(422, { message: `variable set is missing required variable(s): ${missing.join(", ")}` });
         }
       }
     }
@@ -226,7 +226,7 @@ export async function enableCapability(input: {
       metadata: {
         ...input.payload.metadata,
         packVersion: pack.version,
-        ...(environmentId ? { environmentId } : {}),
+        ...(variableSetId ? { variableSetId } : {}),
       },
     });
   }
@@ -263,7 +263,7 @@ async function resolveMcpCredentialHeaders(
   }
   const key = requireCapabilityHeaderEncryption(input.settings);
   try {
-    return Object.fromEntries(Object.entries(storedCiphertext).map(([name, value]) => [name, decryptEnvironmentValue(key, value)]));
+    return Object.fromEntries(Object.entries(storedCiphertext).map(([name, value]) => [name, decryptVariableSetValue(key, value)]));
   } catch {
     throw new HTTPException(422, {
       message: `stored credential headers for "${item.name}" could not be decrypted; supply them again in the enable request "headers" field`,

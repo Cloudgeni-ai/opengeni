@@ -37,13 +37,13 @@ export type SessionClientLike = Pick<
   | "uploadFile"
   | "getFile"
   | "createFileDownloadUrl"
-  // Environments
-  | "listEnvironments"
-  | "createEnvironment"
-  | "updateEnvironment"
-  | "deleteEnvironment"
-  | "setEnvironmentVariable"
-  | "deleteEnvironmentVariable"
+  // VariableSets
+  | "listVariableSets"
+  | "createVariableSet"
+  | "updateVariableSet"
+  | "deleteVariableSet"
+  | "setVariableSetVariable"
+  | "deleteVariableSetVariable"
   // Packs
   | "listPacks"
   | "registerPack"

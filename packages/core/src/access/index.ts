@@ -52,7 +52,13 @@ export function requirePermission(grant: AccessGrant, permission: Permission): v
 }
 
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
-  return permissions.includes(permission) || permissions.includes("workspace:admin");
+  const aliases: Partial<Record<Permission, Permission[]>> = {
+    "variable-sets:use": ["environments:use" as Permission],
+    "variable-sets:manage": ["environments:manage" as Permission],
+  };
+  return permissions.includes(permission)
+    || (aliases[permission]?.some((alias) => permissions.includes(alias)) ?? false)
+    || permissions.includes("workspace:admin");
 }
 
 async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext | null> {

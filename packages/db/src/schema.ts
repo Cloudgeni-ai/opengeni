@@ -78,7 +78,7 @@ export const apiKeys = pgTable("api_keys", {
   workspace: index("api_keys_workspace_idx").on(table.workspaceId),
 }));
 
-export const workspaceEnvironments = pgTable("workspace_environments", {
+export const workspaceVariableSets = pgTable("workspace_variable_sets", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -87,15 +87,15 @@ export const workspaceEnvironments = pgTable("workspace_environments", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  workspaceName: uniqueIndex("workspace_environments_workspace_name_idx").on(table.workspaceId, table.name),
-  workspaceCreated: index("workspace_environments_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  workspaceName: uniqueIndex("workspace_variable_sets_workspace_name_idx").on(table.workspaceId, table.name),
+  workspaceCreated: index("workspace_variable_sets_workspace_created_idx").on(table.workspaceId, table.createdAt),
 }));
 
-export const workspaceEnvironmentVariables = pgTable("workspace_environment_variables", {
+export const workspaceVariableSetVariables = pgTable("workspace_variable_set_variables", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  environmentId: uuid("environment_id").notNull().references(() => workspaceEnvironments.id, { onDelete: "cascade" }),
+  variableSetId: uuid("variable_set_id").notNull().references(() => workspaceVariableSets.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   // Format: v1:<base64 iv>:<base64 ciphertext||gcm-tag>. Never returned by any API.
   valueEncrypted: text("value_encrypted").notNull(),
@@ -103,13 +103,13 @@ export const workspaceEnvironmentVariables = pgTable("workspace_environment_vari
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  environmentName: uniqueIndex("workspace_environment_variables_env_name_idx").on(table.workspaceId, table.environmentId, table.name),
-  environment: index("workspace_environment_variables_workspace_env_idx").on(table.workspaceId, table.environmentId),
+  variableSetName: uniqueIndex("workspace_variable_set_variables_env_name_idx").on(table.workspaceId, table.variableSetId, table.name),
+  variableSet: index("workspace_variable_set_variables_workspace_env_idx").on(table.workspaceId, table.variableSetId),
 }));
 
 // Per-workspace ChatGPT/Codex subscription credential. One row per workspace.
 // access/refresh/id tokens live INSIDE credential_encrypted (v1 AES-256-GCM,
-// same envelope as workspace_environment_variables); the other columns are
+// same envelope as workspace_variable_set_variables); the other columns are
 // plaintext metadata (header value + UI). RLS-isolated per workspace.
 export const codexSubscriptionCredentials = pgTable("codex_subscription_credentials", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -301,7 +301,7 @@ export const sessions = pgTable("sessions", {
   // behavior exactly — the agent substitutes its workspace_root for an empty cwd,
   // so an unset working_dir is a byte-identical no-op. Create-time only (Stage A).
   workingDir: text("working_dir"),
-  environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
+  variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, { onDelete: "set null" }),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.
   firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
@@ -344,7 +344,7 @@ export const sessions = pgTable("sessions", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   workspaceCreated: index("sessions_workspace_created_idx").on(table.workspaceId, table.createdAt),
-  environment: index("sessions_environment_idx").on(table.workspaceId, table.environmentId),
+  variableSet: index("sessions_variable_set_idx").on(table.workspaceId, table.variableSetId),
   parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
   // Routing index: resolve session_id -> sandbox_group_id at every lease entry
   // point and enumerate all sessions in a group for attribution/disclosure.
@@ -1049,14 +1049,14 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
   agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
   reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, { onDelete: "set null" }),
-  environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "restrict" }),
+  variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, { onDelete: "restrict" }),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   temporalScheduleId: uniqueIndex("scheduled_tasks_workspace_temporal_schedule_id_idx").on(table.workspaceId, table.temporalScheduleId),
   status: index("scheduled_tasks_workspace_status_idx").on(table.workspaceId, table.status),
-  environment: index("scheduled_tasks_environment_idx").on(table.workspaceId, table.environmentId),
+  variableSet: index("scheduled_tasks_variable_set_idx").on(table.workspaceId, table.variableSetId),
 }));
 
 export const scheduledTaskRuns = pgTable("scheduled_task_runs", {

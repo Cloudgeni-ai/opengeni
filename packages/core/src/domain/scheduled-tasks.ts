@@ -19,7 +19,7 @@ import { requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { validateEnvironmentAttachment } from "./environments";
+import { validateVariableSetAttachment } from "./environments";
 import { assertConfiguredModel } from "./sessions";
 import {
   normalizeResources,
@@ -60,19 +60,19 @@ export async function createValidatedScheduledTask(input: {
   // capability MCP servers, mirroring session creation.
   toolsProvided?: boolean;
   // Set for pack-installation-inherited attachments that were already
-  // authorized with environments:use when the pack was enabled.
-  environmentPreauthorized?: boolean;
+  // authorized with variable-sets:use when the pack was enabled.
+  variableSetPreauthorized?: boolean;
 }): Promise<ScheduledTask> {
   const agentConfig = await validateScheduledTaskAgentConfig({ ...input, workspaceId: input.grant.workspaceId });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
-  if (input.payload.environmentId) {
-    await validateEnvironmentAttachment(
+  if (input.payload.variableSetId) {
+    await validateVariableSetAttachment(
       { settings: input.settings, db: input.db },
       input.grant,
       input.grant.workspaceId,
-      input.payload.environmentId,
-      { preauthorized: input.environmentPreauthorized ?? false },
+      input.payload.variableSetId,
+      { preauthorized: input.variableSetPreauthorized ?? false },
     );
   }
   return await createScheduledTask(input.db, {
@@ -86,7 +86,7 @@ export async function createValidatedScheduledTask(input: {
     runMode: input.payload.runMode,
     overlapPolicy: input.payload.overlapPolicy,
     agentConfig,
-    environmentId: input.payload.environmentId ?? null,
+    variableSetId: input.payload.variableSetId ?? null,
     metadata: input.payload.metadata,
   });
 }
@@ -121,39 +121,39 @@ export async function validatedScheduledTaskUpdate(input: {
   if (input.payload.metadata !== undefined) {
     update.metadata = input.payload.metadata;
   }
-  if (input.payload.environmentId !== undefined) {
-    const nextEnvironmentId = input.payload.environmentId;
-    if ((input.existing.environmentId ?? null) !== (nextEnvironmentId ?? null)
+  if (input.payload.variableSetId !== undefined) {
+    const nextVariableSetId = input.payload.variableSetId;
+    if ((input.existing.variableSetId ?? null) !== (nextVariableSetId ?? null)
       && input.existing.runMode === "reusable_session"
       && input.existing.reusableSessionId) {
-      throw new HTTPException(409, { message: "cannot change environment of a task with a live reusable session; recreate the task" });
+      throw new HTTPException(409, { message: "cannot change variableSet of a task with a live reusable session; recreate the task" });
     }
-    if (nextEnvironmentId === null) {
-      if (input.existing.environmentId !== null) {
+    if (nextVariableSetId === null) {
+      if (input.existing.variableSetId !== null) {
         // Detaching is also an attachment change: it strips the secrets a
         // task's instructions were designed around.
-        requirePermission(input.grant, "environments:use");
+        requirePermission(input.grant, "variable-sets:use");
       }
-      update.environmentId = null;
+      update.variableSetId = null;
     } else {
-      await validateEnvironmentAttachment(
+      await validateVariableSetAttachment(
         { settings: input.settings, db: input.db },
         input.grant,
         input.existing.workspaceId,
-        nextEnvironmentId,
+        nextVariableSetId,
       );
-      update.environmentId = nextEnvironmentId;
+      update.variableSetId = nextVariableSetId;
     }
   }
   if (input.payload.agentConfig !== undefined) {
     // Editing the instructions of a task that injects workspace secrets is
     // equivalent to attaching those secrets to new instructions, so it
-    // requires environments:use even though plain task edits do not.
-    const willHaveEnvironment = input.payload.environmentId !== undefined
-      ? input.payload.environmentId !== null
-      : Boolean(input.existing.environmentId);
-    if (willHaveEnvironment) {
-      requirePermission(input.grant, "environments:use");
+    // requires variable-sets:use even though plain task edits do not.
+    const willHaveVariableSet = input.payload.variableSetId !== undefined
+      ? input.payload.variableSetId !== null
+      : Boolean(input.existing.variableSetId);
+    if (willHaveVariableSet) {
+      requirePermission(input.grant, "variable-sets:use");
     }
     update.agentConfig = await validateScheduledTaskAgentConfig({
       settings: input.settings,
@@ -184,7 +184,7 @@ export async function restoreScheduledTask(db: Database, task: ScheduledTask): P
     overlapPolicy: task.overlapPolicy,
     agentConfig: task.agentConfig,
     reusableSessionId: task.reusableSessionId,
-    environmentId: task.environmentId,
+    variableSetId: task.variableSetId,
     metadata: task.metadata,
   });
 }

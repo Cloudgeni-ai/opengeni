@@ -56,8 +56,8 @@ import type {
   ReasoningEffort,
   UsageEvent,
   Workspace,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
@@ -93,6 +93,10 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export {
+  decryptEnvironmentValue as decryptVariableSetValue,
+  encryptEnvironmentValue as encryptVariableSetValue,
+} from "./environment-crypto";
 export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -376,8 +380,8 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
-  "environments:manage",
-  "environments:use",
+  "variable-sets:manage",
+  "variable-sets:use",
   "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
@@ -1146,7 +1150,7 @@ export type CreateScheduledTaskInput = {
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
-  environmentId?: string | null;
+  variableSetId?: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -1158,7 +1162,7 @@ export type UpdateScheduledTaskInput = Partial<{
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
-  environmentId: string | null;
+  variableSetId: string | null;
   metadata: Record<string, unknown>;
 }>;
 
@@ -1425,7 +1429,7 @@ export type EnabledMcpCapabilityServer = {
   cacheToolsList?: boolean;
   /**
    * Credential request headers stored encrypted at enable time
-   * (AES-256-GCM under the workspace-environments key). Decrypted only at
+   * (AES-256-GCM under the workspace-variableSets key). Decrypted only at
    * the runtime boundary that builds the MCP client; never exposed by the
    * capability API surface.
    */
@@ -3539,7 +3543,7 @@ export async function updateScheduledTask(db: Database, workspaceId: string, tas
       ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
       ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
       ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
-      ...(input.environmentId !== undefined ? { environmentId: input.environmentId } : {}),
+      ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       updatedAt: new Date(),
     }).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).returning();
@@ -3642,207 +3646,207 @@ export async function listScheduledTaskRuns(db: Database, workspaceId: string, t
   });
 }
 
-export async function createWorkspaceEnvironment(db: Database, input: {
+export async function createVariableSet(db: Database, input: {
   accountId: string;
   workspaceId: string;
   name: string;
   description?: string | null;
   variables?: Array<{ name: string; valueEncrypted: string }>;
-}): Promise<WorkspaceEnvironment> {
-  // withRlsContext wraps the callback in one transaction, so the environment
+}): Promise<VariableSet> {
+  // withRlsContext wraps the callback in one transaction, so the variableSet
   // row and all initial variables commit or roll back together.
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
-    const [row] = await scopedDb.insert(schema.workspaceEnvironments).values({
+    const [row] = await scopedDb.insert(schema.workspaceVariableSets).values({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       name: input.name,
       description: input.description ?? null,
     }).returning();
     if (!row) {
-      throw new Error("Failed to create workspace environment");
+      throw new Error("Failed to create variable set");
     }
     const variables = input.variables ?? [];
     if (variables.length === 0) {
-      return mapWorkspaceEnvironment(row, []);
+      return mapVariableSet(row, []);
     }
-    const inserted = await scopedDb.insert(schema.workspaceEnvironmentVariables).values(variables.map((variable) => ({
+    const inserted = await scopedDb.insert(schema.workspaceVariableSetVariables).values(variables.map((variable) => ({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      environmentId: row.id,
+      variableSetId: row.id,
       name: variable.name,
       valueEncrypted: variable.valueEncrypted,
     }))).returning({
-      name: schema.workspaceEnvironmentVariables.name,
-      version: schema.workspaceEnvironmentVariables.version,
-      createdAt: schema.workspaceEnvironmentVariables.createdAt,
-      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
     });
-    return mapWorkspaceEnvironment(row, inserted
-      .map(mapWorkspaceEnvironmentVariableMetadata)
+    return mapVariableSet(row, inserted
+      .map(mapVariableSetVariableMetadata)
       .sort((a, b) => a.name.localeCompare(b.name)));
   });
 }
 
-export async function listWorkspaceEnvironments(db: Database, workspaceId: string): Promise<WorkspaceEnvironment[]> {
+export async function listVariableSets(db: Database, workspaceId: string): Promise<VariableSet[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.select().from(schema.workspaceEnvironments)
-      .where(eq(schema.workspaceEnvironments.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceEnvironments.createdAt));
+    const rows = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(eq(schema.workspaceVariableSets.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceVariableSets.createdAt));
     const variableRows = await scopedDb.select({
-      environmentId: schema.workspaceEnvironmentVariables.environmentId,
-      name: schema.workspaceEnvironmentVariables.name,
-      version: schema.workspaceEnvironmentVariables.version,
-      createdAt: schema.workspaceEnvironmentVariables.createdAt,
-      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-    }).from(schema.workspaceEnvironmentVariables)
-      .where(eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspaceEnvironmentVariables.name));
-    const grouped = new Map<string, WorkspaceEnvironmentVariableMetadata[]>();
+      variableSetId: schema.workspaceVariableSetVariables.variableSetId,
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+    }).from(schema.workspaceVariableSetVariables)
+      .where(eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceVariableSetVariables.name));
+    const grouped = new Map<string, VariableSetVariableMetadata[]>();
     for (const variable of variableRows) {
-      const list = grouped.get(variable.environmentId) ?? [];
-      list.push(mapWorkspaceEnvironmentVariableMetadata(variable));
-      grouped.set(variable.environmentId, list);
+      const list = grouped.get(variable.variableSetId) ?? [];
+      list.push(mapVariableSetVariableMetadata(variable));
+      grouped.set(variable.variableSetId, list);
     }
-    return rows.map((row) => mapWorkspaceEnvironment(row, grouped.get(row.id) ?? []));
+    return rows.map((row) => mapVariableSet(row, grouped.get(row.id) ?? []));
   });
 }
 
-export async function getWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment | null> {
+export async function getVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSet | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.select().from(schema.workspaceEnvironments)
-      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
+    const [row] = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId));
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId));
   });
 }
 
-export async function getWorkspaceEnvironmentByName(db: Database, workspaceId: string, name: string): Promise<WorkspaceEnvironment | null> {
+export async function getVariableSetByName(db: Database, workspaceId: string, name: string): Promise<VariableSet | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.select().from(schema.workspaceEnvironments)
-      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.name, name)))
+    const [row] = await scopedDb.select().from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.name, name)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, row.id));
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, row.id));
   });
 }
 
-export async function updateWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string, input: {
+export async function updateVariableSet(db: Database, workspaceId: string, variableSetId: string, input: {
   name?: string;
   description?: string | null;
-}): Promise<WorkspaceEnvironment> {
+}): Promise<VariableSet> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.update(schema.workspaceEnvironments).set({
+    const [row] = await scopedDb.update(schema.workspaceVariableSets).set({
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.description !== undefined ? { description: input.description } : {}),
       updatedAt: new Date(),
-    }).where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId))).returning();
+    }).where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId))).returning();
     if (!row) {
-      throw new Error(`Workspace environment not found: ${environmentId}`);
+      throw new Error(`Variable set not found: ${variableSetId}`);
     }
-    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId));
+    return mapVariableSet(row, await listVariableSetVariableMetadata(scopedDb, workspaceId, variableSetId));
   });
 }
 
-export async function deleteWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<boolean> {
+export async function deleteVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.delete(schema.workspaceEnvironments)
-      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
-      .returning({ id: schema.workspaceEnvironments.id });
+    const rows = await scopedDb.delete(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
+      .returning({ id: schema.workspaceVariableSets.id });
     return rows.length > 0;
   });
 }
 
-export async function countWorkspaceEnvironments(db: Database, workspaceId: string): Promise<number> {
+export async function countVariableSets(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb.select({
       count: sql<number>`count(*)::int`,
-    }).from(schema.workspaceEnvironments).where(eq(schema.workspaceEnvironments.workspaceId, workspaceId));
+    }).from(schema.workspaceVariableSets).where(eq(schema.workspaceVariableSets.workspaceId, workspaceId));
     return Number(count);
   });
 }
 
-export async function countScheduledTasksUsingEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<number> {
+export async function countScheduledTasksUsingVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb.select({
       count: sql<number>`count(*)::int`,
     }).from(schema.scheduledTasks)
-      .where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.environmentId, environmentId)));
+      .where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.variableSetId, variableSetId)));
     return Number(count);
   });
 }
 
-export async function countActiveSessionsUsingEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<number> {
+export async function countActiveSessionsUsingVariableSet(db: Database, workspaceId: string, variableSetId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [{ count } = { count: 0 }] = await scopedDb.select({
       count: sql<number>`count(*)::int`,
     }).from(schema.sessions)
       .where(and(
         eq(schema.sessions.workspaceId, workspaceId),
-        eq(schema.sessions.environmentId, environmentId),
+        eq(schema.sessions.variableSetId, variableSetId),
         inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
       ));
     return Number(count);
   });
 }
 
-export async function setWorkspaceEnvironmentVariable(db: Database, input: {
+export async function setVariableSetVariable(db: Database, input: {
   accountId: string;
   workspaceId: string;
-  environmentId: string;
+  variableSetId: string;
   name: string;
   valueEncrypted: string;
-}): Promise<WorkspaceEnvironmentVariableMetadata> {
+}): Promise<VariableSetVariableMetadata> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const now = new Date();
-    const [row] = await scopedDb.insert(schema.workspaceEnvironmentVariables).values({
+    const [row] = await scopedDb.insert(schema.workspaceVariableSetVariables).values({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-      environmentId: input.environmentId,
+      variableSetId: input.variableSetId,
       name: input.name,
       valueEncrypted: input.valueEncrypted,
     }).onConflictDoUpdate({
       target: [
-        schema.workspaceEnvironmentVariables.workspaceId,
-        schema.workspaceEnvironmentVariables.environmentId,
-        schema.workspaceEnvironmentVariables.name,
+        schema.workspaceVariableSetVariables.workspaceId,
+        schema.workspaceVariableSetVariables.variableSetId,
+        schema.workspaceVariableSetVariables.name,
       ],
       set: {
         valueEncrypted: input.valueEncrypted,
-        version: sql`${schema.workspaceEnvironmentVariables.version} + 1`,
+        version: sql`${schema.workspaceVariableSetVariables.version} + 1`,
         updatedAt: now,
       },
     }).returning({
-      name: schema.workspaceEnvironmentVariables.name,
-      version: schema.workspaceEnvironmentVariables.version,
-      createdAt: schema.workspaceEnvironmentVariables.createdAt,
-      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+      name: schema.workspaceVariableSetVariables.name,
+      version: schema.workspaceVariableSetVariables.version,
+      createdAt: schema.workspaceVariableSetVariables.createdAt,
+      updatedAt: schema.workspaceVariableSetVariables.updatedAt,
     });
     if (!row) {
-      throw new Error("Failed to set workspace environment variable");
+      throw new Error("Failed to set variable set variable");
     }
-    await scopedDb.update(schema.workspaceEnvironments).set({ updatedAt: now })
-      .where(and(eq(schema.workspaceEnvironments.workspaceId, input.workspaceId), eq(schema.workspaceEnvironments.id, input.environmentId)));
-    return mapWorkspaceEnvironmentVariableMetadata(row);
+    await scopedDb.update(schema.workspaceVariableSets).set({ updatedAt: now })
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, input.workspaceId), eq(schema.workspaceVariableSets.id, input.variableSetId)));
+    return mapVariableSetVariableMetadata(row);
   });
 }
 
-export async function deleteWorkspaceEnvironmentVariable(db: Database, workspaceId: string, environmentId: string, name: string): Promise<boolean> {
+export async function deleteVariableSetVariable(db: Database, workspaceId: string, variableSetId: string, name: string): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.delete(schema.workspaceEnvironmentVariables)
+    const rows = await scopedDb.delete(schema.workspaceVariableSetVariables)
       .where(and(
-        eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-        eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
-        eq(schema.workspaceEnvironmentVariables.name, name),
+        eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+        eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
+        eq(schema.workspaceVariableSetVariables.name, name),
       ))
-      .returning({ id: schema.workspaceEnvironmentVariables.id });
+      .returning({ id: schema.workspaceVariableSetVariables.id });
     if (rows.length > 0) {
-      await scopedDb.update(schema.workspaceEnvironments).set({ updatedAt: new Date() })
-        .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)));
+      await scopedDb.update(schema.workspaceVariableSets).set({ updatedAt: new Date() })
+        .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)));
     }
     return rows.length > 0;
   });
@@ -3851,39 +3855,39 @@ export async function deleteWorkspaceEnvironmentVariable(db: Database, workspace
 /**
  * The ONLY helper that selects value_encrypted. Used exclusively by the worker
  * activity that materializes a sandbox for a run whose session carries an
- * environment attachment. Do not call from API routes: values are write-only.
+ * variableSet attachment. Do not call from API routes: values are write-only.
  */
-export async function getWorkspaceEnvironmentValuesForRun(db: Database, workspaceId: string, environmentId: string): Promise<{
-  environment: { id: string; name: string; description: string | null };
+export async function getVariableSetValuesForRun(db: Database, workspaceId: string, variableSetId: string): Promise<{
+  variableSet: { id: string; name: string; description: string | null };
   values: Record<string, string>;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [environment] = await scopedDb.select({
-      id: schema.workspaceEnvironments.id,
-      name: schema.workspaceEnvironments.name,
-      description: schema.workspaceEnvironments.description,
-    }).from(schema.workspaceEnvironments)
-      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
+    const [variableSet] = await scopedDb.select({
+      id: schema.workspaceVariableSets.id,
+      name: schema.workspaceVariableSets.name,
+      description: schema.workspaceVariableSets.description,
+    }).from(schema.workspaceVariableSets)
+      .where(and(eq(schema.workspaceVariableSets.workspaceId, workspaceId), eq(schema.workspaceVariableSets.id, variableSetId)))
       .limit(1);
-    if (!environment) {
+    if (!variableSet) {
       return null;
     }
     const rows = await scopedDb.select({
-      name: schema.workspaceEnvironmentVariables.name,
-      valueEncrypted: schema.workspaceEnvironmentVariables.valueEncrypted,
-    }).from(schema.workspaceEnvironmentVariables)
+      name: schema.workspaceVariableSetVariables.name,
+      valueEncrypted: schema.workspaceVariableSetVariables.valueEncrypted,
+    }).from(schema.workspaceVariableSetVariables)
       .where(and(
-        eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-        eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
+        eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+        eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
       ));
     return {
-      environment: { id: environment.id, name: environment.name, description: environment.description },
+      variableSet: { id: variableSet.id, name: variableSet.name, description: variableSet.description },
       values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
     };
   });
 }
 
-export type WorkspaceEnvironmentForRun = {
+export type VariableSetForRun = {
   id: string;
   name: string;
   description: string | null;
@@ -3891,35 +3895,35 @@ export type WorkspaceEnvironmentForRun = {
 };
 
 /**
- * Load and decrypt the workspace environment attached to a run's session. SHARED
+ * Load and decrypt the variable set attached to a run's session. SHARED
  * by the worker TURN path (apps/worker agent-turn) AND the API-direct ATTACH paths
  * (viewer / Channel-A / desktop / terminal) so a box first warmed by an attach is
- * created with the SAME decrypted workspace-environment values the turn declares —
+ * created with the SAME decrypted workspace-variableSet values the turn declares —
  * the box-manifest env must match the agent-manifest env or the SDK's
- * `validateNoEnvironmentDelta` throws when the agent injects its manifest into the
+ * `validateNoVariableSetDelta` throws when the agent injects its manifest into the
  * resumed non-owned box.
  *
- * `environmentId === null` is the unattached path: zero DB work and behavior
+ * `variableSetId === null` is the unattached path: zero DB work and behavior
  * byte-identical to deployments without this feature. Attached runs fail closed: a
- * missing key or a deleted environment throws (names/ids only in messages) instead
+ * missing key or a deleted variableSet throws (names/ids only in messages) instead
  * of silently running without the secrets the run expects.
  */
-export async function loadWorkspaceEnvironmentForRun(
+export async function loadVariableSetForRun(
   db: Database,
   settings: Settings,
   workspaceId: string,
-  environmentId: string | null,
-): Promise<WorkspaceEnvironmentForRun | null> {
-  if (!environmentId) {
+  variableSetId: string | null,
+): Promise<VariableSetForRun | null> {
+  if (!variableSetId) {
     return null;
   }
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
-    throw new Error("workspace environment attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+    throw new Error("variable set attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
   }
-  const stored = await getWorkspaceEnvironmentValuesForRun(db, workspaceId, environmentId);
+  const stored = await getVariableSetValuesForRun(db, workspaceId, variableSetId);
   if (!stored) {
-    throw new Error(`workspace environment not found: ${environmentId}`);
+    throw new Error(`variable set not found: ${variableSetId}`);
   }
   const values: Record<string, string> = {};
   for (const [name, encrypted] of Object.entries(stored.values)) {
@@ -3927,13 +3931,13 @@ export async function loadWorkspaceEnvironmentForRun(
       values[name] = decryptEnvironmentValue(key, encrypted);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`);
+      throw new Error(`failed to decrypt variable set variable ${name}: ${reason}`);
     }
   }
   return {
-    id: stored.environment.id,
-    name: stored.environment.name,
-    description: stored.environment.description,
+    id: stored.variableSet.id,
+    name: stored.variableSet.name,
+    description: stored.variableSet.description,
     values,
   };
 }
@@ -4781,22 +4785,22 @@ export async function recordAuditEvent(db: Database, input: {
   });
 }
 
-async function listEnvironmentVariableMetadata(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironmentVariableMetadata[]> {
+async function listVariableSetVariableMetadata(db: Database, workspaceId: string, variableSetId: string): Promise<VariableSetVariableMetadata[]> {
   const rows = await db.select({
-    name: schema.workspaceEnvironmentVariables.name,
-    version: schema.workspaceEnvironmentVariables.version,
-    createdAt: schema.workspaceEnvironmentVariables.createdAt,
-    updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
-  }).from(schema.workspaceEnvironmentVariables)
+    name: schema.workspaceVariableSetVariables.name,
+    version: schema.workspaceVariableSetVariables.version,
+    createdAt: schema.workspaceVariableSetVariables.createdAt,
+    updatedAt: schema.workspaceVariableSetVariables.updatedAt,
+  }).from(schema.workspaceVariableSetVariables)
     .where(and(
-      eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
-      eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
+      eq(schema.workspaceVariableSetVariables.workspaceId, workspaceId),
+      eq(schema.workspaceVariableSetVariables.variableSetId, variableSetId),
     ))
-    .orderBy(asc(schema.workspaceEnvironmentVariables.name));
-  return rows.map(mapWorkspaceEnvironmentVariableMetadata);
+    .orderBy(asc(schema.workspaceVariableSetVariables.name));
+  return rows.map(mapVariableSetVariableMetadata);
 }
 
-function mapWorkspaceEnvironment(row: typeof schema.workspaceEnvironments.$inferSelect, variables: WorkspaceEnvironmentVariableMetadata[]): WorkspaceEnvironment {
+function mapVariableSet(row: typeof schema.workspaceVariableSets.$inferSelect, variables: VariableSetVariableMetadata[]): VariableSet {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -4809,12 +4813,12 @@ function mapWorkspaceEnvironment(row: typeof schema.workspaceEnvironments.$infer
   };
 }
 
-function mapWorkspaceEnvironmentVariableMetadata(row: {
+function mapVariableSetVariableMetadata(row: {
   name: string;
   version: number;
   createdAt: Date;
   updatedAt: Date;
-}): WorkspaceEnvironmentVariableMetadata {
+}): VariableSetVariableMetadata {
   return {
     name: row.name,
     version: row.version,
@@ -4983,7 +4987,7 @@ export async function createSession(db: Database, input: {
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
-  environmentId?: string | null;
+  variableSetId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   // Per-session agent persona/system instructions (org-visible, not a secret).
   // Null/omitted ⇒ the session carries none (composed instructions unchanged).
@@ -5013,7 +5017,7 @@ export async function createSession(db: Database, input: {
       sandboxBackend: input.sandboxBackend,
       sandboxOs: input.sandboxOs ?? "linux",
       sandboxGroupId: input.sandboxGroupId ?? id,
-      environmentId: input.environmentId ?? null,
+      variableSetId: input.variableSetId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -5052,7 +5056,7 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
-  environmentId?: string | null;
+  variableSetId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   // Per-session agent persona/system instructions (org-visible, not a secret).
   instructions?: string | null;
@@ -5080,7 +5084,7 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       sandboxBackend: input.sandboxBackend,
       sandboxOs: input.sandboxOs ?? "linux",
       sandboxGroupId: input.sandboxGroupId ?? id,
-      environmentId: input.environmentId ?? null,
+      variableSetId: input.variableSetId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -5157,17 +5161,17 @@ export async function getAnySessionInGroup(db: Database, workspaceId: string, sa
 }
 
 /**
- * The DISTINCT environmentIds across a group's member sessions (workspace-
- * scoped; null = no environment attached). The env-aware create check compares
+ * The DISTINCT variableSetIds across a group's member sessions (workspace-
+ * scoped; null = no variableSet attached). The env-aware create check compares
  * a joiner against EVERY member — an arbitrary single member (getAnySessionInGroup)
  * makes the compatibility verdict nondeterministic for legacy env-blind groups
- * whose members carry mixed environmentIds.
+ * whose members carry mixed variableSetIds.
  */
-export async function listDistinctEnvironmentIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
+export async function listDistinctVariableSetIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.selectDistinct({ environmentId: schema.sessions.environmentId }).from(schema.sessions)
+    const rows = await scopedDb.selectDistinct({ variableSetId: schema.sessions.variableSetId }).from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
-    return rows.map((r) => r.environmentId ?? null);
+    return rows.map((r) => r.variableSetId ?? null);
   });
 }
 
@@ -9873,7 +9877,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: Sessio
     // the fence exact even if the column type ever drifts (the lease-epoch lesson).
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
-    environmentId: row.environmentId,
+    variableSetId: row.variableSetId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -10006,7 +10010,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
     reusableSessionId: row.reusableSessionId,
-    environmentId: row.environmentId,
+    variableSetId: row.variableSetId,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

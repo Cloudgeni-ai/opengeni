@@ -23,7 +23,7 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { validateEnvironmentAttachment } from "@opengeni/core";
+import { validateVariableSetAttachment } from "@opengeni/core";
 import {
   assertPackSandboxImageCompatible,
   buildMarketingDailyAnalysisAgentConfig,
@@ -115,22 +115,22 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertPackSandboxImageCompatible(db, workspaceId, pack);
     const existing = await getPackInstallation(db, workspaceId, pack.id);
     const payload = EnablePackRequest.parse(await c.req.json());
-    // Re-enabling without environmentId keeps the stored attachment instead of
+    // Re-enabling without variableSetId keeps the stored attachment instead of
     // silently dropping it; the inherited attachment is re-validated below in
-    // case the environment was deleted or its variables changed since. The
-    // inherited attachment was authorized with environments:use when it was
+    // case the variableSet was deleted or its variables changed since. The
+    // inherited attachment was authorized with variableSets:use when it was
     // first attached, so only a fresh attachment re-checks that permission.
-    const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
-    const environmentId = payload.environmentId ?? storedEnvironmentId;
-    if (pack.environment?.required && !environmentId) {
-      throw new HTTPException(422, { message: "this pack requires an environment attachment; pass environmentId" });
+    const storedVariableSetId = typeof existing?.metadata.variableSetId === "string" ? existing.metadata.variableSetId : undefined;
+    const variableSetId = payload.variableSetId ?? storedVariableSetId;
+    if (pack.variableSet?.required && !variableSetId) {
+      throw new HTTPException(422, { message: "this pack requires an variableSet attachment; pass variableSetId" });
     }
-    if (environmentId) {
-      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, environmentId, { preauthorized: !payload.environmentId });
-      const missing = (pack.environment?.requiredVariables ?? [])
-        .filter((name) => !environment.variables.some((variable) => variable.name === name));
+    if (variableSetId) {
+      const variableSet = await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId, { preauthorized: !payload.variableSetId });
+      const missing = (pack.variableSet?.requiredVariables ?? [])
+        .filter((name) => !variableSet.variables.some((variable) => variable.name === name));
       if (missing.length > 0) {
-        throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+        throw new HTTPException(422, { message: `variableSet is missing required variable(s): ${missing.join(", ")}` });
       }
     }
     const installation = await enablePackInstallation(db, {
@@ -140,7 +140,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       metadata: {
         ...payload.metadata,
         packVersion: pack.version,
-        ...(environmentId ? { environmentId } : {}),
+        ...(variableSetId ? { variableSetId } : {}),
       },
     });
     return c.json(installation, existing ? 200 : 201);
@@ -166,18 +166,18 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       documentBaseIds: payload.documentBaseIds,
       ...(payload.promptInstructions ? { promptInstructions: payload.promptInstructions } : {}),
     });
-    // Installation-inherited environment attachment: it was authorized with
-    // environments:use at pack-enable time, so the scheduled_tasks:manage
+    // Installation-inherited variableSet attachment: it was authorized with
+    // variableSets:use at pack-enable time, so the scheduled_tasks:manage
     // caller here is not re-checked for that permission.
-    const installationEnvironmentId = typeof installation.metadata.environmentId === "string"
-      ? installation.metadata.environmentId
+    const installationVariableSetId = typeof installation.metadata.variableSetId === "string"
+      ? installation.metadata.variableSetId
       : undefined;
     const task = await createValidatedScheduledTask({
       settings,
       db,
       objectStorage,
       grant,
-      environmentPreauthorized: true,
+      variableSetPreauthorized: true,
       payload: {
         name: payload.name ?? "Daily social media analysis",
         status: payload.status,
@@ -190,7 +190,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         runMode: payload.runMode,
         overlapPolicy: payload.overlapPolicy,
         agentConfig,
-        ...(installationEnvironmentId ? { environmentId: installationEnvironmentId } : {}),
+        ...(installationVariableSetId ? { variableSetId: installationVariableSetId } : {}),
         metadata: {
           packId: pack.id,
           packVersion: pack.version,

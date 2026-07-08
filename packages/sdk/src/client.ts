@@ -38,7 +38,7 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
-  CreateWorkspaceEnvironmentRequest,
+  CreateVariableSetRequest,
   CreateWorkspaceRequest,
   // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
   // enroll-token mint.
@@ -125,13 +125,13 @@ import type {
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   UpdateSessionTurnRequest,
-  UpdateWorkspaceEnvironmentRequest,
+  UpdateVariableSetRequest,
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   UploadFileInput,
-  WorkspaceEnvironment,
-  WorkspaceEnvironmentVariableMetadata,
+  VariableSet,
+  VariableSetVariableMetadata,
   WorkspaceMember,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
@@ -191,7 +191,7 @@ export class OpenGeniClient {
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.options = options;
-    // Bind lazily so environments that polyfill fetch after module load work.
+    // Bind lazily so variable sets that polyfill fetch after module load work.
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
   }
 
@@ -869,56 +869,91 @@ export class OpenGeniClient {
     );
   }
 
-  // --- Environments --------------------------------------------------------------
+  // --- VariableSets --------------------------------------------------------------
   // Variable values are write-only: reads return name/version metadata only.
 
-  async listEnvironments(workspaceId: string): Promise<WorkspaceEnvironment[]> {
-    return await this.requestJson<WorkspaceEnvironment[]>("GET", `/v1/workspaces/${workspaceId}/environments`);
+  async listVariableSets(workspaceId: string): Promise<VariableSet[]> {
+    return await this.requestJson<VariableSet[]>("GET", `/v1/workspaces/${workspaceId}/variable-sets`);
   }
 
-  async createEnvironment(workspaceId: string, request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>("POST", `/v1/workspaces/${workspaceId}/environments`, request);
+  async createVariableSet(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>("POST", `/v1/workspaces/${workspaceId}/variable-sets`, request);
   }
 
-  async getEnvironment(workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>("GET", `/v1/workspaces/${workspaceId}/environments/${environmentId}`);
+  async getVariableSet(workspaceId: string, variableSetId: string): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>("GET", `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`);
   }
 
-  async updateEnvironment(
+  async updateVariableSet(
     workspaceId: string,
-    environmentId: string,
-    request: UpdateWorkspaceEnvironmentRequest,
-  ): Promise<WorkspaceEnvironment> {
-    return await this.requestJson<WorkspaceEnvironment>(
+    variableSetId: string,
+    request: UpdateVariableSetRequest,
+  ): Promise<VariableSet> {
+    return await this.requestJson<VariableSet>(
       "PATCH",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`,
       request,
     );
   }
 
-  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
-    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/environments/${environmentId}`);
+  async deleteVariableSet(workspaceId: string, variableSetId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}`);
   }
 
   /** Create or rotate a variable. The value never comes back on any read. */
-  async setEnvironmentVariable(
+  async setVariableSetVariable(
     workspaceId: string,
-    environmentId: string,
+    variableSetId: string,
     name: string,
     value: string,
-  ): Promise<WorkspaceEnvironmentVariableMetadata> {
-    return await this.requestJson<WorkspaceEnvironmentVariableMetadata>(
+  ): Promise<VariableSetVariableMetadata> {
+    return await this.requestJson<VariableSetVariableMetadata>(
       "PUT",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
       { value },
     );
   }
 
-  async deleteEnvironmentVariable(workspaceId: string, environmentId: string, name: string): Promise<void> {
+  async deleteVariableSetVariable(workspaceId: string, variableSetId: string, name: string): Promise<void> {
     await this.requestJson<unknown>(
       "DELETE",
-      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+      `/v1/workspaces/${workspaceId}/variable-sets/${variableSetId}/variables/${encodeURIComponent(name)}`,
     );
+  }
+
+  /** @deprecated use listVariableSets */
+  async listEnvironments(workspaceId: string): Promise<VariableSet[]> {
+    return await this.listVariableSets(workspaceId);
+  }
+
+  /** @deprecated use createVariableSet */
+  async createEnvironment(workspaceId: string, request: CreateVariableSetRequest): Promise<VariableSet> {
+    return await this.createVariableSet(workspaceId, request);
+  }
+
+  /** @deprecated use getVariableSet */
+  async getEnvironment(workspaceId: string, environmentId: string): Promise<VariableSet> {
+    return await this.getVariableSet(workspaceId, environmentId);
+  }
+
+  /** @deprecated use updateVariableSet */
+  async updateEnvironment(workspaceId: string, environmentId: string, request: UpdateVariableSetRequest): Promise<VariableSet> {
+    return await this.updateVariableSet(workspaceId, environmentId, request);
+  }
+
+  /** @deprecated use deleteVariableSet */
+  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
+    await this.deleteVariableSet(workspaceId, environmentId);
+  }
+
+  /** @deprecated use setVariableSetVariable */
+  async setEnvironmentVariable(workspaceId: string, environmentId: string, name: string, value: string): Promise<VariableSetVariableMetadata> {
+    return await this.setVariableSetVariable(workspaceId, environmentId, name, value);
+  }
+
+  /** @deprecated use deleteVariableSetVariable */
+  async deleteEnvironmentVariable(workspaceId: string, environmentId: string, name: string): Promise<void> {
+    await this.deleteVariableSetVariable(workspaceId, environmentId, name);
   }
 
   // --- Files -----------------------------------------------------------------------
