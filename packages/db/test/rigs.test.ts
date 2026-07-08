@@ -130,7 +130,7 @@ describe("rig CRUD lifecycle", () => {
     expect(await deleteRig(db, ws.workspaceId, rig.id)).toBe(true);
     expect(await getRig(db, ws.workspaceId, rig.id)).toBeNull();
     // Versions cascade with the rig.
-    const [{ count }] = await shared!.admin<{ count: number }[]>`
+    const [{ count } = { count: 0 }] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from rig_versions where rig_id = ${rig.id}`;
     expect(Number(count)).toBe(0);
   });
@@ -167,7 +167,7 @@ describe("rig version invariants", () => {
       activateRigVersion(db, ws.workspaceId, rig.id, v3.id),
     ]);
 
-    const [{ count }] = await shared!.admin<{ count: number }[]>`
+    const [{ count } = { count: 0 }] = await shared!.admin<{ count: number }[]>`
       select count(*)::int as count from rig_versions where rig_id = ${rig.id} and active`;
     expect(Number(count)).toBe(1);
 
