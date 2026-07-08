@@ -4,6 +4,7 @@ import {
   applyCreditDebitUpToBalance,
   finishTurn,
   getBillingBalance,
+  getRigName,
   getRigVersion,
   getSandbox,
   readActiveSandbox,
@@ -784,6 +785,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // created (and used for turn.started) before the variableSet is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
     let variableSetId = "";
+    // Rig telemetry (M3): set once the session loads; empty string for a rig-less
+    // turn (mirrors variableSetId). Read by the activity span's finally block.
+    let rigId = "";
+    let rigVersionId = "";
     // The Codex account this turn runs on (pin > workspace active), resolved once
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
@@ -1040,6 +1045,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const rigVersion = session.rigId && session.rigVersionId
         ? await getRigVersion(db, input.workspaceId, session.rigId, session.rigVersionId)
         : null;
+      // Rig display name for the doctrine block + setup events/errors (only on a
+      // rig-bound turn; null-safe fallback keeps the turn alive if the rig row is
+      // gone). Loaded once here alongside the version.
+      const rigName = rigVersion && session.rigId
+        ? (await getRigName(db, input.workspaceId, session.rigId)) ?? "rig"
+        : null;
+      // Telemetry: stamp the frozen rig binding (empty for a rig-less turn).
+      rigId = session.rigId ?? "";
+      rigVersionId = session.rigVersionId ?? "";
       // Workspace tier of the agent-persona resolution (session > workspace >
       // deployment default). null means the workspace has no override, so the
       // runtime falls back to runSettings.agentInstructionsTemplate (the
@@ -1633,6 +1647,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               description: workspaceVariableSet.description,
               variableNames: Object.keys(workspaceVariableSet.values),
             },
+          }
+          : {}),
+        // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
+        // the frozen version carries a non-empty script), and the rig credential
+        // hooks. All absent for a rig-less turn (byte-for-byte today).
+        ...(rigVersion && rigName
+          ? {
+            rig: { name: rigName, version: rigVersion.version },
+            ...(rigVersion.setupScript && rigVersion.setupScript.trim().length > 0
+              ? {
+                rigSetup: {
+                  rigId: session.rigId!,
+                  versionId: rigVersion.id,
+                  rigName,
+                  script: rigVersion.setupScript,
+                  timeoutMs: runSettings.rigSetupTimeoutMs,
+                },
+              }
+              : {}),
+            ...(rigVersion.credentialHooks.length > 0
+              ? { rigCredentialHookIds: rigVersion.credentialHooks }
+              : {}),
           }
           : {}),
       });
@@ -2631,6 +2667,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "opengeni.turn_id": turnId ?? "",
           "opengeni.status": activityStatus,
           "opengeni.variable_set_id": variableSetId,
+          "opengeni.rig_id": rigId,
+          "opengeni.rig_version_id": rigVersionId,
           "opengeni.duration_ms": Math.round(durationSeconds * 1000),
         },
         error: activityError,

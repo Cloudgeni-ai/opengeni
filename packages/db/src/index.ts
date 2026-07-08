@@ -4162,6 +4162,17 @@ export async function getRigVersion(db: Database, workspaceId: string, rigId: st
   });
 }
 
+// M3 runtime: the rig's display name only (for the turn's doctrine block + setup
+// events/errors), without the extra active-version + count reads getRig does.
+export async function getRigName(db: Database, workspaceId: string, rigId: string): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({ name: schema.rigs.name }).from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
+      .limit(1);
+    return row?.name ?? null;
+  });
+}
+
 // Flips which version is active (rollback / promote-activate). Row-locks the rig
 // to serialize concurrent activations, deactivates the current active, activates
 // the target. Only touches the `active` flag — never content.
