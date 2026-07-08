@@ -379,6 +379,32 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("a FAILED clearGoal keeps the goal (and surfaces the error), never hides the pill", async () => {
+    const client = fakeClient({
+      getGoal: async () => fakeGoal(),
+      deleteGoal: async () => {
+        throw new Error("server 5xx");
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    // Populate the goal (shared-feed skips the initial auto-load).
+    await flushing(async () => {
+      await hook.result.current.refresh();
+    });
+    expect(hook.result.current.goal).not.toBeNull();
+    await flushing(async () => {
+      await hook.result.current.clearGoal();
+    });
+    // The delete failed → the goal must remain so the panel's mutationError renders.
+    expect(hook.result.current.goal).not.toBeNull();
+    expect(hook.result.current.mutationError).not.toBeNull();
+    await hook.unmount();
+  });
+
   test("goal.* events on a shared log refetch the goal", async () => {
     let reads = 0;
     const client = fakeClient({

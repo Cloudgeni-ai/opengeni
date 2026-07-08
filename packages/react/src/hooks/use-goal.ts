@@ -153,8 +153,20 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
     if (!sessionId) {
       return;
     }
-    await mutation.run(() => client.deleteGoal(workspaceId, sessionId));
-    setGoal(null);
+    // deleteGoal resolves void, so distinguish success (a truthy sentinel) from
+    // mutation.run's null-on-failure. Only a SUCCESSFUL delete hides the goal:
+    // a failed one leaves the pill up so its mutationError renders. And invalidate
+    // any in-flight load first so a slower getGoal started before the delete can't
+    // commit and repopulate the just-cleared goal.
+    const ok = await mutation.run(async () => {
+      await client.deleteGoal(workspaceId, sessionId);
+      return true as const;
+    });
+    if (ok) {
+      generation.current += 1;
+      setGoal(null);
+      setError(null);
+    }
   }, [client, workspaceId, sessionId, mutation.run]);
 
   return {
