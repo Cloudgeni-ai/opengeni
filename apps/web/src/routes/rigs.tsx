@@ -12,6 +12,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
   ServerCogIcon,
+  StarIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -23,6 +24,7 @@ import {
   emptyRigDefinitionDraft,
   type RigDefinitionDraft,
 } from "@/components/rigs/rig-definition-fields";
+import { RigStatusChip } from "@/components/rigs/rig-status-chip";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
@@ -32,6 +34,7 @@ import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
+import { rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
 import { listViewState } from "@/lib/load-state";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CreateRigRequest, Rig } from "@/types";
@@ -41,6 +44,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
   const canView = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:manage");
   const rigs = useRigs({ enabled: canView });
+  const defaultRigId = context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);
   const rigsView = listViewState({ loading: rigs.loading, error: rigs.error, count: rigs.rigs.length });
 
@@ -130,7 +134,9 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
             }
           />
         ) : (
-          rigs.rigs.map((rig) => <RigCard key={rig.id} workspaceId={workspaceId} rig={rig} />)
+          rigs.rigs.map((rig) => (
+            <RigCard key={rig.id} workspaceId={workspaceId} rig={rig} isDefault={rig.id === defaultRigId} />
+          ))
         )}
         {rigs.mutationError ? (
           <Notice
@@ -161,7 +167,7 @@ export function PermissionDenied() {
   );
 }
 
-function RigCard({ workspaceId, rig }: { workspaceId: string; rig: Rig }) {
+function RigCard({ workspaceId, rig, isDefault }: { workspaceId: string; rig: Rig; isDefault: boolean }) {
   const active = rig.activeVersion;
   const checkCount = active?.checks.length ?? 0;
   return (
@@ -179,9 +185,24 @@ function RigCard({ workspaceId, rig }: { workspaceId: string; rig: Rig }) {
             ) : (
               <MetaChip dot="queued" title="No active version yet">Draft</MetaChip>
             )}
+            {isDefault ? (
+              <MetaChip
+                title="Workspace default — new sessions use this rig unless another is picked"
+                className="border-brand/30 text-brand"
+              >
+                <StarIcon className="size-3 shrink-0 fill-current" />
+                Default
+              </MetaChip>
+            ) : null}
           </div>
           <p className="mt-0.5 line-clamp-1 text-xs text-fg-muted">{rig.description ?? "No description"}</p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {active && versionHasChecks(active) ? (
+              // Last verification's pass/fail/unknown for the active version. The
+              // list payload carries the summary (activeVersionHealth); `unknown`
+              // (or a missing summary) reads as a neutral "Not verified".
+              <RigStatusChip view={rigCheckHealthView(rig.activeVersionHealth?.checkHealth ?? "unknown")} />
+            ) : null}
             <MetaChip title={active?.image ?? "Falls back to the deployment default image"}>
               {active?.image ? active.image : "Default image"}
             </MetaChip>

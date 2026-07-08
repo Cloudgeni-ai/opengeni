@@ -4,7 +4,7 @@
 // rigs:use gates read + propose.
 import { useRig, useRigChanges, useRigVersions, useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, CheckIcon, Loader2Icon, PencilIcon, ServerCogIcon, Trash2Icon } from "lucide-react";
+import { ArrowLeftIcon, CheckIcon, Loader2Icon, PencilIcon, ServerCogIcon, StarIcon, StarOffIcon, Trash2Icon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useNavigate } from "@tanstack/react-router";
@@ -93,6 +93,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
   const current = rig.rig;
   const active = current.activeVersion;
   const pendingChanges = changes.changes.filter((change) => change.status === "proposed" || change.status === "verifying").length;
+  const isDefaultRig = context.workspaces.find((workspace) => workspace.id === workspaceId)?.defaultRigId === current.id;
 
   return (
     <Shell workspaceId={workspaceId}>
@@ -118,6 +119,15 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                 <span className="text-brand"><ServerCogIcon className="size-5" /></span>
                 <h1 className="min-w-0 truncate text-lg font-semibold">{current.name}</h1>
                 {active ? <MetaChip title="Active version">v{active.version}</MetaChip> : <MetaChip dot="queued">Draft</MetaChip>}
+                {isDefaultRig ? (
+                  <MetaChip
+                    title="Workspace default — new sessions use this rig unless another is picked"
+                    className="border-brand/30 text-brand"
+                  >
+                    <StarIcon className="size-3 shrink-0 fill-current" />
+                    Default
+                  </MetaChip>
+                ) : null}
               </div>
               <p className="mt-1 max-w-2xl text-sm leading-5 text-fg-muted">{current.description ?? "No description"}</p>
             </>
@@ -125,6 +135,22 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
         </div>
         {!editing && canManage ? (
           <div className="flex shrink-0 items-center gap-1.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-9"
+              disabled={rig.mutating}
+              onClick={async () => {
+                const updated = await context.setWorkspaceDefaultRig(workspaceId, isDefaultRig ? null : current.id);
+                if (updated) {
+                  toast.success(isDefaultRig ? "Cleared the workspace default rig" : `“${current.name}” is now the workspace default`);
+                }
+              }}
+            >
+              {isDefaultRig ? <StarOffIcon className="size-3.5" /> : <StarIcon className="size-3.5" />}
+              {isDefaultRig ? "Clear default" : "Set as default"}
+            </Button>
             <Button type="button" variant="ghost" size="sm" className="h-9" onClick={() => setEditing(true)}>
               <PencilIcon className="size-3.5" />
               Edit

@@ -122,6 +122,10 @@ export type AppContextValue = {
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   updateWorkspaceSettings: (workspaceId: string, settings: UpdateWorkspaceSettingsRequest) => Promise<Workspace | null>;
+  /** Set (or clear, with `null`) the workspace's default rig — used by session
+   * create fallback. Upserts the returned workspace so the "Default" badge and
+   * any default-derived UI reflect it without a reload. */
+  setWorkspaceDefaultRig: (workspaceId: string, rigId: string | null) => Promise<Workspace | null>;
   updateSessionTitle: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
@@ -389,6 +393,17 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to update workspace settings", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
+  async function setWorkspaceDefaultRig(workspaceId: string, rigId: string | null): Promise<Workspace | null> {
+    try {
+      const updated = await client.setWorkspaceDefaultRig(workspaceId, { rigId });
+      setWorkspaces((current) => upsertWorkspace(current, updated));
+      return updated;
+    } catch (error) {
+      toast.error("Failed to update the workspace default rig", { description: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }
@@ -684,6 +699,7 @@ export function RootRouteComponent() {
     createWorkspace,
     renameWorkspace,
     updateWorkspaceSettings,
+    setWorkspaceDefaultRig,
     updateSessionTitle,
     deleteWorkspace,
     refreshGitHub,
