@@ -34,12 +34,16 @@ run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Recoverable conditions end a turn gracefully (idle the session, keep the
 context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured), provider rate-limit backpressure, and
-budget/credit exhaustion. With an active goal, provider backpressure resumes
-after a pacing delay; without one, the session idles until the next user message
-(a long-lived session between goals must not go terminal because the provider
-had a bad minute). Budget/credit exhaustion likewise idles the turn rather than
-failing the session, so a top-up lets the same session continue.
+model-call cap (if one is configured), provider rate-limit backpressure,
+escaped MCP request timeouts, and budget/credit exhaustion. With an active
+goal, provider/MCP backpressure resumes after a pacing delay; without one, the
+session idles until the next user message (a long-lived session between goals
+must not go terminal because an external service had a bad minute). For an MCP
+timeout that escapes after a successful tool output, conversation truth is
+checkpointed before the turn settles and the continuation is a new follow-up —
+the completed tool call/full turn is never blindly replayed. Budget/credit
+exhaustion likewise idles the turn rather than failing the session, so a top-up
+lets the same session continue.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
@@ -51,9 +55,13 @@ deterministic non-LLM rebuild if the summarizer still fails. A
 persisted for this turn, the activity retries only after an actual compacted
 write, bounded by a per-turn recovery cap. If progress was already persisted,
 it does not replay the trigger; it requeues the turn with a compaction resume
-notice when possible, or publishes a clear recovery message and leaves the
-session `idle`. Exhausted or impossible compaction fails with an error that
-names compaction summarization/fallback, not the threshold event.
+notice only after the persisted active-history token estimate strictly
+decreases. A later resumed turn may compact and requeue again when it makes the
+same durable shrink progress — long productive runs are not generation-capped.
+A no-shrink result publishes a clear recovery message and leaves the session
+`idle`, so zero-progress churn cannot loop. Exhausted or impossible compaction
+fails with an error that names compaction summarization/fallback, not the
+threshold event.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is

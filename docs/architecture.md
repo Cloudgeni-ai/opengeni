@@ -82,7 +82,7 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
 ### 3.4 No run-length limits, by design — bounded by symptoms
 
 - Runs legitimately span days. **Run length is bounded by symptoms** (no-progress detection, budget exhaustion), never by counts or clocks. **Do not add or lower caps** on model calls per turn, continuation count, or activity timeout "to be safe" — fix the pathology instead.
-- Recoverable conditions **idle or explicitly resume** the session (keep context) rather than fail it: retryable provider failures, provider context overflow after bounded compaction recovery, the max-turns segment cap, and budget/credit exhaustion. A failed session would reject the very retry it asks for.
+- Recoverable conditions **idle or explicitly resume** the session (keep context) rather than fail it: retryable provider failures, escaped MCP request timeouts (checkpointed without replaying completed tool calls), provider context overflow after strict-shrink compaction recovery, the max-turns segment cap, and budget/credit exhaustion. Repeated productive compactions are allowed; no-shrink recovery idles instead of churning. A failed session would reject the very retry it asks for.
 - **Failed sessions are revivable**: a new `user.message` transitions `failed → queued` and restarts the workflow (`signalWithStart`). Only `cancelled` is terminal.
 
 > Canonical: [`run-lifecycle.md`](run-lifecycle.md), [`goals.md`](goals.md).
@@ -236,7 +236,7 @@ stateDiagram-v2
   queued --> running: workflow claims turn -> runAgentTurn
   running --> requires_action: human approval needed (RunState saved)
   requires_action --> running: user.approvalDecision (replays original trigger)
-  running --> idle: natural stop / max-turns / provider backpressure / budget / compacted overflow fallback
+  running --> idle: natural stop / max-turns / provider or MCP backpressure / budget / no-shrink compaction fallback
   idle --> queued: new user.message OR goal continuation
   running --> preempted: graceful shutdown OR worker death
   preempted --> queued: re-dispatch (resume notice; bounded x3)

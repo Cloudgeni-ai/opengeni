@@ -59,7 +59,6 @@ import {
 import { createActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
-  CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   WORKER_DEATH_RESUME_TEXT,
 } from "../../apps/worker/src/activities/agent-turn";
@@ -1204,7 +1203,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("a compaction-needed error on a compaction-resumed turn idles instead of requeueing again (loop guard)", async () => {
+  test("a compaction-resumed turn may compact again when active history strictly shrinks", async () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
@@ -1266,7 +1265,7 @@ describe("worker activities integration", () => {
             item: {
               type: "message",
               role: "assistant",
-              content: [{ type: "output_text", text: "old answer" }],
+              content: [{ type: "output_text", text: "old answer".repeat(4_000) }],
             },
           },
           { position: 2, item: { type: "message", role: "user", content: "recent context" } },
@@ -1275,13 +1274,14 @@ describe("worker activities integration", () => {
             item: {
               type: "message",
               role: "assistant",
-              content: [{ type: "output_text", text: "recent answer" }],
+              content: [{ type: "output_text", text: "recent answer".repeat(4_000) }],
             },
           },
         ],
       });
-      // The trigger IS a compaction resume: a second compaction in this lineage
-      // must idle, not requeue forever.
+      // The trigger IS a compaction resume. A second productive compaction must
+      // continue when it strictly reduces the finite active-history estimate;
+      // the shrink invariant, not a one-generation cap, prevents churn.
       const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
         {
           type: "turn.preempted",
@@ -1315,18 +1315,20 @@ describe("worker activities integration", () => {
           triggerEventId: trigger!.id,
           workflowId: "workflow-overflow-loop-guard",
         }),
-      ).resolves.toEqual({ status: "idle" });
+      ).resolves.toEqual({ status: "preempted" });
 
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
-      const failed = events.find((event) => event.type === "turn.failed");
-      expect(failed?.payload).toMatchObject({
-        error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
-        code: "context_compacted",
-        recovery: "user_message",
-      });
-      // No SECOND requeue: the only turn.preempted event is the trigger itself.
-      expect(events.filter((event) => event.type === "turn.preempted").length).toBe(1);
-      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      const compaction = events.find((event) => event.type === "session.context.compacted");
+      expect(compaction?.payload).toMatchObject({ trigger: "proactive" });
+      const compactionPayload = compaction?.payload as Record<string, unknown>;
+      expect(Number(compactionPayload.estimatedTokensAfter)).toBeLessThan(
+        Number(compactionPayload.estimatedTokensBefore),
+      );
+      // Trigger + new resume event: the second productive compaction requeues
+      // exactly once and preserves the same turn.
+      expect(events.filter((event) => event.type === "turn.preempted").length).toBe(2);
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
     } finally {
       server.stop(true);
     }
@@ -1534,6 +1536,138 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
     expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
+  });
+
+  test("an MCP stream timeout after a successful tool output checkpoints once and continues the active goal", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue after transient MCP transport loss",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish without repeating completed tool side effects",
+      createdBy: "api",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "continue after transient MCP transport loss" } },
+    ]);
+    const callId = "call-before-mcp-timeout";
+    const state = {
+      history: [
+        {
+          type: "message",
+          role: "user",
+          content: "continue after transient MCP transport loss",
+        },
+        {
+          type: "function_call",
+          callId,
+          name: "opengeni__session_send_message",
+          arguments: "{}",
+          status: "completed",
+        },
+        {
+          type: "function_call_result",
+          callId,
+          status: "completed",
+          output: { ok: true, durableEventId: "event-once" },
+        },
+      ],
+      usage: {},
+      toString: () => "checkpointed-state",
+    };
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () =>
+        ({
+          toStream: () =>
+            (async function* () {
+              yield {
+                type: "run_item_stream_event",
+                item: {
+                  id: "tool-call-item",
+                  type: "tool_call_item",
+                  rawItem: {
+                    callId,
+                    type: "function_call",
+                    name: "opengeni__session_send_message",
+                    arguments: "{}",
+                  },
+                },
+              };
+              yield {
+                type: "run_item_stream_event",
+                item: {
+                  id: "tool-output-item",
+                  type: "tool_call_output_item",
+                  rawItem: { callId, type: "function_call_result" },
+                  output: { ok: true, durableEventId: "event-once" },
+                },
+              };
+              // Reproduce the actual escaped boundary: no new tool call is
+              // created after the successful output; next-loop MCP transport
+              // work rejects the stream iterator instead.
+              throw new Error("MCP error -32001: Request timed out");
+            })(),
+          completed: Promise.resolve(),
+          interruptions: [],
+          state,
+          finalOutput: "",
+        }) as never,
+    };
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-mcp-timeout-after-output",
+      }),
+    ).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const outputIndex = events.findIndex((event) => event.type === "agent.toolCall.output");
+    const failedIndex = events.findIndex((event) => event.type === "turn.failed");
+    expect(outputIndex).toBeGreaterThanOrEqual(0);
+    expect(failedIndex).toBeGreaterThan(outputIndex);
+    expect(events[failedIndex]?.payload).toMatchObject({
+      code: "mcp_transport_timeout",
+      retryable: true,
+      recovery: "goal_continuation",
+    });
+    expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
+    const activeHistory = await getActiveSessionHistoryItems(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+    );
+    expect(
+      activeHistory.filter(
+        (row) =>
+          (row.item as Record<string, unknown>).type === "function_call_result" &&
+          (row.item as Record<string, unknown>).callId === callId,
+      ),
+    ).toHaveLength(1);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
@@ -4619,6 +4753,47 @@ describe("worker activities integration", () => {
     expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(
       ["old turn 1", "recent turn"],
     );
+  });
+
+  test("requireShrink rejects a stale high provider signal when active history does not shrink", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "tiny active history",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "tiny active history" } },
+      ],
+    });
+    const result = await maybeCompactContext(
+      dbClient.db,
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        openaiProvider: "azure",
+        contextCompactionMode: "client",
+        contextWindowTokens: 1_000_000,
+        contextReservedOutputTokens: 0,
+      }),
+      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+      900_000, // stale provider signal is much larger than the active history
+      async () => "a replacement summary that is intentionally much larger ".repeat(500),
+      { force: true, requireShrink: true },
+    );
+
+    expect(result.compacted).toBe(false);
+    expect(!result.compacted && result.reason).toContain("did not reduce active context");
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active).toHaveLength(1);
+    expect((active[0]!.item as Record<string, unknown>).content).toBe("tiny active history");
   });
 });
 

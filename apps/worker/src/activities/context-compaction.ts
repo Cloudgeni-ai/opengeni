@@ -98,7 +98,19 @@ export async function maybeCompactContext(
 
   const promptInput = buildCompactionPromptInput(items);
   const estimatedTokensBefore = estimateTokens(items);
-  const shrinkBaselineTokens = Math.max(estimatedTokensBefore, decision.signalTokens);
+  // A recovery compaction is allowed to auto-continue only when the ACTIVE
+  // model-facing history itself strictly shrinks. `decision.signalTokens` may
+  // come from the provider's previous request and include system/tool schema
+  // tokens that are not represented in `items`; using max(before, signal) let a
+  // replacement GROW the active history while still claiming a successful
+  // shrink. The smaller ceiling proves progress against both views and gives
+  // repeated compaction resumes a natural, symptom-based loop guard: a
+  // successful recovery monotonically reduces a finite active history; a
+  // no-shrink attempt stops instead of requeueing.
+  const shrinkCeilingTokens = Math.min(
+    estimatedTokensBefore,
+    decision.signalTokens > 0 ? decision.signalTokens : estimatedTokensBefore,
+  );
   const requireShrink = options.requireShrink || decision.reason === "above_threshold";
   let summarizerFailure = "summarizer returned no summary";
   let summaryBody: string | null = null;
@@ -127,10 +139,10 @@ export async function maybeCompactContext(
   if (summaryBody) {
     const summaryReplacement = buildCompactionReplacementHistory(items, summaryBody);
     const summaryEstimate = estimateTokens(summaryReplacement);
-    if (!requireShrink || summaryEstimate < shrinkBaselineTokens) {
+    if (!requireShrink || summaryEstimate < shrinkCeilingTokens) {
       replacementHistory = summaryReplacement;
     } else {
-      summarizerFailure = `summary replacement did not reduce context signal (${summaryEstimate} >= ${shrinkBaselineTokens})`;
+      summarizerFailure = `summary replacement did not reduce active context (${summaryEstimate} >= ${shrinkCeilingTokens})`;
     }
   }
 
@@ -139,7 +151,7 @@ export async function maybeCompactContext(
     const fallbackTargetTokens = Math.max(
       1,
       Math.min(
-        Math.max(1, Math.floor(shrinkBaselineTokens * 0.5)),
+        Math.max(1, Math.floor(shrinkCeilingTokens * 0.5)),
         Math.max(1, Math.floor(Math.max(1, decision.thresholdTokens) * 0.5)),
       ),
     );
@@ -151,10 +163,10 @@ export async function maybeCompactContext(
   }
 
   const estimatedTokensAfter = estimateTokens(replacementHistory);
-  if (requireShrink && estimatedTokensAfter >= shrinkBaselineTokens) {
+  if (requireShrink && estimatedTokensAfter >= shrinkCeilingTokens) {
     return {
       compacted: false,
-      reason: `compaction summarization failed: fallback did not reduce context signal (${estimatedTokensAfter} >= ${shrinkBaselineTokens})`,
+      reason: `compaction summarization failed: fallback did not reduce active context (${estimatedTokensAfter} >= ${shrinkCeilingTokens})`,
     };
   }
 

@@ -121,9 +121,12 @@ recovery loop as provider context-window overflow:
 - If no model/tool progress was persisted, compact and retry inside the same
   activity, bounded by a per-turn recovery cap.
 - If progress was persisted, compact and requeue the turn with a resume notice
-  (`reason: "context_compacted"`).
-- If a turn already resumed from compaction immediately needs compaction again,
-  it falls back to idle instead of looping.
+  (`reason: "context_compacted"`) only when the persisted active-history token
+  estimate strictly decreases.
+- A turn that already resumed from compaction may compact and requeue again when
+  it makes the same durable shrink progress. This supports legitimate long runs
+  without a generation cap; a no-shrink result falls back to idle, so unchanged
+  history cannot churn.
 - A `compacted:false` result is never treated as success. The turn reports
   `compaction summarization failed: ...` instead of retrying unchanged or
   surfacing a misleading `Context compaction needed` threshold error.

@@ -276,6 +276,38 @@ export function classifyContextWindowOverflowError(
   };
 }
 
+/**
+ * Recognize an MCP transport/request timeout that escaped the SDK's per-tool
+ * `mcpConfig.errorFunction` boundary. A thrown tool invocation is normally
+ * converted to an `{isError:true}` tool output; however, connect/tools-list or
+ * next-loop transport work can reject the stream iterator after a prior tool
+ * output was already published. That is transient external backpressure, not a
+ * terminal session error. Match MCP-qualified timeout text only: an unrelated
+ * sandbox/model timeout and MCP's `-32001 Authentication required` signal must
+ * retain their existing semantics.
+ */
+export function classifyMcpTransportTimeoutError(
+  error: unknown,
+): { message: string; detail?: string } | null {
+  const fields = collectErrorStrings(error);
+  const matched = fields.find(
+    (value) =>
+      /\bmcp\b/i.test(value) &&
+      /(?:request\s+timed\s+out|request\s+timeout|\btimed\s+out\b|\btimeout\b|ETIMEDOUT)/i.test(
+        value,
+      ) &&
+      !/authentication\s+required/i.test(value),
+  );
+  if (!matched) {
+    return null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    message,
+    ...(matched !== message ? { detail: matched } : {}),
+  };
+}
+
 function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): string[] {
   if (typeof value === "string") {
     return [value];
@@ -2393,7 +2425,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await publish!([
             {
               type: "session.context.compacted",
-              payload: { summaryPosition: outcome.summaryPosition, trigger: triggerLabel },
+              payload: {
+                summaryPosition: outcome.summaryPosition,
+                trigger: triggerLabel,
+                method: outcome.method,
+                estimatedTokensBefore: outcome.estimatedTokensBefore,
+                estimatedTokensAfter: outcome.estimatedTokensAfter,
+              },
             },
           ]);
         }
@@ -2779,23 +2817,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // the fallback, not the default; it remains for: legacy run-state
             // history (resuming the frozen pre-compaction RunState would
             // overflow again), a compaction that could not shrink anything,
-            // and a turn that ALREADY resumed from an overflow (loop guard —
-            // a second overflow in the same lineage stops churning).
-            const triggerPayload =
-              trigger.payload &&
-              typeof trigger.payload === "object" &&
-              !Array.isArray(trigger.payload)
-                ? (trigger.payload as Record<string, unknown>)
-                : {};
-            const compactionResumedTurn =
-              triggerType === "turn.preempted" &&
-              (triggerPayload.reason === "context_compacted" ||
-                triggerPayload.reason === "context_overflow_compacted");
+            // and a compaction that could not strictly shrink active history.
+            // A prior compaction-resume trigger is NOT itself a stop condition:
+            // long productive turns may legitimately compact many times. The
+            // force-compaction boundary above requires estimatedTokensAfter <
+            // estimatedTokensBefore (and below the provider signal), so every
+            // requeue proves durable shrink; a no-shrink cycle stops naturally.
             const canAutoContinue =
-              compacted &&
-              !compactionResumedTurn &&
-              settings.sessionHistorySource === "items" &&
-              activeTurnId != null;
+              compacted && settings.sessionHistorySource === "items" && activeTurnId != null;
             if (canAutoContinue) {
               const [preemptedEvent] = await appendAndPublishEvents(
                 db,
@@ -3335,7 +3364,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return { status: "idle" };
       }
-      // A retryable provider failure (rate limit) is transient backpressure,
+      // A retryable provider/MCP failure is transient external backpressure,
       // not a session failure: the in-client retry budget is already
       // exhausted by the time the error reaches here, so fail the turn
       // truthfully but idle the session. With an active goal the continuation
@@ -3349,7 +3378,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
         await flushRuntimeBatcher();
-        // Provider errors rarely carry SDK run state; a null falls back to
+        // Provider/MCP errors rarely carry SDK run state; a null falls back to
         // the previous snapshot, same degraded-context contract as the
         // max-turns path above.
         await reconcileConversationTruth();
@@ -3646,6 +3675,18 @@ export function agentRunFailurePayload(error: unknown): {
   const usageLimit = classifyCodexUsageLimitError(error);
   if (usageLimit) {
     return codexUsageLimitFailurePayload(usageLimit, message);
+  }
+  const mcpTimeout = classifyMcpTransportTimeoutError(error);
+  if (mcpTimeout) {
+    return {
+      error:
+        "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+      code: "mcp_transport_timeout",
+      retryable: true,
+      ...(mcpTimeout.detail || mcpTimeout.message
+        ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
+        : {}),
+    };
   }
   if (
     status === 429 ||

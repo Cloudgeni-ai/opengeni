@@ -6,7 +6,9 @@ import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
+  agentRunFailurePayload,
   classifyContextWindowOverflowError,
+  classifyMcpTransportTimeoutError,
   computerToolModeForTurn,
   createTurnSandboxProvisioner,
   emitModelCallUsage,
@@ -766,6 +768,36 @@ describe("context window overflow classifier", () => {
     expect(
       classifyContextWindowOverflowError({ code: "rate_limit_exceeded", message: "rate limit" }),
     ).toBeNull();
+  });
+});
+
+describe("escaped MCP transport timeout classifier", () => {
+  test("matches the production -32001 request-timeout shape and nested transport errors", () => {
+    const exact = new Error("MCP error -32001: Request timed out");
+    expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(exact.message);
+
+    const nested = {
+      error: { message: "MCP transport request timeout while listing tools" },
+    };
+    expect(classifyMcpTransportTimeoutError(nested)?.detail).toContain("MCP transport");
+
+    expect(agentRunFailurePayload(exact)).toEqual({
+      error:
+        "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+      code: "mcp_transport_timeout",
+      retryable: true,
+      detail: exact.message,
+    });
+  });
+
+  test("does not absorb auth-needed or unrelated timeout failures", () => {
+    expect(
+      classifyMcpTransportTimeoutError(
+        new Error("MCP error -32001: Authentication required - a connection link was posted"),
+      ),
+    ).toBeNull();
+    expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
+    expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
   });
 });
 
