@@ -218,26 +218,28 @@ export async function listMachines(
   ]);
   const enrollmentById = new Map(enrollments.map((e) => [e.id, e]));
 
-  for (const sandbox of sandboxes) {
-    if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
-      continue;
-    }
-    const enrollment = enrollmentById.get(sandbox.enrollmentId) ?? null;
-    if (!enrollment) {
-      continue;
-    }
-    const probe = await probeEnrollment(services, workspaceId, enrollment);
-    const state = machineStateFor(probe.state, probe.hasDisplay);
+  const machineViews = await Promise.all(
+    sandboxes.map(async (sandbox): Promise<MachineView | null> => {
+      if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+        return null;
+      }
+      const enrollment = enrollmentById.get(sandbox.enrollmentId) ?? null;
+      if (!enrollment) {
+        return null;
+      }
+      const [probe, lease] = await Promise.all([
+        probeEnrollment(services, workspaceId, enrollment),
+        readLease(db, workspaceId, sandbox.id),
+      ]);
+      const state = machineStateFor(probe.state, probe.hasDisplay);
 
-    // sharedSessionCount = the lease refcount for this machine's group. The
-    // selfhosted sandbox id IS the lease group key (maxSandboxes:1, N sessions
-    // share via refcount). No lease yet → 0 sessions sharing.
-    const lease = await readLease(db, workspaceId, sandbox.id);
-    const sharedSessionCount = lease?.refcount ?? 0;
+      // sharedSessionCount = the lease refcount for this machine's group. The
+      // selfhosted sandbox id IS the lease group key (maxSandboxes:1, N sessions
+      // share via refcount). No lease yet → 0 sessions sharing.
+      const sharedSessionCount = lease?.refcount ?? 0;
 
-    const metricsRow = metricsByEnrollment.get(enrollment.id) ?? null;
-    machines.push(
-      MachineView.parse({
+      const metricsRow = metricsByEnrollment.get(enrollment.id) ?? null;
+      return MachineView.parse({
         sandboxId: sandbox.id,
         enrollmentId: enrollment.id,
         name: sandbox.name,
@@ -253,9 +255,10 @@ export async function listMachines(
         sharedSessionCount,
         lastSeenAt: enrollment.lastSeenAt,
         metrics: metricsRow ? metricRowToSample(metricsRow) : null,
-      }),
-    );
-  }
+      });
+    }),
+  );
+  machines.push(...machineViews.filter((machine): machine is MachineView => machine !== null));
 
   return { activeSandboxId, activeEpoch, machines };
 }

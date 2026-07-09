@@ -13,6 +13,8 @@ import {
   createEnrollment,
   createSandbox,
   createSession,
+  listSandboxes,
+  revokeEnrollment,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -84,6 +86,42 @@ function busWithAgent(opts: {
     return ControlResponse.encode(res).finish();
   });
   return bus;
+}
+
+class SlowProbeBus extends MemoryEventBus {
+  startedSubjects: string[] = [];
+  completed = 0;
+  maxInFlight = 0;
+  private inFlight = 0;
+
+  constructor(private readonly delayMs: number) {
+    super();
+  }
+
+  getRequestConnection(): ReturnType<MemoryEventBus["getRequestConnection"]> {
+    return {
+      request: async (subject, payload) => {
+        this.startedSubjects.push(subject);
+        this.inFlight += 1;
+        this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+        const { requestId } = ControlRequest.decode(payload);
+        await new Promise<void>((resolve) => setTimeout(resolve, this.delayMs));
+        this.inFlight -= 1;
+        this.completed += 1;
+        return {
+          data: ControlResponse.encode({
+            requestId,
+            error: {
+              code: 4,
+              message: "probe timed out",
+              retryable: true,
+              detail: {},
+            },
+          }).finish(),
+        };
+      },
+    };
+  }
 }
 
 /** Build + emit a heartbeat AgentEvent carrying a metrics sample, driving the
@@ -352,6 +390,56 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       expect(body.machines[0]!.state).toBe("display_unavailable");
     }
   }, 120_000);
+
+  test("probes enrolled machines in parallel while preserving sandbox order", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollments = [];
+    for (let i = 0; i < 4; i += 1) {
+      const enrollment = await createEnrollment(db, {
+        accountId,
+        workspaceId,
+        pubkey: `ed25519:${crypto.randomUUID()}`,
+        exposure: "whole-machine",
+        hasDisplay: true,
+        allowScreenControl: true,
+        os: "linux",
+        arch: "x86_64",
+      });
+      enrollments.push(enrollment);
+      await createSandbox(db, {
+        accountId,
+        workspaceId,
+        kind: "selfhosted",
+        name: `machine-${i}`,
+        enrollmentId: enrollment.id,
+      });
+    }
+    await revokeEnrollment(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollments[3]!.id,
+    });
+
+    const expectedOrder = (await listSandboxes(db, workspaceId)).map((sandbox) => sandbox.id);
+    const bus = new SlowProbeBus(150);
+    const app = appFor(bus);
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+
+    const startedAt = performance.now();
+    const res = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+      headers: { authorization: auth },
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { machines: Array<{ sandboxId: string }> };
+    expect(body.machines.map((machine) => machine.sandboxId)).toEqual(expectedOrder);
+    expect(bus.startedSubjects.length).toBe(3);
+    expect(bus.completed).toBe(3);
+    expect(bus.maxInFlight).toBe(3);
+    expect(elapsedMs).toBeLessThan(450);
+  }, 30_000);
 });
 
 describe("M10 GET /machines/:enrollmentId/metrics/series", () => {
