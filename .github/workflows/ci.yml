@@ -34,6 +34,18 @@ jobs:
       - name: Test
         run: bun test
 
+      # OPE-22 production regressions cross the activity/DB/event boundary and
+      # therefore are not discovered by the unit-test command above. Keep the
+      # gate narrowly scoped to the incident cases while running them against
+      # the existing real Postgres + NATS integration harness on GitHub's Docker-
+      # capable runner.
+      - name: OPE-22 recovery integration regressions
+        run: >-
+          bun test --timeout 30000
+          --test-name-pattern
+          'a compaction-resumed turn may compact again|an MCP stream timeout after a successful tool output|requireShrink rejects a stale high provider signal'
+          ./test/integration/worker-activity.integration.ts
+
       - name: Workspace auth/billing static guard
         run: bun scripts/check-workspace-billing-static.ts
 
