@@ -125,15 +125,15 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          Documentation=https://get.opengeni.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
+         # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
+         StartLimitIntervalSec=60\n\
+         StartLimitBurst=5\n\
          \n\
          [Service]\n\
          Type=simple\n\
          ExecStart={exec}\n\
          Restart=always\n\
          RestartSec=5\n\
-         # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
-         StartLimitIntervalSec=60\n\
-         StartLimitBurst=5\n\
          # A clean stop sends SIGTERM so the agent emits its going-offline message.\n\
          KillSignal=SIGTERM\n\
          TimeoutStopSec=15\n\
@@ -282,6 +282,19 @@ mod tests {
             unit.contains("KillSignal=SIGTERM"),
             "clean stop must SIGTERM for going-offline"
         );
+    }
+
+    #[test]
+    fn systemd_start_limit_keys_are_in_unit_section() {
+        let unit = render_systemd_unit(&spec());
+        let service_start = unit.find("[Service]").expect("service section");
+        let unit_section = &unit[..service_start];
+        let service_section = &unit[service_start..];
+
+        assert!(unit_section.contains("StartLimitIntervalSec=60"));
+        assert!(unit_section.contains("StartLimitBurst=5"));
+        assert!(!service_section.contains("StartLimitIntervalSec=60"));
+        assert!(!service_section.contains("StartLimitBurst=5"));
     }
 
     #[test]

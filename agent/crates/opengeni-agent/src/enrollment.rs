@@ -11,8 +11,9 @@
 //!
 //! ## Flow (dossier §10.1 / §23.1)
 //!
-//! 1. The agent generates an ed25519 install keypair locally; the FULL public key
-//!    (base64) is the `publicKey` the enrollment binds to (non-transferable).
+//! 1. The agent loads its durable ed25519 install keypair from disk, generating
+//!    it only once when absent; the FULL public key (base64) is the `publicKey`
+//!    the enrollment binds to (non-transferable).
 //! 2. `POST /v1/enrollments/device/start` with `{ workspaceId, publicKey, os, arch,
 //!    machineName?, canOfferDisplay, requestsScreenControl }` (camelCase) → a
 //!    `userCode` + `verificationUri` the human visits to consent + authorize.
@@ -23,6 +24,7 @@
 //! 4. The caller persists the returned credentials `0600` (see
 //!    [`crate::config::save_credentials`]).
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -43,6 +45,12 @@ const POLL_PATH: &str = "/v1/enrollments/device/poll";
 /// this exchanges it directly for the SAME credential shape the `poll` authorized
 /// branch returns (spec §A2.3).
 const EXCHANGE_PATH: &str = "/v1/enrollments/token/exchange";
+/// The durable machine-identity seed file inside the config dir. This is separate
+/// from `credentials.json`: forced re-enrollment overwrites workspace credentials
+/// but must not rotate the machine's ed25519 identity.
+const INSTALL_IDENTITY_FILE: &str = "machine-identity.ed25519";
+/// The serialized length of an ed25519 signing seed.
+const INSTALL_IDENTITY_SEED_LEN: usize = 32;
 
 /// What the user offered at install time, sent in the start request so the
 /// consent page can present the right toggles.
@@ -109,6 +117,36 @@ pub enum EnrollmentError {
     Disabled,
 }
 
+/// Errors raised while loading or persisting the durable install identity.
+#[derive(Debug, Error)]
+pub enum InstallIdentityError {
+    /// A filesystem operation on the config dir/file failed.
+    #[error("install identity io error at {path}: {source}")]
+    Io {
+        /// The path the failing operation touched.
+        path: PathBuf,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The persisted key file was present but was not a 32-byte ed25519 seed.
+    #[error("malformed install identity at {path}: expected 32 bytes, got {len}")]
+    Malformed {
+        /// The key file path.
+        path: PathBuf,
+        /// The number of bytes found on disk.
+        len: usize,
+    },
+}
+
+impl InstallIdentityError {
+    fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
 /// A consent-printable summary the caller shows the human before polling.
 #[derive(Debug, Clone)]
 pub struct PendingAuthorization {
@@ -136,6 +174,53 @@ impl InstallIdentity {
         }
     }
 
+    /// Loads the durable machine identity from `config_dir`, or generates and
+    /// persists it if this is the first enrollment on the machine.
+    ///
+    /// The stored bytes are the 32-byte ed25519 signing seed, written to
+    /// `machine-identity.ed25519` with owner-only permissions on Unix. This file
+    /// is separate from the enrollment credentials so `enroll --force` can refresh
+    /// workspace grants without changing the machine public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallIdentityError`] when the key file cannot be read/written
+    /// or is malformed.
+    pub fn load_or_generate(config_dir: &Path) -> Result<Self, InstallIdentityError> {
+        let path = config_dir.join(INSTALL_IDENTITY_FILE);
+        match std::fs::read(&path) {
+            Ok(bytes) => Self::from_seed_bytes(&path, &bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir_all(config_dir)
+                    .map_err(|source| InstallIdentityError::io(config_dir, source))?;
+                let generated = Self::generate();
+                match create_identity_file(&path, &generated.signing_key.to_bytes()) {
+                    Ok(()) => Ok(generated),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let bytes = std::fs::read(&path)
+                            .map_err(|source| InstallIdentityError::io(&path, source))?;
+                        Self::from_seed_bytes(&path, &bytes)
+                    }
+                    Err(e) => Err(InstallIdentityError::io(&path, e)),
+                }
+            }
+            Err(e) => Err(InstallIdentityError::io(path, e)),
+        }
+    }
+
+    fn from_seed_bytes(path: &Path, bytes: &[u8]) -> Result<Self, InstallIdentityError> {
+        let seed: [u8; INSTALL_IDENTITY_SEED_LEN] =
+            bytes
+                .try_into()
+                .map_err(|_| InstallIdentityError::Malformed {
+                    path: path.to_path_buf(),
+                    len: bytes.len(),
+                })?;
+        Ok(Self {
+            signing_key: SigningKey::from_bytes(&seed),
+        })
+    }
+
     /// The base64 (standard, no-pad) encoding of the FULL 32-byte ed25519 public
     /// key — the `publicKey` the API's device/start binds the enrollment to. This
     /// is the complete public key (not a hash/fingerprint of it).
@@ -156,6 +241,37 @@ impl InstallIdentity {
         let sig = self.signing_key.sign(challenge);
         base64::engine::general_purpose::STANDARD_NO_PAD.encode(sig.to_bytes())
     }
+}
+
+fn create_identity_file(
+    path: &Path,
+    seed: &[u8; INSTALL_IDENTITY_SEED_LEN],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(seed)?;
+    file.sync_all()?;
+    restrict_identity_permissions(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_identity_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_identity_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Drives a full device-flow enrollment: start → print code/URL via `on_prompt`
@@ -537,6 +653,60 @@ mod tests {
             InstallIdentity::generate().public_key_base64(),
             InstallIdentity::generate().public_key_base64()
         );
+    }
+
+    #[test]
+    fn load_or_generate_returns_same_key_on_second_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = InstallIdentity::load_or_generate(dir.path()).expect("first identity");
+        let key_path = dir.path().join(INSTALL_IDENTITY_FILE);
+        let first_key_bytes = std::fs::read(&key_path).expect("persisted key");
+
+        let second = InstallIdentity::load_or_generate(dir.path()).expect("second identity");
+        let second_key_bytes = std::fs::read(&key_path).expect("persisted key");
+
+        assert_eq!(first_key_bytes.len(), INSTALL_IDENTITY_SEED_LEN);
+        assert_eq!(first_key_bytes, second_key_bytes);
+        assert_eq!(first.public_key_base64(), second.public_key_base64());
+    }
+
+    #[test]
+    fn force_reenroll_keeps_the_persisted_machine_key_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = InstallIdentity::load_or_generate(dir.path()).expect("identity");
+        let key_path = dir.path().join(INSTALL_IDENTITY_FILE);
+        let original_key_bytes = std::fs::read(&key_path).expect("persisted key");
+
+        // Simulate `enroll --force` replacing the workspace-scoped credentials
+        // file. The machine identity lives in a separate file and must survive.
+        std::fs::write(
+            dir.path().join("credentials.json"),
+            br#"{"agent_id":"new-agent","workspace_id":"new-workspace"}"#,
+        )
+        .expect("overwrite credentials");
+
+        let after_force = InstallIdentity::load_or_generate(dir.path()).expect("identity");
+        let after_force_key_bytes = std::fs::read(&key_path).expect("persisted key");
+
+        assert_eq!(original_key_bytes, after_force_key_bytes);
+        assert_eq!(
+            original.public_key_base64(),
+            after_force.public_key_base64()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_install_identity_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        InstallIdentity::load_or_generate(dir.path()).expect("identity");
+        let mode = std::fs::metadata(dir.path().join(INSTALL_IDENTITY_FILE))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "install identity must be owner-only");
     }
 
     #[test]

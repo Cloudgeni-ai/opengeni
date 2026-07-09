@@ -422,7 +422,8 @@ async fn enroll_command(
         },
     };
 
-    let install = InstallIdentity::generate();
+    let config_dir = config::config_dir().map_err(to_boxed)?;
+    let install = InstallIdentity::load_or_generate(&config_dir).map_err(to_boxed)?;
     let creds_proto = enrollment::enroll(&request, &install, |pending| {
         // Print the device-flow prompt exactly once, loudly, for the human.
         println!();
@@ -493,7 +494,8 @@ async fn enroll_with_token(
     };
 
     info!(channel = %args.channel, "non-interactive token enrollment; exchanging token for credentials");
-    let install = InstallIdentity::generate();
+    let config_dir = config::config_dir().map_err(to_boxed)?;
+    let install = InstallIdentity::load_or_generate(&config_dir).map_err(to_boxed)?;
     let creds_proto = enrollment::exchange_token(&request, &install, token)
         .await
         .map_err(to_boxed)?;
