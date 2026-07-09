@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.13.0
+
+### Patch Changes
+
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- Updated dependencies [b804fd4]
+  - @opengeni/sdk@0.13.0
+
 ## 0.12.0
 
 ### Minor Changes

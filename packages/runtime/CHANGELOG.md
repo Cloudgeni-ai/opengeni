@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.6.2
+
+### Patch Changes
+
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- Updated dependencies [b804fd4]
+  - @opengeni/contracts@0.10.0
+  - @opengeni/config@0.4.1
+
 ## 0.6.1
 
 ### Patch Changes
