@@ -84,7 +84,12 @@ function isAuthorized(c: Context, expected: string | undefined): boolean {
     return false;
   }
   const explicit = c.req.header("x-opengeni-access-key");
-  return constantTimeEqual(explicit, expected);
+  if (constantTimeEqual(explicit, expected)) {
+    return true;
+  }
+  const authorization = c.req.header("authorization");
+  const bearer = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+  return constantTimeEqual(bearer, expected);
 }
 
 function constantTimeEqual(actual: string | undefined, expected: string): boolean {
