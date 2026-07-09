@@ -38,7 +38,8 @@ use opengeni_agent_proto::v1::{
 };
 use prost::Message as _;
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::backoff::Backoff;
@@ -52,6 +53,13 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(5);
 /// How long a single dispatched request may run before we log a slow-op warning.
 /// (The op itself is bounded by its own `timeout_ms`; this is purely for logs.)
 const SLOW_OP_WARN: Duration = Duration::from_secs(30);
+/// Maximum platform-backed control RPCs executing on the host at once.
+///
+/// The semaphore is owned by the supervisor rather than one connection
+/// generation. A reconnect therefore cannot admit a second wave while work from
+/// the previous generation is still being cancelled. `ping` bypasses the pool
+/// and is answered inline; heartbeats never enter it.
+const MAX_IN_FLIGHT_CONTROL_RPCS: usize = 8;
 
 /// Errors that abort the supervisor's *current connection* (it then backs off and
 /// retries). Both variants are transient — a deliberate stop is a clean shutdown,
@@ -114,6 +122,8 @@ pub struct Supervisor<P: Platform> {
     agent_version: String,
     started: Instant,
     epoch: Arc<EpochCell>,
+    /// Host-work admission shared across every NATS connection generation.
+    rpc_slots: Arc<Semaphore>,
     /// Notified once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: Arc<Notify>,
 }
@@ -132,6 +142,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             agent_version: agent_version.into(),
             started: Instant::now(),
             epoch: Arc::new(EpochCell::default()),
+            rpc_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_CONTROL_RPCS)),
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -220,44 +231,164 @@ impl<P: Platform + 'static> Supervisor<P> {
         backoff.reset();
 
         // Subscribe to the RPC subject — this IS the registry.
-        let mut subscription = match client.subscribe(self.creds.rpc_subject()).await {
+        let subscription = match client.subscribe(self.creds.rpc_subject()).await {
             Ok(sub) => sub,
             Err(e) => return ConnectionOutcome::Disconnected(format!("subscribe failed: {e}")),
         };
         debug!(subject = %self.creds.rpc_subject(), "subscribed to rpc subject");
 
+        self.serve_connection_generation(&client, subscription)
+            .await
+    }
+
+    /// Serves one subscribed NATS generation until shutdown or disconnect. Host
+    /// work lives in `rpc_tasks`; this loop owns only control liveness and
+    /// admission, so platform latency cannot delay a heartbeat.
+    async fn serve_connection_generation(
+        &self,
+        client: &async_nats::Client,
+        mut subscription: async_nats::Subscriber,
+    ) -> ConnectionOutcome {
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut hb_seq: u64 = 0;
+        let mut rpc_tasks = JoinSet::new();
 
-        loop {
+        let outcome = loop {
             tokio::select! {
                 biased;
-                // Clean shutdown: announce going-offline, then break to the caller.
+                // Stop accepting work immediately. Accepted work is cancelled below
+                // before we announce going-offline and return.
                 () = self.shutdown.notified() => {
-                    self.announce_going_offline(&client).await;
-                    return ConnectionOutcome::CleanShutdown;
+                    break ConnectionOutcome::CleanShutdown;
                 }
-                // An inbound control RPC.
-                msg = subscription.next() => {
-                    match msg {
-                        Some(message) => self.handle_message(&client, message).await,
-                        None => {
-                            // The subscription stream ended => the connection is gone.
-                            return ConnectionOutcome::Disconnected(
-                                "rpc subscription ended".to_string(),
-                            );
-                        }
-                    }
-                }
-                // Heartbeat tick.
+                // Heartbeat is deliberately ahead of inbound work in this biased
+                // select. A ready subscription can never starve the liveness tick.
                 _ = heartbeat.tick() => {
                     hb_seq = hb_seq.wrapping_add(1);
-                    if let Err(e) = self.send_heartbeat(&client, hb_seq).await {
-                        // A heartbeat publish failure means the connection is down.
-                        return ConnectionOutcome::Disconnected(format!("heartbeat failed: {e}"));
+                    if let Err(e) = self.send_heartbeat(client, hb_seq).await {
+                        break ConnectionOutcome::Disconnected(format!("heartbeat failed: {e}"));
                     }
                 }
+                // Reap completed host work so panics are visible and the JoinSet
+                // does not grow for the lifetime of the connection.
+                joined = rpc_tasks.join_next(), if !rpc_tasks.is_empty() => {
+                    if let Some(Err(join_error)) = joined {
+                        warn!(error = %join_error, "control rpc task failed");
+                    }
+                }
+                // Decode/admit inbound control work. Only `ping` executes inline;
+                // every platform-backed operation needs a bounded permit.
+                msg = subscription.next() => match msg {
+                    Some(message) => self.admit_message(client, message, &mut rpc_tasks).await,
+                    None => {
+                        break ConnectionOutcome::Disconnected(
+                            "rpc subscription ended".to_string(),
+                        );
+                    }
+                }
+            }
+        };
+
+        // A request/reply inbox belongs to this connection generation. Once the
+        // generation ends, accepted work cannot produce a useful reply and must
+        // not survive invisibly into the next generation. Aborting the JoinSet
+        // drops native exec futures; `kill_on_drop(true)` then terminates their
+        // child processes before the shared admission permits are released.
+        let in_flight =
+            MAX_IN_FLIGHT_CONTROL_RPCS.saturating_sub(self.rpc_slots.available_permits());
+        if in_flight > 0 {
+            let reason = match &outcome {
+                ConnectionOutcome::CleanShutdown => "shutdown",
+                ConnectionOutcome::Disconnected(_) => "disconnect",
+            };
+            warn!(
+                reason = reason,
+                in_flight, "cancelling accepted control rpc work at connection-generation end"
+            );
+        }
+        rpc_tasks.shutdown().await;
+
+        if matches!(&outcome, ConnectionOutcome::CleanShutdown) {
+            self.announce_going_offline(client).await;
+        }
+        outcome
+    }
+
+    /// Decodes one request, answers liveness work inline, and either spawns one
+    /// permit-owning host task or returns typed saturation immediately.
+    async fn admit_message(
+        &self,
+        client: &async_nats::Client,
+        message: async_nats::Message,
+        rpc_tasks: &mut JoinSet<()>,
+    ) {
+        let Some(reply) = message.reply.clone() else {
+            warn!("dropping rpc with no reply inbox");
+            return;
+        };
+        let max_payload = client.server_info().max_payload;
+        let request = match ControlRequest::decode(message.payload.as_ref()) {
+            Ok(request) => request,
+            Err(decode_error) => {
+                error!(error = %decode_error, "undecodable ControlRequest");
+                let payload = dispatch::dispatch_bytes(
+                    message.payload.as_ref(),
+                    &self.platform,
+                    &self.ctx(max_payload),
+                );
+                if let Err(publish_error) = client.publish(reply, payload.into()).await {
+                    warn!(error = %publish_error, "failed to publish protocol error reply");
+                }
+                return;
+            }
+        };
+        let request_id = request.request_id.clone();
+        let label = op_label(&request);
+        match admit_rpc(&self.rpc_slots, &request) {
+            RpcAdmission::Liveness => {
+                debug!(request_id = %request_id, op = label, "serving liveness rpc outside host-work admission");
+                serve_request(
+                    client,
+                    reply,
+                    request,
+                    &self.platform,
+                    &self.ctx(max_payload),
+                    max_payload,
+                )
+                .await;
+            }
+            RpcAdmission::Work(permit) => {
+                let in_flight =
+                    MAX_IN_FLIGHT_CONTROL_RPCS.saturating_sub(self.rpc_slots.available_permits());
+                debug!(
+                    request_id = %request_id,
+                    op = label,
+                    in_flight,
+                    max_in_flight = MAX_IN_FLIGHT_CONTROL_RPCS,
+                    "admitted control rpc host work"
+                );
+                let client = client.clone();
+                let platform = self.platform.clone();
+                let ctx = self.ctx(max_payload);
+                rpc_tasks.spawn(async move {
+                    // Keep the permit alive through reply encoding and publish.
+                    let _permit = permit;
+                    serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
+                });
+            }
+            RpcAdmission::Saturated => {
+                warn!(
+                    request_id = %request_id,
+                    op = label,
+                    in_flight = MAX_IN_FLIGHT_CONTROL_RPCS,
+                    max_in_flight = MAX_IN_FLIGHT_CONTROL_RPCS,
+                    retryable = true,
+                    "control rpc host-work capacity saturated"
+                );
+                let response =
+                    dispatch::capacity_reply_error(request_id, label, MAX_IN_FLIGHT_CONTROL_RPCS);
+                publish_response(client, reply, response, label, max_payload).await;
             }
         }
     }
@@ -401,81 +532,6 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
-    /// Handles one inbound RPC message: dispatch it to the platform and reply on
-    /// the message's reply inbox. A request with no reply inbox is logged and
-    /// dropped (the control plane always sets one for request/reply).
-    async fn handle_message(&self, client: &async_nats::Client, message: async_nats::Message) {
-        let Some(reply) = message.reply.clone() else {
-            warn!("dropping rpc with no reply inbox");
-            return;
-        };
-
-        // The connection's NEGOTIATED max reply payload (deployment-agnostic — NOT a
-        // hardcoded 1 MiB). Threaded into dispatch so a large-reply op (the
-        // screenshot) fits its body under the budget, and used by the wire-seam
-        // backstop below to convert any residual oversized reply into a diagnosable
-        // error instead of a silent publish failure + caller timeout.
-        let max_payload = client.server_info().max_payload;
-
-        let request = match ControlRequest::decode(message.payload.as_ref()) {
-            Ok(req) => req,
-            Err(e) => {
-                // Reply with a protocol error rather than drop — the caller waits
-                // on the reply and would otherwise time out.
-                error!(error = %e, "undecodable ControlRequest");
-                let resp = dispatch::dispatch_bytes(
-                    message.payload.as_ref(),
-                    &self.platform,
-                    &self.ctx(max_payload),
-                );
-                let _ = client.publish(reply, resp.into()).await;
-                return;
-            }
-        };
-
-        let ctx = self.ctx(max_payload);
-        let op_label = op_label(&request);
-        let request_id = request.request_id.clone();
-        let started = Instant::now();
-        let response = dispatch::dispatch(request, &self.platform, &ctx).await;
-        let elapsed = started.elapsed();
-        if elapsed > SLOW_OP_WARN {
-            warn!(op = op_label, elapsed_ms = millis_u64(elapsed), "slow rpc");
-        } else {
-            debug!(
-                op = op_label,
-                elapsed_ms = millis_u64(elapsed),
-                "served rpc"
-            );
-        }
-
-        // WIRE-SEAM BACKSTOP (generic, ALL ops): a reply larger than the connection's
-        // negotiated max payload cannot be published — the publish fails agent-side
-        // with only a WARN and the caller times out with no cause (the original
-        // screenshot bug; file reads / large exec output share the latent wall).
-        // Rather than let that happen, when the encoded reply would exceed the max we
-        // publish a small structured PAYLOAD_TOO_LARGE error IN ITS PLACE, turning
-        // every silent oversized-reply timeout into a diagnosable, typed failure.
-        let encoded = response.encode_to_vec();
-        let payload = if max_payload > 0 && encoded.len() > max_payload {
-            warn!(
-                op = op_label,
-                encoded_bytes = encoded.len(),
-                max_payload,
-                "reply exceeds the negotiated max payload; replacing it with a \
-                 structured PAYLOAD_TOO_LARGE error so the caller sees a cause"
-            );
-            dispatch::oversized_reply_error(request_id, op_label, encoded.len(), max_payload)
-                .encode_to_vec()
-        } else {
-            encoded
-        };
-
-        if let Err(e) = client.publish(reply, payload.into()).await {
-            warn!(error = %e, "failed to publish rpc reply");
-        }
-    }
-
     /// Builds the dispatch context snapshot for a request. `max_reply_bytes` is the
     /// connection's NEGOTIATED max payload (from `server_info()`), threaded so an op
     /// that produces a large reply (the screenshot) can fit it under the budget
@@ -539,6 +595,99 @@ impl<P: Platform + 'static> Supervisor<P> {
         // Best-effort flush so the offline signal is on the wire before we drop.
         let _ = client.flush().await;
         info!("announced going-offline; closing cleanly");
+    }
+}
+
+/// Admission result for a decoded control RPC.
+enum RpcAdmission {
+    /// Liveness work is host-independent and never waits for a platform slot.
+    Liveness,
+    /// Platform-backed work owns this permit until its reply path completes.
+    Work(OwnedSemaphorePermit),
+    /// The bounded host-work pool is full; return a typed retryable response.
+    Saturated,
+}
+
+/// Admit one decoded RPC without waiting. Waiting here would recreate the
+/// original failure mode by parking the heartbeat/subscription loop behind host
+/// work. `ping` is the only bypass; it is answered entirely from agent state.
+fn admit_rpc(slots: &Arc<Semaphore>, request: &ControlRequest) -> RpcAdmission {
+    if matches!(request.op, Some(v1::control_request::Op::Ping(_))) {
+        return RpcAdmission::Liveness;
+    }
+    match slots.clone().try_acquire_owned() {
+        Ok(permit) => RpcAdmission::Work(permit),
+        Err(_) => RpcAdmission::Saturated,
+    }
+}
+
+/// Dispatch one already-decoded request and publish its typed response. This
+/// function owns no connection-generation state, so the generation's `JoinSet`
+/// can cancel it deterministically on disconnect or shutdown.
+async fn serve_request<P: Platform>(
+    client: &async_nats::Client,
+    reply: async_nats::Subject,
+    request: ControlRequest,
+    platform: &Arc<P>,
+    ctx: &DispatchContext,
+    max_payload: usize,
+) {
+    let label = op_label(&request);
+    let request_id = request.request_id.clone();
+    let started = Instant::now();
+    let response = dispatch::dispatch(request, platform, ctx).await;
+    let elapsed = started.elapsed();
+    if elapsed > SLOW_OP_WARN {
+        warn!(
+            request_id = %request_id,
+            op = label,
+            elapsed_ms = millis_u64(elapsed),
+            "slow control rpc"
+        );
+    } else {
+        debug!(
+            request_id = %request_id,
+            op = label,
+            elapsed_ms = millis_u64(elapsed),
+            "served control rpc"
+        );
+    }
+    publish_response(client, reply, response, label, max_payload).await;
+}
+
+/// Encode and publish a response with the generic negotiated-payload guard. A
+/// payload failure remains an operation-level typed outcome and never changes
+/// heartbeat or machine-liveness state.
+async fn publish_response(
+    client: &async_nats::Client,
+    reply: async_nats::Subject,
+    response: v1::ControlResponse,
+    label: &'static str,
+    max_payload: usize,
+) {
+    let request_id = response.request_id.clone();
+    let encoded = response.encode_to_vec();
+    let payload = if max_payload > 0 && encoded.len() > max_payload {
+        warn!(
+            request_id = %request_id,
+            op = label,
+            encoded_bytes = encoded.len(),
+            max_payload,
+            liveness_affected = false,
+            "reply exceeds negotiated max payload; replacing it with typed error"
+        );
+        dispatch::oversized_reply_error(request_id, label, encoded.len(), max_payload)
+            .encode_to_vec()
+    } else {
+        encoded
+    };
+
+    if let Err(publish_error) = client.publish(reply, payload.into()).await {
+        warn!(
+            error = %publish_error,
+            op = label,
+            "failed to publish control rpc reply"
+        );
     }
 }
 
@@ -641,5 +790,56 @@ mod tests {
         }
         let empty = ControlRequest::default();
         assert_eq!(op_label(&empty), "none");
+    }
+
+    #[test]
+    fn work_admission_is_bounded_while_ping_bypasses_saturation() {
+        use v1::control_request::Op;
+
+        let slots = Arc::new(Semaphore::new(1));
+        let exec = ControlRequest {
+            request_id: "exec-1".to_string(),
+            epoch: 0,
+            op: Some(Op::Exec(v1::ExecRequest::default())),
+        };
+        let RpcAdmission::Work(held) = admit_rpc(&slots, &exec) else {
+            panic!("first host op should take the only permit");
+        };
+        assert!(matches!(admit_rpc(&slots, &exec), RpcAdmission::Saturated));
+
+        let ping = ControlRequest {
+            request_id: "ping-1".to_string(),
+            epoch: 0,
+            op: Some(Op::Ping(v1::PingRequest { nonce: 1 })),
+        };
+        assert!(matches!(admit_rpc(&slots, &ping), RpcAdmission::Liveness));
+
+        drop(held);
+        assert!(matches!(admit_rpc(&slots, &exec), RpcAdmission::Work(_)));
+    }
+
+    #[tokio::test]
+    async fn cancelling_generation_tasks_releases_global_capacity() {
+        use v1::control_request::Op;
+
+        let slots = Arc::new(Semaphore::new(1));
+        let exec = ControlRequest {
+            request_id: "exec-1".to_string(),
+            epoch: 0,
+            op: Some(Op::Exec(v1::ExecRequest::default())),
+        };
+        let RpcAdmission::Work(permit) = admit_rpc(&slots, &exec) else {
+            panic!("first host op should take the only permit");
+        };
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let _permit = permit;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(matches!(admit_rpc(&slots, &exec), RpcAdmission::Saturated));
+
+        tasks.shutdown().await;
+        assert!(matches!(admit_rpc(&slots, &exec), RpcAdmission::Work(_)));
     }
 }

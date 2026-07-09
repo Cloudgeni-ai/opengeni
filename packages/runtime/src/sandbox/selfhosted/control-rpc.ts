@@ -283,24 +283,33 @@ function isRequestTimeoutError(err: unknown): boolean {
  */
 export class NatsControlRpc implements ControlRpc {
   private readonly connect: () => Promise<NatsRequestConnection | null>;
-  private connection: NatsRequestConnection | null | undefined;
+  private connection: NatsRequestConnection | undefined;
+  private connecting: Promise<NatsRequestConnection | null> | undefined;
 
   constructor(connect: () => Promise<NatsRequestConnection | null>) {
     this.connect = connect;
   }
 
   private async resolveConnection(): Promise<NatsRequestConnection | null> {
-    if (this.connection === undefined) {
-      try {
-        this.connection = await this.connect();
-      } catch {
-        // A connect failure is an OFFLINE condition, not a crash. Cache null so a
-        // later request retries the factory (set undefined to allow retry).
-        this.connection = null;
-        return null;
-      }
+    if (this.connection) {
+      return this.connection;
     }
-    return this.connection ?? null;
+    // Share one in-flight dial across concurrent callers, but cache only a real
+    // connection. A transient null/throw must be retried by the next request;
+    // pinning null here would make a recovered NATS bus look offline until the
+    // API/worker process restarted.
+    this.connecting ??= this.connect()
+      .then((connection) => {
+        if (connection) {
+          this.connection = connection;
+        }
+        return connection;
+      })
+      .catch(() => null)
+      .finally(() => {
+        this.connecting = undefined;
+      });
+    return this.connecting;
   }
 
   async request(

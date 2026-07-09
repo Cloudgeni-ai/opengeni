@@ -388,6 +388,36 @@ pub fn oversized_reply_error(
     }
 }
 
+/// Builds the retryable [`ErrorCode::Draining`] response returned when the
+/// supervisor's bounded host-work pool is full. Saturation is an operation-level
+/// backpressure condition: the machine remains online, heartbeats continue, and
+/// `ping` bypasses the pool.
+#[must_use]
+pub fn capacity_reply_error(
+    request_id: String,
+    op_label: &str,
+    max_in_flight: usize,
+) -> ControlResponse {
+    let mut detail = std::collections::HashMap::new();
+    detail.insert("op".to_string(), op_label.to_string());
+    detail.insert("backpressure".to_string(), "host_work_capacity".to_string());
+    detail.insert("in_flight".to_string(), max_in_flight.to_string());
+    detail.insert("max_in_flight".to_string(), max_in_flight.to_string());
+    ControlResponse {
+        request_id,
+        error: Some(AgentError {
+            code: ErrorCode::Draining as i32,
+            message: format!(
+                "agent host-work capacity is full ({max_in_flight} in flight); retry op \
+                 '{op_label}'"
+            ),
+            retryable: true,
+            detail,
+        }),
+        result: None,
+    }
+}
+
 /// A `ERROR_CODE_FENCED` AgentError for a stale-epoch op.
 fn fenced_error(op_epoch: u32, held_epoch: u32) -> AgentError {
     let mut detail = std::collections::HashMap::new();
@@ -703,6 +733,43 @@ mod tests {
             Some(RespResult::FsRead(r)) => assert_eq!(&r.content[..], b"file-bytes"),
             other => panic!("expected FsRead, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn capacity_reply_is_retryable_backpressure_not_liveness_loss() {
+        let response = capacity_reply_error("req-capacity".to_string(), "exec", 8);
+        assert_eq!(response.request_id, "req-capacity");
+        assert!(response.result.is_none());
+        let err = response.error.expect("capacity error");
+        assert_eq!(err.code, ErrorCode::Draining as i32);
+        assert!(err.retryable);
+        assert_eq!(err.detail.get("op").map(String::as_str), Some("exec"));
+        assert_eq!(
+            err.detail.get("backpressure").map(String::as_str),
+            Some("host_work_capacity")
+        );
+        assert_eq!(
+            err.detail.get("max_in_flight").map(String::as_str),
+            Some("8")
+        );
+    }
+
+    #[test]
+    fn oversized_reply_is_typed_and_does_not_claim_liveness_loss() {
+        let response = oversized_reply_error("req-large".to_string(), "fs_read", 2048, 1024);
+        assert_eq!(response.request_id, "req-large");
+        assert!(response.result.is_none());
+        let err = response.error.expect("payload error");
+        assert_eq!(err.code, ErrorCode::PayloadTooLarge as i32);
+        assert!(!err.retryable);
+        assert_eq!(
+            err.detail.get("encoded_bytes").map(String::as_str),
+            Some("2048")
+        );
+        assert_eq!(
+            err.detail.get("max_payload").map(String::as_str),
+            Some("1024")
+        );
     }
 
     #[tokio::test]

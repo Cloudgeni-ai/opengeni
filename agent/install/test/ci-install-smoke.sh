@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI install-smoke (Unix): prove install.sh PARSES + VERIFIES + INSTALLS the
 # freshly-built binary, against a locally-signed mock release. Used by agent-ci.yml
-# on ubuntu-latest + macos-14 (dossier §23.3). Requires `minisign` on PATH.
+# on ubuntu-latest + macos-26 (dossier §23.3). Requires `minisign` on PATH.
 #
 # It generates a THROWAWAY minisign key, signs the just-built binary, builds a mock
 # release tree, embeds the throwaway pubkey into a COPY of install.sh (so the
@@ -53,9 +53,26 @@ OPENGENI_INSTALL_DIR="$work/bin" \
 OPENGENI_NO_RUN=1 \
   sh "$work/install.sh" </dev/null
 
-# Assert it installed + matches the source bytes.
+# Assert it installed. Linux copies the verified bytes unchanged. On macOS the
+# installer intentionally wraps the verified binary in an app bundle and signs
+# that staged bundle (ad-hoc when no Developer ID is available), so Mach-O bytes
+# must change. Requiring `cmp` there made every macOS smoke fail after a correct
+# install; verify the installed bundle's signature and exact binary identity
+# instead.
 test -x "$work/bin/opengeni-agent"
-cmp "$work/bin/opengeni-agent" "$built"
+if [ "$os" = "Darwin" ]; then
+  app="$HOME/Applications/OpenGeni Agent.app"
+  test -d "$app"
+  codesign --verify --strict "$app"
+  want_version="$("$built" --version)"
+  got_version="$("$work/bin/opengeni-agent" --version)"
+  [ "$got_version" = "$want_version" ] || {
+    echo "installed binary version differs: got '$got_version', expected '$want_version'" >&2
+    exit 1
+  }
+else
+  cmp "$work/bin/opengeni-agent" "$built"
+fi
 echo "install-smoke OK: verified + installed $asset"
 
 # A tampered artifact MUST be rejected (exit 5).

@@ -149,6 +149,13 @@ export interface SelfhostedImageOutput {
 /** Default control-op timeout. A transient miss surfaces as `agent_reconnecting`
  *  (the turn pauses + retries); it is NOT a hard failure. */
 export const SELFHOSTED_DEFAULT_TIMEOUT_MS = 30_000;
+/** Reply grace after an agent-side exec deadline. The child is terminated at
+ *  `ExecRequest.timeoutMs`; this outer window lets the typed `timedOut` response
+ *  cross NATS before request/reply gives up. */
+const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
+/** nats.js ultimately schedules a JS timer; stay inside the signed 32-bit timer
+ *  range while also fitting the reply grace. */
+const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
 
 /**
  * The ONLY manifest-environment keys exported into a selfhosted machine's exec
@@ -351,13 +358,14 @@ export class SelfhostedSession {
    *  timeout error from the transport). */
   private async call(
     op: NonNullable<ControlRequest["op"]>,
+    timeoutMs = this.timeoutMs,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const req: ControlRequest = {
       requestId: crypto.randomUUID(),
       epoch: this.epoch,
       op,
     };
-    const res = await this.controlRpc.request(this.subject, req, { timeoutMs: this.timeoutMs });
+    const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
     if (res.error) {
       throw agentErrorToControlError(res.error);
     }
@@ -374,6 +382,13 @@ export class SelfhostedSession {
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    // Keep the process deadline inside the request/reply deadline. Previously the
+    // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
+    // ~30s, leaving accepted work invisible and able to starve control liveness.
+    const executionTimeoutMs = Math.max(
+      1,
+      Math.min(Math.trunc(this.timeoutMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
+    );
     const execReq: ExecRequest = {
       // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
       // single shell command string, so run it through the platform shell.
@@ -390,9 +405,12 @@ export class SelfhostedSession {
       // seed hook can find the tool surface. See SELFHOSTED_EXEC_ENV_ALLOWLIST.
       env: selfhostedExecEnv(this.state.environment),
       stdin: new Uint8Array(0),
-      timeoutMs: 0,
+      timeoutMs: executionTimeoutMs,
     };
-    const result = await this.call({ $case: "exec", exec: execReq });
+    const result = await this.call(
+      { $case: "exec", exec: execReq },
+      executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
+    );
     if (result.$case !== "exec") {
       throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
     }
