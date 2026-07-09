@@ -75,7 +75,12 @@ impl Backoff {
     /// `fast_ceiling` (fast recovery of a short blip), then the exponential
     /// `base` → `cap` takes over (storm protection for a prolonged outage).
     #[must_use]
-    pub fn with_fast_phase(base: Duration, cap: Duration, fast_ceiling: Duration, fast_attempts: u32) -> Self {
+    pub fn with_fast_phase(
+        base: Duration,
+        cap: Duration,
+        fast_ceiling: Duration,
+        fast_attempts: u32,
+    ) -> Self {
         Self {
             fast_ceiling,
             fast_attempts,
@@ -190,7 +195,13 @@ mod tests {
         let cap = Duration::from_secs(10);
         let mut rng = StdRng::seed_from_u64(0xC0FF_EE99);
         for attempt in 0..40u32 {
-            let b = Backoff { base, cap, fast_ceiling: Duration::ZERO, fast_attempts: 0, attempt };
+            let b = Backoff {
+                base,
+                cap,
+                fast_ceiling: Duration::ZERO,
+                fast_attempts: 0,
+                attempt,
+            };
             let ceiling = b.ceiling();
             // Draw repeatedly at this fixed attempt.
             for _ in 0..200 {

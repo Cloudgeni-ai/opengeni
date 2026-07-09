@@ -125,6 +125,20 @@ const samples = await client.machineMetricsSeries(workspaceId, enrollmentId, {
 //   runQueue, sampledAt (ISO-8601). GPU fields are null when no GPU is present.
 ```
 
+## Control liveness and backpressure
+
+Machine liveness is independent of accepted host operations. The agent
+prioritizes heartbeats, answers `ping` outside its bounded host-work pool, and
+returns typed retryable `DRAINING` backpressure when that pool is full. A busy
+machine therefore remains online and diagnosable instead of turning saturation
+into an offline transition.
+
+Exec requests carry a finite agent-side process deadline inside a slightly
+larger request/reply deadline. If that deadline or the connection generation
+ends, the agent cancels the accepted operation and terminates its child process.
+An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
+backpressure nor a reply-size failure changes the machine's heartbeat state.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points

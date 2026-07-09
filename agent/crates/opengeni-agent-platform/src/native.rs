@@ -153,6 +153,11 @@ impl Platform for NativePlatform {
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
+        // The control plane has a request/reply deadline outside this process
+        // deadline. If either deadline or a connection-generation cancellation
+        // drops `wait_with_output`, the child must not keep consuming the machine
+        // after its caller can no longer observe it.
+        cmd.kill_on_drop(true);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -177,9 +182,8 @@ impl Platform for NativePlatform {
             match tokio::time::timeout(dur, wait).await {
                 Ok(out) => out.map_err(|e| PlatformError::from_io("exec wait", &e))?,
                 Err(_) => {
-                    // The future was dropped, which kills the child via the kill-on-drop
-                    // behavior is not default; we instead report the timeout. The OS
-                    // reaps the orphan promptly because stdin/out/err are closed.
+                    // Dropping the wait future owns and kills the child because the
+                    // command was configured with `kill_on_drop(true)` above.
                     return Ok(v1::ExecResponse {
                         exit_code: -1,
                         stdout: prost::bytes::Bytes::new(),
@@ -751,6 +755,57 @@ mod tests {
             .expect("exec");
         assert!(resp.timed_out, "the loop should be killed by the timeout");
         assert_eq!(resp.exit_code, -1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelling_exec_future_kills_child() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("cancelled-exec.pid");
+        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        let req = ExecRequest {
+            command: vec![format!(
+                "printf '%s' \"$$\" > '{quoted_pid_file}'; while :; do :; done"
+            )],
+            shell: true,
+            timeout_ms: 0,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(raw_pid) = tokio::fs::read_to_string(&pid_file).await {
+                    break raw_pid.trim().parse::<u32>().expect("shell pid");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child should publish its pid before cancellation");
+
+        // `JoinSet::shutdown` aborts the dispatch task when a NATS connection
+        // generation ends. Aborting this task exercises the same drop path: the
+        // unbounded child must not outlive the caller that could observe it.
+        exec_task.abort();
+        let _ = exec_task.await;
+
+        let proc_path = PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !proc_path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Keep a failing regression test from becoming the orphan it detects.
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .await;
+        panic!("cancelled exec child {pid} survived after its future was dropped");
     }
 
     #[tokio::test]

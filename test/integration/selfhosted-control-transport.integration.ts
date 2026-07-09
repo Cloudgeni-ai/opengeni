@@ -200,4 +200,39 @@ describe("selfhosted control transport over a REAL local NATS", () => {
       unsub();
     }
   }, 30_000);
+
+  // (e) TRANSIENT CONTROL-PLANE CONNECTION ACQUISITION: a process may ask for
+  //     the managed NATS connection before it is ready. A null first result must
+  //     not be memoized forever; the same ControlRpc retries and recovers.
+  test("(e) transient null connection acquisition recovers on the next request", async () => {
+    const mock = new MockAgentResponder({ hostname: "late-nats-vm" });
+    const subject = subjectFor(WS_A, AGENT);
+    const unsub = bus.subscribeRequests(subject, responderFor(mock));
+    let attempts = 0;
+    const rpc = new NatsControlRpc(async () => {
+      attempts += 1;
+      return attempts === 1 ? null : bus.getRequestConnection();
+    });
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS_A,
+      relay: RELAY,
+      controlRpcFactory: () => rpc,
+      timeoutMs: 2_000,
+    });
+    const session = await client.resume({ agentId: AGENT });
+    try {
+      let firstError: { agentOffline?: boolean } | undefined;
+      try {
+        await session.exec({ cmd: "true" });
+      } catch (error) {
+        firstError = error as typeof firstError;
+      }
+      expect(firstError?.agentOffline).toBe(true);
+
+      expect((await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("late-nats-vm");
+      expect(attempts).toBe(2);
+    } finally {
+      unsub();
+    }
+  }, 30_000);
 });

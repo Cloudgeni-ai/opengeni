@@ -44,6 +44,43 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(mock.requests[0]?.req.op?.$case).toBe("exec");
   });
 
+  test("exec bounds the host process inside a slightly larger reply deadline", async () => {
+    const seen: Array<{ req: ControlRequest; timeoutMs: number }> = [];
+    const rpc: ControlRpc = {
+      request: async (_subject, req, opts) => {
+        seen.push({ req, timeoutMs: opts.timeoutMs });
+        return {
+          requestId: req.requestId,
+          result: {
+            $case: "exec",
+            exec: {
+              exitCode: 0,
+              stdout: new TextEncoder().encode("ok\n"),
+              stderr: new Uint8Array(0),
+              timedOut: false,
+              durationMs: "1",
+            },
+          },
+        };
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: rpc,
+      relay: RELAY,
+      timeoutMs: 12_000,
+    });
+
+    await session.exec({ cmd: "true" });
+
+    expect(seen).toHaveLength(1);
+    const op = seen[0]?.req.op;
+    if (op?.$case !== "exec") throw new Error("expected exec request");
+    expect(op.exec.timeoutMs).toBe(12_000);
+    expect(seen[0]?.timeoutMs).toBe(17_000);
+  });
+
   test("exec surfaces $HOSTNAME from the machine", async () => {
     const mock = new MockAgentResponder({ hostname: "the-vm" });
     const res = await sessionWith(mock).exec({ cmd: "echo $HOSTNAME" });
@@ -407,6 +444,13 @@ describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
     expect(mapped.osNotFound).toBe(true);
   });
 
+  test("PAYLOAD_TOO_LARGE stays an operation error and does not poison liveness", () => {
+    const mapped = agentErrorToControlError(err(ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE));
+    expect(mapped.reason).toBeNull();
+    expect(mapped.agentOffline).toBe(false);
+    expect(mapped.retryable).toBe(false);
+  });
+
   test("a no-responder ControlResponse maps to agent_offline", () => {
     const res = offlineControlResponse("req-1");
     expect(res.error?.code).toBe(ErrorCode.ERROR_CODE_AGENT_OFFLINE);
@@ -518,6 +562,80 @@ describe("NatsControlRpc — offline-until-NATS (boot never requires a live NATS
       err = e;
     }
     expect((err as SelfhostedControlError).reason).toBe("agent_offline");
+  });
+
+  test("transient thrown/null connection acquisition is retried on later requests", async () => {
+    const { NatsControlRpc } = await import("../src/sandbox");
+    let attempts = 0;
+    const rpc = new NatsControlRpc(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("bus starting");
+      if (attempts === 2) return null;
+      return {
+        request: async (_subject, payload) => {
+          const req = ControlRequest.decode(payload);
+          return {
+            data: ControlResponse.encode({
+              requestId: req.requestId,
+              result: {
+                $case: "ping",
+                ping: { nonce: "1", agentMonotonicMs: "1" },
+              },
+            }).finish(),
+          };
+        },
+      };
+    });
+    const req = {
+      requestId: "retry-connection",
+      epoch: 0,
+      op: { $case: "ping", ping: { nonce: "1" } },
+    } as ControlRequest;
+
+    expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
+      ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    );
+    expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).error?.code).toBe(
+      ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    );
+    expect((await rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 })).result?.$case).toBe("ping");
+    expect(attempts).toBe(3);
+  });
+
+  test("concurrent first requests share one connection acquisition", async () => {
+    const { NatsControlRpc } = await import("../src/sandbox");
+    let attempts = 0;
+    const rpc = new NatsControlRpc(async () => {
+      attempts += 1;
+      await Promise.resolve();
+      return {
+        request: async (_subject, payload) => {
+          const req = ControlRequest.decode(payload);
+          return {
+            data: ControlResponse.encode({
+              requestId: req.requestId,
+              result: {
+                $case: "ping",
+                ping: { nonce: "1", agentMonotonicMs: "1" },
+              },
+            }).finish(),
+          };
+        },
+      };
+    });
+    const req = {
+      requestId: "shared-connect",
+      epoch: 0,
+      op: { $case: "ping", ping: { nonce: "1" } },
+    } as ControlRequest;
+
+    const [first, second] = await Promise.all([
+      rpc.request("agent.x.y.rpc", req, { timeoutMs: 10 }),
+      rpc.request("agent.x.y.rpc", { ...req, requestId: "shared-connect-2" }, { timeoutMs: 10 }),
+    ]);
+    expect(first.result?.$case).toBe("ping");
+    expect(second.result?.$case).toBe("ping");
+    expect(attempts).toBe(1);
   });
 
   test("a no-responders transport error maps to agent_offline (never NotFound)", async () => {
