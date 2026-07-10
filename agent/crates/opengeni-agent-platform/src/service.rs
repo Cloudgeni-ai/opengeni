@@ -63,6 +63,9 @@ pub struct ServiceSpec {
     pub args: Vec<String>,
     /// The install scope (Linux only; ignored elsewhere).
     pub scope: ServiceScope,
+    /// LaunchAgent stdout/stderr destination directory. Required by the macOS
+    /// renderer so logs are user-owned and never depend on shell `~` expansion.
+    pub log_dir: Option<PathBuf>,
 }
 
 impl ServiceSpec {
@@ -74,6 +77,7 @@ impl ServiceSpec {
             binary_path: binary_path.into(),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            log_dir: None,
         }
     }
 
@@ -122,7 +126,7 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
     format!(
         "[Unit]\n\
          Description=OpenGeni self-hosted agent\n\
-         Documentation=https://get.opengeni.ai\n\
+         Documentation=https://app.opengeni.ai\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          # Don't hammer on a crash-loop; the in-process backoff is the fine loop.\n\
@@ -155,6 +159,13 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
 }
 
 /// Renders the macOS LaunchAgent plist body for `spec`. PURE + tested.
+///
+/// # Panics
+///
+/// Panics when `spec.log_dir` is absent. Only the macOS service constructor may
+/// call this renderer, and it always supplies the explicit user-owned log path;
+/// treating an omitted path as a programming error prevents a plist with an
+/// implicit or shell-expanded logging destination.
 #[must_use]
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     let mut args = vec![spec.binary_path.to_string_lossy().into_owned()];
@@ -164,6 +175,12 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
         .map(|a| format!("    <string>{}</string>", xml_escape(a)))
         .collect::<Vec<_>>()
         .join("\n");
+    let log_dir = spec
+        .log_dir
+        .as_ref()
+        .expect("LaunchAgent rendering requires an explicit log directory");
+    let stdout = log_dir.join("agent.stdout.log");
+    let stderr = log_dir.join("agent.stderr.log");
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -181,10 +198,16 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
          \x20 <true/>\n\
          \x20 <key>ThrottleInterval</key>\n\
          \x20 <integer>5</integer>\n\
+         \x20 <key>StandardOutPath</key>\n\
+         \x20 <string>{stdout}</string>\n\
+         \x20 <key>StandardErrorPath</key>\n\
+         \x20 <string>{stderr}</string>\n\
          </dict>\n\
          </plist>\n",
         label = ids::LAUNCHD_LABEL,
         program_args = program_args,
+        stdout = xml_escape(&stdout.to_string_lossy()),
+        stderr = xml_escape(&stderr.to_string_lossy()),
     )
 }
 
@@ -226,6 +249,103 @@ pub fn systemd_unit_path(scope: ServiceScope, home: &std::path::Path) -> PathBuf
 pub fn launchd_plist_path(home: &std::path::Path) -> PathBuf {
     home.join("Library/LaunchAgents")
         .join(format!("{}.plist", ids::LAUNCHD_LABEL))
+}
+
+/// The user-owned directory containing LaunchAgent stdout/stderr files.
+#[must_use]
+pub fn launchd_log_dir(home: &std::path::Path) -> PathBuf {
+    home.join("Library/Logs/OpenGeni Agent")
+}
+
+/// Exact modern launchctl argv for bootstrapping a user Aqua-domain LaunchAgent.
+#[must_use]
+pub fn launchctl_bootstrap_args(uid: &str, plist: &std::path::Path) -> Vec<String> {
+    vec![
+        "bootstrap".to_string(),
+        format!("gui/{uid}"),
+        plist.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Exact modern launchctl argv for idempotently unloading a user LaunchAgent.
+#[must_use]
+pub fn launchctl_bootout_args(uid: &str, plist: &std::path::Path) -> Vec<String> {
+    vec![
+        "bootout".to_string(),
+        format!("gui/{uid}"),
+        plist.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Exact modern launchctl argv for restarting a loaded LaunchAgent.
+#[must_use]
+pub fn launchctl_kickstart_args(uid: &str) -> Vec<String> {
+    vec![
+        "kickstart".to_string(),
+        "-k".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact modern launchctl argv for stopping a loaded LaunchAgent cleanly.
+#[must_use]
+pub fn launchctl_kill_args(uid: &str) -> Vec<String> {
+    vec![
+        "kill".to_string(),
+        "SIGTERM".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact modern launchctl argv for inspecting a user LaunchAgent.
+#[must_use]
+pub fn launchctl_print_args(uid: &str) -> Vec<String> {
+    vec![
+        "print".to_string(),
+        format!("gui/{uid}/{}", ids::LAUNCHD_LABEL),
+    ]
+}
+
+/// Exact `tail` argv for compact LaunchAgent logs.
+#[must_use]
+pub fn launchd_tail_args(log_dir: &std::path::Path, lines: u16, follow: bool) -> Vec<String> {
+    let mut args = vec!["-n".to_string(), lines.to_string()];
+    if follow {
+        args.push("-f".to_string());
+    }
+    args.push(
+        log_dir
+            .join("agent.stdout.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    args.push(
+        log_dir
+            .join("agent.stderr.log")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    args
+}
+
+/// Exact journalctl argv for a systemd user or system unit.
+#[must_use]
+pub fn journalctl_args(scope: ServiceScope, lines: u16, follow: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if scope == ServiceScope::User {
+        args.push("--user".to_string());
+    }
+    args.extend([
+        "-u".to_string(),
+        ids::SYSTEMD_UNIT.to_string(),
+        "-n".to_string(),
+        lines.to_string(),
+        "--no-pager".to_string(),
+    ]);
+    if follow {
+        args.push("-f".to_string());
+    }
+    args
 }
 
 /// Builds an `ExecStart=`-style line: the absolute binary path followed by its
@@ -280,6 +400,7 @@ mod tests {
             binary_path: PathBuf::from("/home/u/.local/bin/opengeni-agent"),
             args: vec!["run".to_string()],
             scope: ServiceScope::User,
+            log_dir: Some(PathBuf::from("/Users/u/Library/Logs/OpenGeni Agent")),
         }
     }
 
@@ -363,6 +484,9 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("<string>/home/u/.local/bin/opengeni-agent</string>"));
         assert!(plist.contains("<string>run</string>"));
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("agent.stdout.log"));
+        assert!(plist.contains("agent.stderr.log"));
     }
 
     #[test]
@@ -371,6 +495,73 @@ mod tests {
         assert_eq!(
             p,
             PathBuf::from("/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist")
+        );
+    }
+
+    #[test]
+    fn launchd_commands_are_modern_aqua_user_argv() {
+        let plist = PathBuf::from("/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist");
+        assert_eq!(
+            launchctl_bootstrap_args("501", &plist),
+            [
+                "bootstrap",
+                "gui/501",
+                "/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist"
+            ]
+        );
+        assert_eq!(
+            launchctl_bootout_args("501", &plist),
+            [
+                "bootout",
+                "gui/501",
+                "/Users/u/Library/LaunchAgents/ai.opengeni.agent.plist"
+            ]
+        );
+        assert_eq!(
+            launchctl_kickstart_args("501"),
+            ["kickstart", "-k", "gui/501/ai.opengeni.agent"]
+        );
+        assert_eq!(
+            launchctl_kill_args("501"),
+            ["kill", "SIGTERM", "gui/501/ai.opengeni.agent"]
+        );
+        assert_eq!(
+            launchctl_print_args("501"),
+            ["print", "gui/501/ai.opengeni.agent"]
+        );
+    }
+
+    #[test]
+    fn log_command_builders_are_bounded_and_pure() {
+        assert_eq!(
+            journalctl_args(ServiceScope::User, 25, true),
+            [
+                "--user",
+                "-u",
+                "opengeni-agent.service",
+                "-n",
+                "25",
+                "--no-pager",
+                "-f"
+            ]
+        );
+        assert_eq!(
+            journalctl_args(ServiceScope::System, 25, false),
+            ["-u", "opengeni-agent.service", "-n", "25", "--no-pager"]
+        );
+        assert_eq!(
+            launchd_tail_args(
+                std::path::Path::new("/Users/u/Library/Logs/OpenGeni Agent"),
+                25,
+                true
+            ),
+            [
+                "-n",
+                "25",
+                "-f",
+                "/Users/u/Library/Logs/OpenGeni Agent/agent.stdout.log",
+                "/Users/u/Library/Logs/OpenGeni Agent/agent.stderr.log"
+            ]
         );
     }
 

@@ -10,6 +10,9 @@ use thiserror::Error;
 /// An error from any stage of the self-update flow.
 #[derive(Debug, Error)]
 pub enum UpdateError {
+    /// The requested update channel is not published by this origin.
+    #[error("unsupported update channel: {0}")]
+    Channel(String),
     /// The signed channel manifest could not be fetched or parsed.
     #[error("manifest error: {0}")]
     Manifest(String),

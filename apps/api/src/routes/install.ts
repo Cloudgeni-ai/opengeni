@@ -60,7 +60,7 @@ async function loadAsset(file: string): Promise<string> {
 }
 
 // "The agent ships inside the control-plane" (cont.): the committed install
-// scripts default their release-asset base URL to the public archive
+// scripts default their release-asset base URL to the hosted public origin
 // (app.opengeni.ai) so a from-source / standalone copy still works. But a
 // DEPLOYED control plane must serve a script that pulls the agent from ITSELF —
 // the per-SHA binary baked into THIS image, via the /agent/* routes below — so

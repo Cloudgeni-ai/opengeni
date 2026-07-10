@@ -45,7 +45,7 @@ describe("get.<domain> install routes", () => {
   // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
   // its matching baked agent. The served install scripts must therefore default
   // their asset base URL to THIS deployment's own public origin (so `curl
-  // <host>/install.sh | sh` pulls from the same host — no hosted archive dependency),
+  // <host>/install.sh | sh` pulls from the same host — no retired host dependency),
   // while the user's OPENGENI_INSTALL_BASE_URL override still wins.
   test("GET /install.sh rewrites the default asset base URL to the deployment's own origin", async () => {
     const settings = testSettings({ publicBaseUrl: "https://cp.example.com/" });

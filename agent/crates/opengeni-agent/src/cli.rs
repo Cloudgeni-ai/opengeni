@@ -11,7 +11,7 @@
 //!   LaunchAgent / Windows Service). The default supported model is FOREGROUND
 //!   `run`; this is the explicit opt-in for a dedicated machine.
 //! * [`Command::Update`] — check for and apply a signed self-update (minisign +
-//!   sha256 verify, atomic swap, rollback on a failed health gate).
+//!   sha256 verify, atomic swap, retained manual rollback copy).
 //! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
 //!   `--purge`) delete credentials + deactivate the enrollment.
 
@@ -27,7 +27,7 @@ pub struct Cli {
     pub command: Option<Command>,
 
     /// The control-plane API base URL used for enrollment (e.g.
-    /// `https://api.opengeni.ai`). Falls back to `$OPENGENI_API_URL`.
+    /// `https://app.opengeni.ai`). Falls back to `$OPENGENI_API_URL`.
     #[arg(long, global = true, env = "OPENGENI_API_URL")]
     pub api_url: Option<String>,
 }
@@ -40,7 +40,7 @@ pub enum Command {
     Run(RunArgs),
     /// Run the device-flow enrollment only and persist credentials, then exit.
     Enroll(EnrollArgs),
-    /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status).
+    /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status/logs).
     ///
     /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
     /// service (systemd user unit / macOS LaunchAgent / Windows Service) is for a
@@ -146,6 +146,8 @@ pub enum ServiceAction {
     Stop(ServiceScopeArgs),
     /// Report the service status.
     Status(ServiceScopeArgs),
+    /// Print service logs (compact recent output by default; `--follow` tails).
+    Logs(ServiceLogsArgs),
 }
 
 /// Arguments for `service install`.
@@ -171,6 +173,21 @@ pub struct ServiceScopeArgs {
     pub system: bool,
 }
 
+/// Arguments for `service logs`.
+#[derive(Debug, clap::Args)]
+pub struct ServiceLogsArgs {
+    /// Follow new log output until interrupted.
+    #[arg(long)]
+    pub follow: bool,
+
+    /// Number of recent lines to print (1 through 10,000; default 100).
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=10_000))]
+    pub lines: u16,
+
+    #[command(flatten)]
+    pub scope: ServiceScopeArgs,
+}
+
 /// Arguments for the `update` subcommand.
 #[derive(Debug, Default, clap::Args)]
 pub struct UpdateArgs {
@@ -180,7 +197,7 @@ pub struct UpdateArgs {
     pub check: bool,
 
     /// Override the release base URL (defaults to the enrolled value /
-    /// `https://get.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
+    /// `https://app.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
     #[arg(long, env = "OPENGENI_INSTALL_BASE_URL")]
     pub base_url: Option<String>,
 
@@ -197,6 +214,12 @@ pub struct UninstallArgs {
     /// the credentials are kept so a re-install reconnects.
     #[arg(long)]
     pub purge: bool,
+
+    /// With `--purge`, delete local state without contacting the control plane.
+    /// The dashboard enrollment may remain active; use only when remote revoke
+    /// cannot be retried.
+    #[arg(long, requires = "purge")]
+    pub local_only: bool,
 }
 
 impl ServiceAction {
@@ -209,6 +232,7 @@ impl ServiceAction {
             Self::Start(_) => "start",
             Self::Stop(_) => "stop",
             Self::Status(_) => "status",
+            Self::Logs(_) => "logs",
         }
     }
 }
@@ -336,6 +360,35 @@ mod tests {
             Some(Command::Uninstall(args)) => assert!(args.purge),
             other => panic!("expected uninstall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn uninstall_local_only_requires_purge() {
+        assert!(Cli::try_parse_from(["opengeni-agent", "uninstall", "--local-only"]).is_err());
+        let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge", "--local-only"]);
+        match cli.command {
+            Some(Command::Uninstall(args)) => assert!(args.local_only),
+            other => panic!("expected uninstall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_help_exposes_logs_and_retry_safe_purge_escape_hatch() {
+        let mut root = Cli::command();
+        let help = root.render_long_help().to_string();
+        assert!(help.contains("uninstall"));
+
+        let service = root
+            .find_subcommand_mut("service")
+            .expect("service command");
+        assert!(service.render_long_help().to_string().contains("logs"));
+
+        let uninstall = root
+            .find_subcommand_mut("uninstall")
+            .expect("uninstall command");
+        let uninstall_help = uninstall.render_long_help().to_string();
+        assert!(uninstall_help.contains("--purge"));
+        assert!(uninstall_help.contains("--local-only"));
     }
 
     #[test]

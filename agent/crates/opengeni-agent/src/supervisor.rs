@@ -868,6 +868,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // The computer-use input consent gate reads the SAME enrollment grant
             // the relay pump's `allow_input` uses.
             consented_screen_control: link.creds.consented_screen_control,
+            consented_whole_machine: link.creds.consented_whole_machine,
             max_reply_bytes,
         }
     }

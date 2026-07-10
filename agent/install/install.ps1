@@ -25,8 +25,8 @@
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation).
-  OPENGENI_NO_RUN            "1" => do not start a foreground run; just print the command.
   OPENGENI_API_URL           Control-plane API base URL for enrollment.
+  OPENGENI_WORKSPACE_ID      Workspace UUID for an interactive device-flow enrollment.
 
   Immutable-per-version + GitHub-Releases fallback: assets resolve to
   $BASE/agent/v<ver>/<asset>. If the edge is down, the same assets are mirrored at
@@ -227,7 +227,12 @@ function Complete-Install($bin) {
   $enrollToken = [Environment]::GetEnvironmentVariable('OPENGENI_ENROLL_TOKEN')
   if (-not [string]::IsNullOrEmpty($enrollToken)) {
     Log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    & $bin enroll --token $enrollToken --non-interactive
+    $apiUrl = [Environment]::GetEnvironmentVariable('OPENGENI_API_URL')
+    if (-not [string]::IsNullOrEmpty($apiUrl)) {
+      & $bin --api-url $apiUrl enroll --token $enrollToken --non-interactive
+    } else {
+      & $bin enroll --token $enrollToken --non-interactive
+    }
     Log "enrolled. Start the agent (foreground) with:  $bin run"
     return
   }
@@ -252,13 +257,10 @@ function Complete-Install($bin) {
   Write-Host ""
   Write-Host "Want an always-on machine instead? That is opt-in:  $bin service install"
   Write-Host "Uninstall any time:  $bin uninstall"
-
-  $noRun = [Environment]::GetEnvironmentVariable('OPENGENI_NO_RUN')
-  if ($noRun -ne '1' -and [Environment]::UserInteractive) {
-    Write-Host ""
-    Log "starting a foreground run (Ctrl-C to stop; set OPENGENI_NO_RUN=1 to skip)"
-    & $bin run
-  }
+  # Never start `run` from the installer. In particular `irm … | iex` can run in
+  # an interactive host while the downloaded script has no durable stdin, which
+  # would turn a successful install into an opaque hang. The human explicitly
+  # performs enrollment and starts either a foreground run or the opt-in service.
 }
 
 Main

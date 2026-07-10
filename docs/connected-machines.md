@@ -160,6 +160,22 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+## macOS support boundary
+
+macOS command and service code can be built and unit-tested from another
+platform, but that is **compatibility coverage only**. The persistent service is
+deliberately a user `LaunchAgent` in the logged-in `gui/<uid>` Aqua domain, never
+a system LaunchDaemon: it must share the user's GUI/TCC identity. `service logs`
+reads the LaunchAgent's configured user-owned stdout/stderr files; it does not
+claim a system-wide logging scope.
+
+The current macOS desktop backend truthfully reports `display_unavailable`; it
+does not provide live screen capture or input. Before a future live desktop path
+can be accepted, a signed/notarized stable bundle identity, a logged-in Aqua
+user, human Screen Recording and Accessibility TCC grants, and whole-machine
+enrollment consent must all be demonstrated on a real consenting Mac.
+Cross-compilation and CI cannot substitute for that human gate.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points

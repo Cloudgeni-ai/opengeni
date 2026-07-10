@@ -13,9 +13,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs};
+use crate::cli::{
+    ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceLogsArgs, ServiceScopeArgs,
+};
 
 /// Dispatches a `service` subcommand. Returns a human-facing result string on
 /// success or an error message on failure.
@@ -27,6 +29,7 @@ pub fn run(args: &ServiceArgs) -> Result<(), String> {
         ServiceAction::Start(a) => lifecycle("start", scope(a)),
         ServiceAction::Stop(a) => lifecycle("stop", scope(a)),
         ServiceAction::Status(a) => status(scope(a)),
+        ServiceAction::Logs(a) => logs(a),
     }
 }
 
@@ -55,10 +58,12 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
+    let home = home()?;
     Ok(ServiceSpec {
         binary_path: binary_path()?,
         args: vec!["run".to_string()],
         scope: install_scope,
+        log_dir: Some(service::launchd_log_dir(&home)),
     })
 }
 
@@ -70,6 +75,11 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     } else {
         ServiceScope::User
     };
+    // Do this before `--print` too: dry-run output must never normalize a
+    // forbidden LaunchDaemon/system-scope configuration as supported.
+    if ServiceSpec::backend() == ServiceBackend::Launchd {
+        require_launchagent_scope(install_scope)?;
+    }
     let spec = spec_for(install_scope)?;
 
     if args.print {
@@ -121,6 +131,7 @@ fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
 
 /// macOS: write the LaunchAgent plist and bootstrap it into the user's GUI session.
 fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
+    require_launchagent_scope(spec.scope)?;
     let plist_path = service::launchd_plist_path(&home()?);
     let body = service::render_launchd_plist(spec);
     if let Some(parent) = plist_path.parent() {
@@ -130,17 +141,18 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", plist_path.display()))?;
     info!(path = %plist_path.display(), "wrote LaunchAgent plist");
 
-    // `launchctl bootstrap gui/$(id -u)` (modern) loads it into the GUI session so
-    // desktop/computer-use sees the screen. A non-fatal warning if launchctl is
-    // absent (the plist is written either way; the user can load it manually).
+    let log_dir = spec
+        .log_dir
+        .as_ref()
+        .expect("launchd log dir is configured");
+    std::fs::create_dir_all(log_dir).map_err(|e| format!("mkdir {}: {e}", log_dir.display()))?;
+    // Idempotent reinstall: unload a prior instance if present. A not-loaded
+    // target is harmless; the following bootstrap is strict and must succeed.
     let uid = unsafe_uid();
-    let domain = format!("gui/{uid}");
-    if let Err(e) = run_tool(
-        "launchctl",
-        &["bootstrap", &domain, &plist_path.to_string_lossy()],
-    ) {
-        warn!(error = %e, "launchctl bootstrap failed; the plist is written — load it with `launchctl load`");
-    }
+    let bootout = service::launchctl_bootout_args(&uid, &plist_path);
+    let _ = run_tool_owned("launchctl", &bootout);
+    let bootstrap = service::launchctl_bootstrap_args(&uid, &plist_path);
+    run_tool_owned("launchctl", &bootstrap)?;
     println!(
         "installed the opengeni-agent LaunchAgent at {}.",
         plist_path.display()
@@ -211,15 +223,11 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
             let plist_path = service::launchd_plist_path(&home()?);
             let uid = unsafe_uid();
-            let _ = run_tool(
-                "launchctl",
-                &[
-                    "bootout",
-                    &format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL),
-                ],
-            );
+            let args = service::launchctl_bootout_args(&uid, &plist_path);
+            let _ = run_tool_owned("launchctl", &args);
             let _ = std::fs::remove_file(&plist_path);
             println!("uninstalled the opengeni-agent LaunchAgent.");
             Ok(())
@@ -249,14 +257,14 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
             let uid = unsafe_uid();
-            let target = format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL);
-            let lc_action = if action == "start" {
-                "kickstart"
+            let args = if action == "start" {
+                service::launchctl_kickstart_args(&uid)
             } else {
-                "kill"
+                service::launchctl_kill_args(&uid)
             };
-            let _ = run_tool("launchctl", &[lc_action, "-k", &target]);
+            run_tool_owned("launchctl", &args)?;
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
         }
@@ -287,7 +295,10 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
-            let out = capture("launchctl", &["list", service::ids::LAUNCHD_LABEL]);
+            require_launchagent_scope(install_scope)?;
+            let args = service::launchctl_print_args(&unsafe_uid());
+            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let out = capture("launchctl", &refs);
             match out {
                 Ok(_) => println!("opengeni-agent LaunchAgent: loaded"),
                 Err(_) => println!("opengeni-agent LaunchAgent: not loaded"),
@@ -310,6 +321,31 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
+    }
+}
+
+fn logs(args: &ServiceLogsArgs) -> Result<(), String> {
+    let install_scope = scope(&args.scope);
+    match ServiceSpec::backend() {
+        ServiceBackend::Systemd => {
+            let command = service::journalctl_args(install_scope, args.lines, args.follow);
+            run_tool_owned("journalctl", &command)
+        }
+        ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
+            let command = service::launchd_tail_args(&service::launchd_log_dir(&home()?), args.lines, args.follow);
+            run_tool_owned("tail", &command)
+        }
+        ServiceBackend::WindowsScm => Err("service logs are not supported on Windows; use Event Viewer or your configured service log collector".to_string()),
+        ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
+    }
+}
+
+fn require_launchagent_scope(scope: ServiceScope) -> Result<(), String> {
+    if scope == ServiceScope::System {
+        Err("macOS supports only the logged-in user's Aqua LaunchAgent; --system/LaunchDaemon scope is intentionally unsupported".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -336,6 +372,11 @@ fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("{tool} {args:?} exited with {status}"))
     }
+}
+
+fn run_tool_owned(tool: &str, args: &[String]) -> Result<(), String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_tool(tool, &refs)
 }
 
 /// Runs an external tool and captures its stdout.
@@ -386,5 +427,12 @@ mod tests {
     fn scope_label_is_human_readable() {
         assert_eq!(scope_label(ServiceScope::User), "user");
         assert_eq!(scope_label(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn launchagent_system_scope_error_is_explicit() {
+        let error = require_launchagent_scope(ServiceScope::System).expect_err("system scope");
+        assert!(error.contains("Aqua LaunchAgent"));
+        assert!(error.contains("LaunchDaemon"));
     }
 }

@@ -44,7 +44,7 @@
 #                              --api-url below) and the interactive `enroll`/`run`
 #                              (the agent reads $OPENGENI_API_URL via clap). Set it
 #                              to target a specific deployment instead of the
-#                              app.opengeni.ai default.
+#                              hosted public origin default.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
 #                              enroll binds to (the user who approves must hold a
 #                              grant in it). Honored by the agent's `enroll`/`run`
@@ -669,7 +669,7 @@ finish() {
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not the app.opengeni.ai default) even when the agent's env-inherit path is
+    # (not a retired separate API host) even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path.

@@ -46,14 +46,33 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   embedded in both install scripts + `opengeni-agent-update` (one key, one verify
   routine for install AND self-update). The **private** key is the GitHub Actions
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
-- **Self-update** — `opengeni-agent update [--check]` fetches a signed channel
-  manifest, verifies minisign + sha256 + version-monotonicity, atomically self-
-  replaces (incl. the Windows rename-self-aside), and rolls back to the prior
-  binary on a failed boot health-gate. A tampered artifact is always rejected.
-- **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status`
+- **Self-update** — `opengeni-agent update [--check]` fetches the signed stable
+  manifest at `<base>/agent/stable/manifest.json`, verifies minisign + sha256 +
+  version-monotonicity, and atomically self-replaces (including Windows
+  rename-self-aside). It retains the previous binary as a **manual** rollback
+  copy; the foreground user or service manager must restart it. This command does
+  not claim an automatic post-restart health gate or rollback. A tampered artifact
+  is always rejected. `beta` requires an explicit custom publication origin.
+- **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status|logs`
   installs an always-on service (systemd user/system unit, macOS LaunchAgent,
-  Windows Service). `--print` dry-runs the generated unit/plist. The default
-  remains foreground `run`.
+  Windows Service). `logs` is bounded by default and `--follow` is explicit.
+  `--print` dry-runs the generated unit/plist. The default remains foreground
+  `run`.
+
+### macOS compatibility versus live acceptance
+
+The Rust workspace can compile and unit-test macOS-specific command rendering on
+non-macOS hosts, but that is **compatibility evidence only**, not proof that a
+Mac is ready for desktop use. Service persistence is deliberately a per-user
+`LaunchAgent` in the logged-in `gui/<uid>` Aqua domain — never a LaunchDaemon or
+system scope. The currently supported desktop behavior remains an honest
+`display_unavailable` degradation until the deferred native backend is delivered.
+
+Any future screen capture/input acceptance requires all of: a signed and
+notarized stable app-bundle identity (so TCC grants survive updates), a live Mac
+with a logged-in Aqua user, human Screen Recording and Accessibility grants, and
+human whole-machine enrollment consent. A live consenting Mac must accept those
+flows; CI/cross-compilation cannot grant or prove them.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows

@@ -7,18 +7,19 @@
 //! (atomic swap, incl. the Windows rename-self-aside) and ask for a restart.
 //!
 //! The actual download + minisign/sha256 verify + version gating + atomic swap +
-//! rollback all live in `opengeni-agent-update` (cargo-unit-tested there); this
-//! module only wires the config and prints the outcome.
+//! rollback primitives live in `opengeni-agent-update` (cargo-unit-tested there);
+//! this command only verifies and atomically swaps. It does not claim a boot
+//! health gate that no restarted process currently executes.
 
 use opengeni_agent_update::{check_update, CheckOutcome, HttpSource, UpdateConfig};
 use tracing::{info, warn};
 
 use crate::cli::UpdateArgs;
-use crate::config;
+use crate::config::{self, DEFAULT_PUBLIC_ORIGIN};
 
 /// The default release base URL when neither the flag/env nor an enrolled value is
 /// present (mirrors the install scripts' default).
-const DEFAULT_BASE_URL: &str = "https://get.opengeni.ai";
+const DEFAULT_BASE_URL: &str = DEFAULT_PUBLIC_ORIGIN;
 
 /// Runs the `update` subcommand.
 ///
@@ -35,13 +36,17 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
         |c| (c.agent_id.clone(), c.update_channel.clone()),
     );
     let channel = args.channel.clone().unwrap_or(enrolled_channel);
-    let base_url = args
-        .base_url
-        .clone()
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let base_url = args.base_url.clone().unwrap_or_else(|| {
+        creds
+            .as_ref()
+            .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.api_base_url.clone())
+    });
 
     let current_version = env!("CARGO_PKG_VERSION");
     let config = UpdateConfig::new(base_url, channel, agent_id, current_version);
+    config
+        .validate_channel()
+        .map_err(|e| format!("invalid update channel: {e}"))?;
 
     info!(
         version = current_version,
@@ -68,16 +73,16 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
                 return Ok(());
             }
             // Apply to the running executable (atomic swap + retained backup). The
-            // boot health-gate + rollback run on the next start; the service manager
-            // (or the user's `run`) brings up the new binary, which re-dials NATS —
-            // a self-update is indistinguishable from a reconnect blip.
+            // current process cannot prove the next process booted: a foreground
+            // user or their service manager must restart it. Do not advertise an
+            // automatic health check/rollback that this command does not execute.
             let backup = pending
                 .apply_running()
                 .map_err(|e| format!("failed to apply the update: {e}"))?;
             warn!(backup = %backup.display(), version = %pending.version, "update applied; restart to run the new binary");
             println!(
-                "update applied (v{}). The prior binary is kept at {} until the new \n\
-                 version passes its boot health-gate. Restart opengeni-agent to run it.",
+                "update applied (v{}). The prior binary is retained at {} as a manual \n\
+                 rollback copy. Restart the foreground agent or its service manager to run the new version; this build does not perform an automatic post-restart health gate.",
                 pending.version,
                 backup.display()
             );

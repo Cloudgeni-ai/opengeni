@@ -60,13 +60,13 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Command, EnrollArgs, RunArgs};
-use config::StoredCredentials;
+use config::{StoredCredentials, DEFAULT_PUBLIC_ORIGIN};
 use enrollment::{EnrollmentOffer, EnrollmentRequest, InstallIdentity};
 use supervisor::Supervisor;
 
 /// The default control-plane API base URL when neither `--api-url` nor
 /// `$OPENGENI_API_URL` is set.
-const DEFAULT_API_URL: &str = "https://api.opengeni.ai";
+const DEFAULT_API_URL: &str = DEFAULT_PUBLIC_ORIGIN;
 
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
@@ -108,10 +108,7 @@ fn init_tracing() {
 
 /// Routes a parsed CLI to its handler.
 async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
-    let api_url = cli
-        .api_url
-        .clone()
-        .unwrap_or_else(|| DEFAULT_API_URL.to_string());
+    let api_url = cli.api_url.clone();
     let Some(command) = cli.command else {
         // No subcommand. This is reached BOTH by a bare `opengeni-agent` in a
         // terminal AND by a Finder/Raycast/`open` launch of the .app bundle, which
@@ -123,11 +120,15 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         // show its user code. So branch on enrollment: a double-click of an ENROLLED
         // machine starts the agent (the nicest outcome), and an un-enrolled one
         // prints usage and exits promptly — never a zombie.
-        return run_default(&api_url).await;
+        return run_default(api_url.as_deref()).await;
     };
     match command {
-        Command::Run(args) => run(args, &api_url).await,
-        Command::Enroll(args) => enroll_command(args, &api_url).await.map(|_| ()),
+        Command::Run(args) => run(args, api_url.as_deref()).await,
+        Command::Enroll(args) => {
+            enroll_command(args, api_url.as_deref().unwrap_or(DEFAULT_API_URL))
+                .await
+                .map(|_| ())
+        }
         Command::Service(args) => service::run(&args).map_err(string_err),
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a
@@ -137,7 +138,9 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
                 .map_err(to_boxed)?
                 .map_err(string_err)
         }
-        Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
+        Command::Uninstall(args) => uninstall::run(&args, api_url.as_deref())
+            .await
+            .map_err(string_err),
     }
 }
 
@@ -150,7 +153,7 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 ///   * not enrolled (or credentials unreadable) → print usage to stderr and exit 0
 ///     promptly, rather than dropping into an invisible device-flow enroll that
 ///     needs a workspace id + a visible TTY and would otherwise appear to hang.
-async fn run_default(api_url: &str) -> anyhow_lite::Result {
+async fn run_default(api_url: Option<&str>) -> anyhow_lite::Result {
     if let Ok(Some(_)) = config::load_credentials() {
         run(RunArgs::default(), api_url).await
     } else {
@@ -172,7 +175,7 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
-async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+async fn run(args: RunArgs, api_url_override: Option<&str>) -> anyhow_lite::Result {
     // Single-instance guard, taken FIRST (before enroll-if-needed or any dial): an
     // enrolled agent's NATS subject IS its identity, so two `run` processes on one
     // machine become duplicate control-RPC responders + heartbeat publishers and
@@ -222,7 +225,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             token: std::env::var("OPENGENI_ENROLL_TOKEN").ok(),
             non_interactive: false,
         };
-        enroll_command(enroll_args, api_url).await?
+        enroll_command(enroll_args, api_url_override.unwrap_or(DEFAULT_API_URL)).await?
     };
 
     // Establish per-op OOM cgroup isolation (issue #345) BEFORE spawning any
@@ -472,7 +475,7 @@ async fn enroll_command(
     .await
     .map_err(to_boxed)?;
 
-    let stored = StoredCredentials::from_proto(creds_proto, args.channel);
+    let stored = StoredCredentials::from_proto(creds_proto, args.channel, api_url);
     let path = config::save_credentials(&stored).map_err(to_boxed)?;
     info!(agent_id = %stored.agent_id, path = %path.display(), "enrollment complete; credentials persisted");
     println!("Enrolled. This machine is now registered with OpenGeni.");
@@ -529,7 +532,7 @@ async fn enroll_with_token(
         .await
         .map_err(to_boxed)?;
 
-    let stored = StoredCredentials::from_proto(creds_proto, args.channel.clone());
+    let stored = StoredCredentials::from_proto(creds_proto, args.channel.clone(), api_url);
     let path = config::save_credentials(&stored).map_err(to_boxed)?;
     info!(agent_id = %stored.agent_id, path = %path.display(), "enrollment complete; credentials persisted");
     println!("Enrolled. This machine is now registered with OpenGeni.");
