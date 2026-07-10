@@ -83,6 +83,30 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
   }
 }
 
+/** The selfhosted CONTROL vs EXEC op deadlines for a turn, from settings. Control
+ *  ops (ping/fs/desktop/pty) stay on the short timeout so machine liveness is never
+ *  masked by a slow op; exec gets its own much larger budget so a real command is not
+ *  killed at the control wall. Threaded into every turn-path session build + resolver. */
+export function selfhostedTimeoutsFromSettings(settings: Settings): {
+  timeoutMs: number;
+  execTimeoutMs: number;
+} {
+  return {
+    timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+    execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+  };
+}
+
+/** The same split deadlines shaped for `makeActiveBackendResolver`'s dep names
+ *  (`selfhostedTimeoutMs` / `selfhostedExecTimeoutMs`), for a swap/pin target. */
+function selfhostedResolverTimeouts(settings: Settings): {
+  selfhostedTimeoutMs: number;
+  selfhostedExecTimeoutMs: number;
+} {
+  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
+  return { selfhostedTimeoutMs: timeoutMs, selfhostedExecTimeoutMs: execTimeoutMs };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -131,6 +155,9 @@ export function wrapTurnBoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    // A selfhosted swap target runs real commands too, so give it the same split
+    // deadlines the machine-primary establish path uses (short control, long exec).
+    ...selfhostedResolverTimeouts(settings),
     // The turn's declared environment → a selfhosted swap target's manifest, so the
     // SDK's per-turn manifest-env delta is empty (no "cannot change manifest
     // environment variables" throw when the turn pins to a vm). Mirrors the group
@@ -209,6 +236,7 @@ export function wrapLazyTurnBoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    ...selfhostedResolverTimeouts(settings),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
   });
 
@@ -280,6 +308,7 @@ export async function establishSelfhostedTurnSession(
   },
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus } = services;
+  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
@@ -288,6 +317,10 @@ export async function establishSelfhostedTurnSession(
     epoch: args.epoch,
     environment: args.environment,
     workingDir: args.workingDir,
+    // Give this turn's exec ops the long deadline (control ops stay short) so a real
+    // command is not killed at the control wall.
+    timeoutMs,
+    execTimeoutMs,
   });
   return {
     client,
