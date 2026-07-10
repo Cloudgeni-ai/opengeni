@@ -161,6 +161,12 @@ message Capabilities {
   // with a legible hint instead of offering a desktop it cannot capture — the
   // machine that "claims a display it can't capture" bug the 0.1.3 incident exposed.
   string desktop_unavailable_reason = 9;
+  // The runner speaks the op-stream protocol (OpStart/OpFrame/OpAck; see the
+  // op-stream section below). Advertised at Hello; the server uses the streaming
+  // path only when this is true AND its own feature flag is on, else the legacy
+  // monolithic ops run exactly as today. Additive — absent (false) on an older
+  // runner means "legacy path", no version coupling.
+  bool op_stream = 10;
 }
 
 // Detail about the agent's graphical display, when one is present.
@@ -731,6 +737,198 @@ message UpdateMayProceedResponse {
 }
 
 // =============================================================================
+// Op-stream (v1.1) — the reliable-transfer op protocol
+// =============================================================================
+//
+// A generic sequenced/acked/credited transfer plane plus thin op-lifecycle
+// bookkeeping, layered over the SAME control subject for the server→runner
+// requests and two new fire-and-forget subjects for the bulk direction:
+//   * `agent.<ws>.<id>.op.<op_id>`  — runner→server op frames (OpFrame).
+//   * `agent.<ws>.<id>.ack`         — server→runner acks/credit (OpAck).
+// Everything here is ADDITIVE: the legacy request/reply exec/fs/git ops remain
+// valid forever and are served by adapters over the same engine. These types
+// wire NO behavior on their own — they are the contract the runtime implements.
+// (Wire subject strings keep the "agent." prefix for compatibility; the runner
+// builds them via named helpers.)
+
+// The logical byte stream an op-frame Data chunk belongs to.
+enum OpChannel {
+  OP_CHANNEL_UNSPECIFIED = 0;
+  OP_CHANNEL_STDOUT = 1;
+  OP_CHANNEL_STDERR = 2;
+  // Non-exec content (fs_read bodies and similar).
+  OP_CHANNEL_CONTENT = 3;
+}
+
+// An op's lifecycle state on the runner: accepted → running → complete(retained)
+// → gc; or lost. `lost` is always TYPED (see OpLostReason) — never a silent gap.
+enum OpState {
+  OP_STATE_UNSPECIFIED = 0;
+  OP_STATE_ACCEPTED = 1;
+  OP_STATE_RUNNING = 2;
+  OP_STATE_COMPLETE = 3;
+  OP_STATE_LOST = 4;
+}
+
+// Why a lost op is lost (present iff OpStatus.state == OP_STATE_LOST).
+enum OpLostReason {
+  OP_LOST_REASON_UNSPECIFIED = 0;
+  // A completed op's retained result was evicted (bounded LRU registry) before a
+  // final ack arrived — a loud, counted event, surfaced honestly on a late query.
+  OP_LOST_REASON_EVICTED = 1;
+  // The runner process restarted and the op's in-memory scope did not survive
+  // (until the journal + scope re-adoption of a later milestone).
+  OP_LOST_REASON_AGENT_RESTARTED = 2;
+}
+
+// The terminal outcome of an op — carried in the Exit frame body AND echoed in
+// OpStatus once complete. Digests/totals are keyed by channel name
+// ("stdout"/"stderr"/"content") for a byte-exact assembly proof.
+message OpExit {
+  int32 exit_code = 1;
+  // Hit the runner-enforced deadline (process-tree killed).
+  bool timed_out = 2;
+  // Cancelled via OpCancel.
+  bool cancelled = 3;
+  uint64 duration_ms = 4;
+  // channel name → blake3 hex digest of the full channel stream.
+  map<string, string> digests = 5;
+  // channel name → total bytes emitted on the channel.
+  map<string, uint64> totals = 6;
+}
+
+// The op-begin for a STREAMING fs_write (M7): the target is set up here; the bytes
+// arrive as chunked, idempotent WriteChunk request/replies (no reverse streaming).
+message FsWriteBegin {
+  string path = 1;
+  // Create parent directories as needed.
+  bool create_parents = 2;
+  // POSIX mode for a newly created file (0 => platform default).
+  uint32 mode = 3;
+  // Editor safety (M6): the expected blake3 hex digest of the file's CURRENT
+  // content for a read-modify-write; empty for a plain write. On a re-dispatch a
+  // mismatch REFUSES rather than double-applying a diff.
+  string expected_base_digest = 4;
+}
+
+// Start an op (server→runner). IDEMPOTENT by op_id (= ControlRequest.request_id):
+// a known op_id returns its current status and NEVER re-runs — this closes the
+// at-least-once re-run hazard (a re-dispatched turn re-issues OpStart{same id} and
+// attaches).
+message OpStart {
+  oneof op {
+    ExecRequest exec = 1;
+    FsReadRequest fs_read = 2;
+    FsWriteBegin fs_write = 3;
+  }
+  // Initial send credit in bytes (0 => the runner default, ~4 MiB).
+  uint64 window_bytes = 10;
+  // Absolute runner-enforced deadline, unix-epoch ms (0 = none). Runner-side
+  // enforcement is authoritative (process-tree kill + Exit{timed_out}); the
+  // server wall-clock is advisory.
+  int64 deadline_ms = 11;
+  // The originating session id, for per-origin fair admission.
+  string origin_id = 12;
+}
+
+message OpStarted {
+  bool accepted = 1;
+  OpStatus status = 2;
+}
+
+// Cancel an op (server→runner). Idempotent; triggers the #344 process-tree kill and
+// a terminal frame. Reply is OpStatus.
+message OpCancel {
+  string op_id = 1;
+}
+
+// Query an op's status (server→runner). Reply is OpStatus.
+message OpQuery {
+  string op_id = 1;
+}
+
+// Re-attach to an op after a reconnect or a missed frame (server→runner): the
+// runner re-publishes frames ≥ from_seq from its ring/spool, then resumes live
+// flow. Reply is OpStatus.
+message OpAttach {
+  string op_id = 1;
+  // Resume from this exclusive sequence (the consumer's cumulative-ack floor).
+  uint64 from_seq = 2;
+  // Attach generation (B2): monotonic (the consumer's Temporal attempt number).
+  // The runner serves replay/credit only for the HIGHEST generation seen; a
+  // lower-generation (zombie) consumer's acks are ignored.
+  uint64 attach_generation = 3;
+}
+
+// The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,
+// and embedded in OpStarted).
+message OpStatus {
+  string op_id = 1;
+  OpState state = 2;
+  // The next sequence number the runner will assign (the high watermark, for gap
+  // detection).
+  uint64 next_seq = 3;
+  // Present iff state == OP_STATE_COMPLETE.
+  OpExit exit = 4;
+  // Present iff state == OP_STATE_LOST.
+  OpLostReason lost_reason = 5;
+}
+
+// One chunk of a streaming upload (server→runner): plain idempotent request/reply
+// per chunk (≤512 KiB). A duplicate (op_id, seq) is acked WITHOUT re-applying.
+message WriteChunk {
+  string op_id = 1;
+  // The op-scoped monotonic chunk sequence.
+  uint64 seq = 2;
+  bytes bytes = 3;
+  // The final chunk: commit = digest-verify then atomic rename (M7).
+  bool last = 4;
+  // Byte offset this chunk writes at (M7: writes land in an op-scoped temp file,
+  // committed on the last chunk — an aborted transfer leaves no visible file).
+  uint64 offset = 5;
+}
+
+message WriteChunkAck {
+  uint64 seq = 1;
+}
+
+// A runner→server op frame, published fire-and-forget on the op subject
+// (`agent.<ws>.<id>.op.<op_id>`). `seq` is a SINGLE monotonic sequence per op
+// across ALL body kinds (Progress frames consume sequence numbers too, so gap
+// detection is uniform).
+message OpFrame {
+  string op_id = 1;
+  uint64 seq = 2;
+  oneof body {
+    OpData data = 10;
+    OpProgress progress = 11;
+    OpExit exit = 12;
+  }
+}
+
+// A chunk of op output on a channel (≤128 KiB per frame).
+message OpData {
+  OpChannel channel = 1;
+  bytes bytes = 2;
+}
+
+// A liveness tick: the op is alive but produced no Data. Emitted every 5s while an
+// op is live and quiet; consumes a sequence number like any frame.
+message OpProgress {}
+
+// A server→runner cumulative ack + credit replenishment, published fire-and-forget
+// on the ack subject (`agent.<ws>.<id>.ack`). Best-effort, healed by repetition.
+message OpAck {
+  string op_id = 1;
+  // Cumulative: every frame with seq ≤ acked_seq is acknowledged.
+  uint64 acked_seq = 2;
+  // The replenished ABSOLUTE send-credit window in bytes.
+  uint64 credit_bytes = 3;
+  // The server has fully consumed the terminal frame → the runner may GC the op.
+  bool final = 4;
+}
+
+// =============================================================================
 // Control RPC envelope — the single oneof carrying every control-plane op
 // =============================================================================
 
@@ -762,6 +960,13 @@ message ControlRequest {
     UpdateMayProceedRequest update_may_proceed = 28;
     DesktopInputRequest desktop_input = 29;
     DesktopScreenshotRequest desktop_screenshot = 30;
+    // Op-stream (v1.1), additive. All ride the same rpc subject; each has an
+    // idempotent, typed reply in ControlResponse.result below.
+    OpStart op_start = 31;
+    OpCancel op_cancel = 32;
+    OpQuery op_query = 33;
+    OpAttach op_attach = 34;
+    WriteChunk write_chunk = 35;
   }
 }
 
@@ -792,6 +997,11 @@ message ControlResponse {
     UpdateMayProceedResponse update_may_proceed = 28;
     DesktopInputResponse desktop_input = 29;
     DesktopScreenshotResponse desktop_screenshot = 30;
+    // Op-stream (v1.1) replies, additive. OpStart → OpStarted; OpCancel / OpQuery /
+    // OpAttach all reply OpStatus (op_status); WriteChunk → WriteChunkAck.
+    OpStarted op_start = 31;
+    OpStatus op_status = 32;
+    WriteChunkAck write_chunk = 35;
   }
 }
 

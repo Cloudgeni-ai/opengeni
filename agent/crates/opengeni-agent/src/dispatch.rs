@@ -175,6 +175,14 @@ async fn dispatch_future<P: Platform>(
             )
         }
 
+        // --- op-stream (v1.1): wire types exist, no runtime serves them yet ----
+        // The runner does not advertise `Capabilities.op_stream`, so a compliant
+        // server never sends these; answer any that arrive with a typed Unsupported
+        // rather than a silent drop, until the op engine is wired.
+        Op::OpStart(_) | Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_) | Op::WriteChunk(_) => {
+            op_stream_unsupported(request_id)
+        }
+
         // --- platform-backed Channel-A ops -----------------------------------
         // NOTE: `exec` (large stdout/stderr) and `fs_read` (a big file) produce
         // UNBOUNDED replies that can exceed the transport's max payload — the same
@@ -440,6 +448,23 @@ fn consent_required_error(request_id: String, message: &str) -> ControlResponse 
         error: Some(AgentError {
             code: ErrorCode::ConsentRequired as i32,
             message: message.to_string(),
+            retryable: false,
+            detail: std::collections::HashMap::new(),
+        }),
+        result: None,
+    }
+}
+
+/// A `ERROR_CODE_UNSUPPORTED` response for an op-stream request received before the
+/// op engine is wired. The runner does not advertise `Capabilities.op_stream`, so
+/// this path should not be hit in practice; it exists so an early/forced op-stream
+/// request gets a typed answer instead of a silent drop.
+fn op_stream_unsupported(request_id: String) -> ControlResponse {
+    ControlResponse {
+        request_id,
+        error: Some(AgentError {
+            code: ErrorCode::Unsupported as i32,
+            message: "op-stream is not yet served by this runner".to_string(),
             retryable: false,
             detail: std::collections::HashMap::new(),
         }),

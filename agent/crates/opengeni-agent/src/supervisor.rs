@@ -529,6 +529,10 @@ impl<P: Platform + 'static> Supervisor<P> {
             consented_screen_control: self.creds.consented_screen_control,
             display,
             desktop_unavailable_reason: capture_blocked.unwrap_or_default(),
+            // The op-stream protocol types exist but no runtime serves them yet, so
+            // this runner does NOT advertise the capability — the server keeps using
+            // the legacy monolithic ops. Flipped to true when the op engine is wired.
+            op_stream: false,
         }
     }
 
@@ -725,6 +729,12 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::DesktopScreenshot(_)) => "desktop_screenshot",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
+        // Op-stream (v1.1) — wire types present; no runtime serves them yet.
+        Some(Op::OpStart(_)) => "op_start",
+        Some(Op::OpCancel(_)) => "op_cancel",
+        Some(Op::OpQuery(_)) => "op_query",
+        Some(Op::OpAttach(_)) => "op_attach",
+        Some(Op::WriteChunk(_)) => "write_chunk",
         None => "none",
     }
 }

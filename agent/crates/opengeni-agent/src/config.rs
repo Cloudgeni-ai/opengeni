@@ -188,6 +188,28 @@ impl StoredCredentials {
     pub fn events_subject(&self) -> String {
         format!("agent.{}.{}.events", self.workspace_id, self.agent_id)
     }
+
+    /// The op-stream subject the runner publishes an op's frames on:
+    /// `agent.<ws>.<id>.op.<op_id>` (PROTOCOL.md §Subjects). Fire-and-forget; the
+    /// server subscribes before it sends `OpStart`. Per-op so one subscription
+    /// consumes exactly one op (never a wildcard). The `agent.` wire prefix is kept
+    /// for compatibility even though the daemon is the "runner".
+    // Wire-contract helper for the op-stream plane; the op engine wiring (a later
+    // step) is its first caller, so it is unused by the binary today.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn op_subject(&self, op_id: &str) -> String {
+        format!("agent.{}.{}.op.{}", self.workspace_id, self.agent_id, op_id)
+    }
+
+    /// The op-stream ack subject the runner subscribes to for server acks + credit:
+    /// `agent.<ws>.<id>.ack` (PROTOCOL.md §Subjects). Subscribed alongside the rpc
+    /// subject at connection establishment.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn ack_subject(&self) -> String {
+        format!("agent.{}.{}.ack", self.workspace_id, self.agent_id)
+    }
 }
 
 /// Loads the persisted credentials from the config dir, or `Ok(None)` if the
@@ -349,6 +371,13 @@ mod tests {
         let creds = sample();
         assert_eq!(creds.rpc_subject(), "agent.ws-abc.agent-123.rpc");
         assert_eq!(creds.events_subject(), "agent.ws-abc.agent-123.events");
+        // Op-stream subjects keep the `agent.` wire prefix (compatibility) and are
+        // per-op on the frame side, single on the ack side (PROTOCOL.md §Subjects).
+        assert_eq!(
+            creds.op_subject("read:0"),
+            "agent.ws-abc.agent-123.op.read:0"
+        );
+        assert_eq!(creds.ack_subject(), "agent.ws-abc.agent-123.ack");
     }
 
     #[test]

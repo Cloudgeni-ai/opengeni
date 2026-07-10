@@ -100,6 +100,9 @@ export function canonicalHello(): Hello {
       // Lock-step with the Rust corpus: exercises the desktopUnavailableReason field
       // (desktop:false + display present + reason = the capture-blocked case).
       desktopUnavailableReason: "screen recording not granted",
+      // Left at the proto3 default (false) so the encoded bytes are unchanged and
+      // the existing cross-stack fixtures stay valid (mirrors the Rust corpus).
+      opStream: false,
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",
