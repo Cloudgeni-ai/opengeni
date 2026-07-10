@@ -1,0 +1,91 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000901",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Build the project on the connected machine."
+    },
+    "occurredAt": "2026-01-02T10:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000902",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 2,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000901"
+    },
+    "occurredAt": "2026-01-02T10:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000903",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 3,
+    "type": "machine.op.recovered",
+    "payload": {
+      "op": "exec",
+      "faultClass": "draining",
+      "attempts": 2,
+      "machineId": "agent-abc"
+    },
+    "occurredAt": "2026-01-02T10:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000904",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 4,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-exec-machine",
+      "output": "Process exited with code 0\nOutput:\nbuild ok\n"
+    },
+    "occurredAt": "2026-01-02T10:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000905",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 5,
+    "type": "machine.op.failed",
+    "payload": {
+      "op": "exec",
+      "faultClass": "offline",
+      "attempts": 3,
+      "machineId": "agent-abc"
+    },
+    "occurredAt": "2026-01-02T10:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000906",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 6,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "The build succeeded, but the machine went offline before the next step."
+    },
+    "occurredAt": "2026-01-02T10:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000907",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 7,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T10:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  }
+]

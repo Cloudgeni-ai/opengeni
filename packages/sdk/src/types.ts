@@ -523,6 +523,10 @@ export const SESSION_EVENT_TYPES = [
   // Workbench v2 turn-end workspace capture (announce-only; mirror of contracts
   // SessionEventType — the contract-parity test asserts sorted equality).
   "workspace.revision.captured",
+  // Connected Machine op-outcome observability (announce-only, quiet; mirror of
+  // contracts SessionEventType — the contract-parity test asserts sorted equality).
+  "machine.op.failed",
+  "machine.op.recovered",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
