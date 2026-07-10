@@ -570,20 +570,26 @@ impl<P: Platform + 'static> Supervisor<P> {
                 publish_response(client, reply, response, label, max_payload).await;
             }
             Route::LegacyExec(exec) => {
-                let client = client.clone();
-                let platform = self.platform.clone();
-                let engine = self.engine.clone();
-                let ctx = self.ctx(link, max_payload);
-                rpc_tasks.spawn(async move {
-                    // The adapter path fences epochs BEFORE the engine, exactly
-                    // like the dispatch table does for every other op.
-                    let response = if request.epoch != 0 && request.epoch < ctx.epoch {
-                        dispatch::fenced_reply(request_id, request.epoch, ctx.epoch)
-                    } else {
-                        crate::legacy::serve_exec(&engine, &platform, request_id, exec).await
-                    };
-                    publish_response(&client, reply, response, label, max_payload).await;
-                });
+                self.spawn_adapter(
+                    link,
+                    client,
+                    &request,
+                    AdapterWork::Exec(exec),
+                    reply,
+                    label,
+                    rpc_tasks,
+                );
+            }
+            Route::LegacyGit(git) => {
+                self.spawn_adapter(
+                    link,
+                    client,
+                    &request,
+                    AdapterWork::Git(git),
+                    reply,
+                    label,
+                    rpc_tasks,
+                );
             }
             Route::Work(class) => {
                 let client = client.clone();
@@ -606,6 +612,43 @@ impl<P: Platform + 'static> Supervisor<P> {
                 });
             }
         }
+    }
+
+    /// Spawns a legacy-adapter op (exec/git as an engine job) onto its own
+    /// task. The adapter path fences epochs BEFORE the engine, exactly like
+    /// the dispatch table does for every other op.
+    #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
+    fn spawn_adapter(
+        &self,
+        link: &WorkspaceLink,
+        client: &async_nats::Client,
+        request: &ControlRequest,
+        work: AdapterWork,
+        reply: async_nats::Subject,
+        label: &'static str,
+        rpc_tasks: &mut JoinSet<()>,
+    ) {
+        let max_payload = client.server_info().max_payload;
+        let client = client.clone();
+        let platform = self.platform.clone();
+        let engine = self.engine.clone();
+        let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
+        let request_id = request.request_id.clone();
+        rpc_tasks.spawn(async move {
+            let response = if request_epoch != 0 && request_epoch < held_epoch {
+                dispatch::fenced_reply(request_id, request_epoch, held_epoch)
+            } else {
+                match work {
+                    AdapterWork::Exec(exec) => {
+                        crate::legacy::serve_exec(&engine, &platform, request_id, exec).await
+                    }
+                    AdapterWork::Git(git) => {
+                        crate::legacy::serve_git(&engine, &platform, request_id, git).await
+                    }
+                }
+            };
+            publish_response(&client, reply, response, label, max_payload).await;
+        });
     }
 
     /// Spawns an `OpStart` onto its own task (admission may park) with the
@@ -879,12 +922,22 @@ fn hello_subject(link: &WorkspaceLink) -> String {
     )
 }
 
+/// A legacy op the adapter serves as an engine job.
+enum AdapterWork {
+    /// A monolithic exec request.
+    Exec(v1::ExecRequest),
+    /// A monolithic git request.
+    Git(v1::GitRequest),
+}
+
 /// How a decoded control RPC is served.
 enum Route {
     /// Answered inline on the serve loop — liveness never enters admission.
     Liveness,
     /// Runs as an engine job through the legacy exec adapter.
     LegacyExec(v1::ExecRequest),
+    /// Runs as an engine job through the legacy git adapter.
+    LegacyGit(v1::GitRequest),
     /// Starts an op-stream job (admission may park; runs on its own task).
     OpStart(v1::OpStart),
     /// Op-control (cancel/query/attach): engine state + routing only — served
@@ -902,9 +955,9 @@ fn classify(request: &ControlRequest) -> Route {
     match &request.op {
         Some(Op::Ping(_)) => Route::Liveness,
         Some(Op::Exec(req)) => Route::LegacyExec(req.clone()),
+        Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
-        Some(Op::Git(_)) => Route::Work(JobClass::Heavy),
         _ => Route::Work(JobClass::Light),
     }
 }
@@ -1119,10 +1172,10 @@ mod tests {
             classify(&request(Op::Exec(v1::ExecRequest::default()))),
             Route::LegacyExec(_)
         ));
-        // Git is heavy (long-running, resource-owning); fs ops are light.
+        // Git runs as an engine job through its adapter; fs ops are light.
         assert!(matches!(
             classify(&request(Op::Git(v1::GitRequest::default()))),
-            Route::Work(JobClass::Heavy)
+            Route::LegacyGit(_)
         ));
         assert!(matches!(
             classify(&request(Op::FsRead(v1::FsReadRequest::default()))),

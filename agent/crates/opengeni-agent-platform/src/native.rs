@@ -733,33 +733,62 @@ impl Platform for NativePlatform {
         Ok(v1::FsRemoveResponse {})
     }
 
+    /// Builds the git argv (op-aware) and spawns it inside the shared
+    /// containment primitive — the engine-job path. Descendants are contained
+    /// (process group / Job Object) and, on a delegated Linux host, placed in
+    /// a per-op OOM cgroup leaf like any exec child.
+    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(git_args(req.op(), &req.args))
+            .current_dir(self.resolve_cwd(&req.cwd));
+        spawn_contained(cmd, self.cgroups.as_deref())
+            .map_err(|e| PlatformError::from_io("spawn git", &e))
+    }
+
     async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
-        let cwd = self.resolve_cwd(&req.cwd);
-        let args = git_args(req.op(), &req.args);
+        // Spawn via the shared containment primitive (spawn_git): behaviorally
+        // the pre-engine plain spawn plus containment — a closed piped stdin
+        // reads EOF exactly like the old Stdio::null.
+        let mut contained = self.spawn_git(req)?;
+        drop(contained.stdin.take());
+        let stdout = contained.stdout.take();
+        let stderr = contained.stderr.take();
+        let (status, stdout, stderr) = tokio::try_join!(
+            contained.wait(),
+            read_optional_pipe(stdout),
+            read_optional_pipe(stderr),
+        )
+        .map_err(|e| PlatformError::from_io("git wait", &e))?;
+        Ok(assemble_git_response(
+            req.op(),
+            status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+        ))
+    }
+}
 
-        let output = tokio::process::Command::new("git")
-            .args(&args)
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| PlatformError::from_io("spawn git", &e))?;
-
-        let exit_code = output.status.code().unwrap_or(-1);
-        let status = if req.op() == v1::GitOp::Status && exit_code == 0 {
-            Some(parse_porcelain_status(&output.stdout))
-        } else {
-            None
-        };
-
-        Ok(v1::GitResponse {
-            exit_code,
-            stdout: prost::bytes::Bytes::from(output.stdout),
-            stderr: prost::bytes::Bytes::from(output.stderr),
-            status,
-        })
+/// Assembles the wire `GitResponse` from a finished git invocation: the
+/// porcelain-v2 structured parse for a clean `GIT_OP_STATUS`, raw
+/// stdout/stderr otherwise. Shared by the one-shot [`Platform::git`] and the
+/// engine-job git adapter so the reply shape can never drift.
+#[must_use]
+pub fn assemble_git_response(
+    op: v1::GitOp,
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> v1::GitResponse {
+    let status = if op == v1::GitOp::Status && exit_code == 0 {
+        Some(parse_porcelain_status(&stdout))
+    } else {
+        None
+    };
+    v1::GitResponse {
+        exit_code,
+        stdout: prost::bytes::Bytes::from(stdout),
+        stderr: prost::bytes::Bytes::from(stderr),
+        status,
     }
 }
 

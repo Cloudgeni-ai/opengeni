@@ -24,7 +24,7 @@ use std::time::Duration;
 use opengeni_agent_engine::admission::JobClass;
 use opengeni_agent_engine::registry::QueryAnswer;
 use opengeni_agent_engine::{Channel, FrameBody, OpId};
-use opengeni_agent_platform::Platform;
+use opengeni_agent_platform::{assemble_git_response, Platform};
 use opengeni_agent_proto::v1::{
     self, control_response::Result as RespResult, AgentError, ControlResponse, ErrorCode,
 };
@@ -146,6 +146,138 @@ pub async fn serve_exec<P: Platform>(
             "the op was cancelled before it began (cancel tombstone)",
             false,
         ),
+    }
+}
+
+/// Serves a legacy `git` request over the op engine — same wire shape as the
+/// pre-engine implementation (porcelain status parse included via the shared
+/// [`assemble_git_response`]), but the git children now run CONTAINED with a
+/// per-op OOM cgroup leaf (a clone's page cache bills to the op, closing the
+/// #351 git-boundary hole). Heavy admission; idempotent by request id.
+pub async fn serve_git<P: Platform>(
+    engine: &Arc<Engine>,
+    platform: &Arc<P>,
+    request_id: String,
+    req: v1::GitRequest,
+) -> ControlResponse {
+    let op_id = OpId::new(request_id.clone());
+    let ticket = match engine.admit(&op_id, JobClass::Heavy, LEGACY_ORIGIN).await {
+        Ok(ticket) => ticket,
+        Err(reason) => return crate::dispatch::breaker_reply_error(request_id, "git", reason),
+    };
+
+    let breaker = engine.budgets().legacy_buffer_max_bytes;
+    let buffers = Arc::new(Mutex::new(ReplyBuffers::default()));
+    let mailbox_cell: Arc<OnceLock<tokio::sync::mpsc::Sender<JobCommand>>> =
+        Arc::new(OnceLock::new());
+    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+    let emit = buffering_emit(buffers.clone(), mailbox_cell.clone(), breaker);
+
+    let outcome = engine.start_job(
+        &op_id,
+        ticket,
+        Vec::new(),
+        // Rule C: git carries no caller deadline field; none is imposed.
+        None,
+        || platform.spawn_git(&req),
+        emit,
+        |_exit| Vec::new(),
+        move |_exit_seq, exit: &JobExit| {
+            let _ = exit_tx.send(exit.clone());
+        },
+    );
+
+    match outcome {
+        StartOutcome::Started(started) => {
+            let _ = mailbox_cell.set(started.mailbox.clone());
+            let _ = started
+                .mailbox
+                .send(JobCommand::Attach {
+                    generation: LOCAL_GENERATION,
+                    from_seq: 0,
+                    window_bytes: breaker,
+                })
+                .await;
+
+            let Ok(record) = exit_rx.await else {
+                return error_reply(
+                    request_id,
+                    ErrorCode::Os,
+                    "the git job ended without producing a terminal record",
+                    false,
+                );
+            };
+
+            let acked = started.handles.watermark.load(Ordering::Relaxed);
+            let _ = started
+                .mailbox
+                .send(JobCommand::Ack {
+                    generation: LOCAL_GENERATION,
+                    acked_seq: acked,
+                    credit_bytes: breaker,
+                    final_ack: true,
+                })
+                .await;
+
+            let taken = std::mem::take(&mut *buffers.lock().expect("reply buffer lock"));
+            let response = build_git_reply(request_id, &record, taken, breaker, req.op());
+            let _ = started.handles.legacy_reply.set(response.encode_to_vec());
+            response
+        }
+        StartOutcome::SpawnFailed { error, handles } => {
+            let response = ControlResponse {
+                request_id,
+                error: Some(error.to_agent_error()),
+                result: None,
+            };
+            let _ = handles.legacy_reply.set(response.encode_to_vec());
+            response
+        }
+        StartOutcome::Known { answer, handles } => {
+            duplicate_reply(request_id, answer, handles.as_ref())
+        }
+        StartOutcome::BornCancelled => error_reply(
+            request_id,
+            ErrorCode::Os,
+            "the op was cancelled before it began (cancel tombstone)",
+            false,
+        ),
+    }
+}
+
+/// Assembles the git wire reply from the terminal record + captured output
+/// via the shared porcelain-aware builder.
+fn build_git_reply(
+    request_id: String,
+    record: &JobExit,
+    buffers: ReplyBuffers,
+    breaker: u64,
+    op: v1::GitOp,
+) -> ControlResponse {
+    match &record.outcome {
+        JobOutcome::Exited { exit_code } => {
+            if buffers.overflowed {
+                return overflow_reply(request_id, buffers.total_bytes, breaker);
+            }
+            ControlResponse {
+                request_id,
+                error: None,
+                result: Some(RespResult::Git(assemble_git_response(
+                    op,
+                    *exit_code,
+                    buffers.stdout,
+                    buffers.stderr,
+                ))),
+            }
+        }
+        // No deadline is ever set on git jobs; total for the enum.
+        JobOutcome::TimedOut | JobOutcome::Cancelled => error_reply(
+            request_id,
+            ErrorCode::Os,
+            "the git command was cancelled before completion",
+            false,
+        ),
+        JobOutcome::Failed(failure) => failed_reply(request_id, record, failure),
     }
 }
 
@@ -501,6 +633,71 @@ mod tests {
         );
         let runs = std::fs::read_to_string(&marker).expect("marker written");
         assert_eq!(runs.lines().count(), 1, "the command ran exactly once");
+    }
+
+    /// Whether a usable `git` exists on this host (tests skip cleanly if not).
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    #[tokio::test]
+    async fn git_raw_round_trips_through_the_engine() {
+        if !git_available() {
+            eprintln!("SKIP git_raw_round_trips_through_the_engine: no git on this host");
+            return;
+        }
+        let (engine, _dir) = test_engine();
+        let platform = native();
+        let req = v1::GitRequest {
+            op: v1::GitOp::Raw as i32,
+            args: vec!["--version".to_string()],
+            ..Default::default()
+        };
+        let resp = serve_git(&engine, &platform, "g-1".to_string(), req).await;
+        assert!(resp.error.is_none(), "clean run: {:?}", resp.error);
+        match resp.result {
+            Some(RespResult::Git(g)) => {
+                assert_eq!(g.exit_code, 0);
+                assert!(String::from_utf8_lossy(&g.stdout).contains("git version"));
+            }
+            other => panic!("expected Git result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn git_status_stays_structured_through_the_engine() {
+        if !git_available() {
+            eprintln!("SKIP git_status_stays_structured_through_the_engine: no git on this host");
+            return;
+        }
+        let (engine, _dir) = test_engine();
+        let platform = native();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let req = v1::GitRequest {
+            op: v1::GitOp::Status as i32,
+            cwd: repo.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let resp = serve_git(&engine, &platform, "g-status".to_string(), req).await;
+        assert!(resp.error.is_none(), "clean run: {:?}", resp.error);
+        match resp.result {
+            Some(RespResult::Git(g)) => {
+                assert_eq!(g.exit_code, 0);
+                let status = g.status.expect("porcelain parse survives the adapter");
+                assert!(status.clean, "a fresh repo is clean");
+            }
+            other => panic!("expected Git result, got {other:?}"),
+        }
     }
 
     #[test]
