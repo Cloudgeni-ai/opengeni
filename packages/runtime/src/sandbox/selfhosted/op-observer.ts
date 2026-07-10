@@ -37,6 +37,12 @@ export interface SelfhostedOpObservation {
   reason?: SelfhostedUnavailableReason | null;
   /** Whether a failed fault provably never reached the machine (a pre-send synthesis). */
   neverSent?: boolean;
+  /** The enrolled machine (agent) id the op addressed — for machine-scoped fan-out. */
+  machineId?: string;
+  /** A stable fault-class string (`selfhostedFaultClass`): the fault class on a
+   *  `failed` op, or the class of retries that a `healed` op recovered from. Absent
+   *  on a clean success. Drives the `machine.op.*` event mapping + its infra filter. */
+  faultClass?: string;
   /** The reply size in bytes when known — set on a PAYLOAD_TOO_LARGE fault (from the
    *  agent's `encoded_bytes` detail). The op-stream client fills the success-reply
    *  size once it owns the framed transport; today's request/reply does not surface it. */

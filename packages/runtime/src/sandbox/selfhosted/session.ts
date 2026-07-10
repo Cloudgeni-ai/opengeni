@@ -47,6 +47,7 @@ import {
   type SelfhostedRetryClock,
 } from "./retry-policy";
 import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observer";
+import { selfhostedFaultClass } from "./fault-rendering";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -447,6 +448,18 @@ export class SelfhostedSession {
           healed: retries > 0,
           retries,
           durationMs: Date.now() - startedAt,
+          machineId: this.agentId,
+          // A healed op's class is whichever retry budget it recovered from.
+          ...(retries > 0
+            ? {
+                faultClass:
+                  neverSentRetries > 0
+                    ? "offline"
+                    : drainingRetries > 0
+                      ? "draining"
+                      : "reconnecting",
+              }
+            : {}),
         });
         return res.result;
       }
@@ -478,6 +491,8 @@ export class SelfhostedSession {
           code: error.code,
           reason: error.reason,
           neverSent: error.neverSent,
+          machineId: this.agentId,
+          faultClass: selfhostedFaultClass(error),
           // Known only on a PAYLOAD_TOO_LARGE fault (the agent's encoded_bytes detail).
           ...(Number.isFinite(encoded) ? { replyBytes: encoded } : {}),
         });

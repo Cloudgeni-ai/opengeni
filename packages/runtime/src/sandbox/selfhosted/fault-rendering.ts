@@ -17,6 +17,49 @@
 import { errorCodeToJSON, ErrorCode } from "@opengeni/agent-proto";
 import { SelfhostedControlError } from "./control-rpc";
 
+/**
+ * A stable, low-cardinality fault-class string for a `SelfhostedControlError` — the
+ * out-of-band twin of the in-band renderer's class taxonomy (single-sourced here).
+ * Used for the `machine.op.*` event class + the metrics label + the infra filter.
+ */
+export function selfhostedFaultClass(error: SelfhostedControlError): string {
+  if (error.agentOffline || error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE) return "offline";
+  if (error.draining) return "draining";
+  if (error.payloadTooLarge || error.code === ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE)
+    return "payload_too_large";
+  if (error.reason === "agent_reconnecting") return "reconnecting";
+  if (error.reason === "consent_required") return "consent";
+  if (error.osNotFound || error.code === ErrorCode.ERROR_CODE_NOT_FOUND) return "not_found";
+  if (error.fenced || error.code === ErrorCode.ERROR_CODE_FENCED) return "fenced";
+  switch (error.code) {
+    case ErrorCode.ERROR_CODE_OS:
+      return "os";
+    case ErrorCode.ERROR_CODE_STREAM:
+      return "stream";
+    case ErrorCode.ERROR_CODE_PROTOCOL:
+      return "protocol";
+    default:
+      return "unspecified";
+  }
+}
+
+/**
+ * The fault classes that count as an INFRASTRUCTURE fault (a `machine.op.failed`
+ * event). A semantic miss the model asked about — a missing path (`not_found`), a
+ * consent gate (`consent`), a nonzero exit (never a fault at all) — is an OUTCOME,
+ * not an infra fault, and is DELIBERATELY excluded; `fenced` is a routing/session
+ * condition, not a machine fault. (Doctrine two-planes / the team ruling.)
+ */
+export const SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES: ReadonlySet<string> = new Set([
+  "offline",
+  "draining",
+  "payload_too_large",
+  "reconnecting",
+  "os",
+  "stream",
+  "protocol",
+]);
+
 /** The four mandatory field labels (exported so tests can assert their presence). */
 export const FAULT_FIELD_WHAT_HAPPENED = "What happened:";
 export const FAULT_FIELD_WHICH_LAYER = "Which layer:";

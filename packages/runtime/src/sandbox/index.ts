@@ -207,6 +207,8 @@ export {
 export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
 // The four-field in-band fault renderer (the failure-visibility doctrine).
 export {
+  selfhostedFaultClass,
+  SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,

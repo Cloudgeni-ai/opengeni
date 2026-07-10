@@ -4,8 +4,16 @@
 
 import { describe, expect, test } from "bun:test";
 import { ErrorCode } from "@opengeni/agent-proto";
-import type { RuntimeMetricsHooks } from "@opengeni/runtime";
-import { selfhostedOpObserverForMetrics } from "../src/observability-metrics";
+import type { RuntimeMetricsHooks, SelfhostedOpObservation } from "@opengeni/runtime";
+import {
+  machineOpSessionEventFor,
+  makeMachineOpObserver,
+  selfhostedOpObserverForMetrics,
+} from "../src/observability-metrics";
+
+function obs(over: Partial<SelfhostedOpObservation>): SelfhostedOpObservation {
+  return { op: "exec", outcome: "ok", healed: false, retries: 0, durationMs: 1, ...over };
+}
 
 type SandboxOpInput = Parameters<NonNullable<RuntimeMetricsHooks["onSandboxOp"]>>[0];
 
@@ -89,5 +97,53 @@ describe("selfhostedOpObserverForMetrics", () => {
         durationMs: 1,
       }),
     ).not.toThrow();
+  });
+});
+
+describe("machineOpSessionEventFor — only infra failures + healed recoveries are eventable", () => {
+  test("an infra failure maps to machine.op.failed", () => {
+    const event = machineOpSessionEventFor(
+      obs({ outcome: "failed", faultClass: "offline", retries: 3, machineId: "m1" }),
+    );
+    expect(event).toEqual({
+      type: "machine.op.failed",
+      payload: { op: "exec", faultClass: "offline", attempts: 3, machineId: "m1" },
+    });
+  });
+
+  test("a semantic-miss failure does NOT fire machine.op.failed", () => {
+    for (const faultClass of ["not_found", "consent", "fenced"]) {
+      expect(machineOpSessionEventFor(obs({ outcome: "failed", faultClass }))).toBeNull();
+    }
+  });
+
+  test("a healed op maps to machine.op.recovered", () => {
+    const event = machineOpSessionEventFor(
+      obs({ outcome: "ok", healed: true, faultClass: "draining", retries: 2, machineId: "m1" }),
+    );
+    expect(event).toEqual({
+      type: "machine.op.recovered",
+      payload: { op: "exec", faultClass: "draining", attempts: 2, machineId: "m1" },
+    });
+  });
+
+  test("a clean success is not eventable", () => {
+    expect(machineOpSessionEventFor(obs({ outcome: "ok", healed: false }))).toBeNull();
+  });
+});
+
+describe("makeMachineOpObserver — meters all ops, buffers only eventable ones", () => {
+  test("meters every op but buffers only infra-failure + healed events; drain clears", () => {
+    const seen: unknown[] = [];
+    const { observer, drainEvents } = makeMachineOpObserver({ onSandboxOp: (o) => seen.push(o) });
+    observer(obs({ outcome: "ok", healed: false })); // metered, not eventable
+    observer(obs({ outcome: "ok", healed: true, faultClass: "reconnecting", retries: 1 })); // recovered
+    observer(obs({ outcome: "failed", faultClass: "payload_too_large", retries: 0 })); // failed
+    observer(obs({ outcome: "failed", faultClass: "consent" })); // semantic — metered, not eventable
+
+    expect(seen).toHaveLength(4); // every op metered
+    const events = drainEvents();
+    expect(events.map((e) => e.type)).toEqual(["machine.op.recovered", "machine.op.failed"]);
+    expect(drainEvents()).toHaveLength(0); // drain cleared the buffer
   });
 });

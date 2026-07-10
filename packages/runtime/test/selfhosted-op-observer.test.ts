@@ -94,7 +94,15 @@ describe("SelfhostedOpObserver — one observation per completed op", () => {
       seen.push(o),
     ).exec({ cmd: "true" });
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ op: "exec", outcome: "ok", healed: true, retries: 2 });
+    expect(seen[0]).toMatchObject({
+      op: "exec",
+      outcome: "ok",
+      healed: true,
+      retries: 2,
+      // A healed op's class is whichever budget it recovered from (draining here).
+      faultClass: "draining",
+      machineId: AGENT,
+    });
   });
 
   test("a terminal fault: outcome failed with the typed code + reason + neverSent", async () => {
@@ -116,6 +124,8 @@ describe("SelfhostedOpObserver — one observation per completed op", () => {
       code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
       reason: "agent_offline",
       neverSent: true,
+      faultClass: "offline",
+      machineId: AGENT,
     });
     expect(seen[0]!.retries).toBeGreaterThan(0);
   });
