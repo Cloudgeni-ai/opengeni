@@ -610,6 +610,9 @@ message AdmissionTelemetry {
   uint64 light_queued = 2;
   uint64 heavy_running = 3;
   uint64 heavy_queued = 4;
+  // Jobs with a live mailbox (running + completed-retained awaiting final
+  // ack) — the op-engine's routing-table size.
+  uint64 live_ops = 5;
 }
 
 message HeartbeatAck {

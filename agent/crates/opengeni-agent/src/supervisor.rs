@@ -840,6 +840,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     light_queued: admission.light_queued as u64,
                     heavy_running: admission.heavy_running as u64,
                     heavy_queued: admission.heavy_queued as u64,
+                    live_ops: self.engine.live_ops() as u64,
                 }),
             })),
         };

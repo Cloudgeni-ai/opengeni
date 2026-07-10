@@ -53,7 +53,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opengeni_agent_engine::flow::{AckOutcome, AttachOutcome, CreditFlow};
@@ -145,6 +145,11 @@ pub struct JobParams {
     /// every append, attached or not — the supervisor reads it to answer
     /// `OpQuery`/`OpStatus.next_seq` without reaching into the pump.
     pub watermark: Arc<AtomicU64>,
+    /// Set (once) if POST-EXIT replay fails (spool IO/corruption): the
+    /// terminal record survives in the registry, but the retained frames are
+    /// unrecoverable — status answers must say so typed rather than let a
+    /// consumer wait forever on replay (FAILURE-VISIBILITY two-planes rule).
+    pub collection_failure: Arc<OnceLock<JobFailure>>,
 }
 
 /// The typed terminal outcome of a job — the engine-side form of the wire
@@ -298,6 +303,7 @@ pub async fn run_job(
         deadline,
         config,
         watermark,
+        collection_failure,
     } = params;
 
     let stdout = child.stdout.take();
@@ -310,6 +316,8 @@ pub async fn run_job(
         flow: CreditFlow::new(),
         hooks,
         watermark,
+        collection_failure,
+        exit_fence: None,
         child,
         child_done: false,
         child_code: -1,
@@ -376,6 +384,12 @@ struct Pump {
     hooks: JobHooks,
     /// Mirror of `retention.high_seq()` for supervisor-side status answers.
     watermark: Arc<AtomicU64>,
+    /// See [`JobParams::collection_failure`].
+    collection_failure: Arc<OnceLock<JobFailure>>,
+    /// The final-ack fence: the terminal frame's seq (or, when the exit frame
+    /// could not be retained, the high watermark — everything retained). A
+    /// final ack must reach it; set exactly once when the record is produced.
+    exit_fence: Option<u64>,
     child: ContainedExec,
     child_done: bool,
     /// The child's exit code once `child_done` (`-1` for signal deaths,
@@ -509,6 +523,10 @@ impl Pump {
                 None
             }
         };
+        // The final-ack fence: a consumer's final must cover the terminal
+        // frame; when the exit frame itself could not be retained, covering
+        // everything that WAS retained suffices (the record flows via query).
+        self.exit_fence = Some(exit_seq.unwrap_or_else(|| self.retention.high_seq()));
         if let Some(on_exit) = self.hooks.on_exit.take() {
             on_exit(exit_seq, &exit);
         }
@@ -541,13 +559,27 @@ impl Pump {
             } => {
                 let applied = self.apply_ack(generation, acked_seq, credit_bytes);
                 if final_ack {
-                    // Only a current-generation ack may finish the job (a
-                    // zombie consumer must not GC a result it no longer owns),
-                    // and only once the terminal record exists.
-                    if self.exited() && applied {
-                        self.final_acked = true;
-                    } else if !self.exited() {
-                        warn!(generation, acked_seq, "final ack before completion ignored");
+                    // A final ack is honored ONLY from the exact current
+                    // generation (Applied), post-exit, and covering the
+                    // terminal frame (PROTOCOL v1.1: `acked_seq >= exit_seq`).
+                    // Anything less applies as a plain ack, flag ignored,
+                    // loudly — a "final" below the exit frame proves the
+                    // consumer has NOT consumed the result.
+                    match self.exit_fence {
+                        Some(fence) if applied && acked_seq >= fence => {
+                            self.final_acked = true;
+                        }
+                        Some(fence) => warn!(
+                            generation,
+                            acked_seq,
+                            fence,
+                            applied,
+                            "final ack refused (wrong generation or below the terminal frame); \
+                             applied as a plain ack"
+                        ),
+                        None => {
+                            warn!(generation, acked_seq, "final ack before completion ignored");
+                        }
                     }
                 }
             }
@@ -609,11 +641,21 @@ impl Pump {
     }
 
     /// Runs [`Self::catch_up`], converting a pre-exit replay failure into the
-    /// typed terminal path (post-exit it is logged: the record already exists).
+    /// typed terminal path. Post-exit, a replay failure means the retained
+    /// frames are UNRECOVERABLE (spool IO/corruption) while the terminal
+    /// record survives — surfaced typed through the shared collection-failure
+    /// slot so status answers stop promising a replay that cannot come.
     fn drive_catch_up(&mut self) {
         if let Err(error) = self.catch_up() {
             if self.exited() {
-                warn!(%error, "post-exit replay failed; result remains queryable");
+                warn!(
+                    %error,
+                    "post-exit replay failed; retained frames unrecoverable — \
+                     the terminal record remains queryable and now carries the failure"
+                );
+                let _ = self
+                    .collection_failure
+                    .set(JobFailure::from_retention(&error));
             } else {
                 self.fail(JobFailure::from_retention(&error));
             }
@@ -904,6 +946,7 @@ mod tests {
                 },
             );
             let watermark = Arc::new(AtomicU64::new(0));
+            let collection_failure = Arc::new(OnceLock::new());
             let params = JobParams {
                 child,
                 stdin: self.stdin,
@@ -912,6 +955,7 @@ mod tests {
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,
                 watermark: watermark.clone(),
+                collection_failure: collection_failure.clone(),
             };
             let task = tokio::spawn(run_job(params, cmd_rx, hooks));
             TestJob {
@@ -922,6 +966,7 @@ mod tests {
                 dir,
                 wait: self.wait,
                 watermark,
+                collection_failure,
             }
         }
     }
@@ -934,6 +979,7 @@ mod tests {
         dir: tempfile::TempDir,
         wait: Duration,
         watermark: Arc<AtomicU64>,
+        collection_failure: Arc<OnceLock<JobFailure>>,
     }
 
     impl TestJob {
@@ -1404,6 +1450,14 @@ mod tests {
         job.attach(1, 0, 1 << 20).await;
         job.no_frame_for(Duration::from_millis(250)).await;
 
+        // THE LOSS-PROOF PIN: the zombie ack moved NO retention floor — a
+        // current-generation re-attach from 0 replays frame 1 byte-intact.
+        job.attach(2, 0, 4096).await;
+        let replayed = job.next_frame().await;
+        assert_eq!(replayed.seq, 1, "zombie ack freed nothing; frame 1 replays");
+        assert_eq!(replayed, first, "replay is byte-identical");
+        job.no_frame_for(Duration::from_millis(150)).await; // window full again
+
         // The current generation's ack resumes the flow.
         job.ack(2, 1, 1 << 20).await;
         let resumed = job.next_frame().await;
@@ -1454,17 +1508,19 @@ mod tests {
 
     #[tokio::test]
     async fn retention_overflow_terminates_with_a_typed_exit() {
-        // 4 KiB memory cap, spooling disabled. Retention is RECORD-denominated
-        // (payload + a per-frame overhead constant), so the exact frame count
-        // before overflow is the engine's business — the pins here are the
-        // TYPED death, the in-order emitted-then-silent frame stream, and (via
-        // an Exit payload larger than the whole budget) the exit-not-
-        // retainable path. The consumer grants credit far beyond retention
-        // while never acking, so reads outrun frees — the OP_OVERFLOW path.
+        // Retention is RECORD-denominated (payload + RECORD_OVERHEAD_BYTES per
+        // frame, exported): size the memory cap for EXACTLY four 1 KiB data
+        // frames, spooling disabled. The consumer grants credit far beyond
+        // retention while never acking, so reads outrun frees — the typed
+        // OP_OVERFLOW path; an oversized Exit payload pins the exit-not-
+        // retainable edge on top.
+        use opengeni_agent_engine::retention::RECORD_OVERHEAD_BYTES;
+        let frame_cost = 1024 + RECORD_OVERHEAD_BYTES;
+        let memory_max = usize::try_from(4 * frame_cost).expect("fits");
         let mut job = job("while :; do head -c 1024 /dev/zero; done")
             .frame_bytes(1024)
             .retention(RetentionConfig {
-                memory_max_bytes: 4096,
+                memory_max_bytes: memory_max,
                 memory_max_frames: 64,
                 spool_max_bytes: 0,
                 spool_segment_bytes: 4096,
@@ -1476,7 +1532,11 @@ mod tests {
         let (exit_seq, exit) = job.wait_exit().await;
         match exit.outcome {
             JobOutcome::Failed(JobFailure::Overflow { retained_bytes }) => {
-                assert!(retained_bytes > 4096, "counters name the excess");
+                assert_eq!(
+                    retained_bytes,
+                    5 * frame_cost,
+                    "the exact refused-append counter, record-denominated"
+                );
             }
             other => panic!("expected typed overflow, got {other:?}"),
         }
@@ -1485,17 +1545,17 @@ mod tests {
             "retention is exhausted, so even the Exit frame cannot be retained"
         );
 
-        // The retainable frames were emitted in order; nothing follows the
-        // typed death.
-        let mut last_seq = 0;
-        while let Ok(Some(frame)) = timeout(Duration::from_millis(150), job.frames.recv()).await {
-            assert_eq!(frame.seq, last_seq + 1, "consecutive emission");
-            last_seq = frame.seq;
+        // Exactly the four retainable frames were emitted, in order; nothing
+        // follows the typed death.
+        for expected_seq in 1..=4 {
+            assert_eq!(job.next_frame().await.seq, expected_seq);
         }
-        assert!(last_seq >= 2, "several data frames flowed before the death");
+        job.no_frame_for(Duration::from_millis(150)).await;
 
-        // The result is still collectable/finishable: a final ack ends the task.
-        job.final_ack(1, last_seq, 1 << 20).await;
+        // The result is still collectable/finishable: a final ack at the
+        // fence (= high watermark, since the exit frame was unretainable)
+        // ends the task.
+        job.final_ack(1, 4, 1 << 20).await;
         job.join().await;
     }
 
@@ -1505,6 +1565,73 @@ mod tests {
         job.commands = None; // the supervisor abandons the op
         let (_, exit) = job.wait_exit().await;
         assert_eq!(exit.outcome, JobOutcome::Cancelled);
+        job.join().await;
+    }
+
+    #[tokio::test]
+    async fn final_ack_below_the_exit_frame_is_refused_as_final() {
+        // PROTOCOL v1.1: `final=true` is honored only with acked_seq >=
+        // exit_seq — a "final" that does not cover the terminal frame proves
+        // the consumer has NOT consumed the result; it applies as a plain
+        // ack (loudly) and the pump keeps lingering.
+        let mut job = job("printf fenced").start();
+        let (exit_seq, _) = job.wait_exit().await;
+        let exit_seq = exit_seq.expect("retained"); // data 1, exit 2
+        assert_eq!(exit_seq, 2);
+
+        job.attach(1, 0, 1 << 20).await;
+        let _ = job.collect_until_exit().await;
+
+        // A final that only covers the data frame: refused as final.
+        job.final_ack(1, exit_seq - 1, 1 << 20).await;
+        // The pump must still be alive and serving (replay works).
+        job.attach(1, 0, 1 << 20).await;
+        let replay = job.collect_until_exit().await;
+        assert_eq!(replay.last().expect("exit").seq, exit_seq);
+
+        // A final at the fence ends the task.
+        job.final_ack(1, exit_seq, 1 << 20).await;
+        job.join().await;
+    }
+
+    #[tokio::test]
+    async fn post_exit_replay_failure_is_surfaced_typed_not_swallowed() {
+        // Force the retained frames onto the disk spool, complete the op,
+        // then destroy the spool behind the pump's back: the terminal record
+        // must survive, the collection failure must surface TYPED through the
+        // shared slot, and the op must still be finishable by a final ack at
+        // the fence (the consumer takes the record via status, not frames).
+        let mut job = job("head -c 4096 /dev/zero")
+            .frame_bytes(1024)
+            .retention(RetentionConfig {
+                memory_max_bytes: 128, // spill immediately
+                memory_max_frames: 2,
+                spool_max_bytes: 1024 * 1024,
+                spool_segment_bytes: 4096,
+            })
+            .start();
+        let (exit_seq, exit) = job.wait_exit().await;
+        assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
+        let exit_seq = exit_seq.expect("retained");
+
+        // Destroy the spool segments out from under the retention log.
+        std::fs::remove_dir_all(job.dir.path().join("spool")).expect("spool dir exists");
+
+        // Attach: the replay read hits the missing segments.
+        job.attach(1, 0, 1 << 20).await;
+        for _ in 0..200 {
+            if job.collection_failure.get().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        match job.collection_failure.get() {
+            Some(JobFailure::SpoolIo { .. }) => {}
+            other => panic!("expected a typed SpoolIo collection failure, got {other:?}"),
+        }
+
+        // The op remains finishable: a final ack at the fence ends the task.
+        job.final_ack(1, exit_seq, 1 << 20).await;
         job.join().await;
     }
 

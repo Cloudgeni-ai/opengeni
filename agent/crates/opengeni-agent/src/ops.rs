@@ -374,14 +374,35 @@ fn failure_fields(
     }
 }
 
-/// Builds the `OpStatus` for a phase + (optional) live handles.
+/// Builds the `OpStatus` for a phase + (optional) live handles. A recorded
+/// COLLECTION failure (post-exit replay unrecoverable) rides the embedded
+/// `OpExit`'s failure fields with `phase: post_exit_replay`, so a consumer
+/// re-attaching for frames learns from the status reply to stop waiting —
+/// the terminal record (digests, totals, code) is still authoritative.
 fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v1::OpStatus {
     let next_seq = handles.map_or(0, |h| h.watermark.load(Ordering::Relaxed) + 1);
     let (state, exit, lost) = match answer {
         QueryAnswer::Running { .. } => (v1::OpState::Running, None, None),
         QueryAnswer::Complete { .. } => (
             v1::OpState::Complete,
-            handles.and_then(|h| h.exit.get()).map(wire_exit),
+            handles.and_then(|h| h.exit.get()).map(|record| {
+                let mut exit = wire_exit(record);
+                if let Some(failure) = handles.and_then(|h| h.collection_failure.get()) {
+                    let (code, mut detail) = failure_fields(failure);
+                    detail.insert("phase".to_string(), "post_exit_replay".to_string());
+                    if exit.failure_code.is_empty() {
+                        exit.failure_code = code.to_string();
+                        exit.failure_detail = detail;
+                    } else {
+                        // The op ALSO died typed in its own right; keep that
+                        // primary and annotate the collection loss.
+                        exit.failure_detail
+                            .insert("collection_failure".to_string(), code.to_string());
+                        exit.failure_detail.extend(detail);
+                    }
+                }
+                exit
+            }),
             None,
         ),
         QueryAnswer::Lost(reason) => (

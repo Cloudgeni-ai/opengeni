@@ -116,6 +116,9 @@ pub struct OpHandles {
     /// The send window granted at OpStart — the fallback for an `OpAttach`
     /// that carries `window_bytes: 0` (reuse the original grant).
     pub window_bytes: Arc<AtomicU64>,
+    /// Set (once) if post-exit replay failed: the terminal record survives,
+    /// the retained frames do not — status answers carry it typed.
+    pub collection_failure: Arc<OnceLock<crate::job::JobFailure>>,
 }
 
 /// Outcome of [`Engine::start_job`].
@@ -466,6 +469,7 @@ impl Engine {
                 ..JobConfig::default()
             },
             watermark: handles.watermark.clone(),
+            collection_failure: handles.collection_failure.clone(),
         };
 
         // Engine lifecycle bookkeeping runs FIRST at exit (stash the record,
@@ -525,6 +529,13 @@ impl Engine {
             return false;
         };
         sender.try_send(cmd).is_ok()
+    }
+
+    /// Live jobs with a routable mailbox (running + lingering-completed) —
+    /// the heartbeat's routes-map telemetry.
+    #[must_use]
+    pub fn live_ops(&self) -> usize {
+        self.routes.lock().expect("routes lock").len()
     }
 
     /// Broadcasts `Detach` to every live job — a link lost its connection.

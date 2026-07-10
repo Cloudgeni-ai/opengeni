@@ -1353,6 +1353,11 @@ export interface AdmissionTelemetry {
   lightQueued: string;
   heavyRunning: string;
   heavyQueued: string;
+  /**
+   * Jobs with a live mailbox (running + completed-retained awaiting final
+   * ack) — the op-engine's routing-table size.
+   */
+  liveOps: string;
 }
 
 export interface HeartbeatAck {
@@ -6945,7 +6950,7 @@ export const HostCapacitySample: MessageFns<HostCapacitySample> = {
 };
 
 function createBaseAdmissionTelemetry(): AdmissionTelemetry {
-  return { lightRunning: "0", lightQueued: "0", heavyRunning: "0", heavyQueued: "0" };
+  return { lightRunning: "0", lightQueued: "0", heavyRunning: "0", heavyQueued: "0", liveOps: "0" };
 }
 
 export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
@@ -6961,6 +6966,9 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     }
     if (message.heavyQueued !== "0") {
       writer.uint32(32).uint64(message.heavyQueued);
+    }
+    if (message.liveOps !== "0") {
+      writer.uint32(40).uint64(message.liveOps);
     }
     return writer;
   },
@@ -7004,6 +7012,14 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
           message.heavyQueued = reader.uint64().toString();
           continue;
         }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.liveOps = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7035,6 +7051,11 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
         : isSet(object.heavy_queued)
         ? globalThis.String(object.heavy_queued)
         : "0",
+      liveOps: isSet(object.liveOps)
+        ? globalThis.String(object.liveOps)
+        : isSet(object.live_ops)
+        ? globalThis.String(object.live_ops)
+        : "0",
     };
   },
 
@@ -7052,6 +7073,9 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     if (message.heavyQueued !== "0") {
       obj.heavyQueued = message.heavyQueued;
     }
+    if (message.liveOps !== "0") {
+      obj.liveOps = message.liveOps;
+    }
     return obj;
   },
 
@@ -7064,6 +7088,7 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     message.lightQueued = object.lightQueued ?? "0";
     message.heavyRunning = object.heavyRunning ?? "0";
     message.heavyQueued = object.heavyQueued ?? "0";
+    message.liveOps = object.liveOps ?? "0";
     return message;
   },
 };
