@@ -926,6 +926,14 @@ message OpAck {
   uint64 credit_bytes = 3;
   // The server has fully consumed the terminal frame → the runner may GC the op.
   bool final = 4;
+  // The consumer's attach generation (matches OpAttach.attach_generation; the
+  // consumer's Temporal attempt number). The runner honors this ack — its floor
+  // advance AND its credit grant — ONLY for the HIGHEST generation it has seen for
+  // the op; a lower-generation (zombie) ack is ignored. This must ride the wire
+  // (not be inferred from monotonic acked_seq alone) because credit_bytes is an
+  // ABSOLUTE window REPLACEMENT: a stale consumer's ack could otherwise shrink the
+  // live consumer's window (stall) or grant unintended credit (B2).
+  uint64 attach_generation = 5;
 }
 
 // =============================================================================

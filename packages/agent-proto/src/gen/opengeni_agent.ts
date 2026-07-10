@@ -1653,6 +1653,16 @@ export interface OpAck {
   creditBytes: string;
   /** The server has fully consumed the terminal frame → the runner may GC the op. */
   final: boolean;
+  /**
+   * The consumer's attach generation (matches OpAttach.attach_generation; the
+   * consumer's Temporal attempt number). The runner honors this ack — its floor
+   * advance AND its credit grant — ONLY for the HIGHEST generation it has seen for
+   * the op; a lower-generation (zombie) ack is ignored. This must ride the wire
+   * (not be inferred from monotonic acked_seq alone) because credit_bytes is an
+   * ABSOLUTE window REPLACEMENT: a stale consumer's ack could otherwise shrink the
+   * live consumer's window (stall) or grant unintended credit (B2).
+   */
+  attachGeneration: string;
 }
 
 /**
@@ -9873,7 +9883,7 @@ export const OpProgress: MessageFns<OpProgress> = {
 };
 
 function createBaseOpAck(): OpAck {
-  return { opId: "", ackedSeq: "0", creditBytes: "0", final: false };
+  return { opId: "", ackedSeq: "0", creditBytes: "0", final: false, attachGeneration: "0" };
 }
 
 export const OpAck: MessageFns<OpAck> = {
@@ -9889,6 +9899,9 @@ export const OpAck: MessageFns<OpAck> = {
     }
     if (message.final !== false) {
       writer.uint32(32).bool(message.final);
+    }
+    if (message.attachGeneration !== "0") {
+      writer.uint32(40).uint64(message.attachGeneration);
     }
     return writer;
   },
@@ -9932,6 +9945,14 @@ export const OpAck: MessageFns<OpAck> = {
           message.final = reader.bool();
           continue;
         }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.attachGeneration = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9959,6 +9980,11 @@ export const OpAck: MessageFns<OpAck> = {
         ? globalThis.String(object.credit_bytes)
         : "0",
       final: isSet(object.final) ? globalThis.Boolean(object.final) : false,
+      attachGeneration: isSet(object.attachGeneration)
+        ? globalThis.String(object.attachGeneration)
+        : isSet(object.attach_generation)
+        ? globalThis.String(object.attach_generation)
+        : "0",
     };
   },
 
@@ -9976,6 +10002,9 @@ export const OpAck: MessageFns<OpAck> = {
     if (message.final !== false) {
       obj.final = message.final;
     }
+    if (message.attachGeneration !== "0") {
+      obj.attachGeneration = message.attachGeneration;
+    }
     return obj;
   },
 
@@ -9988,6 +10017,7 @@ export const OpAck: MessageFns<OpAck> = {
     message.ackedSeq = object.ackedSeq ?? "0";
     message.creditBytes = object.creditBytes ?? "0";
     message.final = object.final ?? false;
+    message.attachGeneration = object.attachGeneration ?? "0";
     return message;
   },
 };
