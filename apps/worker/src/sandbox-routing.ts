@@ -298,6 +298,25 @@ export function wrapLazyTurnBoxWithRouting(
   };
 }
 
+export type SelfhostedTurnSessionArgs = {
+  workspaceId: string;
+  /** The target machine's enrollment id == the agent subject id. */
+  agentId: string;
+  /** Whether the target machine advertised Capabilities.op_stream in its latest
+   *  Hello. The runtime-side transport gate must still require the server flag. */
+  opStream: boolean;
+  /** The active pointer's epoch — the control-op fence echoed to the agent. */
+  epoch: number;
+  /** The run's declared sandbox environment (the SAME object fed to buildAgent +
+   *  the manifest), threaded so the SDK's per-turn provided-session env delta is
+   *  empty. */
+  environment: Record<string, string>;
+  /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
+  workingDir: string | null;
+};
+
+type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream">;
+
 /**
  * Stage D machine-primary establish: bind the live SelfhostedSession for a turn
  * whose ACTIVE sandbox is a connected machine — WITHOUT establishing or leasing a
@@ -315,19 +334,7 @@ export function wrapLazyTurnBoxWithRouting(
  */
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
-  args: {
-    workspaceId: string;
-    /** The target machine's enrollment id == the agent subject id. */
-    agentId: string;
-    /** The active pointer's epoch — the control-op fence echoed to the agent. */
-    epoch: number;
-    /** The run's declared sandbox environment (the SAME object fed to buildAgent +
-     *  the manifest), threaded so the SDK's per-turn provided-session env delta is
-     *  empty. */
-    environment: Record<string, string>;
-    /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
-    workingDir: string | null;
-  },
+  args: SelfhostedTurnSessionArgs | LegacySelfhostedTurnSessionArgs,
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
