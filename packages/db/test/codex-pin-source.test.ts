@@ -130,6 +130,31 @@ describe("codex_pin_source (AM-2)", () => {
     expect(state?.pinSource).toBe("manual");
   });
 
+  test("migration 0051 backfill stamps a pre-existing (unlabeled) pin 'manual', leaving policy/unpinned rows untouched", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const account = await seedCodexAccount(ws);
+    // Simulate the PRE-migration state: a pinned session with a NULL source (the only
+    // pin writer before this PR was the manual API), a policy-pinned session, and an
+    // unpinned session — then replay the EXACT backfill statement from 0051.
+    const legacyPinned = await seedSession(ws);
+    const policyPinned = await seedSession(ws);
+    const unpinned = await seedSession(ws);
+    await admin`update sessions set codex_pinned_credential_id = ${account}, codex_pin_source = null where id = ${legacyPinned}`;
+    await admin`update sessions set codex_pinned_credential_id = ${account}, codex_pin_source = 'policy' where id = ${policyPinned}`;
+    await admin`update sessions
+      set codex_pin_source = 'manual'
+      where codex_pinned_credential_id is not null and codex_pin_source is null`;
+    // The legacy unlabeled pin is now manual (sacred); policy + unpinned are untouched.
+    expect((await getSessionCodexState(db, ws.workspaceId, legacyPinned))?.pinSource).toBe(
+      "manual",
+    );
+    expect((await getSessionCodexState(db, ws.workspaceId, policyPinned))?.pinSource).toBe(
+      "policy",
+    );
+    expect((await getSessionCodexState(db, ws.workspaceId, unpinned))?.pinSource).toBeNull();
+  });
+
   test("the CHECK constraint exists and rejects an unknown source value", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

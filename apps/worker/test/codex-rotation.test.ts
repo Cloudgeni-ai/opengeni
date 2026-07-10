@@ -843,6 +843,23 @@ describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningf
     }
   });
 
+  test("DEFENSE-IN-DEPTH: a pin with NULL source is treated as MANUAL under every strategy (never policy-moved)", () => {
+    // A pre-backfill row, or any pin written without a label, must fail safe toward
+    // sacredness — an unlabeled pin is never re-sharded, only an explicit 'policy' pin is.
+    for (const strategy of ALL) {
+      for (const rotationEnabled of [true, false]) {
+        expect(
+          classifyCodexPin({
+            pinnedCredentialId: "acct-1",
+            pinSource: null,
+            strategy,
+            rotationEnabled,
+          }),
+        ).toBe("manual");
+      }
+    }
+  });
+
   test("a leftover POLICY pin under drain_then_next → clearStale (ignore + clear, follow strategy)", () => {
     expect(
       classifyCodexPin({

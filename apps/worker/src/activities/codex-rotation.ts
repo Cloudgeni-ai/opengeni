@@ -40,8 +40,12 @@ export function classifyCodexPin(args: {
   const { pinnedCredentialId, pinSource, strategy, rotationEnabled } = args;
   const pinned = pinnedCredentialId != null;
   // A manual pin is sacrosanct under every strategy — checked FIRST so sharded never
-  // touches it.
-  if (pinned && pinSource === "manual") {
+  // touches it. DEFENSE-IN-DEPTH (fail-safe toward sacredness): a pin whose source is
+  // anything OTHER than the explicit 'policy' — including a NULL source (a pre-backfill
+  // row, or any pin an unforeseen path wrote without labeling it) — is treated as
+  // MANUAL. An unlabeled pin must NEVER be policy-moved; only an explicitly-'policy' pin
+  // is re-shardable.
+  if (pinned && pinSource !== "policy") {
     return "manual";
   }
   const shardedActive = rotationEnabled && strategy === "sharded";
