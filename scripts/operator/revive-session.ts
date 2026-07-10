@@ -259,6 +259,20 @@ export async function runOperatorSessionRevival(
       return duplicateClientEventResult(input, preflight, racedEvent);
     }
     if (isConflict(error)) {
+      // The locked shared admission path checks for newly-active work before
+      // attempting the deterministic insert. Two identical callers can both
+      // pass the unlocked preflight, then the winner queues the session while
+      // the loser waits for the lock. In that case the loser receives 409
+      // rather than 23505, so give the exact client-event lookup precedence
+      // over generic busy-work classification.
+      const racedEvent = await deps.getEventByClientEventId(
+        input.workspaceId,
+        input.sessionId,
+        input.clientEventId,
+      );
+      if (racedEvent) {
+        return duplicateClientEventResult(input, preflight, racedEvent);
+      }
       const [currentSession, currentPendingTurns] = await Promise.all([
         deps.getSession(input.workspaceId, input.sessionId),
         deps.listPendingTurns(input.workspaceId, input.sessionId),

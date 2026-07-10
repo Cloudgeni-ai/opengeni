@@ -149,6 +149,61 @@ describe("operator session revival", () => {
     });
   });
 
+  test("a concurrent identical apply returns the winner event instead of conflicting work", async () => {
+    let currentSession = session("idle");
+    let currentEvent: SessionEvent | null = null;
+    let currentTurns: SessionTurn[] = [];
+    let acceptCalls = 0;
+    let durableWrites = 0;
+    let eventReads = 0;
+    const secondAcceptEntered = deferred<void>();
+    const winnerCommitted = deferred<void>();
+    const deps: OperatorSessionRevivalDependencies = {
+      getSession: async () => currentSession,
+      getEventByClientEventId: async () => {
+        eventReads += 1;
+        return currentEvent;
+      },
+      listPendingTurns: async () => currentTurns,
+      acceptUserMessage: async () => {
+        acceptCalls += 1;
+        if (acceptCalls === 1) {
+          await secondAcceptEntered.promise;
+          durableWrites += 1;
+          currentEvent = userMessageEvent();
+          currentTurns = [turn("queued")];
+          currentSession = session("queued");
+          winnerCommitted.resolve();
+          return { accepted: currentEvent, turn: currentTurns[0] as SessionTurn };
+        }
+        secondAcceptEntered.resolve();
+        await winnerCommitted.promise;
+        throw Object.assign(new Error("redacted"), { status: 409 });
+      },
+    };
+
+    const results = await Promise.all([
+      runOperatorSessionRevival(deps, applyInput()),
+      runOperatorSessionRevival(deps, applyInput()),
+    ]);
+
+    expect(results).toContainEqual(
+      expect.objectContaining({ status: "accepted", eventId, turnId }),
+    );
+    expect(results).toContainEqual(
+      expect.objectContaining({
+        status: "refused",
+        refusal: "duplicate_client_event",
+        eventId,
+      }),
+    );
+    expect(results).not.toContainEqual(expect.objectContaining({ refusal: "conflicting_work" }));
+    expect(acceptCalls).toBe(2);
+    expect(durableWrites).toBe(1);
+    expect(eventReads).toBe(3);
+    expect(currentTurns).toHaveLength(1);
+  });
+
   test("apply requires an explicit model and reasoning effort", () => {
     const { model: _model, ...withoutModel } = applyInput();
     expect(() => validateOperatorSessionRevivalInput(withoutModel)).toThrow();
@@ -296,4 +351,15 @@ function userMessageEvent(): SessionEvent {
     clientEventId,
     turnId: null,
   };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
 }
