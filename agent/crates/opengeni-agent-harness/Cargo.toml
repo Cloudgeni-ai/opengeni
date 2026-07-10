@@ -1,0 +1,63 @@
+[package]
+name = "opengeni-agent-harness"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "Dev-only deterministic load/chaos harness for the opengeni-agent control plane"
+
+[[bin]]
+name = "og-agent-harness"
+path = "src/main.rs"
+
+[dependencies]
+# The wire types — the harness speaks the exact prost ControlRequest/Response the
+# control plane speaks, so it exercises the REAL protocol seam.
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+prost.workspace = true
+
+# Control-plane transport. Same client version the agent dials with.
+async-nats.workspace = true
+
+# Async runtime: spawn the agent + nats children, drive concurrent ops, sample.
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "signal",
+    "time",
+    "sync",
+    "fs",
+    "io-util",
+] }
+futures.workspace = true
+
+# Deterministic op mixes (seeded StdRng) + reproducible request ids.
+rand.workspace = true
+
+# POSIX signals to the child process groups (SIGSTOP/SIGCONT/SIGKILL/SIGTERM) and
+# process-group cleanup — the SAFE nix binding (no unsafe of our own).
+nix = { workspace = true, features = ["signal", "process"] }
+
+# Report shape + config echo.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Latency distributions (p50/p90/p95/p99/max) without storing every sample.
+hdrhistogram = "7"
+
+# Disposable per-agent config dirs + scratch work dirs.
+tempfile.workspace = true
+
+# CLI surface (scenario subcommands).
+clap.workspace = true
+
+# Structured status logs for the harness itself.
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[lints]
+workspace = true
