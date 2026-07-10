@@ -153,9 +153,11 @@ import {
 } from "../sandbox-routing";
 import {
   makeMachineOpObserver,
+  modelCallAccountContext,
   recordBatchFlush,
   recordContextCompaction,
   recordCreditMicros,
+  recordModelCacheTokens,
   recordModelInputTokens,
   recordSessionEventAppendLatency,
   recordSessionEventPublishLatency,
@@ -418,6 +420,11 @@ export async function emitModelCallUsage(input: {
   model: string;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
+  // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
+  // durable event). The opaque serving-account tag and whether it changed since
+  // the session's previous call — the account-switch hypothesis for cache misses.
+  servingAccountHash?: string;
+  accountChangedFromPrevCall?: boolean;
 }): Promise<void> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -441,6 +448,12 @@ export async function emitModelCallUsage(input: {
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
       reasoningTokens: telemetry.reasoningTokens,
+      ...(input.servingAccountHash !== undefined
+        ? { servingAccountHash: input.servingAccountHash }
+        : {}),
+      ...(input.accountChangedFromPrevCall !== undefined
+        ? { accountChangedFromPrevCall: input.accountChangedFromPrevCall }
+        : {}),
     });
   } catch {
     // Usage observability is best-effort.
@@ -1323,6 +1336,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // The Codex account this turn runs on (pin > workspace active), resolved once
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
+    // The session's Codex credential BEFORE this turn resolved its own — captured
+    // before recordSessionActiveCodexCredential overwrites the durable pointer, so
+    // a per-call usage log can report whether the serving account CHANGED since the
+    // session's previous call (the prompt-cache account-switch hypothesis).
+    let priorSessionCodexCredentialId: string | null = null;
     // Multi-account P4 (Part A): the latest usage-header snapshot scraped FOR FREE
     // off this turn's `/codex/responses` responses (a turn issues many model calls;
     // latest wins). Flushed ONCE into the P2 usage cache for the serving account in
@@ -1494,6 +1512,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ]);
         const connectedIds = new Set(accounts.map((account) => account.id));
         const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
+        // Snapshot the session's prior serving credential BEFORE the resolve/overwrite
+        // below, for the per-call account-switch usage log (prompt-cache hypothesis).
+        priorSessionCodexCredentialId = sessionCodex?.lastCredentialId ?? null;
         // The off-path / P1 default: today's workspace active pointer. Untouched
         // when rotation is off or the session is pinned (byte-identical to P1).
         let chosenActive = rotation?.activeCredentialId ?? null;
@@ -2706,6 +2727,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 dispatchId,
                 positionalKey: `response-${responseUsageCount}`,
               });
+              // Within a turn the serving credential is fixed, so a switch can only
+              // surface on the turn's FIRST model call (vs the session's prior).
+              const responseAccountCtx = modelCallAccountContext({
+                servingCredentialId: effectiveCodexCredentialId,
+                priorSessionCredentialId: priorSessionCodexCredentialId,
+                isFirstCallOfTurn: responseUsageCount === 1,
+              });
               await emitModelCallUsage({
                 observability,
                 publish: null,
@@ -2718,6 +2746,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 sourceKey: responseSourceKey,
                 usage: responseUsage,
+                servingAccountHash: responseAccountCtx.servingAccountHash,
+                accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
               });
               modelUsageEventContext = {
                 accountId: input.accountId,
@@ -2742,6 +2772,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   console.error("persist last_input_tokens failed (non-fatal)", error),
                 );
               }
+              // Prompt-cache efficiency for this response — same usage frame as the
+              // input-token accounting above, so the two are always consistent.
+              recordModelCacheTokens(observability, streamProvider, {
+                cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
+                promptTokens: responseUsage.usage?.inputTokens,
+              });
               await recordModelUsageAndDebitCredits(settings, db, {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
@@ -2830,6 +2866,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sourceKey: aggregateSourceKey,
             observability,
           });
+          // The single aggregate frame is this turn's only model-usage record, so
+          // it is the first (account-switch surfaces here just like a first response).
+          const aggregateAccountCtx = modelCallAccountContext({
+            servingCredentialId: effectiveCodexCredentialId,
+            priorSessionCredentialId: priorSessionCodexCredentialId,
+            isFirstCallOfTurn: true,
+          });
+          recordModelCacheTokens(observability, streamProvider, {
+            cachedTokens: modelCallUsageTelemetry(
+              stream.state.usage as Parameters<typeof modelCallUsageTelemetry>[0],
+            ).cachedTokens,
+            promptTokens: (stream.state.usage as { inputTokens?: unknown } | undefined)
+              ?.inputTokens as number | undefined,
+          });
           await emitModelCallUsage({
             observability,
             publish,
@@ -2842,6 +2892,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: turn.model,
             sourceKey: aggregateSourceKey,
             usage: { usage: stream.state.usage },
+            servingAccountHash: aggregateAccountCtx.servingAccountHash,
+            accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
           });
         }
         if (lastInputTokensObserved !== null) {
@@ -4185,6 +4237,13 @@ export async function recordModelUsageAndDebitCredits(
         inputTokens,
         outputTokens,
         totalTokens,
+        // Additive: the prompt-cache slice of this call's input tokens, so the
+        // per-call debit record carries cache efficiency alongside the token
+        // counts. 0 when the provider did not report cached tokens.
+        cachedTokens: positiveInt(
+          modelCallUsageTelemetry(input.usage as Parameters<typeof modelCallUsageTelemetry>[0])
+            .cachedTokens,
+        ),
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);

@@ -92,6 +92,25 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni contexts are running hot but compaction has not fired in 30m
+        - alert: OpenGeniCodexPromptCacheHitRatioLow
+          # The codex-subscription prompt cache is doing little work: median per-call
+          # cache-hit ratio below 40% over 30m while codex calls are actually flowing.
+          # A sustained drop is the signature of prompt-cache thrash (e.g. an account
+          # rotation cold-starting the provider's per-account cache).
+          # `or vector(0)` on the traffic gate is load-bearing (the #367 lesson): with
+          # no codex calls yet the ratio series has never been created, so a bare
+          # `_count` rate is an EMPTY vector — the fallback forces a real 0 so the
+          # conjunction is well-formed and the alert simply stays quiet on no traffic.
+          expr: |
+            histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{provider="codex-subscription"}[30m]))) < 0.4
+            and on()
+            (sum(rate(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni codex prompt-cache hit ratio p50 below 40% over 30m
+            description: The codex-subscription prompt cache is serving under 40% of prompt tokens from cache (median call) for 30m. Suspect prompt-cache thrash — an account rotation cold-starts the provider's per-account cache. Cross-check the per-call usage logs' accountChangedFromPrevCall against cachedTokens.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           expr: sum(rate(opengeni_machine_op_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1) > 0.1

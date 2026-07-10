@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
@@ -573,4 +574,105 @@ export function recordContextCompaction(observability: Observability, trigger: s
     help: "Total context compactions performed, by trigger.",
     labels: { trigger },
   });
+}
+
+// ── Prompt-cache efficiency ─────────────────────────────────────────────────
+// Per model-call prompt-cache signal, provider-labelled only (bounded
+// cardinality — never a session id or account). `cached_tokens` is the slice of
+// the prompt the provider served from its prompt cache; the ratio cached/prompt
+// is the efficiency of that call. The account-switch hypothesis (a codex account
+// rotation cold-starts the provider's per-account prompt cache) is tested from
+// the per-call STRUCTURED LOG below — the account id is unbounded, so it is
+// hashed into a log field and NEVER a Prometheus label.
+
+// The hit ratio lives in [0, 1]; bucket tighter around the alerting threshold so
+// a p50 near 40% resolves. The default duration buckets (to 3600) would collapse
+// every ratio into the first bucket.
+const MODEL_CACHE_HIT_RATIO_BUCKETS = [
+  0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99, 1,
+];
+
+/**
+ * Prompt-cache efficiency of one model response, by provider. Reads from the SAME
+ * usage frame that feeds input-token accounting, so the two are always consistent:
+ *   - `opengeni_model_cached_tokens_total{provider}` — cumulative prompt tokens the
+ *     provider served from cache. Advanced only when >0, so a provider that never
+ *     reports cached tokens contributes nothing rather than phantom zero-increments.
+ *   - `opengeni_model_cache_hit_ratio{provider}` — cached/prompt for the call,
+ *     observed whenever prompt tokens are known (>0). A call whose provider does NOT
+ *     report cached_tokens records a real 0 here — "we saw a call and the cache did
+ *     nothing" is exactly the signal the alert watches, so it must not be swallowed.
+ * Absent/zero/non-finite `cachedTokens` (providers that don't report it) is safe: no
+ * counter increment, ratio 0. A call with no prompt tokens has no ratio (skipped).
+ */
+export function recordModelCacheTokens(
+  observability: Observability,
+  provider: string,
+  input: { cachedTokens: number | null | undefined; promptTokens: number | null | undefined },
+): void {
+  const cached = nonNegativeTokenCount(input.cachedTokens);
+  const prompt = nonNegativeTokenCount(input.promptTokens);
+  if (cached > 0) {
+    observability.incrementCounter({
+      name: "opengeni_model_cached_tokens_total",
+      help: "Total prompt tokens served from the provider's prompt cache, by provider.",
+      labels: { provider },
+      amount: cached,
+    });
+  }
+  if (prompt > 0) {
+    observability.observeHistogram({
+      name: "opengeni_model_cache_hit_ratio",
+      help: "Per-call prompt-cache hit ratio (cached/prompt tokens) by provider.",
+      buckets: MODEL_CACHE_HIT_RATIO_BUCKETS,
+      labels: { provider },
+      // Clamp to [0, 1]: a provider that (rarely) reports cached >= prompt must
+      // not skew the histogram past 1.0.
+      value: Math.min(1, cached / prompt),
+    });
+  }
+}
+
+function nonNegativeTokenCount(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * An opaque, stable, non-reversible tag for a codex credential (account) — the
+ * per-call log dimension the account-switch hypothesis correlates against. It is
+ * a hash of the NON-SECRET credential ROW id (never a token/bearer), truncated so
+ * it is short in logs while still distinguishing a handful of accounts without
+ * collision. A null/absent credential (non-codex turn, no active account) tags as
+ * "none" so the field is always present and never leaks an id verbatim.
+ */
+export function stableAccountHash(credentialId: string | null | undefined): string {
+  if (!credentialId) {
+    return "none";
+  }
+  return createHash("sha256").update(credentialId).digest("hex").slice(0, 12);
+}
+
+/**
+ * The per-call account dimensions for the usage log: the opaque serving-account
+ * tag and whether that account CHANGED versus the session's previous call. Within
+ * one turn the serving credential is fixed, so a switch can only surface on the
+ * turn's FIRST call (compared against the session's durably-recorded prior
+ * credential); later calls in the same turn report `false`. A switch is reported
+ * only when there was a KNOWN prior account that differs — a session's very first
+ * call (no prior) is a cold start, not a switch.
+ */
+export function modelCallAccountContext(input: {
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  isFirstCallOfTurn: boolean;
+}): { servingAccountHash: string; accountChangedFromPrevCall: boolean } {
+  const accountChangedFromPrevCall =
+    input.isFirstCallOfTurn &&
+    input.servingCredentialId !== null &&
+    input.priorSessionCredentialId !== null &&
+    input.priorSessionCredentialId !== input.servingCredentialId;
+  return {
+    servingAccountHash: stableAccountHash(input.servingCredentialId),
+    accountChangedFromPrevCall,
+  };
 }
