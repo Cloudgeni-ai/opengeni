@@ -1,0 +1,49 @@
+name: Desktop image e2e
+
+# The desktop OCI image build + stack assertions live in
+# apps/worker/test/desktop-image.e2e.ts. That test is intentionally excluded
+# from the default `bun test` / PR unit job (it builds the full desktop image —
+# minutes of Docker work). This workflow keeps it running automatically where it
+# matters: on PRs that touch the desktop image context, and weekly as a backstop
+# so the Dockerfile can't silently rot between such PRs.
+on:
+  pull_request:
+    paths:
+      - "docker/desktop.Dockerfile"
+      - "docker/desktop/**"
+      - "apps/worker/test/desktop-image.e2e.ts"
+      - ".github/workflows/desktop-e2e.yml"
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC — weekly backstop
+  workflow_dispatch:
+
+jobs:
+  desktop-image:
+    name: Desktop image build + stack assertions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Builds docker/desktop.Dockerfile, runs the container, and asserts the
+      # noVNC / websockify / real-Chrome / stack-up invariants. The gated
+      # live-Modal half stays skipped (no OPENGENI_P41_LIVE_MODAL). Docker is
+      # available on ubuntu-latest, so dockerAvailable() is true here.
+      - name: Desktop image e2e
+        run: bun test --timeout 2100000 ./apps/worker/test/desktop-image.e2e.ts

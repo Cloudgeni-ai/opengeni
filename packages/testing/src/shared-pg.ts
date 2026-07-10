@@ -48,6 +48,13 @@ const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // gets a fully-migrated + app-granted database in ~100ms instead of replaying
 // the whole 55-migration chain (seconds) per file. Built exactly once per
 // container (lock-guarded); `datistemplate=true` is the "ready" sentinel.
+//
+// INVARIANT: after its one-time build the template is NEVER connected to or
+// mutated again — every test file reads/writes only its own clone. This is
+// load-bearing: `CREATE DATABASE ... TEMPLATE` requires that no session is
+// connected to the source during the copy, so keeping the template quiescent
+// is what lets concurrent clones proceed (they serialize on the source but do
+// not error) and guarantees every clone is byte-identical to the migrated schema.
 const TEMPLATE_DB = "og_test_template";
 
 const STATE_DIR = join(tmpdir(), "opengeni-shared-pg");
@@ -226,7 +233,9 @@ async function ensureTemplateBuilt(): Promise<void> {
   // template also lets the subsequent `CREATE DATABASE ... TEMPLATE` proceed.
   const marker = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
-    await marker.unsafe(`UPDATE pg_database SET datistemplate = true WHERE datname = '${TEMPLATE_DB}'`);
+    await marker.unsafe(
+      `UPDATE pg_database SET datistemplate = true WHERE datname = '${TEMPLATE_DB}'`,
+    );
   } finally {
     await marker.end().catch(() => undefined);
   }
@@ -345,7 +354,10 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
-        if (/being accessed by other users|source database/i.test(message) && Date.now() < deadline) {
+        if (
+          /being accessed by other users|source database/i.test(message) &&
+          Date.now() < deadline
+        ) {
           await Bun.sleep(50 + Math.random() * 100);
           continue;
         }
