@@ -653,11 +653,9 @@ impl Harness {
             check: "a clean SIGTERM emits a GoingOffline event (immediate lease-offline, §23.0)".to_string(),
             pass: going_offline,
             detail: format!(
-                "going_offline observed={going_offline}. FINDING: it is NOT emitted during an active connection — \
-                 the supervise loop's biased outer `shutdown.notified()` branch returns before \
-                 serve_connection_generation can announce (agent logs 'clean shutdown requested before/between \
-                 connections', never 'announced going-offline'); the lease then waits on heartbeat dead-detection \
-                 instead of flipping offline immediately"
+                "going_offline observed={going_offline}. A miss means the supervise loop exited before \
+                 serve_connection_generation could announce (the pre-fix shutdown race): the lease then waits \
+                 on heartbeat dead-detection instead of flipping offline immediately (§23.0)."
             ),
         });
         verdicts.push(Verdict {
