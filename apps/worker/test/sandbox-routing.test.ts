@@ -311,13 +311,13 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     });
     expect(stranded.swapped).toBe(true);
     const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
-    const record = await getSandbox(db, workspaceId, pointer.activeSandboxId!);
 
     const events: Array<{ type: string; payload: unknown }> = [];
     const result = await reconcileActiveSandboxPointer(
       db,
       { accountId, workspaceId, sessionId: session.id },
-      { pointer, record },
+      pointer,
+      (id) => getSandbox(db, workspaceId, id),
       async (evs) => {
         events.push(...evs);
       },
@@ -388,7 +388,6 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       expectedEpoch: 0,
     });
     const stalePointer = (await readActiveSandbox(db, workspaceId, session.id))!;
-    const staleRecord = await getSandbox(db, workspaceId, stalePointer.activeSandboxId!);
     expect(stalePointer.activeEpoch).toBe(1);
 
     // ...but a CONCURRENT user swap moves the real pointer to the enrolled machine at a
@@ -407,7 +406,8 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     const result = await reconcileActiveSandboxPointer(
       db,
       { accountId, workspaceId, sessionId: session.id },
-      { pointer: stalePointer, record: staleRecord },
+      stalePointer,
+      (id) => getSandbox(db, workspaceId, id),
       async (evs) => {
         events.push(...evs);
       },
@@ -422,6 +422,84 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
     expect(persisted.activeSandboxId).toBe(machine.id);
     expect(persisted.activeEpoch).toBe(2);
+  }, 60_000);
+
+  // FAIL-OPEN on a transient lookup failure (issue #341 review / Bugbot): a throwing
+  // record lookup must NEVER be read as "row absent" and clear a (possibly healthy)
+  // user-chosen pointer. The SAME stranded pointer that reconciles cleanly when the
+  // lookup succeeds must be left UNTOUCHED (no CAS, no event) when the lookup throws.
+  test("a transient record-lookup failure never mutates the pointer (fail-open to pre-reconcile behavior)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("transient");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    // A stranded Modal-sibling pointer that WOULD reconcile if the lookup succeeded.
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: sibling.id,
+      expectedEpoch: 0,
+    });
+    const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(pointer.activeSandboxId).toBe(sibling.id);
+
+    const events: Array<{ type: string }> = [];
+    let lookups = 0;
+    const result = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      pointer,
+      // A transient DB blip: the lookup THROWS (recovered by the time the CAS would run).
+      async () => {
+        lookups += 1;
+        throw new Error("transient db lookup failure");
+      },
+      async (evs) => {
+        events.push(...evs);
+      },
+    );
+
+    // Fail open: no reconciliation happened. The pointer is UNTOUCHED (still the sibling
+    // at the same epoch), record null (→ machinePrimary:false, group box), no event.
+    expect(lookups).toBe(1);
+    expect(result.pointer?.activeSandboxId).toBe(sibling.id);
+    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch);
+    expect(result.record).toBeNull();
+    expect(events).toHaveLength(0);
+    // Crucially the DB pointer/epoch never moved — no CAS ran on the transient failure.
+    const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(persisted.activeSandboxId).toBe(sibling.id);
+    expect(persisted.activeEpoch).toBe(pointer.activeEpoch);
+
+    // Sanity: the SAME pointer DOES reconcile once the lookup succeeds (proves the throw
+    // — not some other condition — is what suppressed the reset).
+    const events2: Array<{ type: string }> = [];
+    const recovered = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      pointer,
+      (id) => getSandbox(db, workspaceId, id),
+      async (evs) => {
+        events2.push(...evs);
+      },
+    );
+    expect(recovered.pointer?.activeSandboxId ?? null).toBeNull();
+    expect(events2).toHaveLength(1);
+    expect(events2[0]!.type).toBe("session.route.reconciled");
   }, 60_000);
 
   // BEHAVIORAL "pointer untouched" (issue #341 invariant A / Shape 1): a rejected

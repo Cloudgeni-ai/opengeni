@@ -645,24 +645,38 @@ export type LoadedActivePointer = {
 };
 
 /**
- * TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2). Given the pointer + its
- * sandbox row loaded once at turn start, if the target is STRUCTURALLY unestablishable
- * ({@link pointerReconcileReason}) reset the pointer to the session HOME (null) under
- * the epoch fence, emit a VISIBLE `session.route.reconciled` event, and return the
- * reconciled pointer/record so the rest of the turn runs on home. NEVER a silent
- * downgrade. Bounded to ONE attempt: a lost CAS means a concurrent user swap won a
- * higher epoch, so re-read + honor it rather than clobber a newer, user-directed
- * pointer. The event publish is best-effort — a publish failure never fails the turn.
+ * TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2). If the persisted pointer's
+ * target is STRUCTURALLY unestablishable ({@link pointerReconcileReason}) reset the pointer
+ * to the session HOME (null) under the epoch fence, emit a VISIBLE `session.route.reconciled`
+ * event, and return the reconciled pointer/record so the rest of the turn runs on home. NEVER
+ * a silent downgrade. Bounded to ONE attempt: a lost CAS means a concurrent user swap won a
+ * higher epoch, so re-read + honor it rather than clobber a newer, user-directed pointer. The
+ * event publish is best-effort — a publish failure never fails the turn.
+ *
+ * FAIL-OPEN on a lookup failure (issue #341 review): the sandbox row is fetched HERE via the
+ * caller's NON-swallowing `loadRecord`, so a null decision means the row is genuinely absent,
+ * never a suppressed transient DB error. If `loadRecord` THROWS, reconciliation is skipped
+ * entirely this turn — the pointer is left UNTOUCHED (record null → the turn runs
+ * machinePrimary:false on the group box exactly as before reconcile existed), no CAS, no
+ * event — and the next turn retries. A TRANSIENT LOOKUP FAILURE MUST NEVER MUTATE THE POINTER.
  */
 export async function reconcileActiveSandboxPointer(
   db: ActivityServices["db"],
   ids: { accountId: string; workspaceId: string; sessionId: string },
-  loaded: LoadedActivePointer,
+  pointer: ActiveSandboxPointer | null,
+  loadRecord: (sandboxId: string) => Promise<SandboxRecord | null>,
   publish?: (events: Array<{ type: SessionEventType; payload: unknown }>) => Promise<void> | void,
 ): Promise<LoadedActivePointer> {
-  const { pointer, record } = loaded;
   if (!pointer?.activeSandboxId) {
-    return { pointer, record };
+    return { pointer, record: null };
+  }
+  // Re-fetch the row WITHOUT error swallowing. A throw here (a transient DB blip) is NOT
+  // "row absent": fail open — skip reconciliation, leave the pointer untouched.
+  let record: SandboxRecord | null;
+  try {
+    record = await loadRecord(pointer.activeSandboxId);
+  } catch {
+    return { pointer, record: null };
   }
   const reason = pointerReconcileReason(record);
   if (!reason) {
@@ -689,14 +703,21 @@ export async function reconcileActiveSandboxPointer(
     ).catch(() => undefined);
     return { pointer: reset.pointer, record: null };
   }
-  // The fence was lost: a concurrent higher-epoch swap won. Honor the newer pointer.
+  // The fence was lost: a concurrent higher-epoch swap won. Honor the newer pointer; its
+  // record is re-fetched fail-open too (a transient failure leaves record null, never a
+  // mutation — we already did not win the CAS).
   const reread = await readActiveSandbox(db, ids.workspaceId, ids.sessionId).catch(() => null);
   if (!reread) {
-    return { pointer, record };
+    return { pointer, record: null };
   }
-  const rereadRecord = reread.activeSandboxId
-    ? await getSandbox(db, ids.workspaceId, reread.activeSandboxId).catch(() => null)
-    : null;
+  let rereadRecord: SandboxRecord | null = null;
+  if (reread.activeSandboxId) {
+    try {
+      rereadRecord = await loadRecord(reread.activeSandboxId);
+    } catch {
+      rereadRecord = null;
+    }
+  }
   return { pointer: reread, record: rereadRecord };
 }
 
@@ -1782,30 +1803,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       let activeSandboxPointer = routingOn
         ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
         : null;
-      let activeSandboxRecord =
-        routingOn && activeSandboxPointer?.activeSandboxId
-          ? await getSandbox(db, input.workspaceId, activeSandboxPointer.activeSandboxId).catch(
-              () => null,
-            )
-          : null;
       // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
-      // pointer whose target is STRUCTURALLY unestablishable at turn start would
-      // strand EVERY op of this turn — reset it to the session HOME under the epoch
-      // fence + emit a visible event, honoring a concurrent higher-epoch swap. Reuses
-      // the pointer/record loaded above and returns the (possibly reset) values so the
-      // establish branch below reads them with no second query.
+      // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
+      // EVERY op of this turn — reset it to the session HOME under the epoch fence +
+      // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
+      // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
+      // then means the row is genuinely absent, never a suppressed transient DB error
+      // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
+      // reconcile fails open — pointer untouched, record null (machinePrimary:false),
+      // no event — and the establish branch below reads the returned values.
+      let activeSandboxRecord: SandboxRecord | null = null;
       if (routingOn) {
-        ({ pointer: activeSandboxPointer, record: activeSandboxRecord } =
-          await reconcileActiveSandboxPointer(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-            },
-            { pointer: activeSandboxPointer, record: activeSandboxRecord },
-            publish ?? undefined,
-          ));
+        const reconciled = await reconcileActiveSandboxPointer(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+          activeSandboxPointer,
+          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          publish ?? undefined,
+        );
+        activeSandboxPointer = reconciled.pointer;
+        activeSandboxRecord = reconciled.record;
       }
       const activeSandboxBackend = await resolveActiveSandboxBackend(
         routingOn,
