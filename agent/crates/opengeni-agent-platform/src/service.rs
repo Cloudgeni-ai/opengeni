@@ -137,6 +137,17 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
          # A clean stop sends SIGTERM so the agent emits its going-offline message.\n\
          KillSignal=SIGTERM\n\
          TimeoutStopSec=15\n\
+         # OOM fate isolation (issue #345). Delegate a cgroup subtree so the agent can\n\
+         # place each host exec in its own memory sub-cgroup (see cgroup.rs), keeping a\n\
+         # runaway command from making the heartbeat/control supervisor the OOM victim.\n\
+         # ManagedOOMPreference=avoid biases systemd-oomd away from selecting this unit\n\
+         # for a whole-unit kill; MemoryHigh throttles the unit under sustained\n\
+         # pressure (and turns on the memory accounting the delegated sub-cgroups need)\n\
+         # instead of letting the kernel SIGKILL the supervisor. Linux-only directives;\n\
+         # they are inert on the macOS/Windows service backends.\n\
+         Delegate=yes\n\
+         ManagedOOMPreference=avoid\n\
+         MemoryHigh=75%\n\
          \n\
          [Install]\n\
          WantedBy={wanted_by}\n"
@@ -303,6 +314,32 @@ mod tests {
         s.scope = ServiceScope::System;
         let unit = render_systemd_unit(&s);
         assert!(unit.contains("WantedBy=multi-user.target"));
+    }
+
+    #[test]
+    fn systemd_unit_carries_oom_fate_isolation_directives_in_both_scopes() {
+        // Issue #345: both the user and the system unit must delegate a cgroup
+        // subtree, bias systemd-oomd away from a whole-unit kill, and set a memory
+        // high-watermark (which also enables the accounting the sub-cgroups need).
+        // These live in [Service], never [Unit] or [Install].
+        for scope in [ServiceScope::User, ServiceScope::System] {
+            let mut s = spec();
+            s.scope = scope;
+            let unit = render_systemd_unit(&s);
+            let service_start = unit.find("[Service]").expect("service section");
+            let install_start = unit.find("[Install]").expect("install section");
+            let service_section = &unit[service_start..install_start];
+            for directive in [
+                "Delegate=yes",
+                "ManagedOOMPreference=avoid",
+                "MemoryHigh=75%",
+            ] {
+                assert!(
+                    service_section.contains(directive),
+                    "{scope:?} unit [Service] must contain {directive}; got:\n{unit}"
+                );
+            }
+        }
     }
 
     #[test]
