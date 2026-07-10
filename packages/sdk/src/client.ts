@@ -88,9 +88,11 @@ import type {
   SessionGoal,
   SessionLineageResponse,
   SessionQueueSnapshot,
+  SessionQueueMutationResponse,
   SessionSystemUpdateBundlePage,
   SessionControlResponse,
   WorkspaceInferenceControlResponse,
+  WorkspaceQueueRuntimeControlResponse,
   StopSessionDescendantsResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
@@ -644,8 +646,8 @@ export class OpenGeniClient {
     sessionId: string,
     turnId: string,
     request: { expectedQueueVersion: number; expectedItemVersion: number; update: UpdateSessionTurnRequest },
-  ): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}`,
       request,
@@ -657,8 +659,8 @@ export class OpenGeniClient {
     sessionId: string,
     turnId: string,
     request: { expectedQueueVersion: number; expectedItemVersion: number; reason?: string },
-  ): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/cancel`,
       request,
@@ -670,8 +672,8 @@ export class OpenGeniClient {
     sessionId: string,
     turnId: string,
     request: { expectedQueueVersion: number; expectedItemVersion: number },
-  ): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/promote`,
       request,
@@ -682,8 +684,8 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: { expectedQueueVersion: number; turnIds: string[] },
-  ): Promise<SessionQueueSnapshot> {
-    return await this.requestJson<SessionQueueSnapshot>(
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/reorder`,
       request,
@@ -710,7 +712,14 @@ export class OpenGeniClient {
   async controlSession(
     workspaceId: string,
     sessionId: string,
-    request: { mode: "interrupt" | "stop" | "resume"; reason?: string; clientEventId?: string },
+    request: {
+      mode: "interrupt" | "stop" | "resume";
+      reason?: string;
+      clientEventId?: string;
+      expectedControlState?: "active" | "session_stopped" | "workspace_killed";
+      expectedControlGeneration?: number;
+      expectedWorkspaceInferenceGeneration?: number;
+    },
   ): Promise<SessionControlResponse> {
     return await this.requestJson<SessionControlResponse>(
       "POST",
@@ -746,7 +755,13 @@ export class OpenGeniClient {
   async stopSessionDescendants(
     workspaceId: string,
     sessionId: string,
-    request: { reason?: string; includeRoot?: boolean } = {},
+    request: {
+      reason?: string;
+      includeRoot?: boolean;
+      clientEventId: string;
+      expectedWorkspaceInferenceGeneration: number;
+      expectedRootControlGeneration: number;
+    },
   ): Promise<StopSessionDescendantsResponse> {
     return await this.requestJson<StopSessionDescendantsResponse>(
       "POST",
@@ -757,11 +772,34 @@ export class OpenGeniClient {
 
   async setWorkspaceInferenceState(
     workspaceId: string,
-    request: { state: "active" | "killed"; reason: string },
+    request: {
+      state: "active" | "killed";
+      reason: string;
+      clientEventId: string;
+      expectedState: "active" | "killed";
+      expectedGeneration: number;
+    },
   ): Promise<WorkspaceInferenceControlResponse> {
     return await this.requestJson<WorkspaceInferenceControlResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/inference-control`,
+      request,
+    );
+  }
+
+  async setWorkspaceQueueRuntimeState(
+    workspaceId: string,
+    request: {
+      state: "legacy" | "durable_v1";
+      reason: string;
+      clientEventId: string;
+      expectedState: "legacy" | "durable_v1";
+      expectedGeneration: number;
+    },
+  ): Promise<WorkspaceQueueRuntimeControlResponse> {
+    return await this.requestJson<WorkspaceQueueRuntimeControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/queue-runtime-control`,
       request,
     );
   }

@@ -154,9 +154,9 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
 
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
- * driver — P1.3 / OD-3). Gated on sandboxOwnershipEnabled: with the flag off the
- * Schedule is never created, so the lease feature is fully dark (no sweeps, no
- * terminates).
+ * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
+ * sandbox ownership off the activity performs only bounded DB outbox repair;
+ * it never reads/terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
@@ -173,9 +173,6 @@ export async function registerSandboxReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  if (!settings.sandboxOwnershipEnabled) {
-    return { registered: false, close: async () => {} };
-  }
   const connection = await Connection.connect({ address: settings.temporalHost });
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {

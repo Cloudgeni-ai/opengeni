@@ -665,6 +665,8 @@ export async function postUserMessageTurn(input: {
   delivery?: "queue" | "steer";
   origin?: "human" | "operator";
   actor?: string;
+  expectedControlGeneration?: number;
+  expectedWorkspaceInferenceGeneration?: number;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn; interrupted: boolean }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -689,6 +691,15 @@ export async function postUserMessageTurn(input: {
       clientEventId: input.clientEventId ?? null,
       mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
       delivery: input.delivery ?? "queue",
+      ...(input.expectedControlGeneration !== undefined
+        ? { expectedControlGeneration: input.expectedControlGeneration }
+        : {}),
+      ...(input.expectedWorkspaceInferenceGeneration !== undefined
+        ? {
+            expectedWorkspaceInferenceGeneration:
+              input.expectedWorkspaceInferenceGeneration,
+          }
+        : {}),
       rejectConflicts: input.queuePolicy === "reject_conflicts",
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
@@ -1169,6 +1180,8 @@ export async function acceptSessionUserMessage(
     queuePolicy?: "append" | "reject_conflicts";
     delivery?: "queue" | "steer";
     origin?: "human" | "operator";
+    expectedControlGeneration?: number;
+    expectedWorkspaceInferenceGeneration?: number;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn; interrupted: boolean }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -1229,6 +1242,15 @@ export async function acceptSessionUserMessage(
     delivery: input.delivery ?? "queue",
     origin: input.origin ?? "human",
     actor: grant.subjectId,
+    ...(input.expectedControlGeneration !== undefined
+      ? { expectedControlGeneration: input.expectedControlGeneration }
+      : {}),
+    ...(input.expectedWorkspaceInferenceGeneration !== undefined
+      ? {
+          expectedWorkspaceInferenceGeneration:
+            input.expectedWorkspaceInferenceGeneration,
+        }
+      : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });
   await recordWorkspaceUsage(deps, {

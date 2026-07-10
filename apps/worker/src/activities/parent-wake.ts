@@ -3,8 +3,14 @@ import type { Session, SessionGoal } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
-  addSessionSystemUpdate,
+  addSessionSystemUpdateWithSourceMutation,
+  claimPendingSessionSystemUpdateOutbox,
+  getOrCreateSessionSystemUpdateOutbox,
+  listPendingSessionSystemWakeRepairs,
+  markSessionSystemUpdateOutboxDeliveredInTransaction,
+  markSessionSystemUpdateOutboxFailed,
   type Database,
+  type SessionSystemUpdateOutboxDelivery,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { ActivityServices, WakeSessionWorkflowSignal } from "./types";
@@ -70,11 +76,13 @@ export async function notifyParentOfChildTerminal(
     // guard so a nudge that slips through still cannot revive the goal.
     const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
     const payload = childCompletionPayload(child, goal, terminalStatus);
-    const result = await addSessionSystemUpdate(svc.db, {
+    const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
-      sessionId: child.parentSessionId,
+      sourceSessionId: child.id,
+      targetSessionId: child.parentSessionId,
       kind: "child_session_update",
+      groupingKey: "child-session-terminal:v1",
       classification:
         terminalStatus === "failed"
           ? "failure"
@@ -86,32 +94,101 @@ export async function notifyParentOfChildTerminal(
       summary: childCompletionSummary(child, goal, terminalStatus),
       payload,
       lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
-      reasoningEffortFallback: svc.settings.openaiReasoningEffort,
     });
-    if (!result.added) {
-      return;
-    }
-    await svc.bus.publish(workspaceId, child.parentSessionId, result.events);
-    if (result.shouldWake && svc.wakeSessionWorkflow) {
-      await svc.wakeSessionWorkflow({
-        accountId: child.accountId,
-        workspaceId,
-        sessionId: child.parentSessionId,
-        workflowId: result.temporalWorkflowId,
-      });
-    }
-    svc.observability.info("Woke parent session on worker completion", {
-      childSessionId,
-      parentSessionId: child.parentSessionId,
-      terminalStatus,
-    });
+    await deliverParentSystemUpdateOutbox(svc, outbox);
   } catch (error) {
-    // A parent-wake failure must never fail the child's terminal activity.
+    // A durable pending outbox row survives this boundary. The global worker
+    // reaper retries it; child terminal settlement never depends on this turn.
     svc.observability.error("Failed to wake parent session on worker completion", {
       childSessionId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+async function deliverParentSystemUpdateOutbox(
+  svc: NotifyServices,
+  outbox: SessionSystemUpdateOutboxDelivery,
+): Promise<void> {
+  try {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      svc.db,
+      {
+        accountId: outbox.accountId,
+        workspaceId: outbox.workspaceId,
+        sessionId: outbox.targetSessionId,
+        kind: outbox.kind,
+        groupingKey: outbox.groupingKey,
+        classification: outbox.classification,
+        sourceId: outbox.sourceId,
+        dedupeKey: outbox.dedupeKey,
+        summary: outbox.summary,
+        payload: outbox.payload,
+        lineage: outbox.lineage,
+        reasoningEffortFallback: svc.settings.openaiReasoningEffort,
+      },
+      async (tx) => {
+        await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);
+      },
+    );
+    if (result.reason === "session_cancelled") {
+      return;
+    }
+    if (result.added && result.events.length > 0) {
+      await svc.bus.publish(outbox.workspaceId, outbox.targetSessionId, result.events);
+    }
+    if (result.shouldWake && svc.wakeSessionWorkflow) {
+      await svc.wakeSessionWorkflow({
+        accountId: outbox.accountId,
+        workspaceId: outbox.workspaceId,
+        sessionId: outbox.targetSessionId,
+        workflowId: result.temporalWorkflowId,
+      });
+    }
+    svc.observability.info("Woke parent session on worker completion", {
+      childSessionId: outbox.sourceSessionId,
+      parentSessionId: outbox.targetSessionId,
+      dedupeKey: outbox.dedupeKey,
+    });
+  } catch (error) {
+    await markSessionSystemUpdateOutboxFailed(
+      svc.db,
+      outbox,
+      error instanceof Error ? error.message : String(error),
+    ).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function reconcilePendingParentSystemUpdates(
+  svc: NotifyServices,
+  limit = 100,
+): Promise<{ claimed: number; delivered: number; failed: number; wakeRepairs: number }> {
+  let wakeRepairs = 0;
+  if (svc.wakeSessionWorkflow) {
+    const repairs = await listPendingSessionSystemWakeRepairs(svc.db, limit);
+    for (const repair of repairs) {
+      await svc.wakeSessionWorkflow({
+        accountId: repair.accountId,
+        workspaceId: repair.workspaceId,
+        sessionId: repair.sessionId,
+        workflowId: repair.temporalWorkflowId,
+      });
+      wakeRepairs += 1;
+    }
+  }
+  const rows = await claimPendingSessionSystemUpdateOutbox(svc.db, limit);
+  let delivered = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      await deliverParentSystemUpdateOutbox(svc, row);
+      delivered += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { claimed: rows.length, delivered, failed, wakeRepairs };
 }
 
 function childCompletionPayload(

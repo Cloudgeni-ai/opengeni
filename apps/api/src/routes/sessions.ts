@@ -584,6 +584,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           tools,
         },
       );
+      await bus.publish(workspaceId, sessionId, updated.events);
+      if (updated.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
       return c.json(updated);
     } catch (error) {
       throwQueueConflict(error);
@@ -595,16 +604,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const payload = CancelSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(await cancelQueuedSessionTurnWithVersion(
+      const sessionId = c.req.param("sessionId");
+      const result = await cancelQueuedSessionTurnWithVersion(
         db,
         workspaceId,
-        c.req.param("sessionId"),
+        sessionId,
         c.req.param("turnId"),
         payload.expectedQueueVersion,
         payload.expectedItemVersion,
         grant.subjectId,
         payload.reason ?? null,
-      ));
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json(result);
     } catch (error) {
       throwQueueConflict(error);
     }
@@ -615,22 +635,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const payload = PromoteSessionQueueItemRequest.parse(await c.req.json());
     try {
-      const snapshot = await promoteQueuedSessionTurn(
+      const sessionId = c.req.param("sessionId");
+      const result = await promoteQueuedSessionTurn(
         db,
         workspaceId,
-        c.req.param("sessionId"),
+        sessionId,
         c.req.param("turnId"),
         payload.expectedQueueVersion,
         payload.expectedItemVersion,
         grant.subjectId,
       );
-      await workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId: c.req.param("sessionId"),
-        workflowId: workflowIdForSession(c.req.param("sessionId")),
-      });
-      return c.json(snapshot);
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json(result);
     } catch (error) {
       throwQueueConflict(error);
     }
@@ -641,14 +665,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const payload = ReorderSessionQueueRequest.parse(await c.req.json());
     try {
-      return c.json(await reorderQueuedSessionTurnsWithVersion(
+      const sessionId = c.req.param("sessionId");
+      const result = await reorderQueuedSessionTurnsWithVersion(
         db,
         workspaceId,
-        c.req.param("sessionId"),
+        sessionId,
         payload.expectedQueueVersion,
         payload.turnIds,
         grant.subjectId,
-      ));
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json(result);
     } catch (error) {
       throwQueueConflict(error);
     }
@@ -685,6 +720,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         mode: payload.mode,
         reason: payload.reason ?? null,
         clientEventId: payload.clientEventId ?? null,
+        ...(payload.expectedControlState !== undefined
+          ? { expectedControlState: payload.expectedControlState }
+          : {}),
+        ...(payload.expectedControlGeneration !== undefined
+          ? { expectedControlGeneration: payload.expectedControlGeneration }
+          : {}),
+        ...(payload.expectedWorkspaceInferenceGeneration !== undefined
+          ? {
+              expectedWorkspaceInferenceGeneration:
+                payload.expectedWorkspaceInferenceGeneration,
+            }
+          : {}),
       });
     } catch (error) {
       throwQueueConflict(error);
@@ -708,11 +755,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json({
+      operationId: result.operationId,
       event: result.event,
       controlState: result.controlState,
       controlGeneration: result.controlGeneration,
       expectedActiveTurnId: result.expectedActiveTurnId,
+      expectedExecutionGeneration: result.expectedExecutionGeneration,
+      deliveryEventId: result.deliveryEventId,
       shouldSignalInterrupt: result.shouldSignalInterrupt,
+      shouldWake: result.shouldWake,
     }, 202);
   });
 
@@ -728,6 +779,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       actor: grant.subjectId,
       reason: payload.reason ?? null,
       includeRoot: payload.includeRoot,
+      clientEventId: payload.clientEventId,
+      expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
+      expectedRootControlGeneration: payload.expectedRootControlGeneration,
     });
     for (const broadcast of result.broadcasts) {
       await bus.publish(workspaceId, broadcast.sessionId, broadcast.events);
@@ -742,6 +796,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json({
+      operationId: result.operationId,
       affectedSessionIds: result.affectedSessionIds,
       interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
     }, 202);
@@ -749,7 +804,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const turnId = c.req.param("turnId");
     await assertSessionExists(db, workspaceId, sessionId);
@@ -776,25 +831,47 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     await validateFileResources(db, workspaceId, resources);
     await validateGitHubRepositorySelection(db, workspaceId, [...session.resources, ...resources]);
-    const turn = await updateQueuedSessionTurn(db, workspaceId, turnId, {
-      ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
-      ...(payload.model !== undefined ? { model: payload.model } : {}),
-      ...(payload.reasoningEffort !== undefined
-        ? { reasoningEffort: payload.reasoningEffort }
-        : {}),
-      ...(payload.sandboxBackend !== undefined ? { sandboxBackend: payload.sandboxBackend } : {}),
-      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
-      resources,
-      tools,
-    });
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.updated",
-        turnId: turn.id,
-        payload: { turnId: turn.id },
-      },
-    ]);
-    return c.json(turn);
+    const queue = await getSessionQueueSnapshot(db, workspaceId, sessionId);
+    const queueItem = queue?.items.find((item) => item.id === turnId);
+    if (!queue || !queueItem) throw new HTTPException(409, { message: "queued item changed" });
+    try {
+      const result = await updateQueuedSessionTurnWithVersion(
+        db,
+        workspaceId,
+        sessionId,
+        turnId,
+        queue.version,
+        queueItem.version,
+        grant.subjectId,
+        {
+          ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
+          ...(payload.model !== undefined ? { model: payload.model } : {}),
+          ...(payload.reasoningEffort !== undefined
+            ? { reasoningEffort: payload.reasoningEffort }
+            : {}),
+          ...(payload.sandboxBackend !== undefined
+            ? { sandboxBackend: payload.sandboxBackend }
+            : {}),
+          ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+          resources,
+          tools,
+        },
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      const turn = result.snapshot.items.find((item) => item.id === turnId);
+      if (!turn) throw new HTTPException(409, { message: "queued item changed" });
+      return c.json(turn);
+    } catch (error) {
+      throwQueueConflict(error);
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/reorder", async (c) => {
@@ -803,38 +880,70 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = ReorderSessionTurnsRequest.parse(await c.req.json());
-    const turns = await reorderQueuedSessionTurns(db, workspaceId, sessionId, payload.turnIds);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.updated",
-        payload: { reorderedTurnIds: payload.turnIds },
-      },
-    ]);
-    await workflowClient.wakeSessionWorkflow({
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      workflowId: workflowIdForSession(sessionId),
-    });
-    return c.json(turns);
+    const queue = await getSessionQueueSnapshot(db, workspaceId, sessionId);
+    if (!queue) throw new HTTPException(404, { message: "session not found" });
+    try {
+      const result = await reorderQueuedSessionTurnsWithVersion(
+        db,
+        workspaceId,
+        sessionId,
+        queue.version,
+        payload.turnIds,
+        grant.subjectId,
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json(result.snapshot.items);
+    } catch (error) {
+      throwQueueConflict(error);
+    }
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const turnId = c.req.param("turnId");
     await assertSessionExists(db, workspaceId, sessionId);
     await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
-    const turn = await cancelQueuedSessionTurn(db, workspaceId, turnId);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.cancelled",
-        turnId: turn.id,
-        payload: { turnId: turn.id, triggerEventId: turn.triggerEventId },
-      },
-    ]);
-    return c.json(turn);
+    const queue = await getSessionQueueSnapshot(db, workspaceId, sessionId);
+    const queueItem = queue?.items.find((item) => item.id === turnId);
+    if (!queue || !queueItem) throw new HTTPException(409, { message: "queued item changed" });
+    try {
+      const result = await cancelQueuedSessionTurnWithVersion(
+        db,
+        workspaceId,
+        sessionId,
+        turnId,
+        queue.version,
+        queueItem.version,
+        grant.subjectId,
+        "legacy_delete_adapter",
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json({
+        ...queueItem,
+        status: "cancelled" as const,
+        deliveryState: "cancelled" as const,
+      });
+    } catch (error) {
+      throwQueueConflict(error);
+    }
   });
 
   // Atomic send-and-steer: message append, typed queue insert, exact target
@@ -858,6 +967,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
       delivery: "steer",
       origin: "human",
+      ...(payload.expectedControlGeneration !== undefined
+        ? { expectedControlGeneration: payload.expectedControlGeneration }
+        : {}),
+      ...(payload.expectedWorkspaceInferenceGeneration !== undefined
+        ? {
+            expectedWorkspaceInferenceGeneration:
+              payload.expectedWorkspaceInferenceGeneration,
+          }
+        : {}),
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     });
     return c.json(result, 202);

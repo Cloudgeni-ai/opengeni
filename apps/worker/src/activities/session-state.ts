@@ -6,9 +6,9 @@ import {
   finishTurn,
   getSessionEvent,
   getSessionTurn,
-  incrementTurnWorkerDeathRedispatches,
-  requeuePreemptedTurn,
+  requeueTurnAfterWorkerDeathAtomically,
   requireSession,
+  settleSessionIdleWithParentOutbox,
   setSessionStatus,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
@@ -121,20 +121,13 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     //     generic-cancel catch) marked it as it died. That IS the death, not a
     //     real settle. Requeue it, or the turn — and any goal awaiting it — is
     //     orphaned until a human intervenes (the 76e2f2ee/Vern 16h stall).
-    const deathArtifactCancel = turn?.status === "cancelled";
+    const deathArtifactCancel =
+      turn?.status === "cancelled" && turn.cancelledBy === "worker_death_dispatch";
     if (
       !turn ||
       (turn.status !== "running" && turn.status !== "requires_action" && !deathArtifactCancel)
     ) {
       return { action: "stale" };
-    }
-    const redispatches = await incrementTurnWorkerDeathRedispatches(
-      db,
-      input.workspaceId,
-      input.turnId,
-    );
-    if (redispatches > WORKER_DEATH_MAX_REDISPATCHES) {
-      return { action: "exceeded", redispatches: redispatches - 1 };
     }
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     const approvalRerun = trigger?.type === "user.approvalDecision";
@@ -145,65 +138,26 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       !approvalRerun &&
       settings.sessionHistorySource === "items" &&
       (await countTurnSessionHistoryItems(db, input.workspaceId, input.turnId)) > 0;
-    const [preemptedEvent] = await appendAndPublishEvents(
-      db,
-      bus,
-      input.workspaceId,
-      input.sessionId,
-      [
-        {
-          turnId: turn.id,
-          type: "turn.preempted",
-          payload: {
-            triggerEventId: input.triggerEventId,
-            reason: "worker_death",
-            redispatches,
-            resumeWithNotice,
-            ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
-          },
-        },
-        {
-          turnId: turn.id,
-          type: "session.status.changed",
-          payload: { status: "queued" },
-        },
-      ],
-    );
-    try {
-      // Worker-death redispatch may reset a turn the dying attempt already
-      // stamped `cancelled` (death artifact, see above), so the reset must
-      // match that status too — not only running/requires_action.
-      await requeuePreemptedTurn(
-        db,
-        input.workspaceId,
-        turn.id,
-        resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-        ["running", "requires_action", "cancelled"],
-      );
-    } catch (requeueError) {
-      // The zombie attempt can settle the turn between the status check above
-      // and this requeue (it keeps executing until it notices the timeout). If
-      // the turn is now GENUINELY settled (completed/failed/idle) or already
-      // re-queued by a concurrent actor, that outcome is the truth: report
-      // stale so the workflow continues. But if the turn is STILL in a
-      // requeue-able state — running/requires_action, or a death-artifact
-      // `cancelled` (which this path re-dispatches) — then the requeue hit a
-      // REAL persistence error, so rethrow to retry rather than silently drop
-      // the turn as stale (the exact idle-stall this change fixes).
-      const current = await getSessionTurn(db, input.workspaceId, input.turnId);
-      const stillRequeueable =
-        current &&
-        (current.status === "running" ||
-          current.status === "requires_action" ||
-          current.status === "cancelled");
-      if (!stillRequeueable) {
-        return { action: "stale" };
-      }
-      throw requeueError;
+    const settlement = await requeueTurnAfterWorkerDeathAtomically(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      originalTriggerEventId: input.triggerEventId,
+      resumeWithNotice,
+      maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
+      preemptedPayload: {
+        triggerEventId: input.triggerEventId,
+        reason: "worker_death",
+        resumeWithNotice,
+        ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
+      },
+    });
+    if (settlement.events.length > 0) {
+      await bus.publish(input.workspaceId, input.sessionId, settlement.events);
     }
-    await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
+    if (settlement.action !== "requeued") return settlement;
     await refreshQueuedTurnsGauge(db, observability);
-    return { action: "requeued", redispatches };
+    return { action: "requeued", redispatches: settlement.redispatches };
   }
 
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {
@@ -221,9 +175,13 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
-    if (session.status === "queued" || session.status === "running") {
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-    }
+    const episodeKey = String(session.lastSequence);
+    await settleSessionIdleWithParentOutbox(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      episodeKey,
+    );
     await refreshQueuedTurnsGauge(db, observability);
     // The workflow reaches markSessionIdle exactly when it has decided to stop
     // for now (no queued turn, no goal continuation): the terminal-for-now
@@ -235,6 +193,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       input.workspaceId,
       input.sessionId,
       "idle",
+      episodeKey,
     );
   }
 

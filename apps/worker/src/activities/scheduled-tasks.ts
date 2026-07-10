@@ -1,6 +1,6 @@
 import {
   appendSessionEventsWithLockedSessionUpdate,
-  addSessionSystemUpdate,
+  addSessionSystemUpdateWithSourceMutation,
   createScheduledTaskRun,
   createSession,
   createSessionGoal,
@@ -9,10 +9,12 @@ import {
   getRig,
   getVariableSet,
   isCodexBilledTurn,
+  markScheduledTaskRunFailedIfQueued,
   recordUsageEvent,
   requireScheduledTask,
   requireSession,
   setTemporalWorkflowId,
+  settleScheduledTaskRunInTransaction,
   sumUsageQuantity,
   updateScheduledTask,
   updateScheduledTaskRun,
@@ -62,6 +64,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         workspaceId: task.workspaceId,
         taskId: task.id,
         triggerType: input.triggerType,
+        producerKey:
+          input.producerKey ?? input.agentRunUsageIdempotencyKey ?? `legacy:${crypto.randomUUID()}`,
         scheduledAt: null,
       });
       await recordUsageEvent(db, {
@@ -74,6 +78,27 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         sourceResourceId: run.id,
         idempotencyKey: `usage:scheduled_task.fired:${run.id}`,
       });
+      if (run.status === "dispatched" && run.sessionId && run.triggerEventId) {
+        await recordUsageEvent(db, {
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          eventType: "agent_run.created",
+          quantity: 1,
+          unit: "run",
+          sourceResourceType: "scheduled_task_run",
+          sourceResourceId: run.id,
+          idempotencyKey:
+            input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
+        });
+        return {
+          action: task.runMode === "new_session_per_run" ? "start" : "signal",
+          accountId: task.accountId,
+          workspaceId: task.workspaceId,
+          sessionId: run.sessionId,
+          triggerEventId: run.triggerEventId,
+          workflowId: workflowIdForSession(run.sessionId),
+        };
+      }
       let result: DispatchScheduledTaskRunResult;
       try {
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
@@ -242,7 +267,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           }
           // A recurring "maintain X" task re-establishes its objective on every
           // fire: replace the goal text, reactivate it, and reset the counters.
-          const reusableGoal = goalSpec
+          const reusableGoal = goalSpec && run.status === "queued"
             ? await upsertSessionGoal(db, {
                 accountId: task.accountId,
                 workspaceId: task.workspaceId,
@@ -279,11 +304,26 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             );
             await bus.publish(task.workspaceId, session.id, goalEvents);
           }
-          const bundled = await addSessionSystemUpdate(db, {
+          const bundled = await addSessionSystemUpdateWithSourceMutation(db, {
             accountId: task.accountId,
             workspaceId: task.workspaceId,
             sessionId: session.id,
             kind: "scheduled_wake",
+            groupingKey: `scheduled:${task.id}:${JSON.stringify({
+              prompt: task.agentConfig.prompt,
+              resources: task.agentConfig.resources,
+              tools: taskTools,
+              model,
+              reasoningEffort,
+              sandboxBackend,
+              goal: task.agentConfig.goal ?? null,
+            })}`,
+            executionPolicy: {
+              prompt: task.agentConfig.prompt,
+              model,
+              reasoningEffort,
+              sandboxBackend,
+            },
             classification: "info",
             sourceId: run.id,
             dedupeKey: `scheduled-wake:${run.id}`,
@@ -299,30 +339,45 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             resources: task.agentConfig.resources,
             tools: taskTools,
             reasoningEffortFallback: settings.openaiReasoningEffort,
+          }, async (tx) => {
+            await settleScheduledTaskRunInTransaction(tx, {
+              workspaceId: task.workspaceId,
+              runId: run.id,
+              sessionId: session.id,
+              status: "dispatched",
+            });
           });
-          if (!bundled.added) {
+          if (bundled.reason === "session_cancelled") {
             throw new Error(`scheduled wake was not added: ${bundled.reason}`);
           }
-          await bus.publish(task.workspaceId, session.id, bundled.events);
+          if (bundled.added && bundled.events.length > 0) {
+            await bus.publish(task.workspaceId, session.id, bundled.events);
+          }
+          if (!bundled.wakeEventId) {
+            throw new Error("scheduled wake bundle has no durable trigger event identity");
+          }
+          // Optional identity enrichment after commit. A crash here is repaired
+          // by the duplicate path's exact wakeEventId; dispatched state and
+          // constituent insertion were already atomic above.
           await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-            status: "dispatched",
-            sessionId: session.id,
-            triggerEventId: bundled.turn?.triggerEventId ?? null,
+            triggerEventId: bundled.wakeEventId,
           });
           result = {
             action: "signal",
             accountId: task.accountId,
             workspaceId: task.workspaceId,
             sessionId: session.id,
-            triggerEventId: bundled.turn?.triggerEventId ?? bundled.update.id,
+            triggerEventId: bundled.wakeEventId,
             workflowId: workflowIdForSession(session.id),
           };
         }
       } catch (error) {
-        await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error),
-        }).catch(() => undefined);
+        await markScheduledTaskRunFailedIfQueued(
+          db,
+          task.workspaceId,
+          run.id,
+          error instanceof Error ? error.message : String(error),
+        ).catch(() => undefined);
         throw error;
       }
       await recordUsageEvent(db, {

@@ -174,6 +174,8 @@ export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
+  /** Stable Temporal workflow identity; retries must reuse the same source row. */
+  producerKey?: string;
   agentRunUsageIdempotencyKey?: string;
 };
 

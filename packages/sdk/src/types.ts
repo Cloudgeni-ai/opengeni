@@ -461,6 +461,13 @@ export type SessionQueueItemKind =
 
 export type SessionQueueItemOrigin = "human" | "operator" | "system";
 
+export type SessionQueueDeliveryState =
+  | "pending"
+  | "delivered"
+  | "acknowledged"
+  | "cancelled"
+  | "failed";
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -484,7 +491,7 @@ export type SessionTurn = {
   executionGeneration?: number;
   dedupeKey?: string | null;
   lineage?: Record<string, unknown>;
-  deliveryState?: string;
+  deliveryState?: SessionQueueDeliveryState;
   bundleId?: string | null;
   acknowledgedAt?: string | null;
   cancelledBy?: string | null;
@@ -545,6 +552,12 @@ export const SESSION_EVENT_TYPES = [
   "session.control.steer_requested",
   "workspace.inference.killed",
   "workspace.inference.resumed",
+  "workspace.queue_runtime.changed",
+  "session.queue.item.edited",
+  "session.queue.item.cancelled",
+  "session.queue.item.promoted",
+  "session.queue.reordered",
+  "turn.event.rejected_late",
   "memory.saved",
   "memory.corrected",
   // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
@@ -618,6 +631,7 @@ export type SessionEvent = {
   clientEventId?: string | null | undefined;
   turnId?: string | null | undefined;
   turnGeneration?: number | null | undefined;
+  turnAssociation?: "current" | "late_rejected" | null | undefined;
 };
 
 export type ToolAuthNeededPayload = {
@@ -1387,6 +1401,11 @@ export type Workspace = {
   inferenceReason?: string | null;
   inferenceChangedBy?: string | null;
   inferenceChangedAt?: string | null;
+  queueRuntimeState?: "legacy" | "durable_v1";
+  queueRuntimeGeneration?: number;
+  queueRuntimeReason?: string | null;
+  queueRuntimeChangedBy?: string | null;
+  queueRuntimeChangedAt?: string | null;
   defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1548,19 +1567,39 @@ export type SessionQueueSnapshot = {
 
 export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
 
+export type SessionSystemUpdateKind =
+  | "child_session_update"
+  | "scheduled_wake"
+  | "lifecycle_event"
+  | "runtime_notice";
+
+export type SessionSystemUpdateBundleStatus =
+  | "queued"
+  | "running"
+  | "acknowledged"
+  | "cancelled"
+  | "failed";
+
+export type SessionSystemUpdateExecutionPolicy = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  sandboxBackend: SandboxBackend;
+  prompt: string;
+};
+
 export type SessionSystemUpdate = {
   id: string;
   bundleId: string;
   bundleGeneration: number;
   ordinal: number;
-  kind: "child_session_update" | "scheduled_wake" | "runtime_notice";
+  kind: SessionSystemUpdateKind;
   classification: SystemUpdateClassification;
   sourceId: string;
   dedupeKey: string;
   summary: string;
   payload: Record<string, unknown>;
   lineage: Record<string, unknown>;
-  deliveryState: string;
+  deliveryState: SessionQueueDeliveryState;
   deliveredAt: string | null;
   acknowledgedAt: string | null;
   createdAt: string;
@@ -1570,7 +1609,9 @@ export type SessionSystemUpdateBundle = {
   id: string;
   sessionId: string;
   generation: number;
-  status: string;
+  groupKey: string;
+  executionPolicy: SessionSystemUpdateExecutionPolicy | null;
+  status: SessionSystemUpdateBundleStatus;
   version: number;
   memberCount: number;
   payloadBytes: number;
@@ -1589,14 +1630,19 @@ export type SessionSystemUpdateBundlePage = {
 };
 
 export type SessionControlResponse = {
+  operationId: string;
   event: SessionEvent;
   controlState: "active" | "session_stopped" | "workspace_killed";
   controlGeneration: number;
   expectedActiveTurnId: string | null;
+  expectedExecutionGeneration: number | null;
+  deliveryEventId: string | null;
   shouldSignalInterrupt: boolean;
+  shouldWake: boolean;
 };
 
 export type WorkspaceInferenceControlResponse = {
+  operationId: string;
   state: "active" | "killed";
   generation: number;
   affectedSessionIds: string[];
@@ -1604,8 +1650,21 @@ export type WorkspaceInferenceControlResponse = {
 };
 
 export type StopSessionDescendantsResponse = {
+  operationId: string;
   affectedSessionIds: string[];
   interruptSessionIds: string[];
+};
+
+export type WorkspaceQueueRuntimeControlResponse = {
+  operationId: string;
+  state: "legacy" | "durable_v1";
+  generation: number;
+};
+
+export type SessionQueueMutationResponse = {
+  snapshot: SessionQueueSnapshot;
+  events: SessionEvent[];
+  shouldWake: boolean;
 };
 
 // --- Scheduled tasks: requests + runs ----------------------------------------

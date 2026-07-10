@@ -8,6 +8,7 @@ import {
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WorkspaceInferenceControlRequest,
+  WorkspaceQueueRuntimeControlRequest,
   Workspace,
   WorkspaceMember,
   type AccessContext,
@@ -33,6 +34,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   setWorkspaceInferenceControl,
+  setWorkspaceQueueRuntimeControl,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -175,6 +177,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       actor: grant.subjectId,
       state: payload.state,
       reason: payload.reason,
+      clientEventId: payload.clientEventId,
+      expectedState: payload.expectedState,
+      expectedGeneration: payload.expectedGeneration,
     });
     for (const broadcast of result.broadcasts) {
       await deps.bus.publish(workspaceId, broadcast.sessionId, broadcast.events);
@@ -199,11 +204,29 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     return c.json({
+      operationId: result.operationId,
       state: result.state,
       generation: result.generation,
       affectedSessionIds: result.affectedSessionIds,
       interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
     }, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/queue-runtime-control", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = WorkspaceQueueRuntimeControlRequest.parse(await c.req.json());
+    const result = await setWorkspaceQueueRuntimeControl(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      actor: grant.subjectId,
+      state: payload.state,
+      reason: payload.reason,
+      clientEventId: payload.clientEventId,
+      expectedState: payload.expectedState,
+      expectedGeneration: payload.expectedGeneration,
+    });
+    return c.json(result, 202);
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

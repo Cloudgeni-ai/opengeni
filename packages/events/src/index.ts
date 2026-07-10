@@ -497,8 +497,8 @@ export async function appendAndPublishTurnEventsFenced(
   turnId: string,
   executionGeneration: number,
   events: AppendEventInput[],
-): Promise<SessionEvent[]> {
-  const appended = await appendSessionEventsForTurnGeneration(
+): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  const result = await appendSessionEventsForTurnGeneration(
     db,
     workspaceId,
     sessionId,
@@ -506,16 +506,16 @@ export async function appendAndPublishTurnEventsFenced(
     executionGeneration,
     events,
   );
-  if (appended.length === 0) return [];
+  if (result.events.length === 0) return result;
   try {
-    await bus.publish(workspaceId, sessionId, appended);
+    await bus.publish(workspaceId, sessionId, result.events);
   } catch (error) {
     console.warn(
-      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}; ${appended.length} event(s) are durable`,
+      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}; ${result.events.length} event(s) are durable`,
       error,
     );
   }
-  return appended;
+  return result;
 }
 
 function subscribeSession(

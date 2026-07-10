@@ -65,6 +65,14 @@ export const workspaces = pgTable(
     inferenceReason: text("inference_reason"),
     inferenceChangedBy: text("inference_changed_by"),
     inferenceChangedAt: timestamp("inference_changed_at", { withTimezone: true }),
+    // Durable mixed-fleet cutover. `legacy` keeps new queue/control/fan-in APIs
+    // disabled. `durable_v1` activates the DB claim trigger that rejects an old
+    // worker unless it presents the transaction-local capability marker.
+    queueRuntimeState: text("queue_runtime_state").notNull().default("legacy"),
+    queueRuntimeGeneration: integer("queue_runtime_generation").notNull().default(0),
+    queueRuntimeReason: text("queue_runtime_reason"),
+    queueRuntimeChangedBy: text("queue_runtime_changed_by"),
+    queueRuntimeChangedAt: timestamp("queue_runtime_changed_at", { withTimezone: true }),
     // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
     // created without an explicit rig ride no rig (today's behavior exactly). FK
     // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle
@@ -588,6 +596,7 @@ export const sessions = pgTable(
     pendingControlKind: text("pending_control_kind"),
     pendingControlExpectedTurnId: uuid("pending_control_expected_turn_id"),
     pendingControlExpectedGeneration: integer("pending_control_expected_generation"),
+    controlStateBeforeWorkspaceKill: text("control_state_before_workspace_kill"),
     lastSequence: integer("last_sequence").notNull().default(0),
     // The session's PINNED Codex account (manual override from the in-session
     // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
@@ -1053,6 +1062,11 @@ export const sessionTurns = pgTable(
     priority: integer("priority").notNull().default(100),
     version: integer("version").notNull().default(1),
     executionGeneration: integer("execution_generation").notNull().default(0),
+    // One-time migration sentinel. Existing rows were stamped by 0050 before
+    // the default was installed; every post-migration row receives it at insert.
+    queueMigratedAt: timestamp("queue_migrated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     dedupeKey: text("dedupe_key"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     deliveryState: text("delivery_state").notNull().default("pending"),
@@ -1092,6 +1106,13 @@ export const sessionSystemUpdateBundles = pgTable(
     workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
     generation: integer("generation").notNull(),
+    groupKey: text("group_key").notNull(),
+    executionPolicy: jsonb("execution_policy").$type<{
+      model: string;
+      reasoningEffort: string;
+      sandboxBackend: string;
+      prompt: string;
+    } | null>(),
     status: text("status").notNull().default("queued"),
     version: integer("version").notNull().default(1),
     memberCount: integer("member_count").notNull().default(0),
@@ -1105,6 +1126,10 @@ export const sessionSystemUpdateBundles = pgTable(
   },
   (table) => ({
     generation: uniqueIndex("system_update_bundles_generation_uq").on(table.workspaceId, table.sessionId, table.generation),
+    workspaceIdentity: uniqueIndex("system_update_bundles_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
     sessionStatus: index("system_update_bundles_session_status_idx").on(table.workspaceId, table.sessionId, table.status, table.generation),
   }),
 );
@@ -1135,6 +1160,98 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     dedupe: uniqueIndex("system_updates_dedupe_uq").on(table.workspaceId, table.sessionId, table.dedupeKey),
     bundleOrdinal: uniqueIndex("system_updates_bundle_ordinal_uq").on(table.workspaceId, table.bundleId, table.ordinal),
+  }),
+);
+
+/**
+ * Stable idempotency record for session, descendant, workspace-kill, and
+ * queue-runtime cutover operations. `result` contains only durable IDs/state
+ * snapshots; delivery repair always revalidates those exact IDs against the
+ * current pending fence instead of consulting an unrelated newer operation.
+ */
+export const runtimeControlOperations = pgTable(
+  "runtime_control_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    targetId: uuid("target_id").notNull(),
+    clientEventId: text("client_event_id").notNull(),
+    requestedState: text("requested_state").notNull(),
+    expectedState: text("expected_state"),
+    expectedGeneration: integer("expected_generation"),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotency: uniqueIndex("runtime_control_operations_client_uq").on(
+      table.workspaceId,
+      table.clientEventId,
+    ),
+    target: index("runtime_control_operations_target_idx").on(
+      table.workspaceId,
+      table.scope,
+      table.targetId,
+      table.createdAt,
+    ),
+  }),
+);
+
+/**
+ * Durable child-terminal producer outbox. The source terminal transaction
+ * inserts this row; fan-in delivery marks it delivered inside
+ * addSessionSystemUpdateWithSourceMutation. A bounded reconciler may retry a
+ * committed row after any worker/process death without duplicating a member.
+ */
+export const sessionSystemUpdateOutbox = pgTable(
+  "session_system_update_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceSessionId: uuid("source_session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    targetSessionId: uuid("target_session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    dedupeKey: text("dedupe_key").notNull(),
+    groupingKey: text("grouping_key").notNull(),
+    kind: text("kind").notNull(),
+    classification: text("classification").notNull(),
+    sourceId: text("source_id").notNull(),
+    summary: text("summary").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    updateId: uuid("update_id"),
+    bundleId: uuid("bundle_id"),
+    wakeTurnId: uuid("wake_turn_id"),
+    lastError: text("last_error"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    dedupe: uniqueIndex("session_system_update_outbox_dedupe_uq").on(
+      table.workspaceId,
+      table.dedupeKey,
+    ),
+    pending: index("session_system_update_outbox_pending_idx").on(
+      table.status,
+      table.createdAt,
+    ),
   }),
 );
 
@@ -1263,6 +1380,7 @@ export const sessionEvents = pgTable(
       .references(() => sessions.id, { onDelete: "cascade" }),
     turnId: uuid("turn_id"),
     turnGeneration: integer("turn_generation"),
+    turnAssociation: text("turn_association"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
     payload: jsonb("payload").$type<unknown>().notNull().default({}),
@@ -2016,6 +2134,9 @@ export const scheduledTaskRuns = pgTable(
     firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
     sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
     triggerEventId: uuid("trigger_event_id"),
+    // Stable Temporal producer identity. Activity replay/re-dispatch returns
+    // the exact run instead of allocating a second schedule source row.
+    producerKey: text("producer_key"),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2030,6 +2151,9 @@ export const scheduledTaskRuns = pgTable(
       table.workspaceId,
       table.sessionId,
     ),
+    producer: uniqueIndex("scheduled_task_runs_producer_key_uq")
+      .on(table.workspaceId, table.producerKey)
+      .where(sql`${table.producerKey} is not null`),
   }),
 );
 

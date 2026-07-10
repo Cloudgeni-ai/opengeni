@@ -51,7 +51,6 @@ import {
   validateCodexCapacityResumeTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
-  setSessionStatus,
   setSessionStatusForTurnGeneration,
   setSessionLastInputTokens,
   sumUsageQuantity,
@@ -1149,6 +1148,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeTurnId,
       );
     };
+    const saveRunStateFenced = async (
+      state: Parameters<typeof saveRunState>[1],
+    ): Promise<void> => {
+      if (!(await saveRunState(db, state))) {
+        throw new CancelledFailure("turn execution generation was fenced while saving run state");
+      }
+    };
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     // OPE-21: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
@@ -1513,7 +1519,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
           if (shouldAppendRows) {
-            await appendSessionHistoryItems(db, {
+            const appended = await appendSessionHistoryItems(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -1526,6 +1532,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               producerCodexCredentialId: effectiveCodexCredentialId,
               items: rows,
             });
+            if (!appended) {
+              throw new CancelledFailure(
+                "turn execution generation was fenced while saving conversation history",
+              );
+            }
           }
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
@@ -1749,7 +1760,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           executionGeneration,
           inputs,
         );
-        if (inputs.length > 0 && appended.length === 0) {
+        if (inputs.length > 0 && !appended.accepted) {
           throw new CancelledFailure("turn execution generation was fenced");
         }
         activityContext?.heartbeat({
@@ -3595,7 +3606,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
           const approvals = runtime.serializeApprovals(stream.interruptions);
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -3637,7 +3648,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (settings.sessionHistorySource !== "items") {
           // Legacy conversation memory; in items mode the blob is only written
           // for requires_action pauses (the one RunState-only resume path).
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -3821,7 +3832,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activityError = attemptError;
                 return { status: "idle" };
               }
-              const [preemptedEvent] = await appendAndPublishTurnEventsFenced(
+              const { events: preemptedEvents, accepted: preemptAccepted } =
+                await appendAndPublishTurnEventsFenced(
                 db,
                 bus,
                 input.workspaceId,
@@ -3846,14 +3858,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 ],
               );
+              const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
               await requeuePreemptedTurn(
                 db,
                 input.workspaceId,
                 activeTurnId,
                 preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-              );
-              await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-                () => undefined,
+                undefined,
+                executionGeneration,
               );
               activityStatus = "preempted";
               turnMetricOutcome = "preempted";
@@ -3936,9 +3948,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the worker-death re-dispatch (any worker re-resumes by id).
       if (error instanceof SandboxLeaseSupersededError && preemptTurnId) {
         try {
-          await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, input.triggerEventId);
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-            () => undefined,
+          await requeuePreemptedTurn(
+            db,
+            input.workspaceId,
+            preemptTurnId,
+            input.triggerEventId,
+            undefined,
+            executionGeneration,
           );
           activityStatus = "preempted";
           turnMetricOutcome = "preempted";
@@ -3971,7 +3987,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // failed capture falls back to the previous snapshot and a clean
             // re-run of the original trigger.
             try {
-              await saveRunState(db, {
+              await saveRunStateFenced({
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
@@ -3986,7 +4002,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               resumeWithNotice = false;
             }
           }
-          const [preemptedEvent] = await appendAndPublishTurnEventsFenced(
+          const { events: preemptedEvents, accepted: preemptAccepted } =
+            await appendAndPublishTurnEventsFenced(
             db,
             bus,
             input.workspaceId,
@@ -4010,15 +4027,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 payload: { status: "queued" },
               },
             ],
-          );
+            );
+          const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
           await requeuePreemptedTurn(
             db,
             input.workspaceId,
             preemptTurnId,
             resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-          );
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-            () => undefined,
+            undefined,
+            executionGeneration,
           );
           activityStatus = "preempted";
           turnMetricOutcome = "preempted";
@@ -4090,7 +4107,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const runStateSaved =
           Boolean(maxTurns.serializedRunState) && settings.sessionHistorySource !== "items";
         if (maxTurns.serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -4491,7 +4508,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const runStateSaved =
           Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
         if (serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -4815,7 +4832,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const runStateSaved =
           Boolean(error.serializedRunState) && settings.sessionHistorySource !== "items";
         if (error.serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -4879,7 +4896,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const runStateSaved =
           Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
         if (serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
