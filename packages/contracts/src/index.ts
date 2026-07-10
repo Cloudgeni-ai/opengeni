@@ -4494,6 +4494,19 @@ export const SwapActiveSandboxResponse = z.object({
   activeSandboxId: z.string().nullable(),
   activeEpoch: z.number().int(),
   reason: z.string().optional(),
+  // Typed rejection discriminant (issue #341). Present only when swapped is false,
+  // so a client distinguishes a deleted/absent target from an unaddressable
+  // enrollment from a backend the turn cannot establish from a lost epoch race —
+  // without parsing the human reason string.
+  code: z
+    .enum([
+      "stale_pointer",
+      "offline_enrollment",
+      "unsupported_backend_context",
+      "transient_establishment",
+      "concurrent_swap",
+    ])
+    .optional(),
 });
 export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
 

@@ -28,6 +28,8 @@ import {
   NatsControlRpc,
   selfhostedLiveness,
   SelfhostedSession,
+  swapTargetEstablishability,
+  type BackendUnresolvableCode,
   type ControlRpc,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
@@ -118,12 +120,14 @@ export type FleetListResult = {
   sandboxes: FleetSandboxEntry[];
 };
 
-/** A swap/attach outcome the tool returns. */
+/** A swap/attach outcome the tool returns. On a rejection, `code` carries the
+ *  typed reason (issue #341 typed diagnostics) alongside the human `reason`. */
 export type FleetSwapResult = {
   swapped: boolean;
   activeSandboxId: string | null;
   activeEpoch: number;
   reason?: string;
+  code?: BackendUnresolvableCode | "concurrent_swap";
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
@@ -247,28 +251,58 @@ async function resolveTarget(
   services: FleetServices,
   ctx: FleetContext,
   target: string,
-): Promise<{ ok: true; targetSandboxId: string | null } | { ok: false; reason: string }> {
+): Promise<
+  | { ok: true; targetSandboxId: string | null }
+  | { ok: false; reason: string; code: BackendUnresolvableCode }
+> {
   // The session's own group box → the default pointer (null).
   if (target === ctx.sessionGroupId || target === "session" || target === "default") {
     return { ok: true, targetSandboxId: null };
   }
   const sandbox = await getSandbox(services.db, ctx.workspaceId, target);
   if (!sandbox) {
-    return { ok: false, reason: `sandbox ${target} not found in this workspace` };
+    return {
+      ok: false,
+      reason: `sandbox ${target} not found in this workspace`,
+      code: "stale_pointer",
+    };
+  }
+  // ESTABLISHER-CAPABILITY GATE (issue #341 invariant A): a target must be
+  // establishable by a turn's routing context BEFORE the epoch-fenced CAS commits
+  // the pointer, or a "successful" swap strands every following op on a backend no
+  // turn can resume. `swapTargetEstablishability` is the SAME predicate the turn
+  // resolver consults, so admission and establishment never disagree. Any sandbox
+  // reaching here is NOT the session's own group box (handled above), so a Modal
+  // sibling is rejected pre-commit rather than admitted-then-stranded.
+  const establishable = swapTargetEstablishability({
+    kind: sandbox.kind,
+    isSessionGroup: false,
+  });
+  if (!establishable.ok) {
+    return { ok: false, reason: establishable.reason, code: establishable.code };
   }
   if (sandbox.kind === "selfhosted") {
     if (!sandbox.enrollmentId) {
-      return { ok: false, reason: `selfhosted sandbox ${target} has no enrollment` };
+      return {
+        ok: false,
+        reason: `selfhosted sandbox ${target} has no enrollment`,
+        code: "offline_enrollment",
+      };
     }
     const enrollment = await getEnrollment(services.db, ctx.workspaceId, sandbox.enrollmentId);
     if (!enrollment) {
-      return { ok: false, reason: `enrollment for sandbox ${target} not found` };
+      return {
+        ok: false,
+        reason: `enrollment for sandbox ${target} not found`,
+        code: "offline_enrollment",
+      };
     }
     const probe = await probeEnrollment(services, ctx.workspaceId, enrollment);
     if (probe.liveness !== "online") {
       return {
         ok: false,
         reason: `sandbox ${target} is ${probe.liveness}; cannot attach to a non-online machine`,
+        code: "offline_enrollment",
       };
     }
   }
@@ -298,11 +332,14 @@ export async function swapActiveSandbox(
       activeSandboxId: null,
       activeEpoch: 0,
     };
+    // Fail BEFORE the CAS: the pointer + epoch are read back unchanged and echoed,
+    // so an unestablishable target never mutates the session's routing state.
     return {
       swapped: false,
       activeSandboxId: pointer.activeSandboxId,
       activeEpoch: pointer.activeEpoch,
       reason: resolved.reason,
+      code: resolved.code,
     };
   }
 
@@ -347,6 +384,7 @@ export async function swapActiveSandbox(
     activeSandboxId: pointer.activeSandboxId,
     activeEpoch: pointer.activeEpoch,
     reason: "a concurrent swap won the epoch fence; re-read and retry",
+    code: "concurrent_swap",
   };
 }
 

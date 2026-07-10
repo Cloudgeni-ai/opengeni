@@ -375,4 +375,44 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       expect(modal.sandbox.enrollmentId).toBeNull();
     }
   }, 60_000);
+
+  // REGRESSION (issue #341 Shape 1 / invariant A): a swap to a first-class Modal
+  // sibling was ADMITTED (resolveTarget had no modal branch) and the epoch bumped,
+  // then every following op stranded because no turn context wires an establisher
+  // for it. The establisher-capability gate must reject it BEFORE the CAS — typed
+  // `unsupported_backend_context`, pointer + epoch untouched.
+  test("swap to a NON-group Modal sibling is rejected BEFORE commit (Shape 1), pointer + epoch unchanged", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    expect(before.activeSandboxId).toBeNull();
+
+    // Provision a first-class Modal sibling (a real sandboxes row, not the group box).
+    const provisioned = await provisionSandbox(services, ctx, { kind: "modal", name: "sibling" });
+    expect(provisioned.kind).toBe("modal");
+    const siblingId = provisioned.kind === "modal" ? provisioned.sandbox.id : "";
+
+    const r = await swapActiveSandbox(services, ctx, siblingId);
+    expect(r.swapped).toBe(false);
+    expect(r.code).toBe("unsupported_backend_context");
+    expect(r.reason).toMatch(/Modal sandbox other than this session/i);
+
+    // The CAS never ran: the pointer AND the epoch are exactly as before (no churn).
+    const after = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
+    expect(after.activeSandboxId).toBeNull();
+    expect(after.activeEpoch).toBe(before.activeEpoch);
+    // The rejection echoes the unchanged pointer/epoch, not a moved one.
+    expect(r.activeSandboxId).toBeNull();
+    expect(r.activeEpoch).toBe(before.activeEpoch);
+  }, 60_000);
+
+  // The typed diagnostic also rides the liveness-gate rejection (offline_enrollment),
+  // so a caller can branch on `code` rather than parse the human reason.
+  test("swap to an offline machine carries the typed offline_enrollment code", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ online: false });
+    const r = await swapActiveSandbox(services, ctx, sandbox.id);
+    expect(r.swapped).toBe(false);
+    expect(r.code).toBe("offline_enrollment");
+  }, 60_000);
 });
