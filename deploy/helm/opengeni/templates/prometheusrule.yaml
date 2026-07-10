@@ -46,5 +46,95 @@ spec:
             severity: critical
           annotations:
             summary: An OpenGeni service target is down
+        # ── Streaming health ─────────────────────────────────────────────────
+        # SLIs from the token-streaming pipeline, split so an alert names the
+        # layer: the model (TTFT), the durable write path (append), or delivery
+        # (publish). Thresholds are starters — tune per deployment.
+        - alert: OpenGeniStreamingFirstTokenSlow
+          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket[10m]))) > 8
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni p99 time-to-first-token exceeds 8s
+            description: The model is slow to START streaming (p99 TTFT by provider above 8s for 15m). Suspect the model provider before the write/delivery path.
+        - alert: OpenGeniEventAppendLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket[10m]))) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni session-event append p99 exceeds 1s (durable write path)
+            description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
+        - alert: OpenGeniEventPublishLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket[10m]))) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni live-publish p99 exceeds 500ms (delivery path)
+            description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+        # ── Context / compaction ─────────────────────────────────────────────
+        - alert: OpenGeniCompactionNotFiring
+          # Contexts running hot (p90 observed input tokens high) while NO
+          # compaction has fired in 30m — sessions are drifting toward overflow.
+          # The 150k token threshold assumes a ~200k-window model; tune to yours.
+          expr: |
+            histogram_quantile(0.9, sum by (le) (rate(opengeni_model_input_tokens_bucket[30m]))) > 150000
+            and on()
+            sum(increase(opengeni_context_compactions_total[30m])) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni contexts are running hot but compaction has not fired in 30m
+        # ── Connected Machines (op-outcome plane) ────────────────────────────
+        - alert: OpenGeniMachineOpInfraFailuresHigh
+          expr: sum(rate(opengeni_machine_op_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni Connected Machine op infra-failure ratio exceeds 10%
+        - alert: OpenGeniMachineOpHealedFaultsSpiking
+          # Healed faults are the LEADING indicator of the next unhealed one — a
+          # blip/backpressure the transport absorbed. A rising rate precedes real
+          # op failures, so this fires EARLY (info severity) as a heads-up.
+          expr: sum(rate(opengeni_machine_op_healed_total[10m])) > 0.2
+          for: 15m
+          labels:
+            severity: info
+          annotations:
+            summary: OpenGeni Connected Machine healed-fault rate is elevated (leading indicator)
+        # ── Worker fleet ─────────────────────────────────────────────────────
+        # These two read cluster-infra series (cAdvisor + kube-state-metrics); if
+        # those exporters are absent the alerts simply never fire (no data). Pod/
+        # HPA matchers assume the default "opengeni" release name — override
+        # observability.prometheusRule.rules for a custom name.
+        - alert: OpenGeniWorkerMemoryNearLimit
+          expr: |
+            max by (namespace, pod, container) (
+              container_memory_working_set_bytes{container=~"worker|api|relay", pod=~".*opengeni.*"}
+            )
+            /
+            max by (namespace, pod, container) (
+              kube_pod_container_resource_limits{resource="memory", container=~"worker|api|relay", pod=~".*opengeni.*"}
+            ) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni container is above 90% of its memory limit (pre-OOM)
+            description: The worker holds the full in-turn history in memory; sustained >90% of the limit precedes an OOM kill mid-turn.
+        - alert: OpenGeniHpaAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*opengeni.*"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*opengeni.*"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni HPA has been pinned at maxReplicas (capacity saturation)
+            description: The autoscaler cannot add more pods; sustained saturation means turns queue. Raise maxReplicas or investigate the load source.
         {{- end }}
 {{- end }}
