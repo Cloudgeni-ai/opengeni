@@ -88,6 +88,15 @@ export class SelfhostedControlError extends Error {
   readonly draining: boolean;
   readonly agentOffline: boolean;
   readonly osNotFound: boolean;
+  /** The reply exceeded the transport's max payload (a distinguishing flag so the
+   *  fault renderer can name the size wall + recovery instead of a generic OS error). */
+  readonly payloadTooLarge: boolean;
+  /** The transport synthesized this fault PRE-SEND — it KNOWS the request never
+   *  reached the machine (no connection, or no responder on the subject), so the op
+   *  provably did not execute. Only such a fault is safe to re-issue for ANY op kind
+   *  (a post-send timeout is ambiguous — at-least-once — and must not be re-sent
+   *  unless the op is read-only). Never set for an agent-returned error. */
+  readonly neverSent: boolean;
   readonly detail: Record<string, string>;
 
   constructor(input: {
@@ -99,6 +108,8 @@ export class SelfhostedControlError extends Error {
     draining?: boolean;
     agentOffline?: boolean;
     osNotFound?: boolean;
+    payloadTooLarge?: boolean;
+    neverSent?: boolean;
     detail?: Record<string, string>;
   }) {
     super(input.message);
@@ -109,6 +120,8 @@ export class SelfhostedControlError extends Error {
     this.draining = input.draining ?? false;
     this.agentOffline = input.agentOffline ?? false;
     this.osNotFound = input.osNotFound ?? false;
+    this.payloadTooLarge = input.payloadTooLarge ?? false;
+    this.neverSent = input.neverSent ?? false;
     this.detail = input.detail ?? {};
   }
 }
@@ -139,12 +152,17 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
   const detail = err.detail ?? {};
   switch (err.code) {
     case ErrorCode.ERROR_CODE_AGENT_OFFLINE:
+      // AGENT_OFFLINE is ONLY ever synthesized by our transport (the agent never
+      // sends it). The synthesis marks `neverSent` on the pre-send paths (no NATS
+      // connection, or no responder on the subject) — the op provably never reached
+      // the machine — via the reserved detail key `NEVER_SENT_DETAIL_KEY`.
       return new SelfhostedControlError({
         message: message || "the enrolled agent is offline",
         code: err.code,
         reason: "agent_offline",
         retryable: false,
         agentOffline: true,
+        neverSent: detail[NEVER_SENT_DETAIL_KEY] === "1",
         detail,
       });
     case ErrorCode.ERROR_CODE_TIMEOUT:
@@ -190,6 +208,7 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         code: err.code,
         reason: null,
         retryable: false,
+        payloadTooLarge: true,
         detail,
       });
     case ErrorCode.ERROR_CODE_FENCED:
@@ -279,7 +298,8 @@ export function drainingExhaustedError(
     reason: base.reason,
     retryable: base.retryable,
     draining: base.draining,
-    detail: base.detail,
+    // Carry the retry count in `detail` so the fault renderer can state it.
+    detail: { ...base.detail, retries: String(retries) },
   });
 }
 
@@ -297,14 +317,26 @@ export function execDeadlineHint(seconds: number): string {
   );
 }
 
+/** The reserved `detail` key the transport sets to "1" when it KNOWS a synthesized
+ *  AGENT_OFFLINE fault occurred pre-send (no connection / no responder) — so the op
+ *  provably never reached the machine. `agentErrorToControlError` reads it into
+ *  `SelfhostedControlError.neverSent`. Reserved (never sent by the agent). */
+export const NEVER_SENT_DETAIL_KEY = "_never_sent";
+
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
- *  when no agent responds on the subject at all. */
-export function offlineAgentError(message = "no agent responded (offline)"): AgentError {
+ *  when no agent responds on the subject at all. `neverSent` marks that the request
+ *  provably never reached the machine (no connection / no responder), which makes it
+ *  safe to re-issue for ANY op kind; leave it false for an AMBIGUOUS transport error
+ *  (a connection torn mid-request may have delivered the op). */
+export function offlineAgentError(
+  message = "no agent responded (offline)",
+  neverSent = false,
+): AgentError {
   return {
     code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
     message,
     retryable: false,
-    detail: {},
+    detail: neverSent ? { [NEVER_SENT_DETAIL_KEY]: "1" } : {},
   };
 }
 
@@ -411,7 +443,8 @@ export class NatsControlRpc implements ControlRpc {
     const conn = await this.resolveConnection();
     if (!conn) {
       // No NATS configured / not reachable → the agent is unaddressable → offline.
-      return offlineControlResponse(req.requestId);
+      // The request was never published (no connection) → NEVER SENT: safe to re-issue.
+      return offlineControlResponse(req.requestId, true);
     }
     const payload = ControlRequest.encode(req).finish();
     try {
@@ -420,11 +453,13 @@ export class NatsControlRpc implements ControlRpc {
     } catch (err) {
       // Re-allow a future request to re-dial if the cached conn was torn down.
       if (isNoRespondersError(err)) {
-        // No subscriber on the subject at all → the machine is offline.
-        return offlineControlResponse(req.requestId);
+        // No subscriber on the subject at all → the request reached no responder and
+        // was NOT delivered → NEVER SENT (provably not executed): safe to re-issue.
+        return offlineControlResponse(req.requestId, true);
       }
       if (isRequestTimeoutError(err)) {
-        // A responder may exist but the request timed out → a transient blip.
+        // A responder may exist but the request timed out → a transient blip. AMBIGUOUS
+        // (the op may have run and only the reply was lost) — never marked never-sent.
         return timeoutControlResponse(req.requestId);
       }
       // Any other transport error → treat as offline (never a NotFound). The op
@@ -435,9 +470,11 @@ export class NatsControlRpc implements ControlRpc {
   }
 }
 
-/** A `ControlResponse` carrying a synthesized AGENT_OFFLINE error. */
-export function offlineControlResponse(requestId: string): ControlResponse {
-  return { requestId, error: offlineAgentError(), result: undefined };
+/** A `ControlResponse` carrying a synthesized AGENT_OFFLINE error. `neverSent` marks
+ *  a pre-send synthesis (no connection / no responder) — the op provably never
+ *  reached the machine, so it is safe to re-issue for any op kind. */
+export function offlineControlResponse(requestId: string, neverSent = false): ControlResponse {
+  return { requestId, error: offlineAgentError(undefined, neverSent), result: undefined };
 }
 
 /** A `ControlResponse` carrying a synthesized TIMEOUT error (→ reconnecting). */

@@ -410,6 +410,7 @@ export class SelfhostedSession {
     const opKind = op.$case;
     let drainingRetries = 0;
     let timeoutRetries = 0;
+    let neverSentRetries = 0;
     for (;;) {
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
@@ -433,6 +434,7 @@ export class SelfhostedSession {
         error,
         drainingRetries,
         timeoutRetries,
+        neverSentRetries,
         jitter: this.retryClock.jitter(),
       });
       if (decision.action === "fail") {
@@ -444,7 +446,10 @@ export class SelfhostedSession {
         throw error;
       }
       await this.retryClock.sleep(decision.delayMs);
-      if (error.draining) {
+      // Advance the counter for the class that was retried (separate budgets).
+      if (error.neverSent) {
+        neverSentRetries += 1;
+      } else if (error.draining) {
         drainingRetries += 1;
       } else {
         timeoutRetries += 1;

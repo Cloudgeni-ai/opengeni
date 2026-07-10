@@ -57,6 +57,11 @@ export const SELFHOSTED_EXEC_DRAINING_MAX_RETRIES = 10;
 /** A read-only op that timed out is retried at most once (see the at-least-once
  *  note above — even a read gets a single re-issue, not an unbounded loop). */
 export const SELFHOSTED_TIMEOUT_MAX_RETRIES = 1;
+/** A fault the transport synthesized PRE-SEND (no connection / no responder) — the
+ *  op provably never reached the machine, so it is safe to re-issue for ANY op kind.
+ *  Short bounded budget (≈3.5s summed): enough to ride out a NATS reconnect blip
+ *  quietly, not so long it stalls the model on a machine that is genuinely down. */
+export const SELFHOSTED_NEVER_SENT_MAX_RETRIES = 3;
 
 /** Full-jitter backoff base (ms). Delay N is sampled in `[0, base * factor^N)`. */
 export const SELFHOSTED_RETRY_BACKOFF_BASE_MS = 500;
@@ -89,8 +94,13 @@ export function selfhostedRetryBackoffMs(attempt: number, jitter: number): numbe
  *    nothing executed. exec gets the long `SELFHOSTED_EXEC_DRAINING_MAX_RETRIES`
  *    budget (≈60s of patient queueing under the flat 8-permit pool); every other op
  *    keeps the short `SELFHOSTED_DRAINING_MAX_RETRIES` budget (≤5s).
- *  - `error.reason === "agent_reconnecting"` (a TIMEOUT / transient blip) → retry
- *    at most `SELFHOSTED_TIMEOUT_MAX_RETRIES`, and ONLY for a read-only
+ *  - `error.neverSent` (a pre-send AGENT_OFFLINE synthesis — no connection / no
+ *    responder; the op provably never reached the machine) → retry for ANY op kind
+ *    up to `SELFHOSTED_NEVER_SENT_MAX_RETRIES`. At-least-once does NOT apply (nothing
+ *    executed), so even a mutation is safe to re-issue; this heals a NATS reconnect
+ *    blip quietly. A truly-offline machine surfaces honestly after the short budget.
+ *  - `error.reason === "agent_reconnecting"` (a TIMEOUT / transient blip AFTER send)
+ *    → retry at most `SELFHOSTED_TIMEOUT_MAX_RETRIES`, and ONLY for a read-only
  *    idempotent-safe op (`SELFHOSTED_IDEMPOTENT_READONLY_OPS`). A timed-out
  *    MUTATION is never retried here — it may already have run (at-least-once).
  *  - Everything else → no retry at this layer:
@@ -108,9 +118,22 @@ export function decideSelfhostedRetry(input: {
   error: SelfhostedControlError;
   drainingRetries: number;
   timeoutRetries: number;
+  /** Prior never-sent retries. Optional (default 0) — only the pre-send AGENT_OFFLINE
+   *  branch reads it, so callers that cannot hit that class may omit it. */
+  neverSentRetries?: number;
   jitter: number;
 }): SelfhostedRetryDecision {
-  const { opKind, error, drainingRetries, timeoutRetries, jitter } = input;
+  const { opKind, error, drainingRetries, timeoutRetries, neverSentRetries = 0, jitter } = input;
+
+  if (error.neverSent) {
+    // Provably not executed (the request never reached the machine) → safe to
+    // re-issue for ANY op kind. Bounded so a genuinely-offline machine surfaces
+    // honestly rather than hanging the turn.
+    if (neverSentRetries >= SELFHOSTED_NEVER_SENT_MAX_RETRIES) {
+      return { action: "fail" };
+    }
+    return { action: "retry", delayMs: selfhostedRetryBackoffMs(neverSentRetries, jitter) };
+  }
 
   if (error.draining) {
     // exec is patient (the flat 8-permit pool needs longer than 5s to free a slot);
