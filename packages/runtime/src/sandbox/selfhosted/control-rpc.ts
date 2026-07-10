@@ -128,6 +128,9 @@ export class SelfhostedControlError extends Error {
  *                             real "file does not exist"), no machine-liveness
  *                             reason. (This is the ONLY NotFound; it is NOT the
  *                             box-gone NotFound that licenses a cold restore.)
+ *   - PAYLOAD_TOO_LARGE     → the reply exceeded the transport's max payload;
+ *                             non-retryable, with actionable copy (the sizes + a
+ *                             redirect-to-file workaround).
  *   - OS / UNSUPPORTED / STREAM / PROTOCOL / UNSPECIFIED → op-level error, no
  *                             reason, non-retryable.
  */
@@ -163,12 +166,30 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         detail,
       });
     case ErrorCode.ERROR_CODE_DRAINING:
+      // A pre-admission backpressure rejection (the machine's bounded host-work
+      // pool is full, or it is shutting down): the op NEVER started, so it is safe
+      // to retry (SelfhostedSession.call retries it a bounded number of times).
+      // Replace the agent's internal "N in flight" phrasing with human-language,
+      // actionable copy; call() appends the retry count when it finally surfaces.
       return new SelfhostedControlError({
-        message: message || "the agent is draining and cannot accept new work",
+        message: drainingMessage(0),
         code: err.code,
         reason: null,
         retryable: true,
         draining: true,
+        detail,
+      });
+    case ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE:
+      // The op's reply exceeded the control transport's negotiated max payload and
+      // could not be published (a huge file read, an unbounded exec dump, a full-res
+      // screenshot). Not retryable — the same op reproduces the same oversized reply.
+      // Surface the actual sizes + a concrete workaround (write to a file, read in
+      // ranges) instead of the raw byte-count message.
+      return new SelfhostedControlError({
+        message: payloadTooLargeMessage(detail),
+        code: err.code,
+        reason: null,
+        retryable: false,
         detail,
       });
     case ErrorCode.ERROR_CODE_FENCED:
@@ -204,6 +225,76 @@ export function agentErrorToControlError(err: AgentError): SelfhostedControlErro
         detail,
       });
   }
+}
+
+// ── Actionable, human-language error copy ─────────────────────────────────────
+// These build the messages the model / API caller sees for the failure modes that
+// have a concrete workaround. They live here (next to the mapping) so the phrasing
+// is single-sourced and unit-testable, and deliberately avoid the wire's internal
+// vocabulary ("in flight", "negotiated max payload", raw byte counts alone).
+
+/**
+ * PAYLOAD_TOO_LARGE copy: state the actual sizes (from the agent's `detail` map —
+ * `encoded_bytes` / `max_payload`) and tell the caller how to get the data anyway:
+ * redirect the output to a file and read it back in ranges/chunks.
+ */
+export function payloadTooLargeMessage(detail: Record<string, string>): string {
+  const encoded = detail.encoded_bytes;
+  const max = detail.max_payload;
+  const sizes =
+    encoded && max
+      ? `The result was ${encoded} bytes, over the machine link's ${max}-byte per-message limit. `
+      : "The result was larger than the machine link can deliver in a single message. ";
+  return (
+    `${sizes}Redirect the command's output to a file (for example ` +
+    "`<command> > /tmp/out.log 2>&1`) and then read that file back in ranges or chunks " +
+    "instead of returning it all at once."
+  );
+}
+
+/**
+ * DRAINING copy: the machine is at its concurrent-work capacity. `retries` is the
+ * number of times `SelfhostedSession.call` already re-tried before giving up (0 at
+ * the mapping layer, the final count when it surfaces after exhausting retries).
+ */
+export function drainingMessage(retries: number): string {
+  const retried =
+    retries > 0 ? ` It was retried ${retries} time${retries === 1 ? "" : "s"} first.` : "";
+  return (
+    "The machine is at its concurrent-work capacity and could not accept this command." +
+    retried +
+    " Try again shortly, or reduce the number of commands you run in parallel."
+  );
+}
+
+/** Rebuild a DRAINING error with the final retry count folded into its message —
+ *  used by `SelfhostedSession.call` when the bounded DRAINING retries are exhausted. */
+export function drainingExhaustedError(
+  base: SelfhostedControlError,
+  retries: number,
+): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message: drainingMessage(retries),
+    code: base.code,
+    reason: base.reason,
+    retryable: base.retryable,
+    draining: base.draining,
+    detail: base.detail,
+  });
+}
+
+/**
+ * exec-deadline copy: the command was terminated at the exec time limit. Advise
+ * running long jobs in the background and polling their output rather than blocking
+ * the turn on one long command. Surfaced on a timed-out exec result's stderr.
+ */
+export function execDeadlineHint(seconds: number): string {
+  return (
+    `The command was terminated at the ${seconds}-second execution limit. ` +
+    "Run long jobs in the background (for example " +
+    "`nohup <command> > /tmp/job.log 2>&1 &`, or start them in a terminal session) " +
+    "and poll the output file instead of blocking on a single command."
+  );
 }
 
 /** Build a synthesized AGENT_OFFLINE `AgentError` — the control plane uses this
