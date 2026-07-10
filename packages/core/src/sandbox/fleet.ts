@@ -35,6 +35,12 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
+import {
+  buildSelfhostedProvisioningInstructions,
+  type SelfhostedProvisioningInstructions,
+} from "./selfhosted-provisioning";
+
+export { buildSelfhostedProvisioningInstructions } from "./selfhosted-provisioning";
 
 export type FleetServices = {
   db: Database;
@@ -131,14 +137,6 @@ export type FleetSwapResult = {
 };
 
 const PROBE_TIMEOUT_MS = 5_000;
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function powerShellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
-}
 
 function controlRpc(bus: EventBus | undefined): ControlRpc {
   return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
@@ -488,14 +486,7 @@ export async function runOnSandbox(
 }
 
 export type ProvisionResult =
-  | {
-      kind: "selfhosted";
-      instructions: string;
-      installCommandUnix: string;
-      installCommandWindows: string;
-      verificationUri: string;
-      note: string;
-    }
+  | SelfhostedProvisioningInstructions
   | { kind: "modal"; sandbox: SandboxRecord; note: string };
 
 /**
@@ -513,29 +504,10 @@ export async function provisionSandbox(
   input: { kind: "selfhosted" | "modal"; name?: string },
 ): Promise<ProvisionResult> {
   if (input.kind === "selfhosted") {
-    const base = (services.settings.publicBaseUrl ?? "https://app.opengeni.ai").replace(/\/+$/, "");
-    const installUrl = `${base}/install.sh`;
-    const windowsInstallUrl = `${base}/install.ps1`;
-    return {
-      kind: "selfhosted",
-      instructions:
-        "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent enroll`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox.",
-      // Install from THIS control plane's origin (not a hardcoded public CDN): the
-      // served install script is rewritten to pull the per-SHA agent baked into
-      // this exact deployment (see apps/api/src/routes/install.ts), so a deployed
-      // env is self-contained and a private/air-gapped one works with no public DNS.
-      // Keep the public API origin + workspace id on the shell process that runs
-      // install.sh. The installer bakes those values into its printed interactive
-      // `opengeni-agent enroll` command after curl's process exits; never attempt
-      // enrollment here because whole-machine consent is a human-only gate.
-      installCommandUnix: `curl -fsSL ${shellSingleQuote(installUrl)} | OPENGENI_API_URL=${shellSingleQuote(base)} OPENGENI_WORKSPACE_ID=${shellSingleQuote(ctx.workspaceId)} sh`,
-      // PowerShell's environment assignments must be in the same process as iex
-      // (and quote apostrophes by doubling them) so the served script sees exactly
-      // the same control-plane origin and workspace binding as the Unix command.
-      installCommandWindows: `$env:OPENGENI_API_URL = ${powerShellSingleQuote(base)}; $env:OPENGENI_WORKSPACE_ID = ${powerShellSingleQuote(ctx.workspaceId)}; irm ${powerShellSingleQuote(windowsInstallUrl)} | iex`,
-      verificationUri: `${base}/device`,
-      note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
-    };
+    return buildSelfhostedProvisioningInstructions({
+      publicBaseUrl: services.settings.publicBaseUrl,
+      workspaceId: ctx.workspaceId,
+    });
   }
   // modal: create a first-class named modal sandbox record. NOTE: a session cannot
   // yet be swapped onto a second Modal box — cross-group Modal routing is not built,
