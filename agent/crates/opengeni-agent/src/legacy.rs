@@ -34,6 +34,41 @@ use tracing::warn;
 use crate::engine::{Engine, StartOutcome, LEGACY_ORIGIN};
 use crate::job::{JobCommand, JobExit, JobFailure, JobOutcome};
 
+/// Cancels the op if the adapter future is DROPPED before the terminal
+/// record — a legacy op is generation-scoped (the pre-engine semantics: a
+/// disconnect/shutdown aborts accepted request/reply work and kills its
+/// child), unlike op-stream jobs which deliberately survive generation end
+/// (op ⊥ connection). Without this, the engine's routing map keeps the pump's
+/// mailbox alive, so a JoinSet abort alone would leave the child running.
+struct CancelOnDrop {
+    engine: Arc<Engine>,
+    op_id: OpId,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn new(engine: Arc<Engine>, op_id: OpId) -> Self {
+        Self {
+            engine,
+            op_id,
+            armed: true,
+        }
+    }
+
+    /// The op reached its terminal record; the guard has nothing to do.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.engine.cancel(&self.op_id);
+        }
+    }
+}
+
 /// The adapter's local consumer attach generation. Nothing else ever attaches
 /// to a legacy job (its op id never reaches the op-stream surface), so a
 /// constant generation is correct.
@@ -87,6 +122,7 @@ pub async fn serve_exec<P: Platform>(
 
     match outcome {
         StartOutcome::Started(started) => {
+            let mut guard = CancelOnDrop::new(engine.clone(), op_id);
             let _ = mailbox_cell.set(started.mailbox.clone());
             let _ = started
                 .mailbox
@@ -100,6 +136,7 @@ pub async fn serve_exec<P: Platform>(
             let Ok(record) = exit_rx.await else {
                 // The pump task died without a terminal record — a runner bug,
                 // reported typed rather than a caller timeout.
+                guard.disarm();
                 return error_reply(
                     request_id,
                     ErrorCode::Os,
@@ -107,6 +144,7 @@ pub async fn serve_exec<P: Platform>(
                     false,
                 );
             };
+            guard.disarm();
 
             // Release the job for fast GC: local consumption IS the final ack.
             let acked = started.handles.watermark.load(Ordering::Relaxed);
@@ -189,6 +227,7 @@ pub async fn serve_git<P: Platform>(
 
     match outcome {
         StartOutcome::Started(started) => {
+            let mut guard = CancelOnDrop::new(engine.clone(), op_id);
             let _ = mailbox_cell.set(started.mailbox.clone());
             let _ = started
                 .mailbox
@@ -200,6 +239,7 @@ pub async fn serve_git<P: Platform>(
                 .await;
 
             let Ok(record) = exit_rx.await else {
+                guard.disarm();
                 return error_reply(
                     request_id,
                     ErrorCode::Os,
@@ -207,6 +247,7 @@ pub async fn serve_git<P: Platform>(
                     false,
                 );
             };
+            guard.disarm();
 
             let acked = started.handles.watermark.load(Ordering::Relaxed);
             let _ = started
@@ -698,6 +739,59 @@ mod tests {
             }
             other => panic!("expected Git result, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn aborting_the_adapter_cancels_the_legacy_child() {
+        // Legacy ops are generation-scoped: a JoinSet abort at generation end
+        // must kill the in-flight child (the pre-engine semantics). The
+        // engine's routing map keeps the pump mailbox alive, so the adapter's
+        // cancel-on-drop guard is what carries this — pinned here (found live
+        // by the chaos-nats harness scenario after the engine rework).
+        let (engine, _dir) = test_engine();
+        let platform = native();
+        let op_id = OpId::from("r-abort");
+        let engine2 = engine.clone();
+        let platform2 = platform.clone();
+        let task = tokio::spawn(async move {
+            serve_exec(
+                &engine2,
+                &platform2,
+                "r-abort".to_string(),
+                exec_req(&["sleep 30"], true),
+            )
+            .await
+        });
+        // Wait until the job is running, then abort the adapter (the
+        // generation-end JoinSet shutdown).
+        for _ in 0..200 {
+            if matches!(
+                engine.query(&op_id),
+                opengeni_agent_engine::registry::QueryAnswer::Running { .. }
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+        let _ = task.await;
+
+        // The guard fires: the op settles as a typed cancelled terminal.
+        let mut settled = false;
+        for _ in 0..500 {
+            if let Some(handles) = engine.handles(&op_id) {
+                if handles
+                    .exit
+                    .get()
+                    .is_some_and(|e| e.outcome == JobOutcome::Cancelled)
+                {
+                    settled = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(settled, "an aborted adapter must cancel its child (typed)");
     }
 
     #[test]

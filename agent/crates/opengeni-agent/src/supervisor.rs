@@ -185,6 +185,11 @@ pub struct Supervisor<P: Platform> {
     links: Vec<WorkspaceLink>,
     agent_version: String,
     started: Instant,
+    /// The latest metrics sample, refreshed by a background task so the
+    /// heartbeat send never blocks the serve loop (the sampler's /proc/stat
+    /// CPU delta blocks ~200ms — awaited inline it head-of-line-blocked every
+    /// rpc arriving during a heartbeat, found live by harness scenario E3).
+    metrics: Arc<std::sync::RwLock<v1::MetricsSample>>,
     /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
     shutdown: ShutdownSignal,
 }
@@ -214,6 +219,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             }],
             agent_version: agent_version.into(),
             started: Instant::now(),
+            metrics: Arc::new(std::sync::RwLock::new(v1::MetricsSample::default())),
             shutdown: ShutdownSignal::default(),
         }
     }
@@ -251,10 +257,22 @@ impl<P: Platform + 'static> Supervisor<P> {
         // registry GC + queue-wait expiry every tick, a fresh host-capacity
         // sample (budgets track the host) on the slower cadence.
         let housekeeping = tokio::spawn(housekeeping_loop(self.engine.clone()));
+        // The metrics sampler refreshes the cached heartbeat sample off-loop
+        // (the /proc/stat CPU delta blocks ~200ms — never on the serve path).
+        let metrics_cache = self.metrics.clone();
+        let metrics_task = tokio::spawn(async move {
+            loop {
+                if let Ok(sample) = tokio::task::spawn_blocking(crate::metrics::sample).await {
+                    *metrics_cache.write().expect("metrics lock") = sample;
+                }
+                tokio::time::sleep(DEFAULT_HEARTBEAT).await;
+            }
+        });
         // v1: exactly one link; the loop shape is multi-enrollment-ready.
         let serves = self.links.iter().map(|link| self.run_link(link));
         futures::future::join_all(serves).await;
         housekeeping.abort();
+        metrics_task.abort();
         Ok(())
     }
 
@@ -861,13 +879,12 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         seq: u64,
     ) -> Result<(), async_nats::PublishError> {
-        // The metrics sample briefly blocks (a /proc/stat CPU delta), so it runs on
-        // the blocking pool — it must never stall the async heartbeat/RPC loop. A
-        // join failure degrades to a default sample rather than failing the
-        // heartbeat (a metrics gap is never fatal, dossier §10.7).
-        let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
-            .await
-            .unwrap_or_default();
+        // The metrics sample comes from the background cache — the sampler's
+        // /proc/stat CPU delta blocks ~200ms, and awaiting it here would
+        // head-of-line-block every rpc arriving during a heartbeat (invariant
+        // #4 violation, found live by harness scenario E3). A not-yet-filled
+        // cache degrades to a default sample (a metrics gap is never fatal).
+        let metrics = self.metrics.read().expect("metrics lock").clone();
         // The upward capacity report (LIMITS-DOCTRINE: the runner holds no
         // concurrency policy — the server paces against these figures).
         let capacity = self.engine.capacity();

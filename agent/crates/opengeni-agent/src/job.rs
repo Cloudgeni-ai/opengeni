@@ -751,13 +751,23 @@ impl Pump {
     }
 
     /// The joint read gate. See the loop comment in [`Self::run`].
+    ///
+    /// Attached, the gate is windowed: allowance must remain AND the pump
+    /// must be caught up. The caught-up requirement is load-bearing (found
+    /// live by harness scenario E3): a chunked read that overshoots the
+    /// remaining allowance leaves a retained-UNSENT frame which consumes no
+    /// window — with `allowance() > 0` alone the gate would never close and
+    /// the child would stream unbounded into retention instead of being
+    /// throttled end-to-end. Behind = the window is exhausted in spirit: the
+    /// next frame cannot be sent either, so reading more only buys buffered
+    /// bytes nobody granted credit for.
     fn may_read(&self) -> bool {
         if self.child_done {
             // Post-exit drain: the group is killed, EOF is imminent; what the
             // pipes still hold counts against retention like any output.
             self.retention_headroom()
         } else if self.flow.is_attached() {
-            self.flow.allowance() > 0
+            self.flow.sent_hi() >= self.retention.high_seq() && self.flow.allowance() > 0
         } else {
             self.retention_headroom()
         }
@@ -1565,6 +1575,63 @@ mod tests {
         job.commands = None; // the supervisor abandons the op
         let (_, exit) = job.wait_exit().await;
         assert_eq!(exit.outcome, JobOutcome::Cancelled);
+        job.join().await;
+    }
+
+    #[tokio::test]
+    async fn overshoot_frame_closes_the_read_gate_end_to_end() {
+        // Window 1536, frames <= 1024: frame 1 (1024) sends; frame 2 cannot
+        // (allowance 512) and is retained UNSENT — the pump is now behind.
+        // The read gate must CLOSE (caught-up requirement): the producer's
+        // progress file plateaus, and retention never grows past the
+        // overshoot frame. Credit + catch-up then resume everything.
+        let mut job = job(
+            "i=0; while [ $i -lt 200 ]; do head -c 1024 /dev/zero;              echo $i >> progress.txt; i=$((i+1)); done",
+        )
+        .frame_bytes(1024)
+        .start();
+        let progress_path = job.dir.path().join("progress.txt");
+        let lines =
+            |path: &std::path::Path| std::fs::read_to_string(path).map_or(0, |s| s.lines().count());
+
+        job.attach(1, 0, 1536).await;
+        let first = job.next_frame().await;
+        assert_eq!(first.body.payload_len(), 1024);
+        job.no_frame_for(Duration::from_millis(200)).await;
+
+        // Gate closed: the producer parks (pipe full) despite allowance 512.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let parked_at = lines(&progress_path);
+        assert!(
+            parked_at < 200,
+            "producer must be far from done: {parked_at}"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            lines(&progress_path),
+            parked_at,
+            "the overshoot frame must close the read gate (E3 regression)"
+        );
+
+        // Credit resumes: catch-up sends the retained overshoot frame first,
+        // then the stream completes in order.
+        let mut frames = vec![first];
+        job.ack(1, 1, 1 << 20).await;
+        loop {
+            let frame = job.next_frame().await;
+            let done = frame.body.is_exit();
+            job.ack(1, frame.seq, 1 << 20).await;
+            frames.push(frame);
+            if done {
+                break;
+            }
+        }
+        assert_consecutive_from_one(&frames);
+        let zeros = vec![0u8; 200 * 1024];
+        assert_eq!(reassemble(&frames, Channel::Stdout), zeros);
+        let (exit_seq, exit) = job.wait_exit().await;
+        assert_eq!(exit.stdout.digest, blake3::hash(&zeros));
+        job.final_ack(1, exit_seq.expect("retained"), 1 << 20).await;
         job.join().await;
     }
 
