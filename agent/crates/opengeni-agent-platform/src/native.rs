@@ -157,6 +157,17 @@ struct ExecProcessGroup {
     child: tokio::process::Child,
     pgid: i32,
     running: bool,
+    /// Whether [`wait`](Self::wait)'s post-exit group kill already ran. The
+    /// wait future may be dropped mid-sequence and re-created (the op-engine
+    /// pump polls it inside a select that drops arm futures every iteration);
+    /// re-running the group kill on re-entry is not just redundant — on macOS
+    /// `killpg` returns EPERM once the group holds only zombies (the anchor
+    /// killed but not yet reaped), which surfaced as a spurious typed wait
+    /// failure. Explicit [`terminate`](Self::terminate) calls do NOT set this:
+    /// the post-exit kill must still run once after a cancel, closing the
+    /// fork-race window (a descendant forked between a cancel's kill scan and
+    /// the direct child's exit).
+    wait_killed_group: bool,
     /// The per-op memory leaf this exec's processes were placed in (issue #345),
     /// or `None` when isolation is unavailable. Torn down once the process tree is
     /// reaped. Always `None` off Linux (no manager is ever wired there).
@@ -216,6 +227,7 @@ impl ExecProcessGroup {
             child,
             pgid,
             running: true,
+            wait_killed_group: false,
             op_cgroup,
         })
     }
@@ -239,9 +251,17 @@ impl ExecProcessGroup {
     /// gone before the caller drains to EOF), THEN reap the stopped anchor fence.
     /// `running` flips false only after the reap, so a cancellation at any earlier
     /// point still fences the PGID via [`Drop`].
+    ///
+    /// RESUMABLE: every await point is cancel-safe and the group kill runs
+    /// exactly once (`wait_killed_group`), so a caller may drop this future at
+    /// any point and call `wait` again — the op-engine pump does exactly that
+    /// every select iteration.
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait().await?;
-        self.terminate()?;
+        if !self.wait_killed_group {
+            self.terminate()?;
+            self.wait_killed_group = true;
+        }
         // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
         // this future is dropped after reaping, anchor.id() is None and Drop will
         // not signal the now-recyclable numeric PGID.
@@ -1227,6 +1247,31 @@ mod tests {
         // Do not signal the bare PID here: it may have been reused. The bounded
         // fixture exits by itself, so a failed assertion remains identity-safe.
         panic!("{context} descendant {pid} survived process-group cleanup");
+    }
+
+    /// The op-engine pump recreates the `wait` future every select iteration,
+    /// so `ContainedExec::wait` must be RESUMABLE: dropped at any await point
+    /// and called again, it must still return the status — and must not
+    /// re-run the post-exit group kill (on macOS a second `killpg` on the
+    /// then-zombie-only group returns EPERM, which surfaced as a spurious
+    /// typed wait failure in CI).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contained_wait_is_resumable_across_drops() {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 7");
+        let mut contained = spawn_contained(cmd, None).expect("spawn");
+        drop(contained.stdin.take());
+        // Repeatedly drop the wait future mid-flight (1ms slices) until it
+        // completes — the pump's exact usage pattern under select.
+        let status = loop {
+            let sliced =
+                tokio::time::timeout(std::time::Duration::from_millis(1), contained.wait()).await;
+            if let Ok(result) = sliced {
+                break result.expect("wait must resume cleanly, never EPERM");
+            }
+        };
+        assert_eq!(status.code(), Some(7));
     }
 
     #[tokio::test]
