@@ -2212,9 +2212,7 @@ export const SessionSystemUpdateBundleStatus = z.enum([
   "cancelled",
   "failed",
 ]);
-export type SessionSystemUpdateBundleStatus = z.infer<
-  typeof SessionSystemUpdateBundleStatus
->;
+export type SessionSystemUpdateBundleStatus = z.infer<typeof SessionSystemUpdateBundleStatus>;
 
 export const SessionSystemUpdateExecutionPolicy = z.object({
   model: z.string().min(1),
@@ -2222,9 +2220,7 @@ export const SessionSystemUpdateExecutionPolicy = z.object({
   sandboxBackend: SandboxBackend,
   prompt: z.string(),
 });
-export type SessionSystemUpdateExecutionPolicy = z.infer<
-  typeof SessionSystemUpdateExecutionPolicy
->;
+export type SessionSystemUpdateExecutionPolicy = z.infer<typeof SessionSystemUpdateExecutionPolicy>;
 
 export const SessionSystemUpdate = z.object({
   id: z.string().uuid(),

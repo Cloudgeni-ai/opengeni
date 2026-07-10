@@ -1064,9 +1064,7 @@ export const sessionTurns = pgTable(
     executionGeneration: integer("execution_generation").notNull().default(0),
     // One-time migration sentinel. Existing rows were stamped by 0050 before
     // the default was installed; every post-migration row receives it at insert.
-    queueMigratedAt: timestamp("queue_migrated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
+    queueMigratedAt: timestamp("queue_migrated_at", { withTimezone: true }).notNull().defaultNow(),
     dedupeKey: text("dedupe_key"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
     deliveryState: text("delivery_state").notNull().default("pending"),
@@ -1102,9 +1100,15 @@ export const sessionSystemUpdateBundles = pgTable(
   "session_system_update_bundles",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
     generation: integer("generation").notNull(),
     groupKey: text("group_key").notNull(),
     executionPolicy: jsonb("execution_policy").$type<{
@@ -1125,12 +1129,21 @@ export const sessionSystemUpdateBundles = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    generation: uniqueIndex("system_update_bundles_generation_uq").on(table.workspaceId, table.sessionId, table.generation),
+    generation: uniqueIndex("system_update_bundles_generation_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.generation,
+    ),
     workspaceIdentity: uniqueIndex("system_update_bundles_workspace_id_uq").on(
       table.workspaceId,
       table.id,
     ),
-    sessionStatus: index("system_update_bundles_session_status_idx").on(table.workspaceId, table.sessionId, table.status, table.generation),
+    sessionStatus: index("system_update_bundles_session_status_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.status,
+      table.generation,
+    ),
   }),
 );
 
@@ -1138,10 +1151,18 @@ export const sessionSystemUpdates = pgTable(
   "session_system_updates",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
-    bundleId: uuid("bundle_id").notNull().references(() => sessionSystemUpdateBundles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    bundleId: uuid("bundle_id")
+      .notNull()
+      .references(() => sessionSystemUpdateBundles.id, { onDelete: "cascade" }),
     bundleGeneration: integer("bundle_generation").notNull(),
     ordinal: integer("ordinal").notNull(),
     kind: text("kind").notNull(),
@@ -1158,8 +1179,16 @@ export const sessionSystemUpdates = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    dedupe: uniqueIndex("system_updates_dedupe_uq").on(table.workspaceId, table.sessionId, table.dedupeKey),
-    bundleOrdinal: uniqueIndex("system_updates_bundle_ordinal_uq").on(table.workspaceId, table.bundleId, table.ordinal),
+    dedupe: uniqueIndex("system_updates_dedupe_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.dedupeKey,
+    ),
+    bundleOrdinal: uniqueIndex("system_updates_bundle_ordinal_uq").on(
+      table.workspaceId,
+      table.bundleId,
+      table.ordinal,
+    ),
   }),
 );
 
@@ -1248,10 +1277,7 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.workspaceId,
       table.dedupeKey,
     ),
-    pending: index("session_system_update_outbox_pending_idx").on(
-      table.status,
-      table.createdAt,
-    ),
+    pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
   }),
 );
 

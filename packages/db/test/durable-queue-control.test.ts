@@ -6,6 +6,8 @@ import {
   SYSTEM_UPDATE_INLINE_ITEM_LIMIT,
   addSessionSystemUpdate,
   addSessionSystemUpdateWithSourceMutation,
+  appendSessionEventsForTurnGeneration,
+  appendSessionHistoryItems,
   applySessionControlInterrupt,
   bootstrapWorkspace,
   cancelQueuedSessionTurnWithVersion,
@@ -17,13 +19,17 @@ import {
   enqueueSessionMessageAtomically,
   finishTurn,
   getSessionQueueSnapshot,
+  getSessionHistoryItems,
   getSessionSystemUpdateBundlePage,
   getSessionTurn,
+  listPendingSessionSystemWakeRepairs,
   listScheduledTaskRuns,
   listSessionEvents,
+  promoteQueuedSessionTurn,
   requeueTurnAfterWorkerDeathAtomically,
   reorderQueuedSessionTurnsWithVersion,
   requestSessionControl,
+  saveRunState,
   settleScheduledTaskRunInTransaction,
   setWorkspaceInferenceControl,
   stopSessionDescendants,
@@ -32,10 +38,7 @@ import {
   setWorkspaceQueueRuntimeControl,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 type RequiredTestDatabase = SharedTestDatabase;
 
@@ -94,6 +97,83 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
     expect(queue?.items.filter((turn) => turn.status === "queued")).toHaveLength(1);
   });
 
+  test("rolling cutover normalizes old producers, rejects old claims, and supports explicit rollback", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "rolling queue migration",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const legacyTurnId = crypto.randomUUID();
+    const triggerEventId = crypto.randomUUID();
+    const [normalized] = await shared.admin<
+      Array<{ queue_kind: string; origin: string; priority: number }>
+    >`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, source, position, prompt, resources, tools, model,
+        reasoning_effort, sandbox_backend, metadata
+      ) values (
+        ${legacyTurnId}, ${grant.accountId}, ${grant.workspaceId}, ${session.id},
+        ${triggerEventId}, ${`session-${session.id}`}, 'queued', 'scheduled_task', 1,
+        'legacy scheduled wake',
+        '[]'::jsonb, '[]'::jsonb, 'scripted-model', 'low', 'none', '{}'::jsonb
+      )
+      returning queue_kind, origin, priority
+    `;
+    expect(normalized).toEqual({
+      queue_kind: "scheduled_wake",
+      origin: "system",
+      priority: 200,
+    });
+
+    const cutover = await setWorkspaceQueueRuntimeControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: "test",
+      state: "durable_v1",
+      reason: "all compatible workers ready",
+      clientEventId: `queue-cutover-rolling-${crypto.randomUUID()}`,
+      expectedState: "legacy",
+      expectedGeneration: 0,
+    });
+    let incompatibleClaimError: unknown;
+    try {
+      await shared.admin`
+        update session_turns set status = 'running'
+        where workspace_id = ${grant.workspaceId} and id = ${legacyTurnId}
+      `;
+    } catch (error) {
+      incompatibleClaimError = error;
+    }
+    expect(incompatibleClaimError).toBeInstanceOf(Error);
+    expect((incompatibleClaimError as Error).message).toContain(
+      "durable queue claim requires a compatible worker",
+    );
+
+    const rollback = await setWorkspaceQueueRuntimeControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: "test",
+      state: "legacy",
+      reason: "roll back mixed worker fleet",
+      clientEventId: `queue-rollback-rolling-${crypto.randomUUID()}`,
+      expectedState: "durable_v1",
+      expectedGeneration: cutover.generation,
+    });
+    expect(rollback).toMatchObject({ state: "legacy", generation: cutover.generation + 1 });
+    const [legacyClaim] = await shared.admin<Array<{ status: string }>>`
+      update session_turns set status = 'running'
+      where workspace_id = ${grant.workspaceId} and id = ${legacyTurnId}
+      returning status
+    `;
+    expect(legacyClaim?.status).toBe("running");
+  });
+
   test("a successful reorder is the exact order returned and claimed", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -130,6 +210,74 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
       "reorder-workflow",
     );
     expect(claimed?.id).toBe(human.turn.id);
+  });
+
+  test("human intent outranks routine system work and stale queue OCC has exactly one winner", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createDurableSession(grant, "queue priority and OCC");
+    const routine = await addSessionSystemUpdate(
+      dbClient.db,
+      systemUpdateInput(grant, session.id, {
+        groupingKey: "routine-priority",
+        sourceId: "routine-priority",
+        dedupeKey: "routine-priority",
+        summary: "Routine system maintenance",
+        payload: {},
+      }),
+    );
+    if (!("turn" in routine) || !routine.turn) throw new Error("Expected routine queue turn");
+    const privatePrompt = `private-human-${crypto.randomUUID()}`;
+    const human = await enqueueMessage(grant, session.id, privatePrompt, "human");
+    const operator = await enqueueMessage(grant, session.id, "operator correction", "operator");
+    const before = await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, session.id);
+    expect(before?.items.map((turn) => turn.id)).toEqual([
+      operator.turn.id,
+      human.turn.id,
+      routine.turn.id,
+    ]);
+    await expect(
+      reorderQueuedSessionTurnsWithVersion(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        before!.version,
+        [routine.turn.id, human.turn.id, operator.turn.id],
+        "test",
+      ),
+    ).rejects.toThrow("routine system work cannot be reordered ahead");
+
+    const humanItem = before!.items.find((turn) => turn.id === human.turn.id)!;
+    const raced = await Promise.allSettled([
+      cancelQueuedSessionTurnWithVersion(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        humanItem.id,
+        before!.version,
+        humanItem.version,
+        "test",
+        "concurrent cancellation",
+      ),
+      promoteQueuedSessionTurn(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        humanItem.id,
+        before!.version,
+        humanItem.version,
+        "test",
+      ),
+    ]);
+    expect(raced.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(raced.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const winner = raced.find(
+      (
+        result,
+      ): result is PromiseFulfilledResult<Awaited<ReturnType<typeof promoteQueuedSessionTurn>>> =>
+        result.status === "fulfilled",
+    )!;
+    expect(winner.value.events).toHaveLength(1);
+    expect(JSON.stringify(winner.value.events[0]?.payload)).not.toContain(privatePrompt);
   });
 
   test("101 concurrent child updates converge on one paged bundle and duplicate repair wake", async () => {
@@ -203,6 +351,59 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
     expect(queue?.items.filter((turn) => turn.queueKind === "system_update_bundle")).toHaveLength(
       1,
     );
+  }, 30_000);
+
+  test("10 and 100 simultaneous child completions each create one wake and no lost constituent", async () => {
+    for (const count of [10, SYSTEM_UPDATE_INLINE_ITEM_LIMIT]) {
+      const grant = await testGrant(dbClient.db);
+      const session = await createDurableSession(grant, `fan in exactly ${count} children`);
+      const inputs = Array.from({ length: count }, (_, index) =>
+        systemUpdateInput(grant, session.id, {
+          groupingKey: `child-terminals:${count}`,
+          sourceId: `child-${count}-${index}`,
+          dedupeKey: `child-terminal-${count}-${index}`,
+          summary: `Child ${index} of ${count} completed`,
+          payload: { index, count, status: "completed" },
+        }),
+      );
+
+      const results = await Promise.all(
+        inputs.map((input) => addSessionSystemUpdate(dbClient.db, input)),
+      );
+      const successful = results.filter(
+        (result): result is Extract<typeof result, { reason: "added" | "duplicate" }> =>
+          "bundle" in result,
+      );
+      expect(successful).toHaveLength(count);
+      expect(successful.every((result) => result.added)).toBe(true);
+      expect(new Set(successful.map((result) => result.update.dedupeKey)).size).toBe(count);
+      expect(new Set(successful.map((result) => result.bundle.id)).size).toBe(1);
+      expect(successful.filter((result) => result.wakeCreated)).toHaveLength(1);
+      expect(new Set(successful.map((result) => result.turn?.id)).size).toBe(1);
+      const bundleId = successful[0]!.bundle.id;
+      const turnId = successful[0]!.turn?.id;
+      const page = await getSessionSystemUpdateBundlePage(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        bundleId,
+      );
+      if (!page) throw new Error(`Expected persisted fan-in bundle: ${bundleId}`);
+      expect(page.bundle.memberCount).toBe(count);
+      expect(page.updates).toHaveLength(count);
+      expect(page.nextCursor).toBeNull();
+      expect(
+        page.updates.reduce(
+          (total, update) => total + sessionSystemUpdateConstituentBytes(update),
+          0,
+        ),
+      ).toBe(page.bundle.payloadBytes);
+      expect(
+        (await listPendingSessionSystemWakeRepairs(dbClient.db, 100)).some(
+          (repair) => repair.turnId === turnId,
+        ),
+      ).toBe(true);
+    }
   }, 30_000);
 
   test("byte overflow pages safely and late arrivals form a settled next generation", async () => {
@@ -298,9 +499,7 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
       "test",
       "no longer needed",
     );
-    expect(cancelled.events.map((event) => event.type)).toEqual([
-      "session.queue.item.cancelled",
-    ]);
+    expect(cancelled.events.map((event) => event.type)).toEqual(["session.queue.item.cancelled"]);
     const settledLate = await getSessionSystemUpdateBundlePage(
       dbClient.db,
       grant.workspaceId,
@@ -308,9 +507,7 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
       late.bundle.id,
     );
     expect(settledLate?.bundle.status).toBe("cancelled");
-    expect(settledLate?.updates.every((update) => update.deliveryState === "cancelled")).toBe(
-      true,
-    );
+    expect(settledLate?.updates.every((update) => update.deliveryState === "cancelled")).toBe(true);
   });
 
   test("empty interrupt is durable and non-empty stop preserves queued work inert until exact resume", async () => {
@@ -387,14 +584,8 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
     expect(resumed.shouldSignalInterrupt).toBe(false);
     expect(resumed.shouldWake).toBe(true);
     expect(
-      (
-        await claimNextQueuedTurn(
-          dbClient.db,
-          grant.workspaceId,
-          session.id,
-          "resumed-workflow",
-        )
-      )?.id,
+      (await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "resumed-workflow"))
+        ?.id,
     ).toBe(queuedInput.turn.id);
   });
 
@@ -467,10 +658,200 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
     );
     expect(intended?.id).toBe(steered.turn.id);
     const queue = await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, session.id);
-    expect(queue?.items.some((turn) => turn.id === olderBundle.turn!.id && turn.status === "queued")).toBe(
-      true,
-    );
+    expect(
+      queue?.items.some((turn) => turn.id === olderBundle.turn!.id && turn.status === "queued"),
+    ).toBe(true);
     expect(queue?.items.filter((turn) => turn.status === "running")).toHaveLength(1);
+  });
+
+  test("a pending stop fences history, RunState, and late activity events before cancellation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createDurableSession(grant, "fence stale activity writes");
+    const queued = await enqueueMessage(grant, session.id, "run once", "human");
+    const active = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      "writer-fence-active",
+    );
+    expect(active?.id).toBe(queued.turn.id);
+
+    expect(
+      await appendSessionHistoryItems(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: active!.id,
+        expectedExecutionGeneration: active!.executionGeneration,
+        items: [{ position: 1, item: { role: "assistant", content: "accepted before stop" } }],
+      }),
+    ).toBe(true);
+    expect(
+      await saveRunState(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: active!.id,
+        expectedExecutionGeneration: active!.executionGeneration,
+        serializedRunState: "accepted-before-stop",
+        pendingApprovals: [],
+      }),
+    ).toBe(true);
+    expect(
+      await appendSessionEventsForTurnGeneration(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        active!.id,
+        active!.executionGeneration,
+        [{ type: "agent.message.delta", payload: { text: "accepted before stop" } }],
+      ),
+    ).toMatchObject({ accepted: true });
+
+    const beforeStop = await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, session.id);
+    const stop = await requestSessionControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      actor: "test",
+      mode: "stop",
+      reason: "fence this generation",
+      clientEventId: `writer-fence-stop-${crypto.randomUUID()}`,
+      expectedControlState: beforeStop!.controlState,
+      expectedControlGeneration: beforeStop!.controlGeneration,
+      expectedWorkspaceInferenceGeneration: beforeStop!.workspaceInferenceGeneration,
+    });
+    expect(stop.shouldSignalInterrupt).toBe(true);
+
+    expect(
+      await appendSessionHistoryItems(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: active!.id,
+        expectedExecutionGeneration: active!.executionGeneration,
+        items: [{ position: 2, item: { role: "assistant", content: "must be rejected" } }],
+      }),
+    ).toBe(false);
+    expect(
+      await saveRunState(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: active!.id,
+        expectedExecutionGeneration: active!.executionGeneration,
+        serializedRunState: "must-be-rejected",
+        pendingApprovals: [],
+      }),
+    ).toBe(false);
+    const rejected = await appendSessionEventsForTurnGeneration(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      active!.id,
+      active!.executionGeneration,
+      [{ type: "agent.message.delta", payload: { text: "must be rejected" } }],
+    );
+    expect(rejected.accepted).toBe(false);
+    expect(rejected.events.map((event) => event.type)).toEqual(["turn.event.rejected_late"]);
+    expect(await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toHaveLength(
+      1,
+    );
+
+    const cancelled = await applySessionControlInterrupt(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      stop.deliveryEventId!,
+    );
+    expect(cancelled.cancelledTurnId).toBe(active!.id);
+  });
+
+  test("worker-death recovery atomically resets a bundle and fences the dead generation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createDurableSession(grant, "worker death bundle recovery");
+    const bundled = await addSessionSystemUpdate(
+      dbClient.db,
+      systemUpdateInput(grant, session.id, {
+        groupingKey: "worker-death-bundle",
+        sourceId: "worker-death-child",
+        dedupeKey: "worker-death-child",
+        summary: "Child completed before worker death",
+        payload: { status: "completed" },
+      }),
+    );
+    if (!("turn" in bundled) || !bundled.turn) throw new Error("Expected bundle queue turn");
+    const first = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      "worker-death-first-dispatch",
+    );
+    expect(first?.id).toBe(bundled.turn.id);
+    expect(
+      (
+        await getSessionSystemUpdateBundlePage(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          bundled.bundle.id,
+        )
+      )?.bundle.status,
+    ).toBe("running");
+
+    const recovery = await requeueTurnAfterWorkerDeathAtomically(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: first!.id,
+      originalTriggerEventId: first!.triggerEventId,
+      resumeWithNotice: true,
+      maxRedispatches: 3,
+      preemptedPayload: { turnId: first!.id, reason: "worker_death" },
+    });
+    expect(recovery.action).toBe("requeued");
+    if (recovery.action !== "requeued") throw new Error("Expected worker-death requeue");
+    expect(recovery.redispatches).toBe(1);
+    expect(recovery.events.map((event) => event.type)).toEqual([
+      "turn.preempted",
+      "session.status.changed",
+    ]);
+    const reset = await getSessionSystemUpdateBundlePage(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      bundled.bundle.id,
+    );
+    expect(reset?.bundle.status).toBe("queued");
+    expect(reset?.updates.every((update) => update.deliveryState === "pending")).toBe(true);
+
+    const second = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      "worker-death-second-dispatch",
+    );
+    expect(second?.id).toBe(first!.id);
+    expect(second?.executionGeneration).toBe(first!.executionGeneration + 1);
+    expect(
+      await appendSessionHistoryItems(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: first!.id,
+        expectedExecutionGeneration: first!.executionGeneration,
+        items: [{ position: 1, item: { role: "assistant", content: "dead generation" } }],
+      }),
+    ).toBe(false);
+    const late = await appendSessionEventsForTurnGeneration(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      first!.id,
+      first!.executionGeneration,
+      [{ type: "agent.message.delta", payload: { text: "dead generation" } }],
+    );
+    expect(late.accepted).toBe(false);
+    expect(late.events.map((event) => event.type)).toEqual(["turn.event.rejected_late"]);
   });
 
   test("recursive stop and workspace kill are generation-fenced, idempotent, and preserve queues", async () => {
@@ -555,9 +936,9 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
           ?.controlState,
       ).toBe("session_stopped");
     }
-    expect((await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, root.id))?.controlState).toBe(
-      "active",
-    );
+    expect(
+      (await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, root.id))?.controlState,
+    ).toBe("active");
 
     const workspaceKey = `workspace-kill-${crypto.randomUUID()}`;
     const killed = await setWorkspaceInferenceControl(dbClient.db, {
@@ -613,9 +994,71 @@ describe("durable queue and control transactions (real PostgreSQL)", () => {
     });
     expect(resumed.wakeSessionIds).toContain(root.id);
     expect(resumed.wakeSessionIds).not.toContain(child.id);
-    expect((await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, child.id))?.controlState).toBe(
-      "session_stopped",
+    expect(
+      (await getSessionQueueSnapshot(dbClient.db, grant.workspaceId, child.id))?.controlState,
+    ).toBe("session_stopped");
+  });
+
+  test("sessions created during a workspace kill remain fenced and are included in exact resume", async () => {
+    const grant = await testGrant(dbClient.db);
+    await createDurableSession(grant, "existing before workspace kill");
+    const killed = await setWorkspaceInferenceControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: "test",
+      state: "killed",
+      reason: "hold all inference while admitting queued work",
+      clientEventId: `workspace-kill-create-race-${crypto.randomUUID()}`,
+      expectedState: "active",
+      expectedGeneration: 0,
+    });
+
+    const createdWhileKilled = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "created while killed",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(createdWhileKilled.controlState).toBe("workspace_killed");
+    const queued = await enqueueMessage(
+      grant,
+      createdWhileKilled.id,
+      "preserve me until exact resume",
+      "human",
     );
+    expect(
+      await claimNextQueuedTurn(
+        dbClient.db,
+        grant.workspaceId,
+        createdWhileKilled.id,
+        "must-remain-killed",
+      ),
+    ).toBeNull();
+
+    const resumed = await setWorkspaceInferenceControl(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor: "test",
+      state: "active",
+      reason: "workspace incident cleared",
+      clientEventId: `workspace-resume-create-race-${crypto.randomUUID()}`,
+      expectedState: "killed",
+      expectedGeneration: killed.generation,
+    });
+    expect(resumed.wakeSessionIds).toContain(createdWhileKilled.id);
+    expect(
+      (
+        await claimNextQueuedTurn(
+          dbClient.db,
+          grant.workspaceId,
+          createdWhileKilled.id,
+          "resumed-created-session",
+        )
+      )?.id,
+    ).toBe(queued.turn.id);
   });
 
   test("lifecycle source mutation and fan-in commit or roll back in the same transaction", async () => {

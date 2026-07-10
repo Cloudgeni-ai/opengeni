@@ -550,12 +550,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     const existing = snapshot?.items.find((item) => item.id === turnId);
     if (!existing) throw new HTTPException(404, { message: "queued item not found" });
-    const resources = payload.update.resources !== undefined
-      ? normalizeResources(payload.update.resources)
-      : existing.resources;
-    const tools = payload.update.tools !== undefined
-      ? validateToolRefs(payload.update.tools, runtimeSettings)
-      : existing.tools;
+    const resources =
+      payload.update.resources !== undefined
+        ? normalizeResources(payload.update.resources)
+        : existing.resources;
+    const tools =
+      payload.update.tools !== undefined
+        ? validateToolRefs(payload.update.tools, runtimeSettings)
+        : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -689,21 +691,24 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/system-update-bundles/:bundleId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const cursor = Number(c.req.query("cursor") ?? 0);
-    const page = await getSessionSystemUpdateBundlePage(
-      db,
-      workspaceId,
-      c.req.param("sessionId"),
-      c.req.param("bundleId"),
-      Number.isInteger(cursor) && cursor >= 0 ? cursor : 0,
-      boundedLimit(c.req.query("limit")),
-    );
-    if (!page) throw new HTTPException(404, { message: "system-update bundle not found" });
-    return c.json(page);
-  });
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/system-update-bundles/:bundleId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const cursor = Number(c.req.query("cursor") ?? 0);
+      const page = await getSessionSystemUpdateBundlePage(
+        db,
+        workspaceId,
+        c.req.param("sessionId"),
+        c.req.param("bundleId"),
+        Number.isInteger(cursor) && cursor >= 0 ? cursor : 0,
+        boundedLimit(c.req.query("limit")),
+      );
+      if (!page) throw new HTTPException(404, { message: "system-update bundle not found" });
+      return c.json(page);
+    },
+  );
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -728,8 +733,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           : {}),
         ...(payload.expectedWorkspaceInferenceGeneration !== undefined
           ? {
-              expectedWorkspaceInferenceGeneration:
-                payload.expectedWorkspaceInferenceGeneration,
+              expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
             }
           : {}),
       });
@@ -754,17 +758,20 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workflowId,
       });
     }
-    return c.json({
-      operationId: result.operationId,
-      event: result.event,
-      controlState: result.controlState,
-      controlGeneration: result.controlGeneration,
-      expectedActiveTurnId: result.expectedActiveTurnId,
-      expectedExecutionGeneration: result.expectedExecutionGeneration,
-      deliveryEventId: result.deliveryEventId,
-      shouldSignalInterrupt: result.shouldSignalInterrupt,
-      shouldWake: result.shouldWake,
-    }, 202);
+    return c.json(
+      {
+        operationId: result.operationId,
+        event: result.event,
+        controlState: result.controlState,
+        controlGeneration: result.controlGeneration,
+        expectedActiveTurnId: result.expectedActiveTurnId,
+        expectedExecutionGeneration: result.expectedExecutionGeneration,
+        deliveryEventId: result.deliveryEventId,
+        shouldSignalInterrupt: result.shouldSignalInterrupt,
+        shouldWake: result.shouldWake,
+      },
+      202,
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control/descendants", async (c) => {
@@ -795,11 +802,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workflowId: interrupt.workflowId,
       });
     }
-    return c.json({
-      operationId: result.operationId,
-      affectedSessionIds: result.affectedSessionIds,
-      interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
-    }, 202);
+    return c.json(
+      {
+        operationId: result.operationId,
+        affectedSessionIds: result.affectedSessionIds,
+        interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
+      },
+      202,
+    );
   });
 
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
@@ -972,8 +982,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         : {}),
       ...(payload.expectedWorkspaceInferenceGeneration !== undefined
         ? {
-            expectedWorkspaceInferenceGeneration:
-              payload.expectedWorkspaceInferenceGeneration,
+            expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
           }
         : {}),
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),

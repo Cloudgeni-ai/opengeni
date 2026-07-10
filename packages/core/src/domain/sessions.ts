@@ -696,8 +696,7 @@ export async function postUserMessageTurn(input: {
         : {}),
       ...(input.expectedWorkspaceInferenceGeneration !== undefined
         ? {
-            expectedWorkspaceInferenceGeneration:
-              input.expectedWorkspaceInferenceGeneration,
+            expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
           }
         : {}),
       rejectConflicts: input.queuePolicy === "reject_conflicts",
@@ -732,7 +731,11 @@ export async function postUserMessageTurn(input: {
       workflowId: result.temporalWorkflowId,
     });
   }
-  return { accepted: result.accepted, turn: result.turn, interrupted: result.shouldSignalInterrupt };
+  return {
+    accepted: result.accepted,
+    turn: result.turn,
+    interrupted: result.shouldSignalInterrupt,
+  };
 }
 
 /**
@@ -1247,8 +1250,7 @@ export async function acceptSessionUserMessage(
       : {}),
     ...(input.expectedWorkspaceInferenceGeneration !== undefined
       ? {
-          expectedWorkspaceInferenceGeneration:
-            input.expectedWorkspaceInferenceGeneration,
+          expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
         }
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),

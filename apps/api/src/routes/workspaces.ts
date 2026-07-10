@@ -203,13 +203,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
     }
-    return c.json({
-      operationId: result.operationId,
-      state: result.state,
-      generation: result.generation,
-      affectedSessionIds: result.affectedSessionIds,
-      interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
-    }, 202);
+    return c.json(
+      {
+        operationId: result.operationId,
+        state: result.state,
+        generation: result.generation,
+        affectedSessionIds: result.affectedSessionIds,
+        interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
+      },
+      202,
+    );
   });
 
   app.post("/v1/workspaces/:workspaceId/queue-runtime-control", async (c) => {

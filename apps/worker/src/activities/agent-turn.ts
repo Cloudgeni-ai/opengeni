@@ -1148,9 +1148,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeTurnId,
       );
     };
-    const saveRunStateFenced = async (
-      state: Parameters<typeof saveRunState>[1],
-    ): Promise<void> => {
+    const saveRunStateFenced = async (state: Parameters<typeof saveRunState>[1]): Promise<void> => {
       if (!(await saveRunState(db, state))) {
         throw new CancelledFailure("turn execution generation was fenced while saving run state");
       }
@@ -3834,30 +3832,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
               const { events: preemptedEvents, accepted: preemptAccepted } =
                 await appendAndPublishTurnEventsFenced(
-                db,
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                activeTurnId,
-                executionGeneration,
-                [
-                  {
-                    turnId: activeTurnId,
-                    type: "turn.preempted",
-                    payload: {
-                      triggerEventId: input.triggerEventId,
-                      reason: "context_compacted",
-                      resumeWithNotice: true,
-                      text: CONTEXT_OVERFLOW_RESUME_TEXT,
+                  db,
+                  bus,
+                  input.workspaceId,
+                  input.sessionId,
+                  activeTurnId,
+                  executionGeneration,
+                  [
+                    {
+                      turnId: activeTurnId,
+                      type: "turn.preempted",
+                      payload: {
+                        triggerEventId: input.triggerEventId,
+                        reason: "context_compacted",
+                        resumeWithNotice: true,
+                        text: CONTEXT_OVERFLOW_RESUME_TEXT,
+                      },
                     },
-                  },
-                  {
-                    turnId: activeTurnId,
-                    type: "session.status.changed",
-                    payload: { status: "queued" },
-                  },
-                ],
-              );
+                    {
+                      turnId: activeTurnId,
+                      type: "session.status.changed",
+                      payload: { status: "queued" },
+                    },
+                  ],
+                );
               const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
               await requeuePreemptedTurn(
                 db,
@@ -4004,29 +4002,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           const { events: preemptedEvents, accepted: preemptAccepted } =
             await appendAndPublishTurnEventsFenced(
-            db,
-            bus,
-            input.workspaceId,
-            input.sessionId,
-            preemptTurnId,
-            executionGeneration,
-            [
-              {
-                turnId: preemptTurnId,
-                type: "turn.preempted",
-                payload: {
-                  triggerEventId: input.triggerEventId,
-                  reason: "worker_shutdown",
-                  resumeWithNotice,
-                  ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+              db,
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              preemptTurnId,
+              executionGeneration,
+              [
+                {
+                  turnId: preemptTurnId,
+                  type: "turn.preempted",
+                  payload: {
+                    triggerEventId: input.triggerEventId,
+                    reason: "worker_shutdown",
+                    resumeWithNotice,
+                    ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+                  },
                 },
-              },
-              {
-                turnId: preemptTurnId,
-                type: "session.status.changed",
-                payload: { status: "queued" },
-              },
-            ],
+                {
+                  turnId: preemptTurnId,
+                  type: "session.status.changed",
+                  payload: { status: "queued" },
+                },
+              ],
             );
           const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
           await requeuePreemptedTurn(

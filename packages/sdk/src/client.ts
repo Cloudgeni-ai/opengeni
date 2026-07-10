@@ -559,10 +559,12 @@ export class OpenGeniClient {
     sessionId: string,
     options: { reason?: string; clientEventId?: string } = {},
   ): Promise<SessionEvent> {
-    return (await this.controlSession(workspaceId, sessionId, {
-      mode: "stop",
-      ...options,
-    })).event;
+    return (
+      await this.controlSession(workspaceId, sessionId, {
+        mode: "stop",
+        ...options,
+      })
+    ).event;
   }
 
   async sendApprovalDecision(
@@ -645,7 +647,11 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     turnId: string,
-    request: { expectedQueueVersion: number; expectedItemVersion: number; update: UpdateSessionTurnRequest },
+    request: {
+      expectedQueueVersion: number;
+      expectedItemVersion: number;
+      update: UpdateSessionTurnRequest;
+    },
   ): Promise<SessionQueueMutationResponse> {
     return await this.requestJson<SessionQueueMutationResponse>(
       "PATCH",

@@ -176,12 +176,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
     const episodeKey = String(session.lastSequence);
-    await settleSessionIdleWithParentOutbox(
-      db,
-      input.workspaceId,
-      input.sessionId,
-      episodeKey,
-    );
+    await settleSessionIdleWithParentOutbox(db, input.workspaceId, input.sessionId, episodeKey);
     await refreshQueuedTurnsGauge(db, observability);
     // The workflow reaches markSessionIdle exactly when it has decided to stop
     // for now (no queued turn, no goal continuation): the terminal-for-now
