@@ -860,7 +860,12 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-#[cfg(test)]
+// The tests drive REAL /bin/sh children through the containment primitive —
+// they validate POSIX child semantics (exit codes, pipes, process groups)
+// and are unix-only by nature (the #349 CI lesson). The code under test itself
+// compiles and runs on Windows (Job Objects); its Windows behavior is
+// covered by the platform crate's cross-platform surface.
+#[cfg(all(test, unix))]
 mod tests {
     use std::collections::BTreeMap;
 

@@ -725,6 +725,7 @@ mod tests {
         (engine, dir)
     }
 
+    #[cfg(unix)]
     fn sh(script: &str) -> ContainedExec {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(script);
@@ -861,6 +862,8 @@ mod tests {
         }
     }
 
+    // Drives a REAL /bin/sh child (unix-only by nature; the #349 CI lesson).
+    #[cfg(unix)]
     #[tokio::test]
     async fn start_job_runs_a_real_child_and_never_reruns_a_known_id() {
         let (engine, _dir) = test_engine(AdmissionConfig::default());
