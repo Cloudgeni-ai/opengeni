@@ -21,6 +21,7 @@ import {
   fetchCodexUsageForAccount,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
+  setSessionCodexPin,
   recordCodexAccountUsage,
   recordCodexAccountConnectors,
   resolveWorkspaceMemoryBlock,
@@ -96,8 +97,11 @@ import {
 } from "./capabilities";
 import {
   chooseRotationActive,
+  chooseShardedHome,
   computeIdleDelayMs,
   computeReactiveRotationResume,
+  shardCredentialForSession,
+  earliestCodexReset,
   type CodexRotationStrategy,
   type RotationDecision,
 } from "./codex-rotation";
@@ -1525,19 +1529,141 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ]);
         const connectedIds = new Set(accounts.map((account) => account.id));
         const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
+        const pinSource = sessionCodex?.pinSource ?? null;
+        const strategy = (rotation?.rotationStrategy ?? "most_remaining") as CodexRotationStrategy;
+        // A MANUAL pin is SACRED (AM-1/AM-2): no policy path — sharded or otherwise —
+        // ever moves it. Only 'manual' pins are protected; a 'policy' pin is the
+        // sharded strategy's own home and MAY be re-sharded when its account caps.
+        const manualPinned = sessionPin != null && pinSource === "manual";
         // The off-path / P1 default: today's workspace active pointer. Untouched
         // when rotation is off or the session is pinned (byte-identical to P1).
         let chosenActive = rotation?.activeCredentialId ?? null;
         let rotationDecision: RotationDecision | null = null;
+        // The pin selectCodexCredentialForTurn resolves against. The sharded path
+        // overwrites it with this session's (possibly re-sharded) policy home; every
+        // other path leaves it as today's session pin.
+        let resolvedSessionPin = sessionPin;
+        // True when the ENGINE (rotation OR a sharded (re)assignment) moved this
+        // session onto a different account — drives the switch event's reason.
+        let engineMoved = false;
 
-        // P3 auto-rotation: the ONLY new branch, gated on rotation_enabled and
-        // pin-guarded (a pinned session NEVER rotates). When skipped, chosenActive
-        // stays the active pointer and selectCodexCredentialForTurn is called with
-        // byte-identical arguments to today — zero added cost on non-rotation turns.
-        if (rotation?.rotationEnabled && sessionPin == null) {
+        // The shared all-capped idle (invariant 4: BOUNDED, no thrash). Every eligible
+        // account is capped/cooling → idle the turn AT THE BOUNDARY (no wasted
+        // model/sandbox build) until the EARLIEST reset across all accounts. Used by
+        // BOTH the classic rotation path and the sharded path (identical rotation-wait
+        // shape). No saveRunState: no model ran, nothing to freeze.
+        const idleUntilCodexReset = async (earliestResetAt: Date): Promise<RunAgentTurnResult> => {
+          const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
+            () => null,
+          );
+          const goalActive = Boolean(goal && goal.status === "active");
+          // BOUNDED + POSITIVE: clamp to [MIN_IDLE_MS, max] so a null/elapsed/unknown
+          // reset can never yield a 0 (which session.ts would treat as "continue now",
+          // re-entering this path in a tight CPU/DB-hammering loop).
+          const resumeMs = computeIdleDelayMs(
+            earliestResetAt,
+            new Date(),
+            CODEX_USAGE_LIMIT_MAX_RESUME_MS,
+          );
+          const failurePayload = codexUsageLimitFailurePayload(
+            { resetsInSeconds: Math.ceil(resumeMs / 1000) },
+            "all connected Codex subscriptions are rate-limited",
+            { allAccounts: true },
+          );
+          await publish!(
+            [
+              // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
+              // rotation-wait state as the reactive all-capped path, so it must freeze
+              // autoContinuations identically (evaluateGoalContinuation reads this marker)
+              // — a goal waiting out a long reset must not burn its continuation budget on
+              // the proactive path while the reactive path spares it.
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failurePayload,
+                  recovery: goalActive ? "goal_continuation" : "user_message",
+                  runStateSaved: false,
+                  rotated: true,
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            true,
+          );
+          await finishTurn(db, input.workspaceId, turnId!, "failed");
+          turnMetricOutcome = "failed";
+          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+          activityStatus = "idle";
+          // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
+          // resumeMs even if a future change made it 0 — never a tight re-dispatch.
+          return goalActive
+            ? { status: "idle", continueDelayMs: resumeMs, idleUntilReset: true }
+            : { status: "idle" };
+        };
+
+        if (rotation?.rotationEnabled && strategy === "sharded" && !manualPinned) {
+          // === SHARDED (AM-4/AM-6/AM-7): pick/health-check this session's HOME. ===
+          // Keep an eligible POLICY pin (prompt-cache warmth); otherwise (re-)shard.
+          // First turn (no policy pin) assigns lazily; a capped policy pin re-shards
+          // and durably rewrites the pin. A MANUAL pin never reaches here.
+          const nearPct = settings.codexRotationNearExhaustionPct;
+          const currentPolicyPin = pinSource === "policy" ? sessionPin : null;
+          let shardAccounts = accounts;
+          let shardDecision = chooseShardedHome({
+            sessionId: input.sessionId,
+            currentPolicyPin,
+            accounts: shardAccounts,
+            nearExhaustionPct: nearPct,
+            now: new Date(),
+          });
+          // SELF-HEAL (invariant 4): the turn hot path never refreshes usage, so an
+          // account whose window actually reset still reads capped from the stale cache.
+          // ONLY when we're about to ABANDON an existing pin or idle (not on a clean
+          // first-turn assign) refresh the over-threshold rows ONCE and re-decide, so a
+          // genuinely-reset home is kept and the cache heals.
+          const abandoningPin =
+            currentPolicyPin != null &&
+            (shardDecision.kind === "allCapped" ||
+              (shardDecision.kind === "home" && shardDecision.credentialId !== currentPolicyPin));
+          if (shardDecision.kind === "allCapped" || abandoningPin) {
+            shardAccounts = await refreshCappedCodexUsageRows(
+              db,
+              settings,
+              input.workspaceId,
+              shardAccounts,
+            );
+            shardDecision = chooseShardedHome({
+              sessionId: input.sessionId,
+              currentPolicyPin,
+              accounts: shardAccounts,
+              nearExhaustionPct: nearPct,
+              now: new Date(),
+            });
+          }
+          if (shardDecision.kind === "allCapped") {
+            return await idleUntilCodexReset(shardDecision.earliestResetAt);
+          }
+          if (shardDecision.rewritePin) {
+            // Durable pin (re)write (AM-3/AM-5 rebalance + AM-7 first-turn assign).
+            // The NEXT turn reads this exact home.
+            await setSessionCodexPin(
+              db,
+              input.workspaceId,
+              input.sessionId,
+              shardDecision.credentialId,
+              "policy",
+            );
+            engineMoved = true;
+          }
+          resolvedSessionPin = shardDecision.credentialId; // selectCodexCredentialForTurn returns it.
+        } else if (rotation?.rotationEnabled && sessionPin == null) {
+          // === Classic auto-rotation (unpinned, non-sharded strategies): UNCHANGED. ===
+          // Gated on rotation_enabled and pin-guarded (a pinned session NEVER rotates).
+          // When skipped, chosenActive stays the active pointer and
+          // selectCodexCredentialForTurn is called with byte-identical arguments to today.
           let rankAccounts = accounts;
           rotationDecision = chooseRotationActive({
-            rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
+            rotationStrategy: strategy,
             activeCredentialId: rotation.activeCredentialId,
             priorCredentialId: sessionCodex?.lastCredentialId ?? null,
             accounts: rankAccounts,
@@ -1563,7 +1689,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               rankAccounts,
             );
             rotationDecision = chooseRotationActive({
-              rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
+              rotationStrategy: strategy,
               activeCredentialId: rotation.activeCredentialId,
               priorCredentialId: sessionCodex?.lastCredentialId ?? null,
               accounts: rankAccounts,
@@ -1582,64 +1708,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await setActiveCodexCredential(db, input.workspaceId, rotationDecision.credentialId);
             }
             chosenActive = rotationDecision.credentialId;
-          } else if (rotationDecision.kind === "allCapped" && publish && turnId) {
-            // Every eligible account is capped/cooling (and a usage refresh did NOT
-            // surface a reset): idle the turn AT THE BOUNDARY (no wasted model/sandbox
-            // build) until the EARLIEST reset across all accounts — the multi-account
-            // generalization of #143's single-account idle-until-reset. No saveRunState:
-            // no model ran, nothing to freeze.
-            const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
-              () => null,
-            );
-            const goalActive = Boolean(goal && goal.status === "active");
-            // BOUNDED + POSITIVE: clamp to [MIN_IDLE_MS, max] so a null/elapsed/unknown
-            // reset can never yield a 0 (which session.ts would treat as "continue now",
-            // re-entering this path in a tight CPU/DB-hammering loop).
-            const resumeMs = computeIdleDelayMs(
-              rotationDecision.earliestResetAt,
-              new Date(),
-              CODEX_USAGE_LIMIT_MAX_RESUME_MS,
-            );
-            const failurePayload = codexUsageLimitFailurePayload(
-              { resetsInSeconds: Math.ceil(resumeMs / 1000) },
-              "all connected Codex subscriptions are rate-limited",
-              { allAccounts: true },
-            );
-            await publish(
-              [
-                // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
-                // rotation-wait state as the reactive all-capped path, so it must freeze
-                // autoContinuations identically (evaluateGoalContinuation reads this marker)
-                // — a goal waiting out a long reset must not burn its continuation budget on
-                // the proactive path while the reactive path spares it.
-                {
-                  type: "turn.failed",
-                  payload: {
-                    ...failurePayload,
-                    recovery: goalActive ? "goal_continuation" : "user_message",
-                    runStateSaved: false,
-                    rotated: true,
-                  },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              true,
-            );
-            await finishTurn(db, input.workspaceId, turnId, "failed");
-            turnMetricOutcome = "failed";
-            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-            activityStatus = "idle";
-            // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
-            // resumeMs even if a future change made it 0 — never a tight re-dispatch.
-            return goalActive
-              ? { status: "idle", continueDelayMs: resumeMs, idleUntilReset: true }
-              : { status: "idle" };
+          } else if (rotationDecision.kind === "allCapped" && turnId) {
+            return await idleUntilCodexReset(rotationDecision.earliestResetAt);
           }
           // kind:"none" (no accounts) → chosenActive stays null → existing relogin path.
         }
 
         effectiveCodexCredentialId = selectCodexCredentialForTurn({
-          sessionPinnedCredentialId: sessionPin, // pin still wins, structurally
+          sessionPinnedCredentialId: resolvedSessionPin, // pin (manual / sharded home) still wins
           activeCredentialId: chosenActive, // rotation-choice OR today's active
           connectedIds,
         });
@@ -1652,9 +1728,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             effectiveCodexCredentialId,
           );
           if (priorAccountId !== effectiveCodexCredentialId) {
-            // "rotation" only when the engine actually moved the pointer; otherwise the
-            // unchanged P1 "manual" literal (a manual active flip between turns).
-            const rotated = rotationDecision?.kind === "active" && rotationDecision.moved;
+            // "rotation" whenever the engine moved the session (classic rotation OR a
+            // sharded (re)assignment); otherwise the unchanged P1 "manual" literal (a
+            // manual active flip between turns).
+            const rotated =
+              engineMoved || (rotationDecision?.kind === "active" && rotationDecision.moved);
             // P4: surface the dropped-connector note when this rotation pick couldn't
             // cover the session's used connectors (a Tier-2/unknown failover); the pill
             // renders the badge. Omitted when the switch covered everything (the norm).
@@ -3439,8 +3517,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             getCodexRotationSettings(db, input.workspaceId).catch(() => null),
             getSessionCodexState(db, input.workspaceId, input.sessionId).catch(() => null),
           ]);
+          // AM-1: a MANUAL pin is sacred and never rebalances; classic rotation runs for
+          // UNPINNED sessions; the sharded strategy ALSO rebalances a POLICY-pinned session
+          // (re-shard its home off the capped account). manual pin ⇒ today's idle-until-reset.
+          const reactivePinSource = sessionCodex?.pinSource ?? null;
+          const reactiveSessionPin = sessionCodex?.pinnedCredentialId ?? null;
+          const reactiveManualPinned = reactiveSessionPin != null && reactivePinSource === "manual";
+          const reactiveStrategy = (rotation?.rotationStrategy ??
+            "most_remaining") as CodexRotationStrategy;
+          const reactiveSharded =
+            Boolean(rotation?.rotationEnabled) && reactiveStrategy === "sharded";
           const rotating =
-            Boolean(rotation?.rotationEnabled) && sessionCodex?.pinnedCredentialId == null;
+            Boolean(rotation?.rotationEnabled) &&
+            !reactiveManualPinned &&
+            (reactiveSharded || reactiveSessionPin == null);
           if (rotating && rotation) {
             const accounts = await listCodexAccountStatuses(db, input.workspaceId).catch(() => []);
             const serving = accounts.find((a) => a.id === effectiveCodexCredentialId) ?? null;
@@ -3472,40 +3562,87 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const fresh = accounts.map((a) =>
               a.id === effectiveCodexCredentialId ? { ...a, exhaustedUntil: until } : a,
             );
-            const decision = chooseRotationActive({
-              rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
-              activeCredentialId: rotation.activeCredentialId,
-              priorCredentialId: effectiveCodexCredentialId,
-              accounts: fresh,
-              nearExhaustionPct: settings.codexRotationNearExhaustionPct,
-              now: new Date(),
-              // P4: the just-capped serving account's connector set is the proxy for
-              // "what this session has access to" — prefer a covering failover target.
-              usedConnectors: serving?.connectorNamespaces ?? [],
-            });
-            if (decision.kind === "active") {
-              rotated = true;
-              // Finding 1: a live candidate normally re-dispatches NOW (0). Two second-order
-              // faults would turn that 0 into a hot loop, so bound it. Count the consecutive
-              // reactive failovers since the last successful turn (this one is not yet
-              // published) and combine with the cooldown-persistence result.
-              const priorConsecutiveRotations = await countConsecutiveReactiveRotations(
-                db,
-                input.workspaceId,
-                input.sessionId,
-              ).catch(() => 0);
-              const resume = computeReactiveRotationResume({
-                cooldownPersisted,
-                priorConsecutiveRotations,
-                connectedAccountCount: accounts.length,
+            if (reactiveSharded) {
+              // AM-5: RE-SHARD over the healthy survivors (the just-capped serving account is
+              // marked cooling in `fresh` → excluded) so sessions sharing a capped account
+              // spread across the pool rather than re-concentrating on one first-eligible
+              // failover. AM-3: DURABLY REWRITE the session's POLICY pin to the new home —
+              // selectCodexCredentialForTurn returns a cooling pinned account with NO
+              // exhaustion check, so a pointer-only move would leave the re-dispatched turn on
+              // the capped pin. Like the classic path we do NOT touch the workspace active
+              // pointer; the session pin is the sharded home.
+              const newHome = shardCredentialForSession({
+                sessionId: input.sessionId,
+                accounts: fresh,
+                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+                now: new Date(),
               });
-              rotationResumeMs = resume.continueDelayMs; // 0 (happy path), a slow-retry floor, or the circuit-breaker idle
-              rotationResumeIdleUntilReset = resume.idleUntilReset; // true only on the circuit-breaker fall (MANDATORY hold)
-            } else if (decision.kind === "allCapped") {
-              rotated = true;
-              allCappedResetAt = decision.earliestResetAt;
+              if (newHome) {
+                rotated = true;
+                await setSessionCodexPin(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                  newHome,
+                  "policy",
+                ).catch(() => false);
+                const priorConsecutiveRotations = await countConsecutiveReactiveRotations(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                ).catch(() => 0);
+                const resume = computeReactiveRotationResume({
+                  cooldownPersisted,
+                  priorConsecutiveRotations,
+                  connectedAccountCount: accounts.length,
+                });
+                rotationResumeMs = resume.continueDelayMs;
+                rotationResumeIdleUntilReset = resume.idleUntilReset;
+              } else {
+                // Every account capped/cooling → idle until the earliest reset across all.
+                rotated = true;
+                allCappedResetAt = earliestCodexReset(
+                  fresh,
+                  settings.codexRotationNearExhaustionPct,
+                  new Date(),
+                );
+              }
+            } else {
+              const decision = chooseRotationActive({
+                rotationStrategy: reactiveStrategy,
+                activeCredentialId: rotation.activeCredentialId,
+                priorCredentialId: effectiveCodexCredentialId,
+                accounts: fresh,
+                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+                now: new Date(),
+                // P4: the just-capped serving account's connector set is the proxy for
+                // "what this session has access to" — prefer a covering failover target.
+                usedConnectors: serving?.connectorNamespaces ?? [],
+              });
+              if (decision.kind === "active") {
+                rotated = true;
+                // Finding 1: a live candidate normally re-dispatches NOW (0). Two second-order
+                // faults would turn that 0 into a hot loop, so bound it. Count the consecutive
+                // reactive failovers since the last successful turn (this one is not yet
+                // published) and combine with the cooldown-persistence result.
+                const priorConsecutiveRotations = await countConsecutiveReactiveRotations(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                ).catch(() => 0);
+                const resume = computeReactiveRotationResume({
+                  cooldownPersisted,
+                  priorConsecutiveRotations,
+                  connectedAccountCount: accounts.length,
+                });
+                rotationResumeMs = resume.continueDelayMs; // 0 (happy path), a slow-retry floor, or the circuit-breaker idle
+                rotationResumeIdleUntilReset = resume.idleUntilReset; // true only on the circuit-breaker fall (MANDATORY hold)
+              } else if (decision.kind === "allCapped") {
+                rotated = true;
+                allCappedResetAt = decision.earliestResetAt;
+              }
+              // kind:"none" → fall through to today's single-account idle.
             }
-            // kind:"none" → fall through to today's single-account idle.
           }
         }
 

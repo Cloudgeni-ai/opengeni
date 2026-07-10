@@ -7207,6 +7207,12 @@ export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
   "round_robin",
   "drain_then_next",
+  // Session-sharded account affinity: each session gets a deterministic HOME
+  // account (hash(sessionId) % healthy-accounts), written as a 'policy' pin at its
+  // first codex turn and re-sharded only when that account caps. Spreads load ~1/N
+  // across the pool while keeping a session on one warm account for prompt-cache
+  // stability. Selectable exactly like the others via updateCodexRotationSettings.
+  "sharded",
 ] as const;
 export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
 
@@ -7270,12 +7276,18 @@ export async function renameCodexAccount(
   });
 }
 
+/** The two sources of a per-session codex pin (AM-2). See sessions.codex_pin_source. */
+export type CodexPinSource = "manual" | "policy";
+
 export type SessionCodexState = {
   pinnedCredentialId: string | null;
   lastCredentialId: string | null;
+  // The pin's SOURCE (AM-2): 'manual' (user switcher, sacred) or 'policy' (sharded
+  // home assignment, re-shardable). NULL iff pinnedCredentialId is NULL.
+  pinSource: CodexPinSource | null;
 };
 
-/** The session's pin + last-ran-on Codex account (drives the worker resolver + indicator). */
+/** The session's pin (+ source) + last-ran-on Codex account (drives the worker resolver + indicator). */
 export async function getSessionCodexState(
   db: Database,
   workspaceId: string,
@@ -7286,24 +7298,36 @@ export async function getSessionCodexState(
       .select({
         pinnedCredentialId: schema.sessions.codexPinnedCredentialId,
         lastCredentialId: schema.sessions.codexLastCredentialId,
+        pinSource: schema.sessions.codexPinSource,
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
-    return row ?? null;
+    if (!row) {
+      return null;
+    }
+    return {
+      pinnedCredentialId: row.pinnedCredentialId,
+      lastCredentialId: row.lastCredentialId,
+      pinSource: (row.pinSource as CodexPinSource | null) ?? null,
+    };
   });
 }
 
 /**
- * Per-session pin (manual override). pinnedCredentialId === null clears the pin
- * (follow the workspace active). Validates the id belongs to the workspace when
- * non-null. Returns false if the session is unknown or the id is invalid.
+ * Per-session pin. pinnedCredentialId === null clears the pin (follow the workspace
+ * active) and clears the source. A non-null pin records `source` — 'manual' (the
+ * default; the user's in-session switcher, which no policy path ever moves) or
+ * 'policy' (the sharded strategy's deterministic home, re-shardable on cap).
+ * Validates the id belongs to the workspace when non-null. Returns false if the
+ * session is unknown or the id is invalid.
  */
 export async function setSessionCodexPin(
   db: Database,
   workspaceId: string,
   sessionId: string,
   pinnedCredentialId: string | null,
+  source: CodexPinSource = "manual",
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     if (pinnedCredentialId !== null) {
@@ -7323,7 +7347,12 @@ export async function setSessionCodexPin(
     }
     const updated = await scopedDb
       .update(schema.sessions)
-      .set({ codexPinnedCredentialId: pinnedCredentialId, updatedAt: new Date() })
+      .set({
+        codexPinnedCredentialId: pinnedCredentialId,
+        // Source travels with the pin: a cleared pin (null) clears the source too.
+        codexPinSource: pinnedCredentialId === null ? null : source,
+        updatedAt: new Date(),
+      })
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .returning({ id: schema.sessions.id });
     return updated.length > 0;

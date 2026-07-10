@@ -8,7 +8,11 @@
 // isolation (see codex-rotation.test.ts).
 import type { CodexAccountStatus } from "@opengeni/db";
 
-export type CodexRotationStrategy = "most_remaining" | "round_robin" | "drain_then_next";
+export type CodexRotationStrategy =
+  | "most_remaining"
+  | "round_robin"
+  | "drain_then_next"
+  | "sharded";
 
 export type RotationDecision =
   // The chosen account. `moved` ⇒ it differs from the current active pointer, so
@@ -103,6 +107,115 @@ function eligible(acct: CodexAccountStatus, nearExhaustionPct: number, now: Date
   return (
     acct.status === "active" && !cooling(acct, now) && bindingUsedPct(acct) < nearExhaustionPct
   );
+}
+
+/**
+ * Public eligibility predicate (same definition as the private `eligible`): an
+ * account is usable this turn iff it is connected/active, not cooling, and under
+ * the near-exhaustion threshold on BOTH windows. The worker's sharded home
+ * health-check uses this to decide whether a session's existing policy pin is still
+ * a valid home or must be re-sharded.
+ */
+export function isCodexAccountEligible(
+  acct: CodexAccountStatus,
+  nearExhaustionPct: number,
+  now: Date,
+): boolean {
+  return eligible(acct, nearExhaustionPct, now);
+}
+
+/** Deterministic 32-bit FNV-1a over a UTF-16 code-unit stream. Pure, allocation-free. */
+function fnv1a32(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    // 32-bit FNV prime multiply via Math.imul; `>>> 0` keeps it unsigned.
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Session-sharded HOME account (AM-6): the deterministic account a session runs on
+ * under the "sharded" strategy — `stableAccountList[ hash(sessionId) % N ]` over the
+ * ELIGIBLE (connected, not cooling, under-threshold) accounts in stable created_at
+ * order (`listCodexAccountStatuses`).
+ *
+ * Why deterministic hash over "least-loaded by session count" (AM-6): it needs ZERO
+ * coordination — every worker computes the same home for a given (sessionId,
+ * eligible-set), so a burst of concurrent first-turns can't all read the same
+ * "least-loaded" account and stampede it (read-then-write skew), and there is no
+ * shared round-robin cursor to contend on. It is balanced in expectation.
+ *
+ * Re-shard (AM-5): pass the just-capped account as already-cooling (or simply let it
+ * fall over its threshold) and this reshuffles the SURVIVORS deterministically — the
+ * sessions that shared a capped account spread across the remaining pool by their own
+ * hashes instead of all re-concentrating on one first-eligible failover.
+ *
+ * Returns null when NO account is eligible (the caller idles until reset).
+ */
+export function shardCredentialForSession(args: {
+  sessionId: string;
+  accounts: CodexAccountStatus[];
+  nearExhaustionPct: number;
+  now: Date;
+}): string | null {
+  const { sessionId, accounts, nearExhaustionPct, now } = args;
+  const eligibles = accounts.filter((acct) => eligible(acct, nearExhaustionPct, now));
+  if (eligibles.length === 0) {
+    return null;
+  }
+  const index = fnv1a32(sessionId) % eligibles.length;
+  return eligibles[index]!.id;
+}
+
+/** earliestResetAt across ALL connected accounts — exported for the sharded all-capped idle. */
+export function earliestCodexReset(
+  accounts: CodexAccountStatus[],
+  nearExhaustionPct: number,
+  now: Date,
+): Date {
+  return earliestReset(accounts, nearExhaustionPct, now);
+}
+
+/**
+ * The proactive SHARDED home decision (pure — zero I/O, like {@link chooseRotationActive}).
+ * Decides the account a session should run on THIS turn under the "sharded" strategy,
+ * given its current POLICY pin (null on the first turn) and the accounts snapshot:
+ *
+ *  - keepPin: the current policy pin is still ELIGIBLE → run there, no rewrite. This
+ *    is the steady-state cache-warm path (a session stays on its one home account).
+ *  - reshard: no policy pin yet (first-turn lazy assignment, AM-7) OR the policy pin
+ *    is capped/ineligible (proactive re-shard, AM-4) → deterministically shard over the
+ *    ELIGIBLE set (AM-6) and durably (re)write the pin (`rewritePin:true`, AM-3/AM-5).
+ *  - allCapped: no account is eligible → the caller idles until the earliest reset.
+ *
+ * A MANUAL pin is handled by the CALLER (it never reaches here); this function only
+ * governs policy homes. Pure so the assignment/re-shard/keep logic is unit-testable
+ * without a worker/db env; the caller wraps it with a self-heal usage refresh between
+ * two evaluations exactly like chooseRotationActive's allCapped path.
+ */
+export function chooseShardedHome(args: {
+  sessionId: string;
+  currentPolicyPin: string | null;
+  accounts: CodexAccountStatus[];
+  nearExhaustionPct: number;
+  now: Date;
+}):
+  | { kind: "home"; credentialId: string; rewritePin: boolean }
+  | { kind: "allCapped"; earliestResetAt: Date } {
+  const { sessionId, currentPolicyPin, accounts, nearExhaustionPct, now } = args;
+  const pinRow = currentPolicyPin
+    ? (accounts.find((acct) => acct.id === currentPolicyPin) ?? null)
+    : null;
+  if (pinRow && eligible(pinRow, nearExhaustionPct, now)) {
+    return { kind: "home", credentialId: currentPolicyPin!, rewritePin: false };
+  }
+  const home = shardCredentialForSession({ sessionId, accounts, nearExhaustionPct, now });
+  if (home == null) {
+    return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
+  }
+  return { kind: "home", credentialId: home, rewritePin: true };
 }
 
 /**

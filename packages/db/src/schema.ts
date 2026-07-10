@@ -484,6 +484,14 @@ export const sessions = pgTable(
     // the "Running on:" indicator. Written by the worker at the turn boundary. FK
     // ON DELETE SET NULL (migration).
     codexLastCredentialId: uuid("codex_last_credential_id"),
+    // The SOURCE of codex_pinned_credential_id (AM-2): 'manual' — the user's
+    // in-session account switcher, which is SACRED and never moved by any policy —
+    // or 'policy' — the sharded rotation strategy's deterministic per-session home
+    // assignment, which MAY be re-sharded to another account when its own account
+    // caps. NULL when there is no pin (and for every pre-existing row). CHECK
+    // (manual|policy) lives in the migration; no FK (it describes the pin, not an
+    // account).
+    codexPinSource: text("codex_pin_source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
