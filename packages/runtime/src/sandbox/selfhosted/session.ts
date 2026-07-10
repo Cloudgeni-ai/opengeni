@@ -18,6 +18,7 @@
 import {
   ControlRequest,
   ControlResponse,
+  ErrorCode,
   FsEntryKind,
   StreamKind,
   type DesktopInputRequest,
@@ -38,6 +39,7 @@ import {
   agentErrorToControlError,
   drainingExhaustedError,
   execDeadlineHint,
+  SelfhostedControlError,
   subjectFor,
   type ControlRpc,
 } from "./control-rpc";
@@ -48,6 +50,9 @@ import {
 } from "./retry-policy";
 import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observer";
 import { selfhostedFaultClass } from "./fault-rendering";
+import { nextDurableOpId } from "../op-correlation";
+import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
+import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -213,11 +218,31 @@ export interface SelfhostedRelayConfig {
 /** The relay's default wss dial path (the `opengeni-relay` server route). */
 export const SELFHOSTED_RELAY_STREAM_PATH = "/stream";
 
+/**
+ * The op-stream injection (op-stream protocol v1.1 — see op-stream.ts). PRESENT
+ * = the streaming exec transport is enabled for this session (the worker
+ * injects it only when the runner advertised `Capabilities.op_stream` AND the
+ * server flag is on — the leaf carries no flag logic). ABSENT = the legacy
+ * monolithic exec, byte-identical to before. The timing knobs exist for tests.
+ */
+export interface SelfhostedOpStreamDeps {
+  transport: OpStreamTransport;
+  /** The durable-resume journal (attach generation + settled-frontier persist).
+   *  Absent (tests, non-activity callers) ⇒ generation "1", no persistence. */
+  journal?: OpStreamJournal;
+  windowBytes?: number;
+  ackIntervalMs?: number;
+  silenceTimeoutMs?: number;
+  reconnectHoldMs?: number;
+}
+
 export interface SelfhostedSessionDeps {
   workspaceId: string;
   agentId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
+  /** Op-stream exec transport (present = enabled; see SelfhostedOpStreamDeps). */
+  opStream?: SelfhostedOpStreamDeps;
   /** The lease/active epoch this session is fenced under (echoed on every
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
    *  Defaults to 0 (no fence) for the negotiation-only / test path. */
@@ -316,6 +341,9 @@ export class SelfhostedSession {
   private readonly retryClock: SelfhostedRetryClock;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly subject: string;
+  /** The op-stream exec client — constructed iff `deps.opStream` was injected
+   *  (= the streaming transport is enabled for this session). */
+  private readonly opStreamClient: OpStreamExecClient | undefined;
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
   private readonly workingDir: string;
@@ -366,6 +394,31 @@ export class SelfhostedSession {
     this.onOp = deps.onOp;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
     this.workingDir = deps.workingDir ?? "";
+    this.opStreamClient = deps.opStream
+      ? new OpStreamExecClient({
+          workspaceId: deps.workspaceId,
+          agentId: deps.agentId,
+          epoch: this.epoch,
+          controlRpc: deps.controlRpc,
+          rpcSubject: this.subject,
+          transport: deps.opStream.transport,
+          controlTimeoutMs: this.timeoutMs,
+          retryClock: this.retryClock,
+          ...(deps.opStream.journal !== undefined ? { journal: deps.opStream.journal } : {}),
+          ...(deps.opStream.windowBytes !== undefined
+            ? { windowBytes: deps.opStream.windowBytes }
+            : {}),
+          ...(deps.opStream.ackIntervalMs !== undefined
+            ? { ackIntervalMs: deps.opStream.ackIntervalMs }
+            : {}),
+          ...(deps.opStream.silenceTimeoutMs !== undefined
+            ? { silenceTimeoutMs: deps.opStream.silenceTimeoutMs }
+            : {}),
+          ...(deps.opStream.reconnectHoldMs !== undefined
+            ? { reconnectHoldMs: deps.opStream.reconnectHoldMs }
+            : {}),
+        })
+      : undefined;
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
     // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
     // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
@@ -552,6 +605,27 @@ export class SelfhostedSession {
       stdin: new Uint8Array(0),
       timeoutMs: executionTimeoutMs,
     };
+    if (this.opStreamClient) {
+      try {
+        return await this.execViaOpStream(this.opStreamClient, execReq, executionTimeoutMs);
+      } catch (error) {
+        // The transport had no live connection, or the runner refused the START
+        // itself (capability/downgrade race) — the op provably never ran, so
+        // the legacy monolithic exec (the permanent fallback wire form) is safe.
+        if (!(error instanceof OpStreamUnavailableError)) {
+          throw error;
+        }
+      }
+    }
+    return this.execLegacy(execReq, executionTimeoutMs);
+  }
+
+  /** The legacy monolithic exec request/reply — the permanent fallback wire
+   *  form (and the only form for runners without `op_stream`). */
+  private async execLegacy(
+    execReq: ExecRequest,
+    executionTimeoutMs: number,
+  ): Promise<SelfhostedExecResult> {
     const result = await this.call(
       { $case: "exec", exec: execReq },
       executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
@@ -560,6 +634,85 @@ export class SelfhostedSession {
       throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
     }
     return execResultToChannelA(result.exec, executionTimeoutMs);
+  }
+
+  /**
+   * The op-stream exec path: the SAME `ExecRequest`, streamed (see
+   * op-stream.ts). The durable op id comes from the tool-call correlation
+   * context (`{callId}:{ordinal}` — B1) when this exec runs inside an SDK tool
+   * invocation; a non-tool caller falls back to a random unique id (never
+   * collides, merely not stable across a turn re-dispatch). Emits the SAME
+   * per-op observation the legacy path does, with `replyBytes` filled from the
+   * reassembled stream (the field the framed transport was designed to own).
+   */
+  private async execViaOpStream(
+    client: OpStreamExecClient,
+    execReq: ExecRequest,
+    executionTimeoutMs: number,
+  ): Promise<SelfhostedExecResult> {
+    const startedAt = Date.now();
+    const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    try {
+      const outcome = await client.exec(
+        opId,
+        execReq,
+        executionTimeoutMs,
+        executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
+      );
+      const retries = outcome.heals + outcome.startRetries;
+      this.emitOp({
+        op: "exec",
+        outcome: "ok",
+        healed: retries > 0,
+        retries,
+        durationMs: Date.now() - startedAt,
+        machineId: this.agentId,
+        replyBytes: outcome.replyBytes,
+        // A healed op's class: attach heals are link blips (reconnecting);
+        // start retries without heals were admission backpressure (draining).
+        ...(retries > 0 ? { faultClass: outcome.heals > 0 ? "reconnecting" : "draining" } : {}),
+      });
+      return execResultToChannelA(outcome.response, executionTimeoutMs);
+    } catch (error) {
+      if (error instanceof OpStreamUnavailableError) {
+        // Not a fault: the caller falls back to the legacy exec, which emits
+        // its own observation.
+        throw error;
+      }
+      const controlError =
+        error instanceof SelfhostedControlError
+          ? error
+          : new SelfhostedControlError({
+              message: error instanceof Error ? error.message : String(error),
+              code: ErrorCode.ERROR_CODE_PROTOCOL,
+              reason: null,
+              retryable: false,
+            });
+      this.emitOp({
+        op: "exec",
+        outcome: "failed",
+        healed: false,
+        retries: 0,
+        durationMs: Date.now() - startedAt,
+        code: controlError.code,
+        reason: controlError.reason,
+        neverSent: controlError.neverSent,
+        machineId: this.agentId,
+        faultClass: selfhostedFaultClass(controlError),
+      });
+      throw controlError;
+    }
+  }
+
+  /**
+   * The turn-end op-stream durability hook: persists each settled op's frontier
+   * to the journal, then final-acks it on the wire (licensing the runner to GC
+   * its retained frames). The WORKER calls this after the turn's results are
+   * durably recorded — never mid-turn (the durable-before-wire-ack ordering).
+   * A no-op for sessions without the op-stream transport.
+   */
+  async finalizeOpStreamOps(): Promise<void> {
+    await this.opStreamClient?.finalizeSettledOps();
   }
 
   // ── The agent-turn provided-session contract (over the SAME NATS primitives) ──
@@ -950,6 +1103,7 @@ export class SelfhostedSandboxClient {
   private readonly environment: Record<string, string> | undefined;
   private readonly workingDir: string | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
+  private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
 
   constructor(opts: {
@@ -977,6 +1131,9 @@ export class SelfhostedSandboxClient {
     workingDir?: string;
     /** The per-op observer threaded into every bound session (out-of-band telemetry). */
     onOp?: SelfhostedOpObserver;
+    /** The op-stream exec transport threaded into every bound session (present
+     *  = enabled; see SelfhostedOpStreamDeps). */
+    opStream?: SelfhostedOpStreamDeps;
   }) {
     this.workspaceId = opts.workspaceId;
     this.relay = opts.relay;
@@ -988,6 +1145,7 @@ export class SelfhostedSandboxClient {
     this.environment = opts.environment;
     this.workingDir = opts.workingDir;
     this.onOp = opts.onOp;
+    this.opStream = opts.opStream;
   }
 
   private controlRpc(): ControlRpc {
@@ -1009,6 +1167,7 @@ export class SelfhostedSandboxClient {
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
       ...(this.onOp !== undefined ? { onOp: this.onOp } : {}),
+      ...(this.opStream !== undefined ? { opStream: this.opStream } : {}),
     });
   }
 
@@ -1088,6 +1247,10 @@ export interface SelfhostedSessionBuild {
   execTimeoutMs?: number;
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
+  /** The op-stream exec transport (present = enabled for the session; the
+   *  worker injects it only when the runner advertised the capability AND the
+   *  server flag is on). Absent ⇒ the legacy exec, byte-identical to before. */
+  opStream?: SelfhostedOpStreamDeps;
 }
 
 /**
@@ -1119,6 +1282,7 @@ export async function buildSelfhostedBackendSession(
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
     ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
+    ...(deps.opStream !== undefined ? { opStream: deps.opStream } : {}),
   });
   const session = await client.resume({ agentId: deps.agentId });
   return { client, session };

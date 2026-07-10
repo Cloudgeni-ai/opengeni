@@ -248,7 +248,32 @@ export {
   type SelfhostedApplyDiff,
   type SelfhostedEditor,
   type SelfhostedImageOutput,
+  type SelfhostedOpStreamDeps,
 } from "./selfhosted/session";
+// The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
+// Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
+// the same bus connection as the control rpc) plus an `OpStreamJournal`
+// adapted onto Temporal; sessions without the injection keep the legacy exec.
+export {
+  NatsOpStreamTransport,
+  OpStreamUnavailableError,
+  opAckSubject,
+  opFrameSubject,
+  type NatsOpStreamConnection,
+  type OpStreamSubscription,
+  type OpStreamTransport,
+} from "./selfhosted/op-transport";
+export {
+  OP_STREAM_ACK_INTERVAL_MS,
+  OP_STREAM_DEFAULT_WINDOW_BYTES,
+  OP_STREAM_RECONNECT_HOLD_MS,
+  OP_STREAM_SILENCE_TIMEOUT_MS,
+  type OpStreamExecOutcome,
+  type OpStreamJournal,
+} from "./selfhosted/op-stream";
+// The durable op-id correlation seam (B1): the runtime barrel BINDS it around
+// the SDK shell tool; the sandbox leaf READS it when minting op ids.
+export { nextDurableOpId, runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
 export {
   negotiateSelfhostedCapabilities,
   selfhostedLiveness,

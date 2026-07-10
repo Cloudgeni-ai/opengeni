@@ -140,6 +140,7 @@ import {
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
 } from "./sandbox";
+import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 
@@ -1603,6 +1604,38 @@ function neutralizeStructuredToolTransport(
  * behaviour; the effective window only changes the server-path threshold when a
  * resolved model declares its own contextWindowTokens.
  */
+/**
+ * Wrap the shell capability's `exec_command` so its execution runs inside a
+ * tool-call correlation context (op-correlation.ts): the SDK's tool machinery
+ * passes `details.toolCall` (the model's function_call, with its durable
+ * `callId`) into every function-tool `invoke`, and binding an
+ * AsyncLocalStorage around the invocation makes that id visible to the sandbox
+ * transport underneath — which mints the DURABLE op id `{callId}:{ordinal}`
+ * (op-stream ruling B1). A re-dispatched turn re-executes the same
+ * function_call with the same callId, so the transport's idempotent OpStart
+ * ATTACHES to the already-running/completed op instead of re-running it.
+ * Without a callId (no details on the invocation) the tool runs unwrapped and
+ * the transport falls back to a random unique id — today's semantics.
+ */
+function withExecOpCorrelation(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "exec_command") {
+      return capabilityTool;
+    }
+    const invoke = capabilityTool.invoke;
+    return {
+      ...capabilityTool,
+      invoke: (runContext, input, details) => {
+        const callId = details?.toolCall?.callId;
+        if (!callId) {
+          return invoke(runContext, input, details);
+        }
+        return runWithToolCallCorrelation(callId, () => invoke(runContext, input, details));
+      },
+    };
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
@@ -1632,7 +1665,10 @@ export function buildAgentCapabilities(
   if (options.structuredToolTransport === false) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
-  const caps: ReturnType<typeof Capabilities.default> = [filesystemCapability, shell()];
+  const caps: ReturnType<typeof Capabilities.default> = [
+    filesystemCapability,
+    shell({ configureTools: withExecOpCorrelation }),
+  ];
   if (mode === "server") {
     caps.push(
       compaction({

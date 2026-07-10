@@ -35,6 +35,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "@openai/agents": "^0.11.6",
     "@openai/agents-extensions": "^0.11.6",
     "@opengeni/agent-proto": "workspace:*",
