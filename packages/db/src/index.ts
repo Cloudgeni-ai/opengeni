@@ -22857,6 +22857,18 @@ export async function appendSessionEvents(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Generic API/system event appends participate in the same lock order
+        // as durable queue controls. Without this workspace lock an append can
+        // hold the session row and then request a workspace FK key-share while
+        // a concurrent stop/steer holds workspace FOR UPDATE and waits on the
+        // session — a real PostgreSQL deadlock whose caller may treat the live
+        // fanout as best-effort and accidentally hide a lost terminal event.
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, workspaceId))
+          .for("update")
+          .limit(1);
         const [row] = await tx
           .select()
           .from(schema.sessions)
