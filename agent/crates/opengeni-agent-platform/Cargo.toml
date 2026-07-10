@@ -54,3 +54,5 @@ opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = tr
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
 tempfile = { workspace = true }
+# The wire types the cgroup-placement integration test builds an ExecRequest with.
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
