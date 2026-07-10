@@ -17,9 +17,11 @@ import {
   AGENT_HELLO_SUBJECT,
   handleHelloPayload,
   helloDesktopUnavailableReason,
+  helloReportsOpStream,
   helloReportsDisplay,
   parseAgentHelloSubject,
   refreshEnrollmentDisplay,
+  refreshEnrollmentOpStream,
   startHelloIngestion,
 } from "../src/sandbox/metrics-ingestion";
 
@@ -122,6 +124,20 @@ describe("helloDesktopUnavailableReason", () => {
   });
 });
 
+describe("helloReportsOpStream", () => {
+  test("opStream=true → streaming exec advertised", () => {
+    expect(helloReportsOpStream(Hello.fromPartial({ capabilities: { opStream: true } }))).toBe(
+      true,
+    );
+  });
+  test("opStream=false or absent Capabilities → legacy exec fallback", () => {
+    expect(helloReportsOpStream(Hello.fromPartial({ capabilities: { opStream: false } }))).toBe(
+      false,
+    );
+    expect(helloReportsOpStream(Hello.fromPartial({}))).toBe(false);
+  });
+});
+
 // ── DB round-trip: the Hello refreshes has_display (both directions, no churn) ──
 
 let available = true;
@@ -159,22 +175,29 @@ function helloPayload(
   agentId: string,
   workspaceId: string,
   opts: {
-    desktop: boolean;
+    desktop?: boolean;
+    opStream?: boolean;
     desktopUnavailableReason?: string;
     display?: { id: string; width: number; height: number; virtual: boolean };
+    capabilitiesAbsent?: boolean;
   },
 ): Uint8Array {
   return Hello.encode(
     Hello.fromPartial({
       agentId,
       workspaceId,
-      capabilities: {
-        desktop: opts.desktop,
-        ...(opts.desktopUnavailableReason
-          ? { desktopUnavailableReason: opts.desktopUnavailableReason }
-          : {}),
-        ...(opts.display ? { display: opts.display } : {}),
-      },
+      ...(opts.capabilitiesAbsent
+        ? {}
+        : {
+            capabilities: {
+              desktop: opts.desktop ?? false,
+              opStream: opts.opStream ?? false,
+              ...(opts.desktopUnavailableReason
+                ? { desktopUnavailableReason: opts.desktopUnavailableReason }
+                : {}),
+              ...(opts.display ? { display: opts.display } : {}),
+            },
+          }),
     }),
   ).finish();
 }
@@ -259,6 +282,60 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
       hasDisplay: true,
     });
     expect(result.updated).toBe(false);
+  });
+
+  test("opStream=true flips the enrollment's op_stream false → true", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seedEnrollment(false);
+
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, { desktop: false, opStream: true }),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+    );
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.opStream).toBe(true);
+  });
+
+  test("an UNCHANGED op-stream Hello writes nothing (no churn — updatedAt untouched)", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seedEnrollment(false);
+    await refreshEnrollmentOpStream(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      opStream: true,
+    });
+    const before = await getEnrollment(db, workspaceId, enrollment.id);
+
+    const result = await refreshEnrollmentOpStream(db, {
+      workspaceId,
+      agentId: enrollment.id,
+      opStream: true,
+    });
+    expect(result.updated).toBe(false);
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.opStream).toBe(true);
+    expect(after?.updatedAt).toBe(before!.updatedAt); // no write ⇒ updatedAt unchanged
+  });
+
+  test("a Hello with absent Capabilities leaves op_stream false", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const before = await getEnrollment(db, workspaceId, enrollment.id);
+
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, { capabilitiesAbsent: true }),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+    );
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.opStream).toBe(false);
+    expect(after?.updatedAt).toBe(before!.updatedAt); // both capability refreshes no-op
   });
 
   test("a CAPTURE-BLOCKED Hello persists the reason (server-visible) with has_display=false", async () => {

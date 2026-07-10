@@ -21,6 +21,9 @@
 //     re-surfaced. Consuming the Hello's `capabilities.desktop` / `display` makes
 //     `has_display` track reality (both directions), which the desktop-capability
 //     gate (packages/runtime capabilities.ts) keys off.
+//     refreshEnrollmentOpStream — reconcile `enrollments.op_stream` to the LIVE
+//     runner capability the Hello reports, leaving legacy request/reply exec as the
+//     fallback unless the runner advertises the streaming engine.
 //
 // Both consumers are BEST-EFFORT and fail-soft: a decode/DB error for one message
 // is logged + swallowed (the bus subscription already swallows handler throws) so
@@ -33,6 +36,7 @@ import {
   ingestMachineMetricsSample,
   sessionsWithActiveOpOnEnrollment,
   setEnrollmentDisplayState,
+  setEnrollmentOpStreamState,
   setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
   type AppendEventInput,
@@ -363,6 +367,11 @@ export function helloDesktopUnavailableReason(hello: Hello): string | null {
   return reason ? reason : null;
 }
 
+/** Whether the runner's current Hello advertises the op-stream engine. */
+export function helloReportsOpStream(hello: Hello): boolean {
+  return hello.capabilities?.opStream === true;
+}
+
 /**
  * Reconcile `enrollments.has_display` (+ the capture-blocked reason) to what a Hello
  * reports. Resolves the enrollment (the accountId is the RLS principal + the
@@ -403,6 +412,37 @@ export async function refreshEnrollmentDisplay(
 }
 
 /**
+ * Reconcile `enrollments.op_stream` to what a Hello reports. Resolves the
+ * enrollment first so the accountId remains the RLS principal and so a no-change
+ * Hello short-circuits BEFORE issuing any write (the DB writer is itself
+ * change-guarded as a backstop). An unknown/cross-workspace agentId is a no-op.
+ */
+export async function refreshEnrollmentOpStream(
+  db: Database,
+  input: {
+    workspaceId: string;
+    agentId: string;
+    opStream: boolean;
+  },
+): Promise<{ updated: boolean }> {
+  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
+  if (!enrollment) {
+    return { updated: false };
+  }
+  if (enrollment.opStream === input.opStream) {
+    // The capability is unchanged — do not even issue the UPDATE (no churn on a
+    // steady-state Hello).
+    return { updated: false };
+  }
+  return await setEnrollmentOpStreamState(db, {
+    accountId: enrollment.accountId,
+    workspaceId: input.workspaceId,
+    enrollmentId: input.agentId,
+    opStream: input.opStream,
+  });
+}
+
+/**
  * Decode a raw `Hello` payload + refresh the enrollment's display cursor + clear
  * any pending clean going-offline marker and, when the reconnect actually cleared
  * one, fan out machine.link.restored to the sessions with an active op on the
@@ -438,8 +478,13 @@ export async function handleHelloPayload(
       hasDisplay: helloReportsDisplay(hello),
       desktopUnavailableReason: helloDesktopUnavailableReason(hello),
     });
+    await refreshEnrollmentOpStream(db, {
+      workspaceId: ids.workspaceId,
+      agentId: ids.agentId,
+      opStream: helloReportsOpStream(hello),
+    });
   } catch (error) {
-    observability?.warn?.("Failed to refresh an enrollment's display from a Hello", {
+    observability?.warn?.("Failed to refresh an enrollment's capabilities from a Hello", {
       subject,
       error: error instanceof Error ? error.message : String(error),
     });

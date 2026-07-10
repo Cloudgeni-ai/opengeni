@@ -11378,6 +11378,7 @@ export type EnrollmentRecord = {
   pubkey: string;
   exposure: EnrollmentExposure;
   hasDisplay: boolean;
+  opStream: boolean;
   /** Set when a display exists but capture is not permitted (macOS Screen Recording
    *  not granted); null when capture is permitted or the machine is headless. */
   desktopUnavailableReason: string | null;
@@ -11405,6 +11406,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     pubkey: row.pubkey,
     exposure: row.exposure as EnrollmentExposure,
     hasDisplay: row.hasDisplay,
+    opStream: row.opStream,
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
     status: row.status as EnrollmentStatus,
@@ -11736,6 +11738,48 @@ export async function setEnrollmentDisplayState(
               ne(schema.enrollments.hasDisplay, input.hasDisplay),
               sql`${schema.enrollments.desktopUnavailableReason} IS DISTINCT FROM ${input.desktopUnavailableReason}`,
             ),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { updated: rows.length > 0 };
+    },
+  );
+}
+
+// Live op-stream cursor: the agent's connect Hello advertises whether it supports
+// the streaming exec transport. This is deliberately persisted separately from the
+// server rollout flag so routing can require BOTH server enablement and the live
+// runner capability; agents predating the op-stream engine remain false and keep
+// using legacy request/reply exec.
+//
+// CHANGE-GUARDED at the SQL layer: the write fires only when `op_stream` differs
+// from what the row already holds, so a steady-state Hello updates zero rows and
+// never churns. Returns whether a row was actually changed. Best-effort — the
+// caller swallows failures so capability refresh never breaks the agent's connect.
+export async function setEnrollmentOpStreamState(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    opStream: boolean;
+  },
+): Promise<{ updated: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({
+          opStream: input.opStream,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            ne(schema.enrollments.opStream, input.opStream),
           ),
         )
         .returning({ id: schema.enrollments.id });
