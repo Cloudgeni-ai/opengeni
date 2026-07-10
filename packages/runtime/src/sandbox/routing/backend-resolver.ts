@@ -60,8 +60,13 @@ export interface ActiveBackendResolverDeps {
    *  absent, a modal swap target surfaces as unsupported (the caller validated
    *  liveness, so this is the "modal swap not wired in this context" guard). */
   establishModalTarget?: (sandbox: RoutableSandbox) => Promise<RoutableBackendSession>;
-  /** Override the selfhosted control-op timeout (tests). */
+  /** The selfhosted CONTROL-op timeout (ping/fs/desktop/pty) for a swap/pin target.
+   *  Absent ⇒ the session's 30s default. */
   selfhostedTimeoutMs?: number;
+  /** The selfhosted EXEC process deadline for a swap/pin target, distinct from the
+   *  control timeout (a swapped-to machine runs real commands too). Absent ⇒ falls
+   *  back to the control timeout, as in the session leaf. */
+  selfhostedExecTimeoutMs?: number;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn threads into the agent's TARGET manifest (and into the group box at
@@ -165,6 +170,9 @@ export function makeActiveBackendResolver(
         agentId: sandbox.enrollmentId,
         epoch: pointer.activeEpoch,
         ...(deps.selfhostedTimeoutMs !== undefined ? { timeoutMs: deps.selfhostedTimeoutMs } : {}),
+        ...(deps.selfhostedExecTimeoutMs !== undefined
+          ? { execTimeoutMs: deps.selfhostedExecTimeoutMs }
+          : {}),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).
