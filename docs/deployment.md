@@ -93,6 +93,18 @@ secret-managed CI system. The open-source repository intentionally provides the
 reusable product, chart, Terraform roots, and conformance commands; it does not
 ship Cloudgeni-specific operational release gates or live-account scripts.
 
+External automatic release operators must also compare the immutable migration
+set from the last-known-good source revision to the candidate. Every new SQL
+migration requires an entry in `deploy/release/migration-contracts.json`.
+That file is cumulative: candidate metadata must preserve every entry recorded
+at last known good, and the operator must verify the SQL bytes at both source
+revisions so a deleted contract or rewritten historical migration fails closed.
+Automatic code rollback is eligible only for an `expand` migration declared
+compatible with the previous code and `rollbackMode: "code-only"`. Contract or
+destructive migrations are separate maintenance operations after production
+evidence for the replacement path; never roll schema backward as a side effect
+of workload rollback. See `deploy/release/README.md`.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
@@ -776,6 +788,9 @@ A deployment is not acceptable until it proves:
 - A scripted session can create, stream, replay, run, and complete.
 - A scheduled task can be created, manually triggered through Temporal, dispatch a session, and be cleaned up.
 - Logs, metrics, and traces carry enough correlation data for production debugging.
+- A synthetic release sentinel that spans worker replacement has one durable
+  admission/logical turn and no duplicate model/tool/history effects; the
+  content-free DB audit contract is `docs/release-sentinel-audit.md`.
 
 Use `bun run deployment:stack`, `bun run deployment:preflight`, provider
 Terraform validation, Helm rendering, and this conformance suite as the merge

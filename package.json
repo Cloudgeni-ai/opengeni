@@ -29,6 +29,8 @@
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
     "operator:revive-session": "bun scripts/operator/revive-session.ts",
+    "operator:release-sentinel-key-bootstrap": "bun scripts/operator/release-sentinel-key-bootstrap.ts",
+    "operator:release-sentinel-audit": "bun scripts/operator/release-sentinel-audit.ts",
     "typecheck": "bun scripts/typecheck.ts",
     "lint": "oxlint",
     "format": "oxfmt",

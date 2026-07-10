@@ -1,0 +1,8 @@
+[
+  {
+    "migration": "0049_enrollment_went_offline.sql",
+    "phase": "expand",
+    "previousCodeCompatible": true,
+    "rollbackMode": "code-only"
+  }
+]

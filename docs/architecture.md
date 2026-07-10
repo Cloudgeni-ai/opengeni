@@ -330,7 +330,7 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 
 ### 6.4 Deployment (`deploy/`)
 
-`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
+`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary), and `deploy/release/migration-contracts.json` (provider-neutral expand/contract compatibility assertions consumed by external operators). See §12.
 
 ### 6.5 Docs, scripts, test
 
@@ -509,6 +509,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 - **Secrets never reach Helm values.** `generateRuntimeArtifacts` puts sensitive Terraform outputs only into `runtime.env` (and records them in `sensitiveTerraformOutputsUsed`); generated files carry "Do not commit generated copies."
 - **Parity (not import).** `@opengeni/deployment`'s `SANDBOX_REQUIRED_ENV` and `SandboxBackend` *mirror* `@opengeni/config`/`@opengeni/contracts` — enforced by **tests, not the type system**. Edit one side without the other and it compiles but the parity test goes red.
 - **Conformance.** `scripts/deployment-conformance.ts` black-box-verifies a running deployment (health, access boundary, session run, SSE replay, MCP-tool session, scheduled task, storage round-trip). Preflight is `scripts/deployment-preflight.ts`.
+- **Schema-safe code rollback.** External automatic release paths compare migrations from last known good to the candidate and accept only new entries declared `expand` + previous-code-compatible + `code-only` in `deploy/release/migration-contracts.json`. A contract/destructive migration is a separate maintenance operation; code rollback never improvises schema rollback. The metadata must be backed by mixed-version tests.
 
 > Canonical: `packages/deployment/src/index.ts`, `deploy/helm/opengeni/`, `deploy/terraform/{azure,aws,gcp}/`, `deploy/stacks/`, [`deployment.md`](deployment.md).
 
@@ -552,8 +553,10 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The published SDK/React surface | `packages/sdk/src/index.ts`, `packages/react/src/index.ts` | `.changeset/config.json` |
 | The Rust agent / wire proto | `agent/proto/opengeni_agent.proto`, `agent/scripts/codegen.sh` | `agent/README.md` |
 | Deployment (Helm/Terraform/profiles) | `packages/deployment/src/index.ts`, `deploy/helm/opengeni/` | [`deployment.md`](deployment.md) |
+| Migration compatibility for external release/rollback | `deploy/release/migration-contracts.json`, immutable SQL under `packages/db/drizzle/` | [`deployment.md`](deployment.md) |
 | Build / test / release tooling | `package.json`, `.changeset/config.json`, `.github/workflows/` | [`../AGENTS.md`](../AGENTS.md) Verification |
 | Operator revival of an existing failed/idle session | `scripts/operator/revive-session.ts`, `packages/core/src/domain/sessions.ts` (`acceptSessionUserMessage`) | [`operator-session-revival.md`](operator-session-revival.md) |
+| Read-only exactly-once audit of a release sentinel | `scripts/operator/release-sentinel-audit.ts` | [`release-sentinel-audit.md`](release-sentinel-audit.md) |
 | The web console | `apps/web/src/App.tsx`, `apps/web/src/context.tsx` | [`command-palette.md`](command-palette.md) |
 
 ---
@@ -579,6 +582,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`reliability-fixes.md`](reliability-fixes.md) | Reliability bugs/fixes (bounded Temporal history, orphan repair, scheduled-task/billing idempotency). |
 | [`deployment.md`](deployment.md) | Operator guide: profiles, preflight/stack plans, Helm/Terraform; the disposable-fixtures rule. |
 | [`operator-session-revival.md`](operator-session-revival.md) | Control-plane-only dry-run/apply procedure for reviving one exact session through shared message admission, including audit and no-delete rollback semantics. |
+| [`release-sentinel-audit.md`](release-sentinel-audit.md) | Content-free RLS-scoped audit contract for one synthetic session spanning a worker rollout. |
 | [`embedding.md`](embedding.md) | Host-app embedding guide: router mounting, direct core calls, ports/bindings, schema/RLS, worker, and EventBus. |
 | [`connected-machines.md`](connected-machines.md) | Integrator guide for targeting, swapping, enrolling, and operating Connected Machines. |
 | [`design/lazy-provisioning.md`](design/lazy-provisioning.md) | Point-in-time lazy sandbox provisioning design: first-op provisioner, synthetic manifest invariant, and failure contract. |
