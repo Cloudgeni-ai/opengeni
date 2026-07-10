@@ -22,6 +22,8 @@ import {
   RoutingSandboxSession,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
+  ActiveBackendUnresolvableError,
+  swapTargetEstablishability,
   MockAgentResponder,
   type ActivePointer,
   type RoutableBackendSession,
@@ -268,6 +270,45 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
     await expect(proxy.exec({ cmd: "x" })).rejects.toThrow(/re-entrancy|proxy itself/i);
   });
+
+  // REGRESSION (issue #341 §5.2 / invariant E): the per-op cache was keyed by
+  // active_epoch ALONE, but a pointer can change its target id WITHOUT an epoch
+  // bump — the `sessions.active_sandbox_id` FK is `ON DELETE SET NULL`, so a cascade
+  // that deletes the pointed-at sandbox nulls the id at the SAME epoch. Keying on the
+  // epoch alone kept serving the deleted backend for that epoch (a swap-free route to
+  // the Shape-3 symptom: activeSandboxId:null in the list, ops still hitting the dead
+  // box). The cache must key on the FULL tuple (activeEpoch, activeSandboxId) so a
+  // same-epoch id change invalidates it and the next op re-resolves.
+  test("(6) cache key (epoch, sandboxId): a same-epoch target-id change invalidates the cache and re-resolves the HOME", async () => {
+    const group = new FakeBackend("group-modal");
+    const sibling = new FakeBackend("stale-sibling");
+    // A pointer whose id can change WITHOUT bumping the epoch (the FK SET NULL shape).
+    let pointer: ActivePointer = { activeSandboxId: "sbx-sibling", activeEpoch: 4 };
+    let resolves = 0;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ ...pointer }),
+      resolveActiveBackend: async (p): Promise<ResolvedActiveBackend> => {
+        resolves += 1;
+        return p.activeSandboxId === null
+          ? { session: group, sandboxId: null, kind: "modal" }
+          : { session: sibling, sandboxId: p.activeSandboxId, kind: "modal" };
+      },
+    });
+
+    // Op 1 resolves the sibling target at epoch 4.
+    expect(((await proxy.exec({ cmd: "a" })) as { stdout: string }).stdout).toBe("stale-sibling");
+    expect(resolves).toBe(1);
+
+    // The FK nulls the pointer id at the SAME epoch (no bump) — as an ON DELETE SET
+    // NULL cascade would. The NEXT op must NOT keep serving the cached sibling.
+    pointer = { activeSandboxId: null, activeEpoch: 4 };
+    expect(((await proxy.exec({ cmd: "b" })) as { stdout: string }).stdout).toBe("group-modal");
+    expect(resolves).toBe(2);
+
+    // The stale sibling never saw the second op; the home box did.
+    expect(sibling.calls).toEqual(["a"]);
+    expect(group.calls).toEqual(["b"]);
+  });
 });
 
 describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted dispatch", () => {
@@ -388,7 +429,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(d.sandboxId).toBeNull();
   });
 
-  test("modal swap target with no establisher -> unresolvable (caller 409s)", async () => {
+  test("modal swap target with no establisher -> unresolvable, typed unsupported_backend_context", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
@@ -397,12 +438,12 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 })).rejects.toThrow(
-      /cannot be established/,
-    );
+    const err = await resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("unsupported_backend_context");
   });
 
-  test("unknown sandbox id -> unresolvable", async () => {
+  test("unknown sandbox id -> unresolvable, typed stale_pointer (issue #341 typed diagnostics)", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
@@ -411,9 +452,29 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "ghost", activeEpoch: 1 })).rejects.toThrow(
-      /not found/,
-    );
+    const err = await resolve({ activeSandboxId: "ghost", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("stale_pointer");
+    expect((err as Error).message).toMatch(/not found/);
+  });
+
+  test("selfhosted target missing an enrollment -> typed offline_enrollment", async () => {
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async () => ({
+        id: "sbx-orphan",
+        kind: "selfhosted",
+        name: "unpaired",
+        enrollmentId: null,
+      }),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const err = await resolve({ activeSandboxId: "sbx-orphan", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("offline_enrollment");
   });
 
   test("end-to-end: proxy + real resolver, swap Modal->selfhosted lands the op on the laptop", async () => {
@@ -441,6 +502,40 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     const r = (await proxy.exec({ cmd: "echo $HOSTNAME" })) as { stdout: string };
     expect(r.stdout.trim()).toBe("laptop-99");
     expect(groupModal.calls).toEqual(["uname"]);
+  });
+});
+
+describe("swapTargetEstablishability — the shared admission/establishment predicate (issue #341 invariant A)", () => {
+  test("the session's own group box is always establishable (it is the null/home target)", () => {
+    expect(swapTargetEstablishability({ kind: "modal", isSessionGroup: true })).toEqual({
+      ok: true,
+    });
+    expect(swapTargetEstablishability({ kind: "selfhosted", isSessionGroup: true })).toEqual({
+      ok: true,
+    });
+  });
+
+  test("a selfhosted machine target is establishable (liveness is admission's separate gate)", () => {
+    expect(swapTargetEstablishability({ kind: "selfhosted", isSessionGroup: false })).toEqual({
+      ok: true,
+    });
+  });
+
+  test("a NON-group modal target is NOT establishable → unsupported_backend_context (Shape 1)", () => {
+    const r = swapTargetEstablishability({ kind: "modal", isSessionGroup: false });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("unsupported_backend_context");
+      expect(r.reason).toMatch(/Modal sandbox other than this session/i);
+    }
+  });
+
+  test("an unknown backend kind is NOT establishable", () => {
+    const r = swapTargetEstablishability({ kind: "daytona", isSessionGroup: false });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("unsupported_backend_context");
+    }
   });
 });
 

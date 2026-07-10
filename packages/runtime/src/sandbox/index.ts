@@ -245,8 +245,11 @@ export {
 export {
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
+  swapTargetEstablishability,
   type ActiveBackendResolverDeps,
   type RoutableSandbox,
+  type BackendUnresolvableCode,
+  type SwapTargetEstablishability,
 } from "./routing/backend-resolver";
 
 /**

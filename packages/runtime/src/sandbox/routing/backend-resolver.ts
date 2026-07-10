@@ -88,13 +88,82 @@ export interface ActiveBackendResolverDeps {
   pinnedSelfhosted?: { sandboxId: string; epoch: number; session: RoutableBackendSession };
 }
 
+/** Why a persisted pointer / swap target cannot be turned into a live backend. A
+ *  typed discriminant so callers (turn-start reconcile, the swap tool, future
+ *  reports) can distinguish a stale pointer from an unaddressable enrollment from a
+ *  backend the turn context simply cannot establish — instead of string-matching
+ *  one opaque message (issue #341: "typed diagnostics that distinguish stale
+ *  pointer, offline enrollment, unsupported backend context, transient failure").
+ *   - `stale_pointer`               — the pointed-at sandbox row is gone (deleted/orphaned).
+ *   - `offline_enrollment`          — a selfhosted target carries no enrollment/agent id to address.
+ *   - `unsupported_backend_context` — a target no turn routing context can establish
+ *                                     (a non-group Modal sibling; an unknown kind).
+ *   - `transient_establishment`     — a momentary establish failure worth a retry (reserved;
+ *                                     control-plane timeouts surface as their own typed error). */
+export type BackendUnresolvableCode =
+  | "stale_pointer"
+  | "offline_enrollment"
+  | "unsupported_backend_context"
+  | "transient_establishment";
+
 /** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
- *  target with no establisher in this context). The caller maps it to a 409. */
+ *  target with no establisher in this context). The caller maps it to a 409.
+ *  Carries a typed {@link BackendUnresolvableCode} in addition to the message. */
 export class ActiveBackendUnresolvableError extends Error {
   readonly name = "ActiveBackendUnresolvableError";
-  constructor(message: string) {
+  readonly code: BackendUnresolvableCode;
+  constructor(code: BackendUnresolvableCode, message: string) {
     super(message);
+    this.code = code;
   }
+}
+
+/** The outcome of {@link swapTargetEstablishability}. */
+export type SwapTargetEstablishability =
+  | { ok: true }
+  | { ok: false; code: BackendUnresolvableCode; reason: string };
+
+/**
+ * THE SINGLE SOURCE OF TRUTH for "can a turn's routing context ESTABLISH this swap
+ * target?" — shared by swap/seed ADMISSION (`fleet.resolveTarget`, before the CAS
+ * pointer commit) and turn-time ESTABLISHMENT (this resolver + `wrapTurnBoxWithRouting`).
+ * Admission MUST reject any target this predicate calls unestablishable, so the
+ * pointer is never committed to a backend no turn can resume (issue #341 Shape 1:
+ * a Modal-sibling swap was admitted + epoch-bumped, then every following op
+ * stranded because no context wires an establisher for it).
+ *
+ *  - the session's OWN group box (`isSessionGroup`) is the null/home target and is
+ *    always establishable (it IS the default backend);
+ *  - a `selfhosted` machine target is establishable (`buildSelfhostedBackendSession`);
+ *    admission's separate liveness probe — not this predicate — gates online-ness;
+ *  - a NON-group `modal` target is NOT establishable: no turn context wires
+ *    `establishModalTarget` (cross-group Modal resume-by-id is a future, billing-
+ *    touching feature — sandbox-routing.ts). Wiring that establisher is the ONE
+ *    toggle that flips this branch; keep admission and the resolver in lockstep.
+ */
+export function swapTargetEstablishability(target: {
+  kind: string;
+  isSessionGroup: boolean;
+}): SwapTargetEstablishability {
+  if (target.isSessionGroup) {
+    return { ok: true };
+  }
+  if (target.kind === "selfhosted") {
+    return { ok: true };
+  }
+  if (target.kind === "modal") {
+    return {
+      ok: false,
+      code: "unsupported_backend_context",
+      reason:
+        "a Modal sandbox other than this session's own box cannot be established by a turn yet; swap back to the session default or attach a Connected Machine",
+    };
+  }
+  return {
+    ok: false,
+    code: "unsupported_backend_context",
+    reason: `a sandbox of kind "${target.kind}" cannot be established by a turn`,
+  };
 }
 
 /**
@@ -143,6 +212,7 @@ export function makeActiveBackendResolver(
     const sandbox = await deps.getSandbox(pointer.activeSandboxId);
     if (!sandbox) {
       throw new ActiveBackendUnresolvableError(
+        "stale_pointer",
         `active sandbox ${pointer.activeSandboxId} not found in workspace ${deps.workspaceId}`,
       );
     }
@@ -150,6 +220,7 @@ export function makeActiveBackendResolver(
     if (sandbox.kind === "selfhosted") {
       if (!sandbox.enrollmentId) {
         throw new ActiveBackendUnresolvableError(
+          "offline_enrollment",
           `selfhosted sandbox ${sandbox.id} has no enrollment (agent id) to address`,
         );
       }
@@ -183,6 +254,7 @@ export function makeActiveBackendResolver(
     if (sandbox.kind === "modal") {
       if (!deps.establishModalTarget) {
         throw new ActiveBackendUnresolvableError(
+          "unsupported_backend_context",
           `modal swap target ${sandbox.id} cannot be established in this context (no establisher wired)`,
         );
       }
@@ -191,6 +263,7 @@ export function makeActiveBackendResolver(
     }
 
     throw new ActiveBackendUnresolvableError(
+      "unsupported_backend_context",
       `unsupported swap target kind "${sandbox.kind}" for sandbox ${sandbox.id}`,
     );
   };
