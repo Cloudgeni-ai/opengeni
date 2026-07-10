@@ -415,6 +415,46 @@ describe("model call usage observability", () => {
         }),
       },
     ]);
+    // The account-switch dimensions are LOG-ONLY (the research hypothesis) and
+    // must NEVER leak into the durable event payload.
+    expect(infos[0]).not.toHaveProperty("servingAccountHash");
+    expect(events[0]?.payload).not.toHaveProperty("servingAccountHash");
+    expect(events[0]?.payload).not.toHaveProperty("accountChangedFromPrevCall");
+  });
+
+  test("logs the opaque serving-account tag and account-switch flag when provided", async () => {
+    const infos: Array<Record<string, unknown>> = [];
+    const observability = {
+      info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+      warn: mock(),
+    };
+
+    await emitModelCallUsage({
+      observability: observability as any,
+      publish: null,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "codex-subscription",
+      providerApi: "responses",
+      model: "codex/gpt-5.6",
+      sourceKey: "resp-1",
+      usage: {
+        responseId: "resp-1",
+        usage: { inputTokens: 1200, inputTokensDetails: { cached_tokens: 200 } },
+      },
+      servingAccountHash: "abc123def456",
+      accountChangedFromPrevCall: true,
+    });
+
+    expect(infos[0]).toMatchObject({
+      sessionId: "sess-1",
+      inputTokens: 1200,
+      cachedTokens: 200,
+      servingAccountHash: "abc123def456",
+      accountChangedFromPrevCall: true,
+    });
   });
 });
 
