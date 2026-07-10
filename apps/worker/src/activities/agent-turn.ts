@@ -154,6 +154,7 @@ import {
 import {
   recordCreditMicros,
   runtimeMetricsHooksForObservability,
+  selfhostedOpObserverForMetrics,
   turnLifecycleMetricsFor,
   type TurnOutcome,
 } from "../observability-metrics";
@@ -1935,7 +1936,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // bind (no NATS round-trip), so build it FIRST; if the lease then fences,
           // there is nothing to clean up.
           const established = await establishSelfhostedTurnSession(
-            { db, settings, bus },
+            {
+              db,
+              settings,
+              bus,
+              onOp: selfhostedOpObserverForMetrics(
+                runtimeMetricsHooksForObservability(observability),
+              ),
+            },
             {
               workspaceId: input.workspaceId,
               agentId: activeSandboxRecord!.enrollmentId!,
@@ -1963,7 +1971,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // write (via the proxy's `state` getter) and the per-op reads hit ONE
             // instance — no two-instance manifest divergence.
             established: wrapTurnBoxWithRouting(
-              { db, settings, bus },
+              {
+                db,
+                settings,
+                bus,
+                onOp: selfhostedOpObserverForMetrics(
+                  runtimeMetricsHooksForObservability(observability),
+                ),
+              },
               {
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
@@ -2345,7 +2360,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
         lazyOwnedSandbox = wrapLazyTurnBoxWithRouting(
-          { db, settings, bus },
+          {
+            db,
+            settings,
+            bus,
+            onOp: selfhostedOpObserverForMetrics(
+              runtimeMetricsHooksForObservability(observability),
+            ),
+          },
           {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,

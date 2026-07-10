@@ -27,6 +27,7 @@ import {
   type NatsRequestConnection,
   type RoutableBackendSession,
   type RoutableSandbox,
+  type SelfhostedOpObserver,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime";
 
@@ -37,6 +38,9 @@ export type RoutingWiringServices = {
    *  Optional: when absent (or NATS unconfigured) a selfhosted swap target
    *  surfaces agent_offline on its first op rather than failing to build. */
   bus?: EventBus;
+  /** The per-op observer wired into every selfhosted session this turn builds
+   *  (out-of-band telemetry — op metrics + machine.* events). Absent ⇒ no-op. */
+  onOp?: SelfhostedOpObserver;
 };
 
 export type RoutingWiringIds = {
@@ -147,7 +151,7 @@ export function wrapTurnBoxWithRouting(
   ids: RoutingWiringIds,
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
-  const { db, settings, bus } = services;
+  const { db, settings, bus, onOp } = services;
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -168,6 +172,7 @@ export function wrapTurnBoxWithRouting(
     // A selfhosted swap target runs real commands too, so give it the same split
     // deadlines the machine-primary establish path uses (short control, long exec).
     ...selfhostedResolverTimeouts(settings),
+    ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
     // The turn's declared environment → a selfhosted swap target's manifest, so the
     // SDK's per-turn manifest-env delta is empty (no "cannot change manifest
     // environment variables" throw when the turn pins to a vm). Mirrors the group
@@ -231,7 +236,7 @@ export function wrapLazyTurnBoxWithRouting(
     provisioner: { get(): Promise<{ established: EstablishedSandboxSession }> };
   },
 ): EstablishedSandboxSession {
-  const { db, settings, bus } = services;
+  const { db, settings, bus, onOp } = services;
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
   };
@@ -253,6 +258,7 @@ export function wrapLazyTurnBoxWithRouting(
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
+    ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
   });
 
@@ -323,7 +329,7 @@ export async function establishSelfhostedTurnSession(
     workingDir: string | null;
   },
 ): Promise<EstablishedSandboxSession> {
-  const { settings, bus } = services;
+  const { settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
@@ -337,6 +343,8 @@ export async function establishSelfhostedTurnSession(
     // command is not killed at the control wall.
     timeoutMs,
     execTimeoutMs,
+    // Meter every control op (out-of-band telemetry) — no-op when unwired.
+    ...(onOp !== undefined ? { onOp } : {}),
   });
   return {
     client,
