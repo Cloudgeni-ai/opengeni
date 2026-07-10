@@ -68,9 +68,10 @@ pub fn spawn_grouped(
 
     let mut tokio_cmd = tokio::process::Command::from(cmd);
     let child = tokio_cmd.spawn()?;
-    let pid = child
+    let raw = child
         .id()
-        .expect("a freshly spawned child always has a pid") as i32;
+        .expect("a freshly spawned child always has a pid");
+    let pid = i32::try_from(raw).expect("a pid always fits in i32");
     register_pgid(pid);
     Ok((child, pid))
 }
@@ -132,9 +133,7 @@ pub fn sample_proc(pid: i32) -> Option<ProcSample> {
             threads = rest.trim().parse().unwrap_or(0);
         }
     }
-    let fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
-        .map(|dir| dir.count() as u64)
-        .unwrap_or(0);
+    let fds = std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, |dir| dir.count() as u64);
     Some(ProcSample {
         rss_bytes,
         threads,
@@ -147,8 +146,7 @@ fn parse_kib_line(rest: &str) -> u64 {
     rest.split_whitespace()
         .next()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|kib| kib * 1024)
-        .unwrap_or(0)
+        .map_or(0, |kib| kib * 1024)
 }
 
 /// The global set of things to reap if the harness dies unexpectedly.
@@ -204,6 +202,41 @@ pub fn reap_all() {
             .arg(&marker)
             .status();
     }
+}
+
+/// Kills the process GROUP of every process whose command line contains
+/// `marker`. This reaps an orphaned agent-exec subtree completely: the agent
+/// isolates each exec into an anchored process group, so killing just the marked
+/// leaf would leave the stopped anchor behind — killing the whole group gets both.
+pub fn reap_marker_group(marker: &str) {
+    if let Ok(out) = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(marker)
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Ok(pid) = line.trim().parse::<i32>() {
+                if let Some(pgid) = read_pgid(pid) {
+                    signal_group(pgid, Signal::SIGKILL);
+                }
+            }
+        }
+    }
+    // Belt: also a direct leaf sweep in case a pid raced away above.
+    let _ = std::process::Command::new("pkill")
+        .arg("-9")
+        .arg("-f")
+        .arg(marker)
+        .status();
+}
+
+/// Reads a process's group id (`pgrp`, field 5 of `/proc/<pid>/stat`). The `comm`
+/// field can contain spaces/parens, so parse the fields AFTER the final `)`.
+fn read_pgid(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    // after_comm = " <state> <ppid> <pgrp> ..." → the 3rd whitespace field is pgrp.
+    after_comm.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// Installs a panic hook and an async signal task so an unexpected harness exit

@@ -204,10 +204,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
 }
 
 /// Runs scenarios 1-6, each on a fresh fleet, and returns whether all passed.
-async fn run_all(
-    cli: &Cli,
-    mk: &impl Fn(usize) -> HarnessConfig,
-) -> Result<bool, String> {
+async fn run_all(cli: &Cli, mk: &impl Fn(usize) -> HarnessConfig) -> Result<bool, String> {
     let mut all = true;
 
     let h = Harness::bootstrap(mk(1)).await?;
@@ -248,7 +245,11 @@ async fn milestone0(cfg: HarnessConfig) -> Result<bool, String> {
 
     let outcome = h
         .driver
-        .execute(&subject, driver::Op::Ping, std::time::Duration::from_secs(5))
+        .execute(
+            &subject,
+            driver::Op::Ping,
+            std::time::Duration::from_secs(5),
+        )
         .await;
     let ping_ok = matches!(outcome.class, driver::OpClass::Ok);
 

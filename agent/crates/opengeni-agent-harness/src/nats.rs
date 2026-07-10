@@ -50,10 +50,12 @@ impl NatsServer {
         if let Some(path) = scan_nix_store() {
             return Ok(path);
         }
-        Err("could not find a nats-server binary. Put one on $PATH, pass \
+        Err(
+            "could not find a nats-server binary. Put one on $PATH, pass \
              --nats-server <path> / set $HX_NATS_SERVER, or (docker) run \
              `docker run --rm -p 4222:4222 nats:2-alpine` and point the harness at it"
-            .to_string())
+                .to_string(),
+        )
     }
 
     /// Spawns a server on a fresh free port and waits until it is ready.
@@ -85,15 +87,9 @@ impl NatsServer {
             "-p".to_string(),
             self.port.to_string(),
         ];
-        let (child, pid) = proc::spawn_grouped(
-            &self.binary,
-            &args,
-            None,
-            &[],
-            false,
-            &self.log_path,
-        )
-        .map_err(|e| format!("failed to spawn nats-server: {e}"))?;
+        let (child, pid) =
+            proc::spawn_grouped(&self.binary, &args, None, &[], false, &self.log_path)
+                .map_err(|e| format!("failed to spawn nats-server: {e}"))?;
         self.child = Some(child);
         self.pid = pid;
         self.await_ready().await

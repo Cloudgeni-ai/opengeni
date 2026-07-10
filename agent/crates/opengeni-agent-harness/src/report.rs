@@ -133,7 +133,10 @@ impl Report {
                 .fold((u64::MAX, 0u64), |(lo, hi), r| {
                     (lo.min(r.fds), hi.max(r.fds))
                 });
-            println!("\nagent resources ({} samples):", self.measurements.resources.len());
+            println!(
+                "\nagent resources ({} samples):",
+                self.measurements.resources.len()
+            );
             println!(
                 "  rss  first={:.1}MiB last={:.1}MiB max={:.1}MiB",
                 mib(first.rss_bytes),
@@ -170,7 +173,9 @@ impl Report {
     }
 }
 
-/// Bytes → MiB for the human summary.
+/// Bytes → MiB for the human summary. Precision loss above 2^52 bytes is
+/// irrelevant for an agent RSS readout.
+#[allow(clippy::cast_precision_loss)]
 fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -281,9 +286,10 @@ impl ResourceSampler {
     #[must_use]
     pub fn finish(self) -> Vec<ResourceSample> {
         self.task.abort();
-        Arc::try_unwrap(self.samples)
-            .map(|m| m.into_inner().unwrap())
-            .unwrap_or_else(|arc| arc.lock().unwrap().clone())
+        Arc::try_unwrap(self.samples).map_or_else(
+            |arc| arc.lock().unwrap().clone(),
+            |m| m.into_inner().unwrap(),
+        )
     }
 }
 

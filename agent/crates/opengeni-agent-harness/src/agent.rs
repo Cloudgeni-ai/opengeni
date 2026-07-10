@@ -40,7 +40,7 @@ impl DisposableAgent {
     ///
     /// Returns an error if the temp dirs or credentials cannot be written, or the
     /// agent binary cannot be spawned.
-    pub async fn spawn(
+    pub fn spawn(
         binary: PathBuf,
         index: usize,
         nats_url: &str,
@@ -96,12 +96,14 @@ impl DisposableAgent {
         Ok(())
     }
 
-    /// SIGKILLs the agent WITHOUT relaunching (models a hard crash), waiting for
-    /// the process to exit. The exec children the agent isolated into their own
-    /// process groups are deliberately NOT signalled here — the point is to
-    /// observe whether a hard-killed agent leaves them orphaned.
+    /// SIGKILLs ONLY the agent process (a single-process kill — the faithful
+    /// model of an OOM-kill/segfault/`kill -9 <pid>`), waiting for it to exit.
+    /// The exec children the agent isolated into their own anchored process groups
+    /// are deliberately NOT signalled — the point is to observe whether a
+    /// hard-killed agent leaves them orphaned (it cannot run `kill_on_drop` on a
+    /// SIGKILL).
     pub async fn kill_now(&mut self) {
-        proc::signal_group(self.pid, nix::sys::signal::Signal::SIGKILL);
+        proc::signal_pid(self.pid, Signal::SIGKILL);
         if let Some(mut child) = self.child.take() {
             let _ = child.wait().await;
         }
@@ -199,6 +201,9 @@ fn write_credentials(config_dir: &Path, agent_id: &str, nats_url: &str) -> Resul
         "last_known_epoch": 0
     });
     let path = config_dir.join("credentials.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&creds).expect("creds serialize"))
-        .map_err(|e| format!("write credentials.json: {e}"))
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&creds).expect("creds serialize"),
+    )
+    .map_err(|e| format!("write credentials.json: {e}"))
 }

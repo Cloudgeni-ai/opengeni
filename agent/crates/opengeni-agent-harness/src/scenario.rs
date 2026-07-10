@@ -65,8 +65,7 @@ impl Harness {
         let mut agents = Vec::with_capacity(cfg.agent_count);
         for i in 0..cfg.agent_count {
             let agent =
-                DisposableAgent::spawn(cfg.agent_binary.clone(), i, &url, &cfg.agent_log_level)
-                    .await?;
+                DisposableAgent::spawn(cfg.agent_binary.clone(), i, &url, &cfg.agent_log_level)?;
             agents.push(agent);
         }
         // Readiness: each agent must heartbeat within a generous window.
@@ -83,7 +82,10 @@ impl Harness {
                 ));
             }
         }
-        tracing::info!(count = agents.len(), "fleet online (all agents heartbeating)");
+        tracing::info!(
+            count = agents.len(),
+            "fleet online (all agents heartbeating)"
+        );
 
         Ok(Self {
             nats,
@@ -145,8 +147,11 @@ impl Harness {
     pub async fn baseline(&self) -> Report {
         let subject = self.primary().rpc_subject();
         let work = self.primary().work_dir().to_string_lossy().into_owned();
-        let sampler =
-            ResourceSampler::spawn(self.primary().pid(), Instant::now(), Duration::from_millis(250));
+        let sampler = ResourceSampler::spawn(
+            self.primary().pid(),
+            Instant::now(),
+            Duration::from_millis(250),
+        );
         let mut agg = Aggregator::new();
 
         for _ in 0..1000 {
@@ -199,12 +204,19 @@ impl Harness {
             Verdict {
                 check: "ping p99 < 100ms on an idle agent".to_string(),
                 pass: ping.as_ref().is_some_and(|s| s.p99 < 100_000),
-                detail: ping
-                    .as_ref()
-                    .map_or_else(|| "no ping samples".to_string(), |s| format!("p99={}us", s.p99)),
+                detail: ping.as_ref().map_or_else(
+                    || "no ping samples".to_string(),
+                    |s| format!("p99={}us", s.p99),
+                ),
             },
         ]);
-        self.finish("baseline", json!({"pings": 1000, "execs": 200, "fs_ops": 100}), agg, resources, verdicts)
+        self.finish(
+            "baseline",
+            json!({"pings": 1000, "execs": 200, "fs_ops": 100}),
+            agg,
+            resources,
+            verdicts,
+        )
     }
 
     // ---- scenario 2: flood ---------------------------------------------------
@@ -214,29 +226,17 @@ impl Harness {
     /// concurrent ops each.
     pub async fn flood(&self, fleet_size: usize) -> Report {
         let mut agg = Aggregator::new();
-        let sampler =
-            ResourceSampler::spawn(self.primary().pid(), Instant::now(), Duration::from_millis(200));
+        let sampler = ResourceSampler::spawn(
+            self.primary().pid(),
+            Instant::now(),
+            Duration::from_millis(200),
+        );
+        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
 
         // --- part (a): single-agent saturation with a concurrent ping probe ---
         let subject = self.primary().rpc_subject();
         let work = self.primary().work_dir().to_string_lossy().into_owned();
-        let mut ops = Vec::with_capacity(256);
-        for _ in 0..64 {
-            ops.push(Op::ExecSleep {
-                secs: "0.5".to_string(),
-                timeout_ms: 10_000,
-            });
-        }
-        for _ in 0..64 {
-            ops.push(Op::FsStat { path: work.clone() });
-        }
-        for _ in 0..64 {
-            ops.push(Op::FsList { path: work.clone() });
-        }
-        for _ in 0..64 {
-            ops.push(Op::Ping);
-        }
-        let mut rng = rand::rngs::StdRng::seed_from_u64(self.seed);
+        let mut ops = mixed_op_batch(&work, 64, 64, 64, 64);
         ops.shuffle(&mut rng);
 
         let flood = join_all(
@@ -258,65 +258,20 @@ impl Harness {
             v
         };
         let (flood_out, probe_out): (Vec<OpOutcome>, Vec<OpOutcome>) = tokio::join!(flood, probe);
-        // The probe pings define the isolation verdict; record them under a
-        // distinct label by stats, but they share the "ping" histogram.
+        // The probe pings define the isolation verdict; they share the "ping"
+        // histogram but are summarized on their own to isolate the claim.
         let mut probe_agg = Aggregator::new();
         probe_agg.record_all(&probe_out);
         let probe_ping = probe_agg.stats("ping");
         agg.record_all(&flood_out);
         agg.record_all(&probe_out);
-        let draining_a = flood_out
-            .iter()
-            .filter(|o| matches!(&o.class, OpClass::AgentError(c) if c == "DRAINING"))
-            .count();
+        let draining_a = count_draining(&flood_out);
 
         // --- part (b): fleet shape (fleet_size agents × 16 concurrent ops) ----
         let fleet_n = fleet_size.min(self.agents.len());
-        let mut fleet_futs = Vec::new();
-        for agent in self.agents.iter().take(fleet_n) {
-            let subj = agent.rpc_subject();
-            let wd = agent.work_dir().to_string_lossy().into_owned();
-            let mut per = vec![
-                Op::ExecSleep {
-                    secs: "0.5".to_string(),
-                    timeout_ms: 10_000,
-                },
-                Op::ExecSleep {
-                    secs: "0.5".to_string(),
-                    timeout_ms: 10_000,
-                },
-                Op::ExecSleep {
-                    secs: "0.5".to_string(),
-                    timeout_ms: 10_000,
-                },
-                Op::ExecSleep {
-                    secs: "0.5".to_string(),
-                    timeout_ms: 10_000,
-                },
-                Op::FsStat { path: wd.clone() },
-                Op::FsStat { path: wd.clone() },
-                Op::FsStat { path: wd.clone() },
-                Op::FsStat { path: wd.clone() },
-                Op::FsList { path: wd.clone() },
-                Op::FsList { path: wd.clone() },
-                Op::FsList { path: wd.clone() },
-                Op::FsList { path: wd.clone() },
-                Op::Ping,
-                Op::Ping,
-                Op::Ping,
-                Op::Ping,
-            ];
-            per.shuffle(&mut rng);
-            for op in per {
-                fleet_futs.push(self.driver.execute_owned(subj.clone(), op, Duration::from_secs(15)));
-            }
-        }
-        let fleet_out = join_all(fleet_futs).await;
+        let fleet_out = self.fleet_flood(fleet_n, &mut rng).await;
         agg.record_all(&fleet_out);
-        let draining_b = fleet_out
-            .iter()
-            .filter(|o| matches!(&o.class, OpClass::AgentError(c) if c == "DRAINING"))
-            .count();
+        let draining_b = count_draining(&fleet_out);
 
         let resources = sampler.finish();
         let max_gap = max_gap_ms(&self.collector.gaps_ms());
@@ -355,6 +310,26 @@ impl Harness {
         )
     }
 
+    /// Part (b) of the flood: `fleet_n` agents each issued a shuffled 16-op mix
+    /// concurrently (the whole-fleet shape), all fired at once.
+    async fn fleet_flood(&self, fleet_n: usize, rng: &mut rand::rngs::StdRng) -> Vec<OpOutcome> {
+        let mut fleet_futs = Vec::new();
+        for agent in self.agents.iter().take(fleet_n) {
+            let subj = agent.rpc_subject();
+            let wd = agent.work_dir().to_string_lossy().into_owned();
+            let mut per = mixed_op_batch(&wd, 4, 4, 4, 4);
+            per.shuffle(rng);
+            for op in per {
+                fleet_futs.push(self.driver.execute_owned(
+                    subj.clone(),
+                    op,
+                    Duration::from_secs(15),
+                ));
+            }
+        }
+        join_all(fleet_futs).await
+    }
+
     // ---- scenario 3: large ---------------------------------------------------
 
     /// 1 agent: exec/fs_read/fs_write at 256KB..8MB, documenting the ~1MB wall as
@@ -383,7 +358,8 @@ impl Harness {
                 .await;
             // fs_read of a file of that size (reply-side wall): create it directly.
             let read_path = work.join(format!("read-{name}.bin"));
-            let _ = std::fs::write(&read_path, vec![b'a'; bytes as usize]);
+            let byte_len = usize::try_from(bytes).unwrap_or(usize::MAX);
+            let _ = std::fs::write(&read_path, vec![b'a'; byte_len]);
             let read = self
                 .driver
                 .execute(
@@ -459,7 +435,7 @@ impl Harness {
                     secs: "45".to_string(),
                     timeout_ms: 30_000,
                 },
-                Duration::from_millis(35_000),
+                Duration::from_secs(35),
             )
             .await;
         let under = self
@@ -470,7 +446,7 @@ impl Harness {
                     secs: "5".to_string(),
                     timeout_ms: 30_000,
                 },
-                Duration::from_millis(35_000),
+                Duration::from_secs(35),
             )
             .await;
         agg.record(&over);
@@ -481,12 +457,16 @@ impl Harness {
         let verdicts = self.assertable(vec![
             Verdict {
                 check: "sleep 45 hits the 30s wall as a TYPED timeout".to_string(),
-                pass: matches!(over.class, OpClass::Ok) && over.exec_timed_out && (28_000..=33_000).contains(&over_ms),
+                pass: matches!(over.class, OpClass::Ok)
+                    && over.exec_timed_out
+                    && (28_000..=33_000).contains(&over_ms),
                 detail: format!("timed_out={} at {over_ms}ms", over.exec_timed_out),
             },
             Verdict {
                 check: "sleep 5 completes under the 30s deadline".to_string(),
-                pass: matches!(under.class, OpClass::Ok) && !under.exec_timed_out && under_ms < 8_000,
+                pass: matches!(under.class, OpClass::Ok)
+                    && !under.exec_timed_out
+                    && under_ms < 8_000,
                 detail: format!("timed_out={} at {under_ms}ms", under.exec_timed_out),
             },
         ]);
@@ -522,7 +502,13 @@ impl Harness {
             tracing::error!(error = %e, "nats restart failed");
             Instant::now()
         });
-        let convergence = wait_for_beat_after(&self.collector, &agent_id, ready_at, Duration::from_secs(20)).await;
+        let convergence = wait_for_beat_after(
+            &self.collector,
+            &agent_id,
+            ready_at,
+            Duration::from_secs(20),
+        )
+        .await;
         // Give the reconnect a beat to have run its in-flight cancellation.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let child_after = pgrep_alive(&marker);
@@ -551,7 +537,13 @@ impl Harness {
         tokio::time::sleep(Duration::from_secs(pause_secs)).await;
         self.nats.resume();
         let resume_at = Instant::now();
-        let recovery = wait_for_beat_after(&self.collector, &agent_id, resume_at, Duration::from_secs(20)).await;
+        let recovery = wait_for_beat_after(
+            &self.collector,
+            &agent_id,
+            resume_at,
+            Duration::from_secs(20),
+        )
+        .await;
         let beats_after_resume = self.collector.beat_count(&agent_id);
         verdicts.push(Verdict {
             check: format!("heartbeats resume within 15s after a {pause_secs}s SIGSTOP freeze"),
@@ -562,8 +554,8 @@ impl Harness {
             ),
         });
 
-        // Belt-and-suspenders: sweep the marker child if it somehow survived.
-        let _ = std::process::Command::new("pkill").arg("-9").arg("-f").arg(&marker).status();
+        // Belt-and-suspenders: sweep the marker subtree if it somehow survived.
+        crate::proc::reap_marker_group(&marker);
 
         let verdicts = self.assertable(verdicts);
         self.finish(
@@ -598,20 +590,30 @@ impl Harness {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let child_orphaned = pgrep_alive(&marker_a);
         inflight_a.abort();
-        // Reap the orphan we deliberately created so it does not leak.
-        let _ = std::process::Command::new("pkill").arg("-9").arg("-f").arg(&marker_a).status();
+        // Reap the orphan we deliberately created (leaf + its anchor group).
+        crate::proc::reap_marker_group(&marker_a);
 
         if let Err(e) = self.agents[0].relaunch() {
             tracing::error!(error = %e, "agent relaunch failed");
         }
         let relaunch_at = Instant::now();
-        let first_beat =
-            wait_for_beat_after(&self.collector, &agent_id, relaunch_at, Duration::from_secs(15)).await;
+        let first_beat = wait_for_beat_after(
+            &self.collector,
+            &agent_id,
+            relaunch_at,
+            Duration::from_secs(15),
+        )
+        .await;
 
         verdicts.push(Verdict {
-            check: "a hard SIGKILL of the agent ORPHANS its in-flight exec child (no reaper on crash)".to_string(),
-            pass: child_before && child_orphaned,
-            detail: format!("child alive before kill={child_before}, still alive after agent SIGKILL={child_orphaned}"),
+            check: "a hard SIGKILL of the agent leaves NO orphaned exec compute".to_string(),
+            pass: child_before && !child_orphaned,
+            detail: format!(
+                "child alive before kill={child_before}, still alive after single-process agent SIGKILL={child_orphaned}. \
+                 The agent isolates each exec into an anchored process group whose anchor is STOPPED; when the agent dies \
+                 that group becomes orphaned WITH a stopped member, so the kernel sends SIGHUP to the whole group and the \
+                 exec is reaped even though kill_on_drop cannot run on a SIGKILL (verified with a standalone fork experiment)"
+            ),
         });
         verdicts.push(Verdict {
             check: "agent restarts and heartbeats within 15s after SIGKILL".to_string(),
@@ -625,7 +627,11 @@ impl Harness {
         // --- (b) SIGTERM clean ----------------------------------------------
         // Wait until the relaunched agent can accept work again.
         self.collector
-            .wait_for_beats(&agent_id, self.collector.beat_count(&agent_id) + 1, Duration::from_secs(10))
+            .wait_for_beats(
+                &agent_id,
+                self.collector.beat_count(&agent_id) + 1,
+                Duration::from_secs(10),
+            )
             .await;
         let marker_b = unique_marker(&work, "ca-term");
         crate::proc::register_marker(&marker_b);
@@ -634,19 +640,30 @@ impl Harness {
         let child_b_before = pgrep_alive(&marker_b);
 
         self.agents[0].stop_clean().await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Poll for the going-offline event (it is published + flushed just before
+        // the process exits; a fixed sleep would race a slow local delivery).
+        let going_offline =
+            wait_for_going_offline(&self.collector, &agent_id, Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let child_b_after = pgrep_alive(&marker_b);
-        let going_offline = self.collector.going_offline_seen(&agent_id);
         inflight_b.abort();
-        let _ = std::process::Command::new("pkill").arg("-9").arg("-f").arg(&marker_b).status();
+        crate::proc::reap_marker_group(&marker_b);
 
         verdicts.push(Verdict {
-            check: "a clean SIGTERM emits a GoingOffline event".to_string(),
+            check: "a clean SIGTERM emits a GoingOffline event (immediate lease-offline, §23.0)".to_string(),
             pass: going_offline,
-            detail: format!("going_offline observed={going_offline}"),
+            detail: format!(
+                "going_offline observed={going_offline}. FINDING: it is NOT emitted during an active connection — \
+                 the supervise loop's biased outer `shutdown.notified()` branch returns before \
+                 serve_connection_generation can announce (agent logs 'clean shutdown requested before/between \
+                 connections', never 'announced going-offline'); the lease then waits on heartbeat dead-detection \
+                 instead of flipping offline immediately"
+            ),
         });
         verdicts.push(Verdict {
-            check: "a clean SIGTERM REAPS the in-flight exec child (kill_on_drop via graceful abort)".to_string(),
+            check:
+                "a clean SIGTERM REAPS the in-flight exec child (kill_on_drop via graceful abort)"
+                    .to_string(),
             pass: child_b_before && !child_b_after,
             detail: format!("child alive before SIGTERM={child_b_before}, after={child_b_after}"),
         });
@@ -677,22 +694,22 @@ impl Harness {
         // A moderate rate: ~5 ops/sec (one op every ~200ms).
         while Instant::now() < deadline {
             let op = seeded_soak_op(&mut rng, &work);
-            let o = self.driver.execute(&subject, op, Duration::from_secs(10)).await;
+            let o = self
+                .driver
+                .execute(&subject, op, Duration::from_secs(10))
+                .await;
             agg.record(&o);
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         let resources = sampler.finish();
         // Compare an early sample (~120s) against a late one (~end).
-        let early = resources.iter().find(|r| r.t_ms >= 120_000).or_else(|| resources.first());
+        let early = resources
+            .iter()
+            .find(|r| r.t_ms >= 120_000)
+            .or_else(|| resources.first());
         let late = resources.last();
-        let (rss_drift_pct, fd_delta) = match (early, late) {
-            (Some(e), Some(l)) if e.rss_bytes > 0 => (
-                ((l.rss_bytes as f64 - e.rss_bytes as f64) / e.rss_bytes as f64) * 100.0,
-                (l.fds as i64 - e.fds as i64).abs(),
-            ),
-            _ => (0.0, 0),
-        };
+        let (rss_drift_pct, fd_delta) = resource_drift(early, late);
         let verdicts = self.assertable(vec![
             Verdict {
                 check: "agent RSS drift < 20% over the soak".to_string(),
@@ -784,14 +801,84 @@ fn spawn_inflight(
     })
 }
 
+/// Builds a mixed op batch: `sleeps` × `sleep 0.5`, `stats` × fs_stat, `lists` ×
+/// fs_list, `pings` × ping — the shared flood op mix (order is set by the caller's
+/// seeded shuffle).
+fn mixed_op_batch(work: &str, sleeps: usize, stats: usize, lists: usize, pings: usize) -> Vec<Op> {
+    let mut ops = Vec::with_capacity(sleeps + stats + lists + pings);
+    for _ in 0..sleeps {
+        ops.push(Op::ExecSleep {
+            secs: "0.5".to_string(),
+            timeout_ms: 10_000,
+        });
+    }
+    for _ in 0..stats {
+        ops.push(Op::FsStat {
+            path: work.to_string(),
+        });
+    }
+    for _ in 0..lists {
+        ops.push(Op::FsList {
+            path: work.to_string(),
+        });
+    }
+    for _ in 0..pings {
+        ops.push(Op::Ping);
+    }
+    ops
+}
+
+/// Counts the DRAINING (8-slot saturation) rejections in a batch of outcomes.
+fn count_draining(outcomes: &[OpOutcome]) -> usize {
+    outcomes
+        .iter()
+        .filter(|o| matches!(&o.class, OpClass::AgentError(c) if c == "DRAINING"))
+        .count()
+}
+
+/// RSS drift percentage and absolute fd delta between an early and a late
+/// resource sample. The casts are safe for realistic RSS/fd magnitudes (well
+/// under 2^52 bytes and 2^63 fds).
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
+fn resource_drift(
+    early: Option<&crate::report::ResourceSample>,
+    late: Option<&crate::report::ResourceSample>,
+) -> (f64, i64) {
+    match (early, late) {
+        (Some(e), Some(l)) if e.rss_bytes > 0 => (
+            ((l.rss_bytes as f64 - e.rss_bytes as f64) / e.rss_bytes as f64) * 100.0,
+            (l.fds as i64 - e.fds as i64).abs(),
+        ),
+        _ => (0.0, 0),
+    }
+}
+
 /// Whether a process whose command line contains `needle` is alive.
 fn pgrep_alive(needle: &str) -> bool {
     std::process::Command::new("pgrep")
         .arg("-f")
         .arg(needle)
         .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// Polls the collector until a going-offline event is seen for `agent_id`, or
+/// the timeout elapses.
+async fn wait_for_going_offline(
+    collector: &HeartbeatCollector,
+    agent_id: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if collector.going_offline_seen(agent_id) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// Polls the collector for the first heartbeat strictly after `after`.
@@ -833,8 +920,12 @@ fn seeded_soak_op(rng: &mut rand::rngs::StdRng, work: &str) -> Op {
     use rand::Rng as _;
     match rng.gen_range(0..10) {
         0..=3 => Op::Ping,
-        4..=5 => Op::FsStat { path: work.to_string() },
-        6..=7 => Op::FsList { path: work.to_string() },
+        4..=5 => Op::FsStat {
+            path: work.to_string(),
+        },
+        6..=7 => Op::FsList {
+            path: work.to_string(),
+        },
         _ => Op::ExecEcho,
     }
 }
