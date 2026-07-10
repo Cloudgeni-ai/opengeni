@@ -743,42 +743,48 @@ mod tests {
         }
     }
 
-    const EXEC_DESCENDANT_BINARY_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_BINARY";
     const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
 
-    #[cfg(unix)]
-    fn descendant_loop_command() -> String {
-        format!(
-            "\"${EXEC_DESCENDANT_BINARY_ENV}\" --ignored --exact native::tests::exec_descendant_fixture --nocapture"
-        )
-    }
-
-    #[cfg(windows)]
-    fn descendant_loop_command() -> String {
-        format!(
-            "call \"%{EXEC_DESCENDANT_BINARY_ENV}%\" --ignored --exact native::tests::exec_descendant_fixture --nocapture"
-        )
+    #[cfg(any(unix, windows))]
+    fn descendant_command() -> Vec<String> {
+        vec![
+            std::env::current_exe()
+                .expect("current test executable")
+                .to_string_lossy()
+                .into_owned(),
+            "--ignored".to_string(),
+            "--exact".to_string(),
+            "native::tests::exec_descendant_parent_fixture".to_string(),
+            "--nocapture".to_string(),
+        ]
     }
 
     #[cfg(any(unix, windows))]
     fn descendant_exec_env(pid_file: &Path) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::from([
-            (
-                EXEC_DESCENDANT_BINARY_ENV.to_string(),
-                std::env::current_exe()
-                    .expect("current test executable")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            (
-                EXEC_DESCENDANT_PID_FILE_ENV.to_string(),
-                pid_file.to_string_lossy().into_owned(),
-            ),
-        ])
+        std::collections::HashMap::from([(
+            EXEC_DESCENDANT_PID_FILE_ENV.to_string(),
+            pid_file.to_string_lossy().into_owned(),
+        )])
     }
 
     #[test]
-    #[ignore = "infinite child-process fixture; invoked explicitly by exec tests"]
+    #[ignore = "process-tree parent fixture; invoked explicitly by exec tests"]
+    fn exec_descendant_parent_fixture() {
+        let status =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::exec_descendant_fixture",
+                    "--nocapture",
+                ])
+                .status()
+                .expect("spawn descendant fixture");
+        panic!("descendant fixture exited unexpectedly: {status}");
+    }
+
+    #[test]
+    #[ignore = "infinite child fixture; invoked explicitly by the parent fixture"]
     fn exec_descendant_fixture() {
         let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
             .expect("descendant fixture pid-file env");
@@ -926,19 +932,19 @@ mod tests {
     async fn exec_timeout_kills_and_flags() {
         let (platform, dir) = rooted();
         let pid_file = dir.path().join("timed-out-descendant.pid");
-        // The outer exec shell launches an ignored copy of this test binary.
-        // Recording that descendant PID catches the regression where kill-on-drop
-        // terminated only the shell and reparented its still-running child.
+        // The direct exec helper launches a second ignored copy of this test
+        // binary. Recording that grandchild PID catches the regression where
+        // kill-on-drop terminated only the parent and reparented its child.
         let req = ExecRequest {
-            command: vec![descendant_loop_command()],
-            shell: true,
+            command: descendant_command(),
+            shell: false,
             env: descendant_exec_env(&pid_file),
             timeout_ms: 1_000,
             ..Default::default()
         };
-        // Retry the transient NixOS shell-spawn ENOENT. It happens before the
-        // timeout path, so the retry cannot mask the deliberate timeout asserted
-        // below; other platforms return on the first attempt.
+        // Retry the transient NixOS spawn ENOENT. It happens before the timeout
+        // path, so the retry cannot mask the deliberate timeout asserted below;
+        // other platforms return on the first attempt.
         let resp = retry_transient_spawn(|| platform.exec(&req))
             .await
             .expect("exec");
@@ -958,8 +964,8 @@ mod tests {
         let (platform, dir) = rooted();
         let pid_file = dir.path().join("cancelled-descendant.pid");
         let req = ExecRequest {
-            command: vec![descendant_loop_command()],
-            shell: true,
+            command: descendant_command(),
+            shell: false,
             env: descendant_exec_env(&pid_file),
             timeout_ms: 0,
             ..Default::default()
