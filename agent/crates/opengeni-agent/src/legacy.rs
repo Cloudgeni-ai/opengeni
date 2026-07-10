@@ -110,6 +110,8 @@ pub async fn serve_exec<P: Platform>(
         ticket,
         stdin,
         deadline,
+        // Legacy: the spool ledger share returns at the terminal record.
+        true,
         || platform.spawn_exec(&req),
         emit,
         // The legacy consumer never replays the Exit frame; its record flows
@@ -217,6 +219,8 @@ pub async fn serve_git<P: Platform>(
         Vec::new(),
         // Rule C: git carries no caller deadline field; none is imposed.
         None,
+        // Legacy: the spool ledger share returns at the terminal record.
+        true,
         || platform.spawn_git(&req),
         emit,
         |_exit| Vec::new(),

@@ -178,6 +178,45 @@ impl Drop for AdmissionTicket {
     }
 }
 
+/// A job's share of the global spool ledger (M2). Idempotent release: the
+/// legacy adapter returns it early at the terminal record (no consumer is
+/// ever coming for a legacy op's spool frames), the task-end guard returns
+/// whatever remains, and a double release is a no-op.
+struct SpoolReservation {
+    engine: Arc<Engine>,
+    granted: AtomicU64,
+}
+
+impl SpoolReservation {
+    fn release(&self) {
+        let granted = self.granted.swap(0, Ordering::AcqRel);
+        if granted > 0 {
+            self.engine.release_spool(granted);
+        }
+    }
+}
+
+/// Owned by the pump task: route removal + spool release run on Drop, so a
+/// PANICKING pump still cleans up (design-review fold-in — previously the
+/// cleanup ran after `run_job().await` and a panic leaked the route and the
+/// reservation until restart).
+struct JobCleanup {
+    engine: Arc<Engine>,
+    op_id: OpId,
+    reservation: Arc<SpoolReservation>,
+}
+
+impl Drop for JobCleanup {
+    fn drop(&mut self) {
+        self.engine
+            .routes
+            .lock()
+            .expect("routes lock")
+            .remove(&self.op_id);
+        self.reservation.release();
+    }
+}
+
 /// The engine assembly. See module docs. Construct once, share via `Arc`.
 pub struct Engine {
     registry: Mutex<OpRegistry<OpHandles>>,
@@ -431,7 +470,39 @@ impl Engine {
     /// spawns the child via `spawn`, wires the pump hooks (engine lifecycle
     /// bookkeeping composed in front of the caller's `on_exit`), and launches
     /// the pump task. The admission ticket rides inside `on_exit`, releasing
-    /// at completion (linger is not running work).
+    /// at completion (linger is not running work). Route removal + spool
+    /// release live in a task-owned Drop guard, so even a panicking pump
+    /// cleans up.
+    ///
+    /// Reserves the op's spool quota against the global ledger (M2); a short
+    /// budget clamps the quota (loudly) rather than refusing the op.
+    fn reserve_op_spool(
+        self: &Arc<Self>,
+        op_id: &OpId,
+        retention: &mut RetentionConfig,
+    ) -> Arc<SpoolReservation> {
+        let granted = self.reserve_spool(retention.spool_max_bytes);
+        if granted < retention.spool_max_bytes {
+            warn!(
+                op = %op_id,
+                wanted = retention.spool_max_bytes,
+                granted,
+                "global spool budget short; op spool quota clamped"
+            );
+        }
+        retention.spool_max_bytes = granted;
+        Arc::new(SpoolReservation {
+            engine: self.clone(),
+            granted: AtomicU64::new(granted),
+        })
+    }
+
+    /// `release_spool_at_exit`: LEGACY ops set this — their spool ledger
+    /// share returns at the terminal record instead of task end, because no
+    /// consumer ever collects a legacy op's spool frames post-exit (duplicate
+    /// replies serve the stashed ENCODED reply); the lingering pump's spool
+    /// residue is already ack-trimmed to ~nothing. Op-stream ops keep their
+    /// reservation through the linger — post-exit replay is their whole point.
     #[allow(clippy::too_many_arguments)] // the job seams are irreducible; a builder would just rename them
     pub fn start_job<E>(
         self: &Arc<Self>,
@@ -439,6 +510,7 @@ impl Engine {
         ticket: AdmissionTicket,
         stdin: Vec<u8>,
         deadline: Option<tokio::time::Instant>,
+        release_spool_at_exit: bool,
         spawn: impl FnOnce() -> Result<ContainedExec, E>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
@@ -476,20 +548,8 @@ impl Engine {
             }
         };
 
-        // Reserve this op's spool quota against the global budget (M2); a
-        // short budget clamps the quota (loudly) rather than refusing the op.
-        let budgets = self.budgets();
-        let mut retention = budgets.retention_per_op;
-        let granted = self.reserve_spool(retention.spool_max_bytes);
-        if granted < retention.spool_max_bytes {
-            warn!(
-                op = %op_id,
-                wanted = retention.spool_max_bytes,
-                granted,
-                "global spool budget short; op spool quota clamped"
-            );
-        }
-        retention.spool_max_bytes = granted;
+        let mut retention = self.budgets().retention_per_op;
+        let reservation = self.reserve_op_spool(op_id, &mut retention);
 
         let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);
         let params = JobParams {
@@ -514,6 +574,7 @@ impl Engine {
             let id = op_id.clone();
             let exit_stash = handles.exit.clone();
             let watermark = handles.watermark.clone();
+            let exit_reservation = release_spool_at_exit.then(|| reservation.clone());
             JobHooks::new(emit, encode_exit, move |exit_seq, exit: &JobExit| {
                 let _ = exit_stash.set(exit.clone());
                 engine.registry.lock().expect("registry lock").complete(
@@ -521,6 +582,9 @@ impl Engine {
                     exit_seq.unwrap_or_else(|| watermark.load(Ordering::Relaxed)),
                     engine.now_ms(),
                 );
+                if let Some(reservation) = exit_reservation {
+                    reservation.release();
+                }
                 drop(ticket);
                 on_exit(exit_seq, exit);
             })
@@ -531,22 +595,27 @@ impl Engine {
             .expect("routes lock")
             .insert(op_id.clone(), mailbox_tx.clone());
 
-        let engine = self.clone();
-        let id = op_id.clone();
+        let cleanup = JobCleanup {
+            engine: self.clone(),
+            op_id: op_id.clone(),
+            reservation,
+        };
         tokio::spawn(async move {
+            // Owned here so a PANIC in the pump still removes the route and
+            // returns the spool reservation on unwind (Drop guard).
+            let cleanup = cleanup;
             let end = run_job(params, mailbox_rx, hooks).await;
             if end == JobEnd::FinalAcked {
                 // The pump is the single authority on final-ack acceptance
                 // (it fences consumer generations); only then may the
                 // registry entry GC quietly.
-                engine
+                cleanup
+                    .engine
                     .registry
                     .lock()
                     .expect("registry lock")
-                    .final_ack(&id);
+                    .final_ack(&cleanup.op_id);
             }
-            engine.routes.lock().expect("routes lock").remove(&id);
-            engine.release_spool(granted);
         });
 
         StartOutcome::Started(StartedJob {
@@ -879,6 +948,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            false,
             || Ok::<_, std::io::Error>(sh("printf out; exit 4")),
             |_frame| {},
             |exit| format!("{exit:?}").into_bytes(),
@@ -920,6 +990,7 @@ mod tests {
             ticket2,
             Vec::new(),
             None,
+            false,
             || -> Result<ContainedExec, std::io::Error> { panic!("a known op id must not spawn") },
             |_| {},
             |_| Vec::new(),
@@ -986,6 +1057,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            false,
             || Err(std::io::Error::other("no such program")),
             |_| {},
             |_| Vec::new(),
@@ -1024,6 +1096,7 @@ mod tests {
             ticket,
             Vec::new(),
             None,
+            false,
             || -> Result<ContainedExec, std::io::Error> {
                 panic!("a tombstoned op must not spawn")
             },
@@ -1032,6 +1105,123 @@ mod tests {
             |_, _| {},
         );
         assert!(matches!(outcome, StartOutcome::BornCancelled));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn panicking_pump_still_cleans_up_route_and_ledger() {
+        // The emit hook panics on the first frame: the pump task unwinds and
+        // the task-owned Drop guard must still remove the route and return
+        // the spool reservation (design-review fold-in — previously the
+        // cleanup ran only on the normal path).
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = OpId::from("panicky");
+        let ticket = engine
+            .admit(&op, JobClass::Heavy, "o")
+            .await
+            .expect("admit");
+        let outcome = engine.start_job(
+            &op,
+            ticket,
+            Vec::new(),
+            None,
+            false,
+            || Ok::<_, std::io::Error>(sh("printf boom")),
+            |_frame| panic!("emit hook panic (deliberate)"),
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh id must start");
+        };
+        // Attach so the first frame is emitted (and panics the task).
+        let _ = started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await;
+        // Poll NON-destructively (a probe command like Detach would detach
+        // the pump before the child's first output, and the hook never fires).
+        let route_alive =
+            |engine: &Arc<Engine>| engine.routes.lock().expect("routes lock").contains_key(&op);
+        for _ in 0..500 {
+            if !route_alive(&engine) && *engine.spool_reserved.lock().expect("ledger") == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!route_alive(&engine), "route removed on the panic path");
+        assert_eq!(
+            *engine.spool_reserved.lock().expect("ledger"),
+            0,
+            "spool reservation returned on the panic path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_jobs_release_their_ledger_share_at_exit() {
+        // release_spool_at_exit: the ledger share returns at the terminal
+        // record while the pump still lingers (route alive) — legacy ops
+        // never serve post-exit spool replay, so holding the share through
+        // the linger only starves new ops under connection churn.
+        let (engine, _dir) = test_engine(AdmissionConfig::default());
+        let op = OpId::from("legacy-early-release");
+        let ticket = engine
+            .admit(&op, JobClass::Heavy, "o")
+            .await
+            .expect("admit");
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let outcome = engine.start_job(
+            &op,
+            ticket,
+            Vec::new(),
+            None,
+            true,
+            || Ok::<_, std::io::Error>(sh("printf done")),
+            |_frame| {},
+            |_| Vec::new(),
+            move |seq, exit: &JobExit| {
+                let _ = exit_tx.send((seq, exit.clone()));
+            },
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh id must start");
+        };
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), exit_rx)
+            .await
+            .expect("exit in time")
+            .expect("exit delivered");
+        assert_eq!(
+            *engine.spool_reserved.lock().expect("ledger"),
+            0,
+            "ledger share returned at the terminal record"
+        );
+        assert!(
+            engine.route_command(&op, JobCommand::Detach),
+            "the pump still lingers (route alive) after the early release"
+        );
+        // Normal teardown still works.
+        let _ = started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await;
+        let _ = started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: u64::MAX,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await;
     }
 
     #[test]

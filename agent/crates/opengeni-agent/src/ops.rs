@@ -58,28 +58,24 @@ pub async fn serve_op_start<P: Platform>(
     request_id: String,
     start: v1::OpStart,
 ) -> ControlResponse {
-    use v1::op_start::Op;
-    let exec = match start.op {
-        Some(Op::Exec(exec)) => exec,
-        Some(Op::FsRead(_) | Op::FsWrite(_)) => {
-            return error_reply(
-                request_id,
-                ErrorCode::Unsupported,
-                "op-stream fs_read/fs_write land with the M7 chunked-write milestone; \
-                 use the legacy fs ops",
-                false,
-            );
-        }
-        None => {
-            return error_reply(
-                request_id,
-                ErrorCode::Protocol,
-                "OpStart carried no op",
-                false,
-            );
-        }
+    let exec = match extract_exec(&request_id, start.op) {
+        Ok(exec) => exec,
+        Err(reply) => return *reply,
     };
 
+    // The op id is interpolated into the frame subject
+    // (`agent.<ws>.<id>.op.<op_id>`): a NATS-illegal token (empty,
+    // whitespace, '.', '*', '>') would make every frame publish fail and the
+    // op present as HUNG — reject it loud + typed instead (design-review
+    // fold-in).
+    if let Err(reason) = validate_subject_token(&request_id) {
+        return error_reply(
+            request_id,
+            ErrorCode::Protocol,
+            &format!("op_id is not a legal frame-subject token ({reason})"),
+            false,
+        );
+    }
     let op_id = OpId::new(request_id.clone());
     let origin = if start.origin_id.is_empty() {
         "unknown"
@@ -99,6 +95,9 @@ pub async fn serve_op_start<P: Platform>(
         ticket,
         stdin,
         deadline,
+        // Op-stream: retention (and its ledger share) survives to the final
+        // ack — post-exit replay is the point.
+        false,
         || platform.spawn_exec(&exec),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),
@@ -301,6 +300,52 @@ fn frame_publisher(publish: FrameSink, op_id: String) -> impl Fn(Frame) + Send +
         };
         publish(wire.encode_to_vec());
     }
+}
+
+/// Extracts the exec op from the OpStart oneof; other kinds answer typed
+/// (`op_stream=true` advertises the PROTOCOL, kinds are per-OpStart — the M7
+/// milestone adds fs_read/fs_write + WriteChunk).
+fn extract_exec(
+    request_id: &str,
+    op: Option<v1::op_start::Op>,
+) -> Result<v1::ExecRequest, Box<ControlResponse>> {
+    use v1::op_start::Op;
+    match op {
+        Some(Op::Exec(exec)) => Ok(exec),
+        Some(Op::FsRead(_) | Op::FsWrite(_)) => Err(Box::new(error_reply(
+            request_id.to_string(),
+            ErrorCode::Unsupported,
+            "op-stream fs_read/fs_write land with the M7 chunked-write milestone; \
+             use the legacy fs ops",
+            false,
+        ))),
+        None => Err(Box::new(error_reply(
+            request_id.to_string(),
+            ErrorCode::Protocol,
+            "OpStart carried no op",
+            false,
+        ))),
+    }
+}
+
+/// Validates a string as a single NATS subject TOKEN: non-empty, no
+/// whitespace/control characters, and none of the subject-structure
+/// characters (`.` separator, `*`/`>` wildcards). An illegal op id would
+/// poison the frame subject — every publish fails and the op presents as
+/// hung.
+fn validate_subject_token(token: &str) -> Result<(), &'static str> {
+    if token.is_empty() {
+        return Err("empty");
+    }
+    for c in token.chars() {
+        if c.is_whitespace() || c.is_control() {
+            return Err("contains whitespace/control characters");
+        }
+        if matches!(c, '.' | '*' | '>') {
+            return Err("contains subject-structure characters ('.', '*', '>')");
+        }
+    }
+    Ok(())
 }
 
 /// The engine→wire channel mapping.
@@ -815,6 +860,37 @@ mod tests {
             b"clamped",
             "data flowed despite the tiny request"
         );
+    }
+
+    #[tokio::test]
+    async fn illegal_op_ids_are_refused_typed_before_anything_starts() {
+        // A NATS-illegal op id would poison the frame subject (every publish
+        // fails; the op presents as hung) — refused loud + typed instead,
+        // before admission or spawn.
+        let rig = rig();
+        for bad in [
+            "",
+            "has space",
+            "dotted.id",
+            "wild*card",
+            "tail>",
+            "tab\tid",
+        ] {
+            let resp = rig.start_exec(bad, "echo never", 1 << 20).await;
+            let err = resp
+                .error
+                .unwrap_or_else(|| panic!("op_id {bad:?} must be refused"));
+            assert_eq!(err.code, v1::ErrorCode::Protocol as i32, "{bad:?}");
+            assert!(
+                matches!(
+                    rig.engine.query(&OpId::new(bad)),
+                    opengeni_agent_engine::registry::QueryAnswer::Unknown
+                        | opengeni_agent_engine::registry::QueryAnswer::Lost(_)
+                ),
+                "nothing may begin for {bad:?}"
+            );
+        }
+        assert!(rig.frames.lock().expect("frames").is_empty(), "zero spawns");
     }
 
     #[test]
