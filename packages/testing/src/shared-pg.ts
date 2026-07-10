@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
@@ -55,7 +56,39 @@ const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
 // connected to the source during the copy, so keeping the template quiescent
 // is what lets concurrent clones proceed (they serialize on the source but do
 // not error) and guarantees every clone is byte-identical to the migrated schema.
-const TEMPLATE_DB = "og_test_template";
+//
+// The name carries a FINGERPRINT of the migration chain (sorted file names +
+// contents). The container OUTLIVES checkouts — it persists across sessions and
+// is shared by every worktree on the machine — so a bare name would freeze the
+// schema at whichever migration chain first built it: a branch that ADDS a
+// migration would then run all its tests against clones missing the new
+// column, failing on every touched table. Baking the fingerprint into the name
+// gives each distinct chain its own template (built on first use, coexisting
+// with older ones), with no rebuild races between checkouts.
+const TEMPLATE_DB_PREFIX = "og_test_template_";
+
+/** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
+const MIGRATIONS_DIR = fileURLToPath(new URL("../../db/drizzle", import.meta.url));
+
+let templateDbNameMemo: string | undefined;
+
+/** `og_test_template_<12-hex>` — the fingerprint of THIS checkout's migration
+ *  chain. Memoized (the chain cannot change within a process lifetime). */
+async function templateDbName(): Promise<string> {
+  if (templateDbNameMemo) {
+    return templateDbNameMemo;
+  }
+  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => file.endsWith(".sql")).sort();
+  const hasher = new Bun.CryptoHasher("sha256");
+  for (const file of files) {
+    hasher.update(file);
+    hasher.update("\0");
+    hasher.update(await readFile(join(MIGRATIONS_DIR, file)));
+    hasher.update("\0");
+  }
+  templateDbNameMemo = `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+  return templateDbNameMemo;
+}
 
 const STATE_DIR = join(tmpdir(), "opengeni-shared-pg");
 const LOCK_DIR = join(STATE_DIR, "lock");
@@ -177,7 +210,7 @@ async function templateReady(): Promise<boolean> {
   const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     const rows = await root`
-      SELECT 1 FROM pg_database WHERE datname = ${TEMPLATE_DB} AND datistemplate`;
+      SELECT 1 FROM pg_database WHERE datname = ${await templateDbName()} AND datistemplate`;
     return rows.length > 0;
   } catch {
     return false;
@@ -200,6 +233,7 @@ async function ensureTemplateBuilt(): Promise<void> {
     return;
   }
   // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
+  const TEMPLATE_DB = await templateDbName();
   const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     await root.unsafe(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
@@ -350,7 +384,7 @@ async function cloneFromTemplate(dbName: string): Promise<void> {
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {
-        await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${TEMPLATE_DB}"`);
+        await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName()}"`);
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
