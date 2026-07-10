@@ -743,20 +743,50 @@ mod tests {
         }
     }
 
+    const EXEC_DESCENDANT_BINARY_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_BINARY";
+    const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
+
     #[cfg(unix)]
-    fn descendant_loop_command(pid_file: &Path) -> String {
-        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+    fn descendant_loop_command() -> String {
         format!(
-            "/bin/sh -c 'printf \"%s\" \"$$\" > \"$1\"; while :; do :; done' nested '{quoted_pid_file}' & wait"
+            "\"${EXEC_DESCENDANT_BINARY_ENV}\" --ignored --exact native::tests::exec_descendant_fixture --nocapture"
         )
     }
 
     #[cfg(windows)]
-    fn descendant_loop_command(pid_file: &Path) -> String {
-        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+    fn descendant_loop_command() -> String {
         format!(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Set-Content -NoNewline -LiteralPath '{quoted_pid_file}' -Value $PID; while ($true) {{}}\""
+            "call \"%{EXEC_DESCENDANT_BINARY_ENV}%\" --ignored --exact native::tests::exec_descendant_fixture --nocapture"
         )
+    }
+
+    #[cfg(any(unix, windows))]
+    fn descendant_exec_env(pid_file: &Path) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([
+            (
+                EXEC_DESCENDANT_BINARY_ENV.to_string(),
+                std::env::current_exe()
+                    .expect("current test executable")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                EXEC_DESCENDANT_PID_FILE_ENV.to_string(),
+                pid_file.to_string_lossy().into_owned(),
+            ),
+        ])
+    }
+
+    #[test]
+    #[ignore = "infinite child-process fixture; invoked explicitly by exec tests"]
+    fn exec_descendant_fixture() {
+        let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
+            .expect("descendant fixture pid-file env");
+        std::fs::write(pid_file, std::process::id().to_string())
+            .expect("write descendant fixture pid");
+        loop {
+            std::thread::park();
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -896,22 +926,27 @@ mod tests {
     async fn exec_timeout_kills_and_flags() {
         let (platform, dir) = rooted();
         let pid_file = dir.path().join("timed-out-descendant.pid");
-        // The outer exec shell launches a nested, pure-shell busy loop. Recording
-        // that nested PID catches the regression where kill-on-drop terminated
-        // only the outer shell and reparented its still-running descendant.
+        // The outer exec shell launches an ignored copy of this test binary.
+        // Recording that descendant PID catches the regression where kill-on-drop
+        // terminated only the shell and reparented its still-running child.
         let req = ExecRequest {
-            command: vec![descendant_loop_command(&pid_file)],
+            command: vec![descendant_loop_command()],
             shell: true,
+            env: descendant_exec_env(&pid_file),
             timeout_ms: 1_000,
             ..Default::default()
         };
-        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT (a
-        // spawn ENOENT errors before the timeout path, so the retry is on spawn,
-        // not on the deliberate timeout this test asserts).
+        // Retry the transient NixOS shell-spawn ENOENT. It happens before the
+        // timeout path, so the retry cannot mask the deliberate timeout asserted
+        // below; other platforms return on the first attempt.
         let resp = retry_transient_spawn(|| platform.exec(&req))
             .await
             .expect("exec");
-        assert!(resp.timed_out, "the loop should be killed by the timeout");
+        assert!(
+            resp.timed_out,
+            "the loop should be killed by the timeout: exit={} stdout={:?} stderr={:?}",
+            resp.exit_code, resp.stdout, resp.stderr
+        );
         assert_eq!(resp.exit_code, -1);
         let descendant_pid = recorded_pid(&pid_file).await;
         assert_process_exits(descendant_pid, "timed-out exec").await;
@@ -923,8 +958,9 @@ mod tests {
         let (platform, dir) = rooted();
         let pid_file = dir.path().join("cancelled-descendant.pid");
         let req = ExecRequest {
-            command: vec![descendant_loop_command(&pid_file)],
+            command: vec![descendant_loop_command()],
             shell: true,
+            env: descendant_exec_env(&pid_file),
             timeout_ms: 0,
             ..Default::default()
         };
