@@ -96,6 +96,7 @@ pub enum JobCommand {
     Detach,
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
+    #[allow(dead_code)] // constructed by the op-stream OpCancel route (next step)
     Cancel,
 }
 
@@ -788,9 +789,12 @@ mod tests {
     /// [`PAUSED_WAIT`]: auto-advance would jump a small virtual timeout past a
     /// pending REAL event (child I/O, SIGCHLD), so they need a huge virtual
     /// budget that the pump's own timers walk through while the real event
-    /// lands within wall-clock milliseconds.
+    /// lands. The budget buys REAL time proportional to the wakeup count
+    /// (virtual budget / 5s ticker steps × per-wakeup cost), so it is sized
+    /// generously: ~500k wakeups ≈ seconds of real margin even under a fully
+    /// loaded parallel test run.
     const WAIT: Duration = Duration::from_secs(10);
-    const PAUSED_WAIT: Duration = Duration::from_secs(3600);
+    const PAUSED_WAIT: Duration = Duration::from_secs(30 * 24 * 3600);
 
     struct JobBuilder {
         script: String,

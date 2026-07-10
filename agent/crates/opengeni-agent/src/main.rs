@@ -34,24 +34,15 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent")]
 
 mod backoff;
-// The impure HostCapacity sampler (LIMITS-DOCTRINE rule R); feeds the engine
-// assembly's derived budgets. Wired to the supervisor in the next commit.
-#[allow(dead_code)]
 mod capacity;
 mod cli;
 mod config;
 mod dispatch;
-// The impure assembly of the pure op engine (registry/admission/derived
-// budgets/spool ledger/routing). Wired to the supervisor in the next commit.
-#[allow(dead_code)]
 mod engine;
 mod enrollment;
 mod instance_lock;
-// The op-stream job pump. Fully unit-tested here; the supervisor wires it to the
-// live OpStart/OpAck path in the next engine step, so the non-test build does not
-// reference it yet.
-#[allow(dead_code)]
 mod job;
+mod legacy;
 mod metrics;
 mod service;
 mod supervisor;
@@ -264,7 +255,13 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     }
     let platform = Arc::new(platform);
 
-    let supervisor = Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"));
+    // The engine's disk spool lives under the config dir — a real filesystem
+    // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
+    let supervisor = match config::config_dir() {
+        Ok(dir) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"))
+            .with_spool_root(dir.join("spool")),
+        Err(_) => Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION")),
+    };
     let shutdown = supervisor.shutdown_handle();
 
     // Wire SIGINT/SIGTERM to a clean shutdown so the lease flips offline

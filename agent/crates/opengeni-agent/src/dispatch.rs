@@ -396,32 +396,48 @@ pub fn oversized_reply_error(
     }
 }
 
-/// Builds the retryable [`ErrorCode::Draining`] response returned when the
-/// supervisor's bounded host-work pool is full. Saturation is an operation-level
-/// backpressure condition: the machine remains online, heartbeats continue, and
-/// `ping` bypasses the pool.
+/// Builds the retryable [`ErrorCode::Draining`] response returned when an
+/// admission CIRCUIT BREAKER trips (LIMITS-DOCTRINE: the runner holds no
+/// concurrency policy — a refusal means pathology, not load, and it names the
+/// tripped breaker). The machine remains online, heartbeats continue, and
+/// `ping` never enters admission.
 #[must_use]
-pub fn capacity_reply_error(
+pub fn breaker_reply_error(
     request_id: String,
     op_label: &str,
-    max_in_flight: usize,
+    reason: opengeni_agent_engine::admission::RefusalReason,
 ) -> ControlResponse {
+    use opengeni_agent_engine::admission::RefusalReason;
+    let breaker = match reason {
+        RefusalReason::QueueFull => "queue_breaker",
+        RefusalReason::WaitDeadline => "wait_breaker",
+    };
     let mut detail = std::collections::HashMap::new();
     detail.insert("op".to_string(), op_label.to_string());
-    detail.insert("backpressure".to_string(), "host_work_capacity".to_string());
-    detail.insert("in_flight".to_string(), max_in_flight.to_string());
-    detail.insert("max_in_flight".to_string(), max_in_flight.to_string());
+    detail.insert("backpressure".to_string(), breaker.to_string());
     ControlResponse {
         request_id,
         error: Some(AgentError {
             code: ErrorCode::Draining as i32,
             message: format!(
-                "agent host-work capacity is full ({max_in_flight} in flight); retry op \
-                 '{op_label}'"
+                "the runner's admission breaker '{breaker}' tripped for op '{op_label}' — \
+                 this signals a pathological backlog, not normal load; retry, and expect \
+                 host-capacity telemetry to explain the pressure"
             ),
             retryable: true,
             detail,
         }),
+        result: None,
+    }
+}
+
+/// The fenced-epoch reply, shared with the supervisor's adapter route (which
+/// fences BEFORE reaching this dispatch table, mirroring the check above).
+#[must_use]
+pub fn fenced_reply(request_id: String, op_epoch: u32, held_epoch: u32) -> ControlResponse {
+    ControlResponse {
+        request_id,
+        error: Some(fenced_error(op_epoch, held_epoch)),
         result: None,
     }
 }
@@ -761,21 +777,19 @@ mod tests {
     }
 
     #[test]
-    fn capacity_reply_is_retryable_backpressure_not_liveness_loss() {
-        let response = capacity_reply_error("req-capacity".to_string(), "exec", 8);
-        assert_eq!(response.request_id, "req-capacity");
+    fn breaker_reply_is_retryable_backpressure_naming_the_breaker() {
+        use opengeni_agent_engine::admission::RefusalReason;
+        let response =
+            breaker_reply_error("req-breaker".to_string(), "exec", RefusalReason::QueueFull);
+        assert_eq!(response.request_id, "req-breaker");
         assert!(response.result.is_none());
-        let err = response.error.expect("capacity error");
+        let err = response.error.expect("breaker error");
         assert_eq!(err.code, ErrorCode::Draining as i32);
         assert!(err.retryable);
         assert_eq!(err.detail.get("op").map(String::as_str), Some("exec"));
         assert_eq!(
             err.detail.get("backpressure").map(String::as_str),
-            Some("host_work_capacity")
-        );
-        assert_eq!(
-            err.detail.get("max_in_flight").map(String::as_str),
-            Some("8")
+            Some("queue_breaker")
         );
     }
 

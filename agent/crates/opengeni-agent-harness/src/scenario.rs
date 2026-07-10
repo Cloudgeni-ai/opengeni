@@ -221,9 +221,10 @@ impl Harness {
 
     // ---- scenario 2: flood ---------------------------------------------------
 
-    /// (a) 1 agent, 256 concurrent mixed ops (expect 8-slot saturation → DRAINING,
-    /// while a concurrent ping probe stays fast). (b) `fleet_size` agents × 16
-    /// concurrent ops each.
+    /// (a) 1 agent, 256 concurrent mixed ops — LIMITS-DOCTRINE: the runner
+    /// admits everything (no concurrency policy; breakers are pathology-scale),
+    /// so ALL ops run while a concurrent ping probe stays fast. (b)
+    /// `fleet_size` agents × 16 concurrent ops each.
     pub async fn flood(&self, fleet_size: usize) -> Report {
         let mut agg = Aggregator::new();
         let sampler = ResourceSampler::spawn(
@@ -285,8 +286,9 @@ impl Harness {
                 ),
             },
             Verdict {
-                check: "8-slot saturation observed (DRAINING returned)".to_string(),
-                pass: draining_a > 0,
+                check: "no admission refusals under the 256-op burst (runner admits everything)"
+                    .to_string(),
+                pass: draining_a == 0 && draining_b == 0,
                 detail: format!("{draining_a} DRAINING in the 256-op burst; {draining_b} across the {fleet_n}-agent fleet burst"),
             },
             Verdict {
@@ -302,7 +304,7 @@ impl Harness {
                 "single_agent_probe_pings": 100,
                 "fleet_size": fleet_n,
                 "fleet_ops_per_agent": 16,
-                "max_in_flight_control_rpcs": 8
+                "admission": "unbounded (derived breakers only)"
             }),
             agg,
             resources,

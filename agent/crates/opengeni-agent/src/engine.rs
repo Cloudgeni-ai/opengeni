@@ -42,6 +42,10 @@ use tracing::{info, warn};
 
 use crate::job::{run_job, JobCommand, JobConfig, JobExit, JobHooks, JobParams};
 
+/// The admission-fairness origin for legacy request/reply work (legacy
+/// requests carry no session identity; they share one fairness domain).
+pub const LEGACY_ORIGIN: &str = "legacy";
+
 /// Commands queued to one job. A pipe diameter, not a limit (queue rule):
 /// senders block/backpressure, the pump drains every loop iteration.
 const JOB_MAILBOX_DEPTH: usize = 1024;
@@ -252,6 +256,7 @@ impl Engine {
     }
 
     /// The last installed capacity sample (heartbeat telemetry).
+    #[allow(dead_code)] // wired at the op-stream heartbeat-telemetry step
     #[must_use]
     pub fn capacity(&self) -> HostCapacity {
         *self.capacity.read().expect("capacity lock")
@@ -278,6 +283,13 @@ impl Engine {
     #[must_use]
     pub fn max_frame_bytes(&self) -> usize {
         self.max_frame_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The spool root this engine was built against (the capacity sampler's
+    /// disk target).
+    #[must_use]
+    pub fn spool_root(&self) -> &std::path::Path {
+        &self.spool_root
     }
 
     /// Requests an admission slot, parking until promoted when queued. Under
@@ -494,6 +506,7 @@ impl Engine {
     /// Delivers a wire command to a job's mailbox without blocking. `false`
     /// when the op is unknown/ended or its mailbox is saturated (fire-and-
     /// forget wire messages are healed by repetition — ruling M1).
+    #[allow(dead_code)] // wired at the op-stream serving step (OpAck/OpAttach routing)
     pub fn route_command(&self, op_id: &OpId, cmd: JobCommand) -> bool {
         let Some(sender) = self.routes.lock().expect("routes lock").get(op_id).cloned() else {
             return false;
@@ -518,6 +531,7 @@ impl Engine {
     }
 
     /// The op's current phase (for `OpQuery`/`OpStarted` answers).
+    #[allow(dead_code)] // wired at the op-stream serving step (OpQuery answers)
     #[must_use]
     pub fn query(&self, op_id: &OpId) -> QueryAnswer {
         self.registry.lock().expect("registry lock").query(op_id)
