@@ -332,6 +332,14 @@ describe("sandbox preparation profiles", () => {
     ).toBe(true);
   });
 
+  test("agent op-stream transport is gated off unless explicitly enabled", () => {
+    expect(withEnv({}, () => getSettings()).agentOpStreamEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_AGENT_OP_STREAM_ENABLED: "true" }, () => getSettings())
+        .agentOpStreamEnabled,
+    ).toBe(true);
+  });
+
   test("retries startup dependency operations with bounded backoff", async () => {
     const retries: string[] = [];
     let calls = 0;

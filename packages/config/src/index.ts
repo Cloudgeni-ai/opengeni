@@ -501,6 +501,11 @@ const SettingsSchema = z.object({
   // z.coerce.boolean(), which coerces "false" -> true). Flipped per-environment via
   // the deploy-staging IaC secret/configmap pattern (dossier §17/§25.1).
   sandboxSelfhostedEnabled: EnvBoolean.default(false),
+  // Gates the op-stream (streaming exec) transport to Connected Machines. The
+  // runner must ALSO advertise Capabilities.op_stream; default off, and legacy
+  // request/reply exec is the permanent fallback. EnvBoolean (NOT
+  // z.coerce.boolean(), which coerces "false" -> true).
+  agentOpStreamEnabled: EnvBoolean.default(false),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -1130,6 +1135,7 @@ export function getSettings(): Settings {
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
+    agentOpStreamEnabled: optional("OPENGENI_AGENT_OP_STREAM_ENABLED"),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
