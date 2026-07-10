@@ -299,6 +299,14 @@ class OpConsumer {
     outcome: OpStreamExecOutcome;
     exitSeq: string;
   }> {
+    // Arm the settle promise FIRST: frames can start applying the moment the
+    // attach below returns (replay is asynchronous), and a completion that
+    // fires before the resolver exists would strand the op on its wall.
+    const settled = new Promise<void>((resolve, reject) => {
+      this.settleResolve = resolve;
+      this.settleReject = reject;
+    });
+
     // Subscription BEFORE OpStart (protocol invariant): no frame can be
     // published before the consumer exists on a healthy path.
     this.subscription = await this.deps.transport.subscribe(
@@ -317,11 +325,6 @@ class OpConsumer {
     this.ackTimer = setInterval(() => {
       void this.sendAck();
     }, this.ackIntervalMs);
-
-    const settled = new Promise<void>((resolve, reject) => {
-      this.settleResolve = resolve;
-      this.settleReject = reject;
-    });
     const liveness = this.watchLiveness(wallMs);
     try {
       await Promise.race([settled, liveness.wall]);
