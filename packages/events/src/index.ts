@@ -469,7 +469,25 @@ export async function appendAndPublishEvents(
   const appendStartedAt = performance.now();
   const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
   observeSince(observe?.onAppend, appendStartedAt, appended.length);
-  // The DB append above is the durable system of record; the publish is only a
+  await publishDurableSessionEvents(bus, workspaceId, sessionId, appended, observe);
+  return appended;
+}
+
+/**
+ * Best-effort live fanout for events another DB helper already committed in
+ * the same transaction as related durable state. This must never append again.
+ */
+export async function publishDurableSessionEvents(
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  appended: SessionEvent[],
+  observe?: AppendPublishObserver,
+): Promise<void> {
+  if (appended.length === 0) {
+    return;
+  }
+  // The committed DB events are the durable system of record; this publish is only a
   // best-effort LIVE fan-out. Guard it so NO EventBus implementation can throw an
   // in-flight agent turn to death on a transient NATS disconnect — consumers
   // reconcile any missed live events from the durable log via the events/stream
@@ -486,7 +504,6 @@ export async function appendAndPublishEvents(
     );
   }
   observeSince(observe?.onPublish, publishStartedAt, appended.length);
-  return appended;
 }
 
 export async function appendAndPublishTurnEventsFenced(

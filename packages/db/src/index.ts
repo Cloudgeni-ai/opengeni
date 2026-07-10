@@ -19039,6 +19039,370 @@ export async function settleCodexCredentialFailover(
   );
 }
 
+export type ApplySessionTurnPreemptionInput = {
+  sessionId: string;
+  turnId: string;
+  triggerEventId: string;
+  reason: string;
+  resumeWithNotice: boolean;
+  text?: string;
+  fromStatuses?: SessionTurnStatus[];
+};
+
+export type ApplySessionTurnPreemptionResult =
+  | { action: "requeued"; events: SessionEvent[] }
+  | {
+      action: "stale";
+      events: [];
+      turnStatus: SessionTurnStatus | null;
+      activeTurnId: string | null;
+    };
+
+/**
+ * Atomically publish a preemption settlement and return the same live turn to
+ * the queue. The lock order is session -> turn, shared with the interrupt path
+ * below. A missing, terminal, superseded, or interrupted target is an
+ * idempotent stale outcome: no `turn.preempted` event is appended and the
+ * current session pointer/status is left untouched.
+ */
+export async function applySessionTurnPreemption(
+  db: Database,
+  workspaceId: string,
+  input: ApplySessionTurnPreemptionInput,
+): Promise<ApplySessionTurnPreemptionResult> {
+  const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
+
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      if (
+        !turn ||
+        session.activeTurnId !== input.turnId ||
+        !fromStatuses.includes(turnStatus as SessionTurnStatus)
+      ) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+
+      const [triggerEvent] = await tx
+        .select({ sequence: schema.sessionEvents.sequence })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.id, input.triggerEventId),
+          ),
+        )
+        .limit(1);
+      const [pendingInterrupt] = await tx
+        .select({ id: schema.sessionEvents.id })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.type, "user.interrupt"),
+            gt(schema.sessionEvents.sequence, triggerEvent?.sequence ?? 0),
+          ),
+        )
+        .orderBy(asc(schema.sessionEvents.sequence))
+        .limit(1);
+      if (!triggerEvent || pendingInterrupt) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+
+      const now = new Date();
+      let sequence = session.lastSequence;
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values([
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            sequence: ++sequence,
+            type: "turn.preempted",
+            turnId: input.turnId,
+            payload: sanitizeEventPayload({
+              triggerEventId: input.triggerEventId,
+              reason: input.reason,
+              resumeWithNotice: input.resumeWithNotice,
+              ...(input.text !== undefined ? { text: input.text } : {}),
+            }),
+            occurredAt: now,
+          },
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            sequence: ++sequence,
+            type: "session.status.changed",
+            turnId: input.turnId,
+            payload: sanitizeEventPayload({ status: "queued" }),
+            occurredAt: now,
+          },
+        ])
+        .returning();
+      const preemptedEventId = inserted[0]?.id;
+      if (input.resumeWithNotice && !preemptedEventId) {
+        throw new Error(`Preemption event not inserted for turn: ${input.turnId}`);
+      }
+
+      const [updatedTurn] = await tx
+        .update(schema.sessionTurns)
+        .set({
+          status: "queued",
+          triggerEventId:
+            input.resumeWithNotice && preemptedEventId ? preemptedEventId : input.triggerEventId,
+          startedAt: null,
+          finishedAt: null,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+            inArray(schema.sessionTurns.status, fromStatuses),
+          ),
+        )
+        .returning({ id: schema.sessionTurns.id });
+      if (!updatedTurn) {
+        // The row is locked, so this is an invariant failure rather than a
+        // legitimate race. Throwing rolls the events back too.
+        throw new Error(`Preemptible session turn changed while locked: ${input.turnId}`);
+      }
+
+      const [updatedSession] = await tx
+        .update(schema.sessions)
+        .set({
+          status: "queued",
+          activeTurnId: null,
+          lastSequence: sequence,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            eq(schema.sessions.activeTurnId, input.turnId),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updatedSession) {
+        throw new Error(`Active session turn changed while locked: ${input.turnId}`);
+      }
+      return { action: "requeued" as const, events: inserted.map(mapEvent) };
+    });
+  });
+}
+
+export type ApplySessionTurnInterruptResult =
+  | { action: "cancelled"; turnId: string; events: SessionEvent[] }
+  | {
+      action: "stale";
+      turnId: string | null;
+      turnStatus: SessionTurnStatus | null;
+      events: [];
+    };
+
+/**
+ * Atomically apply one durable interrupt event to the exact active turn. The
+ * event must be newer than that turn's current durable trigger, so a delayed
+ * old Temporal signal cannot cancel a newer queued/resumed turn. The activity
+ * may publish `turn.started` after an interrupt arrives during setup, so start
+ * events are deliberately not the fence. Stale outcomes append no events.
+ */
+export async function applySessionTurnInterrupt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  interruptEventId: string,
+): Promise<ApplySessionTurnInterruptResult> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .for("update")
+        .limit(1);
+      if (!session) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const [interruptEvent] = await tx
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, sessionId),
+            eq(schema.sessionEvents.id, interruptEventId),
+            eq(schema.sessionEvents.type, "user.interrupt"),
+          ),
+        )
+        .limit(1);
+      if (!interruptEvent || !session.activeTurnId) {
+        return {
+          action: "stale" as const,
+          turnId: session.activeTurnId,
+          turnStatus: null,
+          events: [] as [],
+        };
+      }
+
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            eq(schema.sessionTurns.id, session.activeTurnId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      if (!turn || (turnStatus !== "running" && turnStatus !== "requires_action")) {
+        return {
+          action: "stale" as const,
+          turnId: session.activeTurnId,
+          turnStatus,
+          events: [] as [],
+        };
+      }
+
+      const [turnTrigger] = await tx
+        .select({ sequence: schema.sessionEvents.sequence })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, workspaceId),
+            eq(schema.sessionEvents.sessionId, sessionId),
+            eq(schema.sessionEvents.id, turn.triggerEventId),
+          ),
+        )
+        .limit(1);
+      if (!turnTrigger || interruptEvent.sequence <= turnTrigger.sequence) {
+        return {
+          action: "stale" as const,
+          turnId: turn.id,
+          turnStatus,
+          events: [] as [],
+        };
+      }
+
+      const now = new Date();
+      const [updatedTurn] = await tx
+        .update(schema.sessionTurns)
+        .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            eq(schema.sessionTurns.id, turn.id),
+            inArray(schema.sessionTurns.status, ["running", "requires_action"]),
+          ),
+        )
+        .returning({ id: schema.sessionTurns.id });
+      if (!updatedTurn) {
+        throw new Error(`Interruptible session turn changed while locked: ${turn.id}`);
+      }
+
+      let sequence = session.lastSequence;
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values([
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            sequence: ++sequence,
+            type: "turn.cancelled",
+            turnId: turn.id,
+            payload: sanitizeEventPayload({
+              triggerEventId: interruptEventId,
+              reason: interruptEvent.payload ?? null,
+            }),
+            occurredAt: now,
+          },
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            sequence: ++sequence,
+            type: "session.status.changed",
+            turnId: turn.id,
+            payload: sanitizeEventPayload({ status: "queued" }),
+            occurredAt: now,
+          },
+        ])
+        .returning();
+      const [updatedSession] = await tx
+        .update(schema.sessions)
+        .set({
+          status: "queued",
+          activeTurnId: null,
+          lastSequence: sequence,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, workspaceId),
+            eq(schema.sessions.id, sessionId),
+            eq(schema.sessions.activeTurnId, turn.id),
+          ),
+        )
+        .returning({ id: schema.sessions.id });
+      if (!updatedSession) {
+        throw new Error(`Active session turn changed while locked: ${turn.id}`);
+      }
+      return {
+        action: "cancelled" as const,
+        turnId: turn.id,
+        events: inserted.map(mapEvent),
+      };
+    });
+  });
+}
+
 /**
  * Bump the per-turn worker-death redispatch counter and return the new value.
  * Stored in the turn row's metadata (not workflow-local state) so the

@@ -54,6 +54,7 @@ mock.module("nats", () => ({
 // --- db mock: synthesize durable events for the sentinel workspace only -------
 const realDb = await import("@opengeni/db");
 const realAppend = realDb.appendSessionEvents;
+let sentinelAppendCalls = 0;
 mock.module("@opengeni/db", () => ({
   ...realDb,
   appendSessionEvents: async (
@@ -65,6 +66,7 @@ mock.module("@opengeni/db", () => ({
     if (workspaceId !== SENTINEL_WS) {
       return realAppend(db as never, workspaceId, sessionId, events as never);
     }
+    sentinelAppendCalls += 1;
     // Stand in for the durable append: assign contiguous sequences like the DB.
     return events.map((event, index) => ({
       id: `00000000-0000-4000-8000-00000000000${index}`,
@@ -80,8 +82,12 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER both mocks are installed so it binds them.
-const { createNatsEventBus, createResponderConnection, appendAndPublishEvents } =
-  await import("../src/index");
+const {
+  createNatsEventBus,
+  createResponderConnection,
+  appendAndPublishEvents,
+  publishDurableSessionEvents,
+} = await import("../src/index");
 
 afterAll(() => {
   mock.restore();
@@ -147,6 +153,54 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
     // was swallowed (consumers reconcile the missed live event from the DB).
     expect(appended).toHaveLength(1);
     expect(appended[0]!.sequence).toBe(1);
+  });
+
+  test("publishes an already-durable batch without appending it again", async () => {
+    sentinelAppendCalls = 0;
+    const published: unknown[][] = [];
+    const bus = {
+      publish: async (_workspaceId: string, _sessionId: string, events: unknown[]) => {
+        published.push(events);
+      },
+    } as never;
+    const events = [
+      {
+        id: "00000000-0000-4000-8000-000000000010",
+        workspaceId: SENTINEL_WS,
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        sequence: 10,
+        type: "turn.preempted",
+        payload: { reason: "worker_shutdown" },
+        occurredAt: "2026-07-10T00:00:00.000Z",
+        clientEventId: null,
+        turnId: "00000000-0000-4000-8000-000000000020",
+      },
+    ];
+
+    await publishDurableSessionEvents(
+      bus,
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000001",
+      events as never,
+    );
+
+    expect(sentinelAppendCalls).toBe(0);
+    expect(published).toEqual([events]);
+  });
+
+  test("an empty durable batch does not publish", async () => {
+    let publishCalls = 0;
+    await publishDurableSessionEvents(
+      {
+        publish: async () => {
+          publishCalls += 1;
+        },
+      } as never,
+      SENTINEL_WS,
+      "00000000-0000-4000-8000-000000000001",
+      [],
+    );
+    expect(publishCalls).toBe(0);
   });
 });
 

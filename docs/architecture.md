@@ -75,6 +75,7 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
 - Each turn runs as one activity with `maximumAttempts: 1` (`apps/worker/src/workflows/activities.ts`). **There is no automatic activity retry.** Model/sandbox/GitHub/cloud calls are side-effectful.
 - **Do not add automatic Temporal retries around full agent turns** unless every model/tool/sandbox boundary has been made idempotent.
 - Recovery is *explicit*: graceful shutdown checkpoints + requeues (status `preempted`); ungraceful death is detected via typed heartbeat/schedule-to-start timeout failures and re-dispatched via `requeueTurnAfterWorkerDeath`, **bounded by a per-turn redispatch ceiling of 3** before the session fails for real.
+- Preemption is one durable settlement, not an event followed by a later row CAS: the session and exact active turn are locked, the turn is requeued, the session pointer is cleared, and `turn.preempted`/queued events commit together. Missing/terminal targets, newer attempts, and durable interrupts newer than the current attempt are stale no-ops, so a cancelled zombie cannot publish a contradictory preemption or fail the session.
 - Worker-death detection **must use typed SDK failure classes** (`instanceof ActivityFailure` + `TimeoutFailure.timeoutType`), never message-string matching, so it is replay-safe.
 
 > Canonical: `apps/worker/src/activities/agent-turn.ts`, `apps/worker/src/activities/session-state.ts`, [`run-lifecycle.md`](run-lifecycle.md).
@@ -268,6 +269,7 @@ See §3.5 — the three stores (`session_history_items`, `agent_run_states`, `se
 ### 5.5 Worker-death recovery
 
 - **Graceful shutdown (SIGTERM):** the activity checkpoints (conversation reconcile + sandbox envelope), requeues the turn, emits `turn.preempted`, returns status `preempted`; the workflow re-dispatches on a healthy worker.
+- **Terminal/control race:** graceful, compaction, and sandbox-supersession preemption use the same atomic session→turn settlement. If interrupt/terminal/newer-attempt truth already won, preemption returns stale without appending events or changing the current session.
 - **Ungraceful death (heartbeat timeout):** surfaces as a typed `ActivityFailure` (not a session failure). `requeueTurnAfterWorkerDeath` re-dispatches from dual-written conversation truth, bounded by the redispatch ceiling (3).
 - Neither is an automatic Temporal retry. Deep dive: [`run-lifecycle.md`](run-lifecycle.md).
 

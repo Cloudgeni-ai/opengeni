@@ -3,6 +3,7 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
+  applySessionTurnPreemption,
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
@@ -13,7 +14,7 @@ import {
   listSessionEvents,
   listSessionTurns,
 } from "@opengeni/db";
-import { createNatsEventBus, type EventBus } from "@opengeni/events";
+import { createNatsEventBus, publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import {
   functionCall,
@@ -358,6 +359,134 @@ describe("worker restart resilience", () => {
           JSON.stringify(event.payload).includes("did the work"),
       ),
     ).toBe(true);
+  }, 180_000);
+
+  test("late activity preemption after a steer cancellation is stale and cannot fail the session", async () => {
+    const grant = await testGrant();
+    const taskQueue = `terminal-preempt-race-${crypto.randomUUID()}`;
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+      sessionHistorySource: "items",
+    });
+    const baseActivities = createActivities({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "must not be called" }]),
+      }),
+    });
+    let dispatchStarted = false;
+    let interruptSettled!: () => void;
+    const interruptSettlement = new Promise<void>((resolve) => {
+      interruptSettled = resolve;
+    });
+    let latePreemption: Awaited<ReturnType<typeof applySessionTurnPreemption>> | null = null;
+    const activities = {
+      ...baseActivities,
+      interruptActiveTurn: async (
+        input: Parameters<typeof baseActivities.interruptActiveTurn>[0],
+      ) => {
+        await baseActivities.interruptActiveTurn(input);
+        interruptSettled();
+      },
+      runAgentSegment: async (input: Parameters<typeof baseActivities.runAgentSegment>[0]) => {
+        dispatchStarted = true;
+        const context = currentActivityContext();
+        while (!context?.cancellationSignal.aborted) {
+          context?.heartbeat({ phase: "waiting_for_test_interrupt", turnId: input.turnId });
+          await Bun.sleep(10);
+        }
+        // Deterministically model the production zombie: the workflow's
+        // interrupt activity has committed terminal truth, while the cancelled
+        // activity continues into compaction settlement.
+        await interruptSettlement;
+        latePreemption = await applySessionTurnPreemption(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId!,
+          triggerEventId: input.triggerEventId,
+          reason: "context_compacted",
+          resumeWithNotice: true,
+          text: "late compaction resume",
+        });
+        if (latePreemption.action === "requeued") {
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            latePreemption.events,
+          );
+          return { status: "preempted" as const };
+        }
+        return { status: "cancelled" as const };
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "hold until steer",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "hold until steer" } },
+    ]);
+    await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: workflowId,
+      source: "user",
+      prompt: "hold until steer",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "xhigh",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const workerRun = worker.run();
+    const client = new Client({ connection });
+    const handle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId,
+      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+    });
+    try {
+      await waitFor(() => dispatchStarted);
+      const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+        { type: "user.interrupt", payload: { reason: "steer" } },
+      ]);
+      await handle.signal("interrupt", interrupt!.id);
+      await handle.result();
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+
+    expect(latePreemption).toMatchObject({
+      action: "stale",
+      turnStatus: "cancelled",
+      activeTurnId: null,
+      events: [],
+    });
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns.map((turn) => turn.status)).toEqual(["cancelled"]);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   }, 180_000);
 
   test("a failed session accepts a new user message and revives from stored items", async () => {

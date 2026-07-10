@@ -101,6 +101,16 @@ only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
 intent. See [`context-compaction.md`](context-compaction.md).
 
+That requeue is one atomic durable settlement: lock the session and exact
+active turn, append `turn.preempted` plus queued status, change the turn back to
+queued, and clear the session's active pointer in the same transaction. A
+missing/already-terminal turn, a newer attempt, or a durable `user.interrupt`
+newer than the current attempt returns a stale no-op and appends nothing. This
+prevents a cancelled activity that keeps running through compaction from
+publishing a contradictory preemption and then failing the session on a later
+row CAS. Interrupt settlement uses the same lock order and current-trigger
+fence, so a delayed old workflow signal cannot cancel a newer turn.
+
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
 creating the group sandbox waits at most
@@ -124,6 +134,9 @@ input and is told to verify in-flight side effects before repeating them), or
 replaying the original trigger when nothing was persisted yet. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry.
+The event, turn reset, and session transition share the atomic settlement above;
+an interrupt, terminal state, or newer attempt is respected as stale rather
+than overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
 kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never

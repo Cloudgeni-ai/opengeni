@@ -1,4 +1,5 @@
 import {
+  applySessionTurnPreemption,
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   createTurn,
   applyCreditDebitUpToBalance,
@@ -45,7 +46,6 @@ import {
   getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   recordContextCompactionRecoveryProgress,
-  requeuePreemptedTurn,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
   validateCodexCapacityResumeTurn,
@@ -68,7 +68,11 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
-import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  appendAndPublishTurnEventsFenced,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
   agentsErrorRunState,
@@ -3827,40 +3831,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activityError = attemptError;
                 return { status: "idle" };
               }
-              const { events: preemptedEvents, accepted: preemptAccepted } =
-                await appendAndPublishTurnEventsFenced(
-                  db,
-                  bus,
-                  input.workspaceId,
-                  input.sessionId,
-                  activeTurnId,
-                  executionGeneration,
-                  [
-                    {
-                      turnId: activeTurnId,
-                      type: "turn.preempted",
-                      payload: {
-                        triggerEventId: input.triggerEventId,
-                        reason: "context_compacted",
-                        resumeWithNotice: true,
-                        text: CONTEXT_OVERFLOW_RESUME_TEXT,
-                      },
-                    },
-                    {
-                      turnId: activeTurnId,
-                      type: "session.status.changed",
-                      payload: { status: "queued" },
-                    },
-                  ],
-                );
-              const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
-              await requeuePreemptedTurn(
-                db,
+              const preemption = await applySessionTurnPreemption(db, input.workspaceId, {
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                triggerEventId: input.triggerEventId,
+                reason: "context_compacted",
+                resumeWithNotice: true,
+                text: CONTEXT_OVERFLOW_RESUME_TEXT,
+              });
+              if (preemption.action === "stale") {
+                activityStatus = "cancelled";
+                turnMetricOutcome = "cancelled";
+                observability.info("context compaction preemption lost to durable settlement", {
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnStatus: preemption.turnStatus,
+                  activeTurnId: preemption.activeTurnId,
+                });
+                return { status: "cancelled" };
+              }
+              await publishDurableSessionEvents(
+                bus,
                 input.workspaceId,
-                activeTurnId,
-                preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-                undefined,
-                executionGeneration,
+                input.sessionId,
+                preemption.events,
               );
               activityStatus = "preempted";
               turnMetricOutcome = "preempted";
@@ -3943,13 +3937,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the worker-death re-dispatch (any worker re-resumes by id).
       if (error instanceof SandboxLeaseSupersededError && preemptTurnId) {
         try {
-          await requeuePreemptedTurn(
-            db,
+          const preemption = await applySessionTurnPreemption(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: preemptTurnId,
+            triggerEventId: input.triggerEventId,
+            reason: "sandbox_lease_superseded",
+            resumeWithNotice: false,
+          });
+          if (preemption.action === "stale") {
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return { status: "cancelled" };
+          }
+          await publishDurableSessionEvents(
+            bus,
             input.workspaceId,
-            preemptTurnId,
-            input.triggerEventId,
-            undefined,
-            executionGeneration,
+            input.sessionId,
+            preemption.events,
           );
           activityStatus = "preempted";
           turnMetricOutcome = "preempted";
@@ -3997,40 +4001,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               resumeWithNotice = false;
             }
           }
-          const { events: preemptedEvents, accepted: preemptAccepted } =
-            await appendAndPublishTurnEventsFenced(
-              db,
-              bus,
-              input.workspaceId,
-              input.sessionId,
-              preemptTurnId,
-              executionGeneration,
-              [
-                {
-                  turnId: preemptTurnId,
-                  type: "turn.preempted",
-                  payload: {
-                    triggerEventId: input.triggerEventId,
-                    reason: "worker_shutdown",
-                    resumeWithNotice,
-                    ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
-                  },
-                },
-                {
-                  turnId: preemptTurnId,
-                  type: "session.status.changed",
-                  payload: { status: "queued" },
-                },
-              ],
-            );
-          const preemptedEvent = preemptAccepted ? preemptedEvents[0] : undefined;
-          await requeuePreemptedTurn(
-            db,
+          const preemption = await applySessionTurnPreemption(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: preemptTurnId,
+            triggerEventId: input.triggerEventId,
+            reason: "worker_shutdown",
+            resumeWithNotice,
+            ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+          });
+          if (preemption.action === "stale") {
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return { status: "cancelled" };
+          }
+          await publishDurableSessionEvents(
+            bus,
             input.workspaceId,
-            preemptTurnId,
-            resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-            undefined,
-            executionGeneration,
+            input.sessionId,
+            preemption.events,
           );
           activityStatus = "preempted";
           turnMetricOutcome = "preempted";

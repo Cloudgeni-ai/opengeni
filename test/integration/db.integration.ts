@@ -6,6 +6,8 @@ import * as dbSchema from "../../packages/db/src/schema";
 import {
   appendSessionEvents,
   appendSessionHistoryItems,
+  applySessionTurnInterrupt,
+  applySessionTurnPreemption,
   applyContextCompaction,
   bootstrapWorkspace,
   claimNextQueuedTurn,
@@ -495,6 +497,263 @@ describe("DB integration", () => {
     await expect(
       requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id),
     ).rejects.toThrow("Preemptible session turn not found");
+  });
+
+  test("terminal interrupt makes a late compaction preempt an event-free stale no-op", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "race terminal settlement",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger, interrupt] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      [
+        { type: "user.message", payload: { text: "race terminal settlement" } },
+        { type: "user.interrupt", payload: { reason: "steer" } },
+      ],
+    );
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "race terminal settlement",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "xhigh",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const [rolePosture] = await appDbClient.db.execute<{
+        rolsuper: boolean;
+        rolbypassrls: boolean;
+      }>(dbSql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`);
+      expect(rolePosture).toEqual({ rolsuper: false, rolbypassrls: false });
+
+      const cancelled = await applySessionTurnInterrupt(
+        appDbClient.db,
+        grant.workspaceId,
+        session.id,
+        interrupt!.id,
+      );
+      expect(cancelled.action).toBe("cancelled");
+      const sequenceAfterCancel = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+        .lastSequence;
+
+      const late = await applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        reason: "context_compacted",
+        resumeWithNotice: true,
+        text: "resume only if the live turn still owns the session",
+      });
+      expect(late).toMatchObject({
+        action: "stale",
+        events: [],
+        turnStatus: "cancelled",
+        activeTurnId: null,
+      });
+      const settledSession = await getSession(dbClient.db, grant.workspaceId, session.id);
+      expect(settledSession?.lastSequence).toBe(sequenceAfterCancel);
+      expect(settledSession?.status).toBe("queued");
+      expect(settledSession?.activeTurnId).toBeNull();
+      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+        "cancelled",
+      );
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
+      expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+
+      const missing = await applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: crypto.randomUUID(),
+        triggerEventId: trigger!.id,
+        reason: "worker_shutdown",
+        resumeWithNotice: false,
+      });
+      expect(missing).toMatchObject({ action: "stale", events: [], turnStatus: null });
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
+        sequenceAfterCancel,
+      );
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("concurrent interrupt and preempt commit exactly one coherent settlement", async () => {
+    const grant = await testGrant(dbClient.db);
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const session = await createSession(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          initialMessage: `concurrent settlement ${attempt}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+        });
+        const [trigger, interrupt] = await appendSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          [
+            { type: "user.message", payload: { text: `concurrent settlement ${attempt}` } },
+            { type: "user.interrupt", payload: { reason: "steer" } },
+          ],
+        );
+        const turn = await enqueueSessionTurn(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: trigger!.id,
+          temporalWorkflowId: `session-${session.id}`,
+          source: "user",
+          prompt: `concurrent settlement ${attempt}`,
+          resources: [],
+          tools: [],
+          model: "scripted-model",
+          reasoningEffort: "xhigh",
+          sandboxBackend: "none",
+          metadata: {},
+        });
+        await claimNextQueuedTurn(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          `session-${session.id}`,
+        );
+
+        const [control, preempt] = await Promise.all([
+          applySessionTurnInterrupt(appDbClient.db, grant.workspaceId, session.id, interrupt!.id),
+          applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            turnId: turn.id,
+            triggerEventId: trigger!.id,
+            reason: "context_compacted",
+            resumeWithNotice: true,
+            text: "concurrent resume",
+          }),
+        ]);
+        expect(control.action).toBe("cancelled");
+        expect(preempt.action).toBe("stale");
+        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+        expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
+        expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
+        expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+        expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+          "cancelled",
+        );
+        const finalSession = await getSession(dbClient.db, grant.workspaceId, session.id);
+        expect(finalSession?.status).toBe("queued");
+        expect(finalSession?.activeTurnId).toBeNull();
+      }
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("a delayed interrupt event cannot cancel a newer attempt", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "stale interrupt",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [oldTrigger, staleInterrupt, currentTrigger] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      [
+        { type: "user.message", payload: { text: "old attempt" } },
+        { type: "user.interrupt", payload: { reason: "steer" } },
+        { type: "user.message", payload: { text: "current attempt" } },
+      ],
+    );
+    expect(oldTrigger).toBeDefined();
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: currentTrigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "stale interrupt",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "xhigh",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+      .lastSequence;
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+
+    try {
+      const stale = await applySessionTurnInterrupt(
+        appDbClient.db,
+        grant.workspaceId,
+        session.id,
+        staleInterrupt!.id,
+      );
+      expect(stale).toMatchObject({
+        action: "stale",
+        turnId: turn.id,
+        turnStatus: "running",
+        events: [],
+      });
+      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+        "running",
+      );
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
+        sequenceBefore,
+      );
+
+      const [currentInterrupt] = await appendSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        [{ type: "user.interrupt", payload: { reason: "steer" } }],
+      );
+      expect(
+        (
+          await applySessionTurnInterrupt(
+            appDbClient.db,
+            grant.workspaceId,
+            session.id,
+            currentInterrupt!.id,
+          )
+        ).action,
+      ).toBe("cancelled");
+    } finally {
+      await appDbClient.close();
+    }
   });
 
   test("dying-attempt cancel is fenced against worker-death recovery", async () => {

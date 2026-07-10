@@ -1104,6 +1104,10 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        // This scenario tests progress-aware auto-continuation, not the
+        // production trigger default. Keep its historical 80k usage above a
+        // pinned 60k threshold after the production default moved to 90%.
+        contextCompactionThresholdRatio: 0.6,
         mcpServers: [
           {
             id: "opengeni",
