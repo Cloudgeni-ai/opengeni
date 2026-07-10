@@ -43,6 +43,12 @@ const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";
 const ADMIN_BASE_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}`;
+// A once-migrated database every test file clones from via `CREATE DATABASE ...
+// TEMPLATE`. Postgres clones a template with a file-level copy, so each file
+// gets a fully-migrated + app-granted database in ~100ms instead of replaying
+// the whole 55-migration chain (seconds) per file. Built exactly once per
+// container (lock-guarded); `datistemplate=true` is the "ready" sentinel.
+const TEMPLATE_DB = "og_test_template";
 
 const STATE_DIR = join(tmpdir(), "opengeni-shared-pg");
 const LOCK_DIR = join(STATE_DIR, "lock");
@@ -159,6 +165,73 @@ async function waitForReady(url: string): Promise<void> {
   }
 }
 
+/** Is the migrated template database present and marked ready? */
+async function templateReady(): Promise<boolean> {
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+  try {
+    const rows = await root`
+      SELECT 1 FROM pg_database WHERE datname = ${TEMPLATE_DB} AND datistemplate`;
+    return rows.length > 0;
+  } catch {
+    return false;
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
+/**
+ * Build the once-per-container template database: CREATE it, run the full
+ * migration chain, apply the opengeni_app GRANTs, then flip datistemplate=true
+ * as the ready sentinel. Every test file's database is later cloned from it via
+ * `CREATE DATABASE ... TEMPLATE`, which skips the migration replay entirely.
+ * Called only inside the container lock, so exactly one process builds it; the
+ * `datistemplate` guard makes it idempotent and self-healing after a crash
+ * mid-build (a leftover non-template DB of the same name is dropped + rebuilt).
+ */
+async function ensureTemplateBuilt(): Promise<void> {
+  if (await templateReady()) {
+    return;
+  }
+  // Drop a partial/crashed leftover (not yet marked as a template) and rebuild.
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+  try {
+    await root.unsafe(`DROP DATABASE IF EXISTS "${TEMPLATE_DB}" WITH (FORCE)`);
+    await root.unsafe(`CREATE DATABASE "${TEMPLATE_DB}"`);
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+
+  const templateUrl = `${ADMIN_BASE_URL}/${TEMPLATE_DB}`;
+  // Apply the full migration chain once (pgvector extension is created by
+  // 0000_initial inside migrate()).
+  await migrate(templateUrl);
+
+  // Grant the non-superuser login role the same way each per-file database used
+  // to be granted (the migrations' grants are IF EXISTS-guarded and skipped in a
+  // fresh database); clones inherit these object grants from the template.
+  const grantsSql = postgres(templateUrl, { max: 1 });
+  try {
+    await grantsSql.unsafe(`
+      GRANT USAGE ON SCHEMA public TO opengeni_app;
+      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
+      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
+    `);
+  } finally {
+    await grantsSql.end().catch(() => undefined);
+  }
+
+  // Flip the ready sentinel. This must run with NO open connections to the
+  // template; the migrate + grant pools above are already closed. Marking it a
+  // template also lets the subsequent `CREATE DATABASE ... TEMPLATE` proceed.
+  const marker = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+  try {
+    await marker.unsafe(`UPDATE pg_database SET datistemplate = true WHERE datname = '${TEMPLATE_DB}'`);
+  } finally {
+    await marker.end().catch(() => undefined);
+  }
+}
+
 /**
  * Ensure the single shared container is up and the cluster-global opengeni_app
  * role exists, then bump the refcount. Lock-guarded so exactly one parallel
@@ -222,6 +295,10 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         throw err;
       }
     }
+    // Build the once-per-container migrated template (idempotent; self-heals a
+    // crashed partial). Inside the lock so exactly one process pays the
+    // migration; every acquire after that just clones from it.
+    await ensureTemplateBuilt();
     await writeRefcount((await readRefcount()) + 1);
     return true;
   });
@@ -247,6 +324,34 @@ async function createDatabase(dbName: string): Promise<void> {
   const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
   try {
     await root.unsafe(`CREATE DATABASE "${dbName}"`);
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
+/**
+ * CREATE a uniquely-named database as a clone of the migrated template. Under
+ * parallel test-file processes two clones can race and Postgres briefly reports
+ * the template as "being accessed by other users" — a transient that clears in
+ * milliseconds — so retry a few times before giving up.
+ */
+async function cloneFromTemplate(dbName: string): Promise<void> {
+  const root = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
+  try {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try {
+        await root.unsafe(`CREATE DATABASE "${dbName}" TEMPLATE "${TEMPLATE_DB}"`);
+        return;
+      } catch (err) {
+        const message = String((err as { message?: string })?.message ?? err);
+        if (/being accessed by other users|source database/i.test(message) && Date.now() < deadline) {
+          await Bun.sleep(50 + Math.random() * 100);
+          continue;
+        }
+        throw err;
+      }
+    }
   } finally {
     await root.end().catch(() => undefined);
   }
@@ -289,22 +394,12 @@ export async function acquireSharedTestDatabase(
   const appUrl = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/${dbName}`;
 
   try {
-    await createDatabase(dbName);
+    // Clone this file's database from the once-migrated template. Postgres does a
+    // file-level copy, so the fully-migrated schema + opengeni_app grants land in
+    // ~100ms instead of replaying the whole migration chain per file.
+    await cloneFromTemplate(dbName);
 
-    // Apply the full migration chain to this file's database.
-    await migrate(adminUrl);
-
-    // Run the same per-database GRANT blocks the migrations would have (they are
-    // IF EXISTS-guarded and were skipped while opengeni_app didn't exist at
-    // migration time / in a fresh database). pgvector extension is created by
-    // 0000_initial inside migrate().
     const admin = postgres(adminUrl, { max: 4 });
-    await admin.unsafe(`
-      GRANT USAGE ON SCHEMA public TO opengeni_app;
-      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-    `);
 
     let released = false;
     return {
