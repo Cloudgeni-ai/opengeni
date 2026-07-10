@@ -63,6 +63,16 @@ export type RoutingWiringIds = {
    * swap target is built fresh).
    */
   pinnedSelfhosted?: { sandboxId: string; epoch: number };
+  /**
+   * Whether the turn's `defaultBackend` IS the session's home (so the null pointer may
+   * resolve to it). Defaults to TRUE (omitted). Set explicitly FALSE on a machine-primary
+   * turn of a Modal-HOME session (pinned to a machine, no Modal group box established this
+   * turn): the routing resolver's null branch then throws a typed `home_unavailable_this_turn`
+   * error on a mid-turn clear-to-null instead of silently serving the pinned machine — the
+   * detach's pointer commit stands and takes effect next turn. A genuine machine-HOME turn
+   * (home IS the machine) passes true.
+   */
+  defaultIsHome?: boolean;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -81,6 +91,30 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
   } catch {
     return { host: raw, port: 443, tls: true };
   }
+}
+
+/** The selfhosted CONTROL vs EXEC op deadlines for a turn, from settings. Control
+ *  ops (ping/fs/desktop/pty) stay on the short timeout so machine liveness is never
+ *  masked by a slow op; exec gets its own much larger budget so a real command is not
+ *  killed at the control wall. Threaded into every turn-path session build + resolver. */
+export function selfhostedTimeoutsFromSettings(settings: Settings): {
+  timeoutMs: number;
+  execTimeoutMs: number;
+} {
+  return {
+    timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+    execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+  };
+}
+
+/** The same split deadlines shaped for `makeActiveBackendResolver`'s dep names
+ *  (`selfhostedTimeoutMs` / `selfhostedExecTimeoutMs`), for a swap/pin target. */
+function selfhostedResolverTimeouts(settings: Settings): {
+  selfhostedTimeoutMs: number;
+  selfhostedExecTimeoutMs: number;
+} {
+  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
+  return { selfhostedTimeoutMs: timeoutMs, selfhostedExecTimeoutMs: execTimeoutMs };
 }
 
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
@@ -131,6 +165,9 @@ export function wrapTurnBoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    // A selfhosted swap target runs real commands too, so give it the same split
+    // deadlines the machine-primary establish path uses (short control, long exec).
+    ...selfhostedResolverTimeouts(settings),
     // The turn's declared environment → a selfhosted swap target's manifest, so the
     // SDK's per-turn manifest-env delta is empty (no "cannot change manifest
     // environment variables" throw when the turn pins to a vm). Mirrors the group
@@ -154,6 +191,12 @@ export function wrapTurnBoxWithRouting(
     // unresolvable (the swap tool validates liveness, so this only triggers if a
     // session points at a sibling modal box the turn cannot resume here) and the
     // op surfaces unresolvable — never a silent wrong-box landing.
+    //
+    // For a machine-primary turn of a Modal-HOME session (pinned to a machine, no
+    // group box established this turn), a mid-turn clear-to-null must NOT fall back to
+    // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
+    // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
+    ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
   });
 
   const proxy = new RoutingSandboxSession({
@@ -209,6 +252,7 @@ export function wrapLazyTurnBoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    ...selfhostedResolverTimeouts(settings),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
   });
 
@@ -280,6 +324,7 @@ export async function establishSelfhostedTurnSession(
   },
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus } = services;
+  const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
@@ -288,6 +333,10 @@ export async function establishSelfhostedTurnSession(
     epoch: args.epoch,
     environment: args.environment,
     workingDir: args.workingDir,
+    // Give this turn's exec ops the long deadline (control ops stay short) so a real
+    // command is not killed at the control wall.
+    timeoutMs,
+    execTimeoutMs,
   });
   return {
     client,

@@ -819,7 +819,7 @@ mod tests {
             let mut cmd = tokio::process::Command::new("/bin/sh");
             cmd.arg("-c").arg(&self.script);
             cmd.current_dir(dir.path());
-            let child = spawn_contained(cmd).expect("spawn test child");
+            let child = spawn_contained(cmd, None).expect("spawn test child");
 
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
             let (frame_tx, frame_rx) = mpsc::unbounded_channel();

@@ -194,9 +194,28 @@ export {
   timeoutControlResponse,
   offlineAgentError,
   timeoutAgentError,
+  drainingExhaustedError,
+  payloadTooLargeMessage,
+  drainingMessage,
+  execDeadlineHint,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+// The selfhosted control-op retry policy (the pure decision + the injected clock).
+export {
+  decideSelfhostedRetry,
+  selfhostedRetryBackoffMs,
+  defaultSelfhostedRetryClock,
+  SELFHOSTED_IDEMPOTENT_READONLY_OPS,
+  SELFHOSTED_DRAINING_MAX_RETRIES,
+  SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
+  SELFHOSTED_TIMEOUT_MAX_RETRIES,
+  SELFHOSTED_RETRY_BACKOFF_BASE_MS,
+  SELFHOSTED_RETRY_BACKOFF_FACTOR,
+  SELFHOSTED_RETRY_BACKOFF_CAP_MS,
+  type SelfhostedRetryClock,
+  type SelfhostedRetryDecision,
+} from "./selfhosted/retry-policy";
 export {
   SelfhostedSession,
   SelfhostedSandboxClient,
@@ -245,8 +264,11 @@ export {
 export {
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
+  swapTargetEstablishability,
   type ActiveBackendResolverDeps,
   type RoutableSandbox,
+  type BackendUnresolvableCode,
+  type SwapTargetEstablishability,
 } from "./routing/backend-resolver";
 
 /**

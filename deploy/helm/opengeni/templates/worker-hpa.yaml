@@ -20,4 +20,28 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ ((.Values.worker).autoscaling).targetCPUUtilizationPercentage }}
+    {{- if ((.Values.worker).autoscaling).targetMemoryUtilizationPercentage }}
+    # The worker is MEMORY bound, not CPU bound: each pod holds the full
+    # in-turn conversation history for every session it runs, so pods approach
+    # the memory limit (and OOM) long before CPU saturates. Memory is the
+    # signal that actually tracks the pressure; keep the target high (headroom)
+    # and pair it with the scaleDown stabilization in `behavior` so a transient
+    # dip never evicts a pod mid-turn.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ ((.Values.worker).autoscaling).targetMemoryUtilizationPercentage }}
+    {{- end }}
+    {{- with ((.Values.worker).autoscaling).customMetrics }}
+    # Optional custom/external metrics (needs a Prometheus adapter). A
+    # session-count or Temporal task-queue-backlog metric tracks worker load
+    # better than CPU; wire it here once the adapter is available.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ((.Values.worker).autoscaling).behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}

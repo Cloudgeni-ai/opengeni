@@ -30,6 +30,7 @@
 
 #![doc(html_root_url = "https://docs.rs/opengeni-agent-platform")]
 
+mod cgroup;
 mod desktop;
 mod error;
 mod native;
@@ -53,6 +54,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
+pub use cgroup::{establish_oom_isolation, OpCgroupConfig, OpCgroups};
 pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };

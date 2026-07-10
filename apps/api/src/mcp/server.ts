@@ -980,7 +980,7 @@ function registerFleetTools(
     "sandbox_provision",
     {
       description:
-        "Provision a new sandbox for the fleet. kind=selfhosted returns device-flow enrollment instructions to share with a HUMAN (install the agent + enroll their machine with loud whole-machine consent — the agent cannot self-consent). kind=modal creates a named Modal sandbox record (its box materializes on first swap).",
+        "Provision a new sandbox for the fleet. kind=selfhosted returns device-flow enrollment instructions to share with a HUMAN (install the agent + enroll their machine with loud whole-machine consent — the agent cannot self-consent). kind=modal creates a named Modal sandbox record, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so sandbox_swap to its id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
       inputSchema: {
         kind: z4.enum(["selfhosted", "modal"]),
         name: z4.string().min(1).max(120).optional(),

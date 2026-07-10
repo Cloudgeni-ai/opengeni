@@ -180,9 +180,17 @@ function isFenceError(error: unknown): boolean {
 export class RoutingSandboxSession implements RoutableBackendSession {
   private readonly deps: RoutingSandboxSessionDeps;
   private readonly maxFenceRetries: number;
-  // The per-epoch resolved-backend cache. Keyed by activeEpoch: a swap bumps the
-  // epoch, invalidating the cache so the NEXT op re-resolves the new backend.
+  // The resolved-backend cache. Keyed by the FULL pointer tuple
+  // `(activeEpoch, activeSandboxId)` — NOT the epoch alone. A swap bumps the epoch,
+  // but a pointer can also change its target id WITHOUT an epoch bump: the
+  // `sessions.active_sandbox_id` FK is `ON DELETE SET NULL`, so a cascade that
+  // deletes the pointed-at sandbox row nulls the id at the SAME epoch. Keying on the
+  // epoch alone would then keep serving the deleted/stale backend for that epoch
+  // (issue #341 §5.2 — a swap-free route to the Shape-3 symptom). Keying on the tuple
+  // makes any target change — epoch-bumped OR not — invalidate the cache so the next
+  // op re-resolves (and, for a null id, re-resolves the session HOME).
   private cachedEpoch: number | undefined;
+  private cachedSandboxId: string | null | undefined;
   private cached: ResolvedActiveBackend | undefined;
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
@@ -266,7 +274,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    */
   private async resolve(): Promise<ResolvedActiveBackend> {
     const pointer = await this.deps.readPointer();
-    if (this.cachedEpoch === pointer.activeEpoch && this.cached) {
+    if (
+      this.cachedEpoch === pointer.activeEpoch &&
+      this.cachedSandboxId === pointer.activeSandboxId &&
+      this.cached
+    ) {
       return this.cached;
     }
     const fromEpoch = this.cachedEpoch ?? pointer.activeEpoch;
@@ -282,6 +294,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
     }
     this.cachedEpoch = pointer.activeEpoch;
+    this.cachedSandboxId = pointer.activeSandboxId;
     this.cached = resolved;
     this.lastResolved = resolved;
     this.deps.onTransition?.({
@@ -327,6 +340,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
         lastError = error;
         this.cachedEpoch = undefined;
+        this.cachedSandboxId = undefined;
         this.cached = undefined;
         this.deps.onTransition?.({
           type: "fenced-retry",

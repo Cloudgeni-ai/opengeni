@@ -34,7 +34,18 @@ import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
 import type { ExposedPortEndpoint } from "../stream-port";
-import { agentErrorToControlError, subjectFor, type ControlRpc } from "./control-rpc";
+import {
+  agentErrorToControlError,
+  drainingExhaustedError,
+  execDeadlineHint,
+  subjectFor,
+  type ControlRpc,
+} from "./control-rpc";
+import {
+  decideSelfhostedRetry,
+  defaultSelfhostedRetryClock,
+  type SelfhostedRetryClock,
+} from "./retry-policy";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -209,8 +220,22 @@ export interface SelfhostedSessionDeps {
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
    *  Defaults to 0 (no fence) for the negotiation-only / test path. */
   epoch?: number;
-  /** Override the control-op timeout (tests). */
+  /** The CONTROL-op timeout (ping/fs/desktop/pty and the exec wire fallback). The
+   *  agent's own control liveness must stay responsive, so this is short (the 30s
+   *  default). Override for tests or per-deployment tuning. */
   timeoutMs?: number;
+  /**
+   * The EXEC process deadline — distinct from `timeoutMs`. A real command
+   * (compile, test run, install) routinely outlives the short control timeout, so
+   * exec gets its own, much larger budget: the agent kills the child at this wall,
+   * and the wire waits `execTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS`. Omitted ⇒
+   * falls back to `timeoutMs` (byte-identical to before this split), so any caller
+   * that does not opt in keeps today's behavior.
+   */
+  execTimeoutMs?: number;
+  /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
+   *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
+  retryClock?: SelfhostedRetryClock;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn passes to `runtime.buildAgent`'s `sandboxEnvironment` (and that the
@@ -276,6 +301,9 @@ export class SelfhostedSession {
   private readonly relay: SelfhostedRelayConfig;
   private readonly epoch: number;
   private readonly timeoutMs: number;
+  /** The exec process deadline (falls back to `timeoutMs` when unset). */
+  private readonly execTimeoutMs: number | undefined;
+  private readonly retryClock: SelfhostedRetryClock;
   private readonly subject: string;
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
@@ -322,6 +350,8 @@ export class SelfhostedSession {
     this.relay = deps.relay;
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
+    this.execTimeoutMs = deps.execTimeoutMs;
+    this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
     this.workingDir = deps.workingDir ?? "";
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
@@ -353,31 +383,69 @@ export class SelfhostedSession {
     };
   }
 
-  /** Issue a control op, decoding the agent's reply or throwing the mapped
-   *  `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
-   *  timeout error from the transport). */
+  /**
+   * Issue a control op, decoding the agent's reply or throwing the mapped
+   * `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
+   * timeout error from the transport).
+   *
+   * Two failure modes are retried in-place (the decision is the pure
+   * `decideSelfhostedRetry` policy):
+   *   - DRAINING — a pre-admission host-work backpressure rejection; the op never
+   *     started, so it is safe to re-issue for ANY op kind (bounded).
+   *   - a TIMEOUT / `agent_reconnecting` blip — re-issued ONCE, and ONLY for a
+   *     read-only idempotent-safe op. A timed-out MUTATION is NEVER re-issued: it
+   *     may already have executed on the machine (at-least-once), which would
+   *     duplicate the write/command. FENCED is intentionally NOT retried here — the
+   *     routing proxy retries it against a re-resolved backend under a fresh epoch.
+   * Each attempt carries a FRESH `requestId` (a retry is a distinct request).
+   */
   private async call(
     op: NonNullable<ControlRequest["op"]>,
     timeoutMs = this.timeoutMs,
   ): Promise<NonNullable<ControlResponse["result"]>> {
-    const req: ControlRequest = {
-      requestId: crypto.randomUUID(),
-      epoch: this.epoch,
-      op,
-    };
-    const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
-    if (res.error) {
-      throw agentErrorToControlError(res.error);
-    }
-    if (!res.result) {
-      throw agentErrorToControlError({
-        code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
-        message: "agent returned an empty control response",
-        retryable: false,
-        detail: {},
+    const opKind = op.$case;
+    let drainingRetries = 0;
+    let timeoutRetries = 0;
+    for (;;) {
+      const req: ControlRequest = {
+        requestId: crypto.randomUUID(),
+        epoch: this.epoch,
+        op,
+      };
+      const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
+      if (!res.error && res.result) {
+        return res.result;
+      }
+      const error = res.error
+        ? agentErrorToControlError(res.error)
+        : agentErrorToControlError({
+            code: 7, // ERROR_CODE_PROTOCOL — an empty result is a protocol violation
+            message: "agent returned an empty control response",
+            retryable: false,
+            detail: {},
+          });
+      const decision = decideSelfhostedRetry({
+        opKind,
+        error,
+        drainingRetries,
+        timeoutRetries,
+        jitter: this.retryClock.jitter(),
       });
+      if (decision.action === "fail") {
+        // Fold the retry count into the DRAINING copy when we actually retried, so
+        // the surfaced message reads "…retried N times first…".
+        if (error.draining && drainingRetries > 0) {
+          throw drainingExhaustedError(error, drainingRetries);
+        }
+        throw error;
+      }
+      await this.retryClock.sleep(decision.delayMs);
+      if (error.draining) {
+        drainingRetries += 1;
+      } else {
+        timeoutRetries += 1;
+      }
     }
-    return res.result;
   }
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
@@ -385,9 +453,13 @@ export class SelfhostedSession {
     // Keep the process deadline inside the request/reply deadline. Previously the
     // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
     // ~30s, leaving accepted work invisible and able to starve control liveness.
+    // exec gets its OWN (much larger) deadline distinct from the short control
+    // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
+    // when no exec deadline is threaded (unchanged for those callers).
+    const execDeadlineMs = this.execTimeoutMs ?? this.timeoutMs;
     const executionTimeoutMs = Math.max(
       1,
-      Math.min(Math.trunc(this.timeoutMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
+      Math.min(Math.trunc(execDeadlineMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
     );
     const execReq: ExecRequest = {
       // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
@@ -414,7 +486,7 @@ export class SelfhostedSession {
     if (result.$case !== "exec") {
       throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
     }
-    return execResultToChannelA(result.exec);
+    return execResultToChannelA(result.exec, executionTimeoutMs);
   }
 
   // ── The agent-turn provided-session contract (over the SAME NATS primitives) ──
@@ -788,6 +860,7 @@ export class SelfhostedSandboxClient {
   private readonly defaultAgentId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
+  private readonly execTimeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
   private readonly workingDir: string | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -801,7 +874,11 @@ export class SelfhostedSandboxClient {
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
     epoch?: number;
+    /** The control-op timeout threaded into every bound session. */
     timeoutMs?: number;
+    /** The exec process deadline threaded into every bound session (distinct from
+     *  `timeoutMs`; falls back to it when unset). See SelfhostedSessionDeps.execTimeoutMs. */
+    execTimeoutMs?: number;
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -818,6 +895,7 @@ export class SelfhostedSandboxClient {
     this.defaultAgentId = opts.agentId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
+    this.execTimeoutMs = opts.execTimeoutMs;
     this.environment = opts.environment;
     this.workingDir = opts.workingDir;
   }
@@ -837,6 +915,7 @@ export class SelfhostedSandboxClient {
       relay: this.relay,
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
+      ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
     });
@@ -911,8 +990,11 @@ export interface SelfhostedSessionBuild {
   environment?: Record<string, string>;
   /** The session working directory (the path/cwd base). Null/absent ⇒ workspace_root. */
   workingDir?: string | null;
-  /** Override the control-op timeout (tests). */
+  /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
   timeoutMs?: number;
+  /** The exec process deadline, distinct from `timeoutMs`. Absent ⇒ falls back to
+   *  `timeoutMs` (a real turn threads the long exec budget here). */
+  execTimeoutMs?: number;
 }
 
 /**
@@ -940,6 +1022,7 @@ export async function buildSelfhostedBackendSession(
     agentId: deps.agentId,
     epoch: deps.epoch,
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
+    ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
     ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
   });
@@ -959,9 +1042,17 @@ function readAgentId(state: unknown): string | undefined {
   return undefined;
 }
 
-function execResultToChannelA(res: ExecResponse): SelfhostedExecResult {
+function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): SelfhostedExecResult {
   const stdout = decoder.decode(res.stdout);
-  const stderr = decoder.decode(res.stderr);
+  let stderr = decoder.decode(res.stderr);
+  if (res.timedOut) {
+    // The agent killed the child at the exec deadline. Surface an actionable hint
+    // on STDERR ONLY — stdout is left byte-exact because the structural Channel-A
+    // surface parses command stdout (find/stat/git listings); a hint injected there
+    // would corrupt those parsers.
+    const hint = execDeadlineHint(Math.round(execDeadlineMs / 1000));
+    stderr = stderr ? `${stderr}\n${hint}` : hint;
+  }
   return {
     output: stdout,
     stdout,

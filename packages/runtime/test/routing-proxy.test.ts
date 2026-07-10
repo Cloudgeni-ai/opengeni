@@ -22,6 +22,8 @@ import {
   RoutingSandboxSession,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
+  ActiveBackendUnresolvableError,
+  swapTargetEstablishability,
   MockAgentResponder,
   type ActivePointer,
   type RoutableBackendSession,
@@ -268,6 +270,45 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
     await expect(proxy.exec({ cmd: "x" })).rejects.toThrow(/re-entrancy|proxy itself/i);
   });
+
+  // REGRESSION (issue #341 §5.2 / invariant E): the per-op cache was keyed by
+  // active_epoch ALONE, but a pointer can change its target id WITHOUT an epoch
+  // bump — the `sessions.active_sandbox_id` FK is `ON DELETE SET NULL`, so a cascade
+  // that deletes the pointed-at sandbox nulls the id at the SAME epoch. Keying on the
+  // epoch alone kept serving the deleted backend for that epoch (a swap-free route to
+  // the Shape-3 symptom: activeSandboxId:null in the list, ops still hitting the dead
+  // box). The cache must key on the FULL tuple (activeEpoch, activeSandboxId) so a
+  // same-epoch id change invalidates it and the next op re-resolves.
+  test("(6) cache key (epoch, sandboxId): a same-epoch target-id change invalidates the cache and re-resolves the HOME", async () => {
+    const group = new FakeBackend("group-modal");
+    const sibling = new FakeBackend("stale-sibling");
+    // A pointer whose id can change WITHOUT bumping the epoch (the FK SET NULL shape).
+    let pointer: ActivePointer = { activeSandboxId: "sbx-sibling", activeEpoch: 4 };
+    let resolves = 0;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ ...pointer }),
+      resolveActiveBackend: async (p): Promise<ResolvedActiveBackend> => {
+        resolves += 1;
+        return p.activeSandboxId === null
+          ? { session: group, sandboxId: null, kind: "modal" }
+          : { session: sibling, sandboxId: p.activeSandboxId, kind: "modal" };
+      },
+    });
+
+    // Op 1 resolves the sibling target at epoch 4.
+    expect(((await proxy.exec({ cmd: "a" })) as { stdout: string }).stdout).toBe("stale-sibling");
+    expect(resolves).toBe(1);
+
+    // The FK nulls the pointer id at the SAME epoch (no bump) — as an ON DELETE SET
+    // NULL cascade would. The NEXT op must NOT keep serving the cached sibling.
+    pointer = { activeSandboxId: null, activeEpoch: 4 };
+    expect(((await proxy.exec({ cmd: "b" })) as { stdout: string }).stdout).toBe("group-modal");
+    expect(resolves).toBe(2);
+
+    // The stale sibling never saw the second op; the home box did.
+    expect(sibling.calls).toEqual(["a"]);
+    expect(group.calls).toEqual(["b"]);
+  });
 });
 
 describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted dispatch", () => {
@@ -388,7 +429,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(d.sandboxId).toBeNull();
   });
 
-  test("modal swap target with no establisher -> unresolvable (caller 409s)", async () => {
+  test("modal swap target with no establisher -> unresolvable, typed unsupported_backend_context", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
@@ -397,12 +438,12 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 })).rejects.toThrow(
-      /cannot be established/,
-    );
+    const err = await resolve({ activeSandboxId: "sbx-modal", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("unsupported_backend_context");
   });
 
-  test("unknown sandbox id -> unresolvable", async () => {
+  test("unknown sandbox id -> unresolvable, typed stale_pointer (issue #341 typed diagnostics)", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
@@ -411,9 +452,29 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       controlRpcFactory: () => new MockAgentResponder(),
       relay: RELAY,
     });
-    await expect(resolve({ activeSandboxId: "ghost", activeEpoch: 1 })).rejects.toThrow(
-      /not found/,
-    );
+    const err = await resolve({ activeSandboxId: "ghost", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("stale_pointer");
+    expect((err as Error).message).toMatch(/not found/);
+  });
+
+  test("selfhosted target missing an enrollment -> typed offline_enrollment", async () => {
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async () => ({
+        id: "sbx-orphan",
+        kind: "selfhosted",
+        name: "unpaired",
+        enrollmentId: null,
+      }),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const err = await resolve({ activeSandboxId: "sbx-orphan", activeEpoch: 1 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("offline_enrollment");
   });
 
   test("end-to-end: proxy + real resolver, swap Modal->selfhosted lands the op on the laptop", async () => {
@@ -441,6 +502,112 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     const r = (await proxy.exec({ cmd: "echo $HOSTNAME" })) as { stdout: string };
     expect(r.stdout.trim()).toBe("laptop-99");
     expect(groupModal.calls).toEqual(["uname"]);
+  });
+
+  // REGRESSION (issue #341 Shape 3): a Modal-home turn that starts on its group box,
+  // swaps to a Connected Machine, then clears BACK to the null/default pointer must
+  // re-land the next op on the EXISTING group box — never keep serving the cached
+  // SelfhostedSession the swap built. (The 2026-07-10 failure: activeSandboxId:null in
+  // the list, but the exec hit a SelfhostedControlError from a stale machine session.)
+  test("(Shape 3) swap Modal-home → machine → clear back to null re-lands on the EXISTING group box, never the cached machine session", async () => {
+    const groupModal = new FakeBackend("group-modal");
+    const laptop = new MockAgentResponder({ hostname: "laptop-1" });
+    const ptr = mutablePointer(); // null start == the established Modal group box (home)
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: groupModal,
+      defaultKind: "modal",
+      getSandbox: async (id) =>
+        id === "sbx-self"
+          ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
+          : null,
+      controlRpcFactory: () => laptop,
+      relay: RELAY,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: groupModal, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // Home op: the group Modal box (echoes its tag).
+    expect(((await proxy.exec({ cmd: "0" })) as { stdout: string }).stdout).toBe("group-modal");
+    // Swap to the machine: the op reaches the laptop agent (echoes its hostname).
+    ptr.swap("sbx-self");
+    expect(
+      ((await proxy.exec({ cmd: "echo $HOSTNAME" })) as { stdout: string }).stdout.trim(),
+    ).toBe("laptop-1");
+    // Clear BACK to null: the op re-lands on the EXISTING group box, NOT the machine.
+    ptr.swap(null);
+    const back = await proxy.exec({ cmd: "2" });
+    expect((back as { stdout: string }).stdout).toBe("group-modal");
+    // The group box served both home ops; the machine served only its swapped-to op.
+    expect(groupModal.calls).toEqual(["0", "2"]);
+  });
+
+  // A machine going offline WHILE IT IS NOT ACTIVE (pointer back on the group box)
+  // must never surface on a home op — the null pointer resolves to the group box,
+  // whose availability is independent of the (now offline) machine.
+  test("(Shape 3) a machine offline while not active does not surface on the null/home op", async () => {
+    const groupModal = new FakeBackend("group-modal");
+    // The machine is offline → any op addressed to it would surface agent_offline.
+    const offlineLaptop = new MockAgentResponder({ online: false });
+    const ptr = mutablePointer();
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: groupModal,
+      defaultKind: "modal",
+      getSandbox: async (id) =>
+        id === "sbx-self"
+          ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
+          : null,
+      controlRpcFactory: () => offlineLaptop,
+      relay: RELAY,
+      selfhostedTimeoutMs: 200,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: groupModal, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // The pointer is on the group box (null); the offline machine is irrelevant.
+    expect(((await proxy.exec({ cmd: "home" })) as { stdout: string }).stdout).toBe("group-modal");
+    expect(groupModal.calls).toEqual(["home"]);
+  });
+});
+
+describe("swapTargetEstablishability — the shared admission/establishment predicate (issue #341 invariant A)", () => {
+  test("the session's own group box is always establishable (it is the null/home target)", () => {
+    expect(swapTargetEstablishability({ kind: "modal", isSessionGroup: true })).toEqual({
+      ok: true,
+    });
+    expect(swapTargetEstablishability({ kind: "selfhosted", isSessionGroup: true })).toEqual({
+      ok: true,
+    });
+  });
+
+  test("a selfhosted machine target is establishable (liveness is admission's separate gate)", () => {
+    expect(swapTargetEstablishability({ kind: "selfhosted", isSessionGroup: false })).toEqual({
+      ok: true,
+    });
+  });
+
+  test("a NON-group modal target is NOT establishable → unsupported_backend_context (Shape 1)", () => {
+    const r = swapTargetEstablishability({ kind: "modal", isSessionGroup: false });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("unsupported_backend_context");
+      expect(r.reason).toMatch(/Modal sandbox other than this session/i);
+    }
+  });
+
+  test("an unknown backend kind is NOT establishable", () => {
+    const r = swapTargetEstablishability({ kind: "daytona", isSessionGroup: false });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("unsupported_backend_context");
+    }
   });
 });
 
@@ -537,5 +704,107 @@ describe("RoutingSandboxSession — native-desktop surface (machine-primary comp
     expect(shot.png).toBe(native.frame.png);
     expect(shot.width).toBe(1440);
     expect(shot.height).toBe(900);
+  });
+});
+
+describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (issue #341, deferred sliver)", () => {
+  const machineSandbox: RoutableSandbox = {
+    id: "sbx-self",
+    kind: "selfhosted",
+    name: "laptop",
+    enrollmentId: "enroll-1",
+  };
+
+  test("defaultIsHome:false — a clear-to-null on a machine-pinned turn throws typed home_unavailable_this_turn, never routes to the machine", async () => {
+    // A Modal-HOME session pinned to a machine never established its group box this
+    // turn. A mid-turn clear-to-null must fail typed-and-specific — the detach is
+    // accepted (its pointer commit stands, effective next turn) and this turn has no
+    // home box — rather than silently keep serving the pinned machine.
+    const machine = new FakeBackend("pinned-machine");
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: machine,
+      defaultKind: "selfhosted",
+      getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },
+      defaultIsHome: false,
+    });
+
+    // The pinned machine pointer still resolves to the machine (normal machine ops).
+    const pinned = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 3 });
+    expect(pinned.session).toBe(machine);
+
+    // A clear-to-null has NO established home this turn → typed, specific error.
+    const err = await resolve({ activeSandboxId: null, activeEpoch: 4 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("home_unavailable_this_turn");
+    expect((err as Error).message).toMatch(/detach|next turn|no active home/i);
+    // The machine was NOT returned as the null answer (no silent re-route).
+    expect((err as Error).message).not.toMatch(/pinned-machine/);
+  });
+
+  test("defaultIsHome omitted (machine-home / null-start Modal-home): null resolves to the home default as before", async () => {
+    const home = new FakeBackend("home-box");
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: home,
+      defaultKind: "selfhosted",
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const r = await resolve({ activeSandboxId: null, activeEpoch: 0 });
+    expect(r.session).toBe(home);
+    expect(r.sandboxId).toBeNull();
+  });
+
+  test("defaultIsHome:true (a genuine machine-HOME turn): null still resolves to the machine (no regression)", async () => {
+    // A machine-HOME session's home IS the machine, so a clear-to-null resolves right
+    // back to it — the throw is scoped to Modal-home turns pinned to a machine.
+    const machine = new FakeBackend("machine-home");
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: machine,
+      defaultKind: "selfhosted",
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      defaultIsHome: true,
+    });
+    const r = await resolve({ activeSandboxId: null, activeEpoch: 5 });
+    expect(r.session).toBe(machine);
+    expect(r.sandboxId).toBeNull();
+  });
+
+  test("the proxy surfaces the typed error to the op (never a silent machine landing)", async () => {
+    const machine = new FakeBackend("pinned-machine");
+    const ptr = mutablePointer({ activeSandboxId: "sbx-self", activeEpoch: 3 });
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: machine,
+      defaultKind: "selfhosted",
+      getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },
+      defaultIsHome: false,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: machine, sandboxId: "sbx-self", kind: "selfhosted" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // First op on the pinned machine works.
+    expect(((await proxy.exec({ cmd: "0" })) as { stdout: string }).stdout).toBe("pinned-machine");
+    // Clear to null (the detach) → the next op fails typed, does NOT land on the machine.
+    ptr.swap(null);
+    const err = await proxy.exec({ cmd: "1" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("home_unavailable_this_turn");
+    // The machine only ever saw the pre-detach op.
+    expect(machine.calls).toEqual(["0"]);
   });
 });

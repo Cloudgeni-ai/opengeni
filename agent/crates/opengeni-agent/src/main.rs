@@ -224,6 +224,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         enroll_command(enroll_args, api_url).await?
     };
 
+    // Establish per-op OOM cgroup isolation (issue #345) BEFORE spawning any
+    // agent-infra child (e.g. Xvfb below): the startup dance moves the agent into a
+    // `supervisor` cgroup leaf, so children spawned afterward inherit that leaf and
+    // only host execs land in their own per-op memory leaves. Returns None (a
+    // logged, graceful no-op) off a delegated Linux cgroup v2 host — the agent then
+    // serves exactly as before, with no per-op isolation.
+    let op_cgroups = opengeni_agent_platform::establish_oom_isolation(
+        opengeni_agent_platform::OpCgroupConfig::from_env(),
+    );
+
     // Opt-in Xvfb for a headless Linux box (`--virtual-desktop`). Held for the run
     // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
     let _virtual_desktop = maybe_spawn_virtual_desktop(&args);
@@ -239,7 +249,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     });
     // Build the platform with the relay registrar wired; its desktop backend is
     // (re)resolved against the now-present $DISPLAY (a real screen or the Xvfb one).
-    let platform = Arc::new(NativePlatform::new().with_stream_registry(Arc::new(hub)));
+    // Wire the per-op cgroup manager in when the startup dance established one.
+    let mut platform = NativePlatform::new().with_stream_registry(Arc::new(hub));
+    if let Some(cgroups) = op_cgroups {
+        platform = platform.with_oom_isolation(cgroups);
+    }
+    let platform = Arc::new(platform);
 
     let supervisor = Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"));
     let shutdown = supervisor.shutdown_handle();
@@ -515,11 +530,11 @@ async fn enroll_with_token(
 }
 
 /// Spawns a task that triggers a clean shutdown on SIGINT or (unix) SIGTERM.
-fn spawn_signal_handler(shutdown: Arc<tokio::sync::Notify>) {
+fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         info!("received stop signal; shutting down cleanly");
-        shutdown.notify_waiters();
+        shutdown.request();
     });
 }
 

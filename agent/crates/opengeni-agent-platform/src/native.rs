@@ -17,6 +17,7 @@ use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
+use crate::cgroup::OpCgroups;
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
 use crate::{HostIdentity, Platform, StreamRegistry};
@@ -36,6 +37,11 @@ pub struct NativePlatform {
     /// agent supervisor once it has a relay connection. `None` until then (and in
     /// unit contexts), in which case the stream ops report a clean `Unsupported`.
     stream_registry: Option<Arc<dyn StreamRegistry>>,
+    /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
+    /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
+    /// non-Linux / non-delegated host), in which case exec runs with no per-op
+    /// memory isolation — its children still get a raised `oom_score_adj`.
+    cgroups: Option<Arc<OpCgroups>>,
 }
 
 impl std::fmt::Debug for NativePlatform {
@@ -44,6 +50,7 @@ impl std::fmt::Debug for NativePlatform {
             .field("workspace_root", &self.workspace_root)
             .field("has_display", &self.desktop.probe().is_some())
             .field("has_stream_registry", &self.stream_registry.is_some())
+            .field("has_oom_isolation", &self.cgroups.is_some())
             .finish()
     }
 }
@@ -65,6 +72,7 @@ impl NativePlatform {
             workspace_root,
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
+            cgroups: None,
         }
     }
 
@@ -76,6 +84,7 @@ impl NativePlatform {
             workspace_root: workspace_root.into(),
             desktop: Arc::from(resolve_desktop()),
             stream_registry: None,
+            cgroups: None,
         }
     }
 
@@ -85,6 +94,16 @@ impl NativePlatform {
     #[must_use]
     pub fn with_stream_registry(mut self, registry: Arc<dyn StreamRegistry>) -> Self {
         self.stream_registry = Some(registry);
+        self
+    }
+
+    /// Returns a copy of this platform with a per-op OOM cgroup manager wired in, so
+    /// each `exec` child is placed in its own memory sub-cgroup (issue #345). Called
+    /// by the agent supervisor at startup after [`crate::establish_oom_isolation`]
+    /// succeeds on a delegated Linux cgroup v2 host; left unset everywhere else.
+    #[must_use]
+    pub fn with_oom_isolation(mut self, cgroups: Arc<OpCgroups>) -> Self {
+        self.cgroups = Some(cgroups);
         self
     }
 
@@ -138,11 +157,18 @@ struct ExecProcessGroup {
     child: tokio::process::Child,
     pgid: i32,
     running: bool,
+    /// The per-op memory leaf this exec's processes were placed in (issue #345),
+    /// or `None` when isolation is unavailable. Torn down once the process tree is
+    /// reaped. Always `None` off Linux (no manager is ever wired there).
+    op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
 }
 
 #[cfg(unix)]
 impl ExecProcessGroup {
-    fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+    fn spawn(
+        mut command: tokio::process::Command,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<Self> {
         let mut anchor_command = tokio::process::Command::new("/bin/sh");
         anchor_command
             .arg("-c")
@@ -166,11 +192,31 @@ impl ExecProcessGroup {
             }
         };
 
+        // Bias the kernel's global OOM killer toward this child (and its inheriting
+        // descendants) so a runaway command is sacrificed before the supervisor.
+        // Always applied on Linux — independent of, and composing with, the per-op
+        // cgroup below (which bounds systemd-oomd's scope).
+        #[cfg(target_os = "linux")]
+        if let Some(child_pid) = child.id() {
+            crate::cgroup::raise_exec_oom_score_adj(child_pid);
+        }
+
+        // Place the requested child AND the group anchor into a per-op memory leaf
+        // so they share one OOM fate, isolated from the control supervisor. The tiny
+        // window between spawn and this move is the accepted post-spawn billing
+        // window — pre_exec placement is async-signal-unsafe and deliberately not
+        // used. A no-op when `cgroups` is `None` (isolation unavailable / off Linux).
+        let op_cgroup = cgroups.and_then(|cg| {
+            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            cg.place_op(&pids)
+        });
+
         Ok(Self {
             anchor,
             child,
             pgid,
             running: true,
+            op_cgroup,
         })
     }
 
@@ -201,6 +247,11 @@ impl ExecProcessGroup {
         // not signal the now-recyclable numeric PGID.
         let _ = self.anchor.wait().await?;
         self.running = false;
+        // The process tree is reaped, so the op leaf can be removed now (bounded
+        // EBUSY retry). Taking the handle here means Drop below won't touch it.
+        if let Some(handle) = self.op_cgroup.take() {
+            handle.teardown().await;
+        }
         Ok(status)
     }
 }
@@ -208,17 +259,24 @@ impl ExecProcessGroup {
 #[cfg(unix)]
 impl Drop for ExecProcessGroup {
     fn drop(&mut self) {
-        if !self.running || self.anchor.id().is_none() {
-            return;
-        }
-        if let Err(error) = self.terminate() {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    group_id = self.pgid,
-                    %error,
-                    "failed to terminate cancelled exec process group"
-                );
+        if self.running && self.anchor.id().is_some() {
+            if let Err(error) = self.terminate() {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        group_id = self.pgid,
+                        %error,
+                        "failed to terminate cancelled exec process group"
+                    );
+                }
             }
+        }
+        // A cancelled/timed-out exec drops here with its op leaf still present: the
+        // group was just SIGKILL'd but its processes reap asynchronously, so this
+        // best-effort rmdir usually leaves an (eventually empty) leaf that the next
+        // unit stop reclaims. On the normal path the handle was already taken and
+        // torn down in wait(), so this is a no-op there.
+        if let Some(handle) = self.op_cgroup.take() {
+            handle.teardown_best_effort();
         }
     }
 }
@@ -381,16 +439,31 @@ impl ContainedExec {
 /// design: on Unix a stopped anchor owns the process-group id; on Windows a Job
 /// Object owns the tree.
 ///
+/// `cgroups` is the per-op OOM-isolation root: when present (Linux with isolation
+/// available), the group's processes are placed into a fresh memory leaf so their
+/// page cache and anon memory share one OOM fate, billed away from the supervisor.
+/// Pass `None` where isolation is unavailable or not wanted (tests, non-Linux).
+///
 /// # Errors
 ///
 /// Propagates the spawn IO error (e.g. the program is missing or not executable).
-pub fn spawn_contained(mut command: tokio::process::Command) -> std::io::Result<ContainedExec> {
+pub fn spawn_contained(
+    mut command: tokio::process::Command,
+    cgroups: Option<&OpCgroups>,
+) -> std::io::Result<ContainedExec> {
     command
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut group = ExecProcessGroup::spawn(command)?;
+    #[cfg(unix)]
+    let mut group = ExecProcessGroup::spawn(command, cgroups)?;
+    #[cfg(windows)]
+    let mut group = {
+        // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
+        let _ = cgroups;
+        ExecProcessGroup::spawn(command)?
+    };
     let (stdin, stdout, stderr) = group.take_pipes();
     Ok(ContainedExec {
         stdin,
@@ -447,7 +520,9 @@ impl Platform for NativePlatform {
         // Spawn inside the shared containment primitive. `spawn_contained` configures
         // piped stdio + kill_on_drop; the group's Drop SIGKILLs the POSIX process
         // group (Unix) / Job Object (Windows) on any early return, incl. the timeout.
-        let mut contained = spawn_contained(cmd)
+        // The per-op cgroup leaf (#351) rides inside the group: placed at spawn,
+        // torn down after the anchor reap in wait(), best-effort in Drop.
+        let mut contained = spawn_contained(cmd, self.cgroups.as_deref())
             .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))?;
 
         // Feed stdin (if any) then drop the handle so the child sees EOF.
@@ -1306,6 +1381,49 @@ mod tests {
         let _ = exec_task.await;
 
         assert_process_exits(descendant_pid, "cancelled exec").await;
+    }
+
+    /// Every exec child is stamped `oom_score_adj=500` so the kernel OOM killer
+    /// sacrifices a runaway command before the supervisor (issue #345). This needs
+    /// no cgroup delegation (raising is always unprivileged-legal), so it runs on
+    /// any Linux host. The direct child (the fixture) reports its own PID — the one
+    /// the exec path stamps — and holds it alive long enough to read the value.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exec_child_gets_raised_oom_score_adj() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("oom-score-child.pid");
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_descendant_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let child_pid = recorded_pid(&pid_file).await;
+        // The stamp is written post-spawn, so poll briefly for the raised value
+        // rather than assume it landed before the fixture published its PID.
+        let oom_path = format!("/proc/{child_pid}/oom_score_adj");
+        let mut observed = String::new();
+        for _ in 0..200 {
+            if let Ok(text) = tokio::fs::read_to_string(&oom_path).await {
+                observed = text.trim().to_string();
+                if observed == "500" {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        exec_task.abort();
+        let _ = exec_task.await;
+        assert_eq!(
+            observed, "500",
+            "exec child {child_pid} must have oom_score_adj=500, saw {observed:?}"
+        );
     }
 
     #[tokio::test]

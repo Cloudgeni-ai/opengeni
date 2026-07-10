@@ -554,6 +554,25 @@ const SettingsSchema = z.object({
   // bus connects anonymously (local dev / a NATS with no auth_callout).
   selfhostedNatsControlUser: z.string().optional(),
   selfhostedNatsControlPassword: z.string().optional(),
+  // --- selfhosted (Connected Machine) control/exec op deadlines ---------------
+  // The control plane splits its op deadline in two. CONTROL ops (ping / fs / git /
+  // desktop / pty) must stay responsive so a machine's liveness is never masked by a
+  // slow op, so they use the short control timeout. EXEC gets its OWN, larger budget:
+  // a real command (compile, test run, dependency install) routinely outlives the
+  // control timeout, and before the split a long command was killed at the ~30s
+  // control wall. The agent kills the exec child at this deadline; the wire waits
+  // slightly longer (SELFHOSTED_EXEC_REPLY_GRACE_MS) for the typed timed-out reply.
+  //
+  // The exec default is a DELIBERATELY MODEST 2min (not 5): the agent-side admission
+  // pool is (until a later agent release) a FLAT 8 permits with no per-class split,
+  // so 8 slow execs holding a permit for 5 minutes would blanket-DRAIN every fs/git
+  // op — shipping the amplifier before the class-aware-admission fix. 2min still
+  // clears the large majority of the observed >30s exec tail; genuinely long jobs run
+  // in the background (see the exec-deadline hint) or raise the knob per deployment.
+  // Knobs: OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS (default 2min) and
+  // OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS (default 30s).
+  sandboxSelfhostedExecTimeoutMs: z.coerce.number().int().positive().default(120_000),
+  sandboxSelfhostedControlTimeoutMs: z.coerce.number().int().positive().default(30_000),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
@@ -1119,6 +1138,8 @@ export function getSettings(): Settings {
     selfhostedNatsCalloutPassword: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD"),
     selfhostedNatsControlUser: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_USER"),
     selfhostedNatsControlPassword: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD"),
+    sandboxSelfhostedExecTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS"),
+    sandboxSelfhostedControlTimeoutMs: optional("OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),

@@ -165,6 +165,21 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
+  test("selfhosted exec/control timeouts default to 2min/30s and parse their env vars", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(120_000);
+    expect(defaults.sandboxSelfhostedControlTimeoutMs).toBe(30_000);
+    const overridden = withEnv(
+      {
+        OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS: "600000",
+        OPENGENI_SANDBOX_SELFHOSTED_CONTROL_TIMEOUT_MS: "45000",
+      },
+      () => getSettings(),
+    );
+    expect(overridden.sandboxSelfhostedExecTimeoutMs).toBe(600_000);
+    expect(overridden.sandboxSelfhostedControlTimeoutMs).toBe(45_000);
+  });
+
   test("parses boolean environment values without treating false as true", () => {
     const settings = withEnv(
       {

@@ -9,6 +9,7 @@ members = [
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
     "crates/opengeni-relay",
+    "crates/opengeni-agent-harness",
 ]
 
 # Shared metadata + lint posture for every crate in the agent workspace.

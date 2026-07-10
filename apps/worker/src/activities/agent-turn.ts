@@ -9,6 +9,7 @@ import {
   getRigVersion,
   getSandbox,
   readActiveSandbox,
+  setActiveSandbox,
   requireFile,
   getSessionEvent,
   getSessionGoal,
@@ -47,6 +48,8 @@ import {
   SandboxImageConflictError,
   buildConnectionTokenResolver,
   type AppendEventInput,
+  type ActiveSandboxPointer,
+  type SandboxRecord,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
@@ -64,12 +67,14 @@ import {
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
+  swapTargetEstablishability,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
   type ModelResponseUsage,
   type BuildAgentOptions,
+  type BackendUnresolvableCode,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import {
@@ -162,7 +167,11 @@ import { captureWorkspaceRevision } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
-import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
+import {
+  CAPABILITY_DESCRIPTORS,
+  type ResourceRef,
+  type SessionEventType,
+} from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 
 // How long the session workflow holds the loop after a retryable provider
@@ -596,6 +605,120 @@ export async function resolveActiveSandboxBackend(
     );
     return undefined;
   }
+}
+
+/**
+ * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
+ * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
+ * or null to leave it in place. STRUCTURAL unestablishability only:
+ *   - no record → the pointed-at sandbox row is gone (`stale_pointer`);
+ *   - an unestablishable kind (a non-group Modal sibling, or an unknown backend) per
+ *     the SHARED `swapTargetEstablishability` predicate (`unsupported_backend_context`);
+ *   - a selfhosted sandbox with no enrollment id to address (`offline_enrollment`).
+ * A selfhosted sandbox WITH an enrollment is deliberately left in place even when it
+ * is momentarily offline: the machine may recover mid-turn and its ops surface
+ * agent_offline lazily, so the user's explicit machine target is never abandoned for
+ * a transient control-plane blip (that is #339's concern, not this one).
+ */
+export function pointerReconcileReason(
+  record: { kind: string; enrollmentId: string | null } | null,
+): BackendUnresolvableCode | null {
+  if (!record) {
+    return "stale_pointer";
+  }
+  const establishable = swapTargetEstablishability({ kind: record.kind, isSessionGroup: false });
+  if (!establishable.ok) {
+    return establishable.code;
+  }
+  if (record.kind === "selfhosted" && !record.enrollmentId) {
+    return "offline_enrollment";
+  }
+  return null;
+}
+
+/** The active pointer + its sandbox row, loaded once at turn start and threaded
+ *  through the reconcile so the establish branch reads the SAME (possibly reset)
+ *  values with no second query. */
+export type LoadedActivePointer = {
+  pointer: ActiveSandboxPointer | null;
+  record: SandboxRecord | null;
+};
+
+/**
+ * TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2). If the persisted pointer's
+ * target is STRUCTURALLY unestablishable ({@link pointerReconcileReason}) reset the pointer
+ * to the session HOME (null) under the epoch fence, emit a VISIBLE `session.route.reconciled`
+ * event, and return the reconciled pointer/record so the rest of the turn runs on home. NEVER
+ * a silent downgrade. Bounded to ONE attempt: a lost CAS means a concurrent user swap won a
+ * higher epoch, so re-read + honor it rather than clobber a newer, user-directed pointer. The
+ * event publish is best-effort — a publish failure never fails the turn.
+ *
+ * FAIL-OPEN on a lookup failure (issue #341 review): the sandbox row is fetched HERE via the
+ * caller's NON-swallowing `loadRecord`, so a null decision means the row is genuinely absent,
+ * never a suppressed transient DB error. If `loadRecord` THROWS, reconciliation is skipped
+ * entirely this turn — the pointer is left UNTOUCHED (record null → the turn runs
+ * machinePrimary:false on the group box exactly as before reconcile existed), no CAS, no
+ * event — and the next turn retries. A TRANSIENT LOOKUP FAILURE MUST NEVER MUTATE THE POINTER.
+ */
+export async function reconcileActiveSandboxPointer(
+  db: ActivityServices["db"],
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+  pointer: ActiveSandboxPointer | null,
+  loadRecord: (sandboxId: string) => Promise<SandboxRecord | null>,
+  publish?: (events: Array<{ type: SessionEventType; payload: unknown }>) => Promise<void> | void,
+): Promise<LoadedActivePointer> {
+  if (!pointer?.activeSandboxId) {
+    return { pointer, record: null };
+  }
+  // Re-fetch the row WITHOUT error swallowing. A throw here (a transient DB blip) is NOT
+  // "row absent": fail open — skip reconciliation, leave the pointer untouched.
+  let record: SandboxRecord | null;
+  try {
+    record = await loadRecord(pointer.activeSandboxId);
+  } catch {
+    return { pointer, record: null };
+  }
+  const reason = pointerReconcileReason(record);
+  if (!reason) {
+    return { pointer, record };
+  }
+  const fromEpoch = pointer.activeEpoch;
+  const reset = await setActiveSandbox(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sessionId: ids.sessionId,
+    targetSandboxId: null,
+    expectedEpoch: fromEpoch,
+  }).catch(
+    () => ({ swapped: false, pointer: null }) as Awaited<ReturnType<typeof setActiveSandbox>>,
+  );
+  if (reset.swapped && reset.pointer) {
+    await Promise.resolve(
+      publish?.([
+        {
+          type: "session.route.reconciled",
+          payload: { reason, fromEpoch, toEpoch: reset.pointer.activeEpoch },
+        },
+      ]),
+    ).catch(() => undefined);
+    return { pointer: reset.pointer, record: null };
+  }
+  // The fence was lost: a concurrent higher-epoch swap won. Honor the newer pointer; its
+  // record is re-fetched fail-open too (a transient failure leaves record null, never a
+  // mutation — we already did not win the CAS).
+  const reread = await readActiveSandbox(db, ids.workspaceId, ids.sessionId).catch(() => null);
+  if (!reread) {
+    return { pointer, record: null };
+  }
+  let rereadRecord: SandboxRecord | null = null;
+  if (reread.activeSandboxId) {
+    try {
+      rereadRecord = await loadRecord(reread.activeSandboxId);
+    } catch {
+      rereadRecord = null;
+    }
+  }
+  return { pointer: reread, record: rereadRecord };
 }
 
 /**
@@ -1677,15 +1800,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // double read, no read-skew between the gate decision and the establish. With
       // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
       const routingOn = routingEnabled(settings);
-      const activeSandboxPointer = routingOn
+      let activeSandboxPointer = routingOn
         ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
         : null;
-      const activeSandboxRecord =
-        routingOn && activeSandboxPointer?.activeSandboxId
-          ? await getSandbox(db, input.workspaceId, activeSandboxPointer.activeSandboxId).catch(
-              () => null,
-            )
-          : null;
+      // TURN-START RECONCILE (issue #341 invariant B / Shapes 1+2): a persisted
+      // pointer whose target is STRUCTURALLY unestablishable at turn start would strand
+      // EVERY op of this turn — reset it to the session HOME under the epoch fence +
+      // emit a visible event, honoring a concurrent higher-epoch swap. The sandbox row
+      // is loaded HERE, inside reconcile, via a NON-swallowing lookup: a null decision
+      // then means the row is genuinely absent, never a suppressed transient DB error
+      // (which would wrongly clear a healthy user-chosen pointer). On a lookup throw the
+      // reconcile fails open — pointer untouched, record null (machinePrimary:false),
+      // no event — and the establish branch below reads the returned values.
+      let activeSandboxRecord: SandboxRecord | null = null;
+      if (routingOn) {
+        const reconciled = await reconcileActiveSandboxPointer(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          },
+          activeSandboxPointer,
+          (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
+          publish ?? undefined,
+        );
+        activeSandboxPointer = reconciled.pointer;
+        activeSandboxRecord = reconciled.record;
+      }
       const activeSandboxBackend = await resolveActiveSandboxBackend(
         routingOn,
         async () => activeSandboxPointer,
@@ -1830,6 +1972,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   sandboxId: activeSandboxPointer!.activeSandboxId!,
                   epoch: activeSandboxPointer!.activeEpoch,
                 },
+                // HOME semantics for a mid-turn clear-to-null: only a genuine
+                // machine-HOME session (its home IS this machine, session.sandboxBackend
+                // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
+                // session merely PINNED to a machine this turn never established its group
+                // box, so defaultIsHome:false makes a clear-to-null fail typed
+                // (`home_unavailable_this_turn`) rather than silently serving the machine;
+                // the detach takes effect next turn. (Lazy home-box establishment on such a
+                // clear is a deferred follow-up; issue #341.)
+                defaultIsHome: session.sandboxBackend === "selfhosted",
               },
               established,
             ),
