@@ -1235,6 +1235,12 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        // This scenario is calibrated so the resumed turn's 80k-token model
+        // report sits ABOVE the proactive trigger (it tests the shrink-invariant
+        // loop guard, not the trigger default). Pin the ratio the calibration
+        // assumed instead of inheriting the production default (now 0.9, which
+        // would put the trigger at 90k and never re-compact here).
+        contextCompactionThresholdRatio: 0.6,
         mcpServers: [
           {
             id: "opengeni",
