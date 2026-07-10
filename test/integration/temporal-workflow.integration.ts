@@ -359,7 +359,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "idle interrupt marks the session idle without cancelling a turn",
+    "idle interrupt delegates one atomic idle settlement without cancelling a turn",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -387,8 +387,16 @@ describe("Temporal workflow integration", () => {
         });
         await handle.signal("interrupt", "interrupt-event");
         await handle.result();
-        expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
-        expect(interrupts).toHaveLength(0);
+        expect(idleMarks).toHaveLength(0);
+        expect(interrupts).toEqual([
+          {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId,
+            triggerEventId: "interrupt-event",
+            workflowId: expect.any(String),
+          },
+        ]);
       } finally {
         worker.shutdown();
         await run;
@@ -413,15 +421,11 @@ describe("Temporal workflow integration", () => {
       const sessionId = crypto.randomUUID();
       const workflowId = `wf-${crypto.randomUUID()}`;
       const idleMarks: unknown[] = [];
-      const pauses: unknown[] = [];
       const interrupts: unknown[] = [];
       const worker = await testWorker(nativeConnection, taskQueue, {
         claimNextQueuedTurn: async () => null,
         markSessionIdle: async (input: unknown) => {
           idleMarks.push(input);
-        },
-        pauseGoalForInterrupt: async (input: unknown) => {
-          pauses.push(input);
         },
         runAgentTurn: async () => ({ status: "idle" }),
         failSession: async () => undefined,
@@ -444,13 +448,18 @@ describe("Temporal workflow integration", () => {
           signalArgs: ["interrupt-event"],
         });
         await handle.result();
-        // The idle-interrupt path ran: the goal was paused for the trigger event
-        // and the session was marked idle. No active turn existed to cancel.
-        expect(pauses).toEqual([
-          { workspaceId: scope.workspaceId, sessionId, triggerEventId: "interrupt-event" },
+        // The idle-interrupt path is one atomic activity: it owns goal pause,
+        // durable events, and the idle session state. No legacy split calls.
+        expect(idleMarks).toHaveLength(0);
+        expect(interrupts).toEqual([
+          {
+            accountId: scope.accountId,
+            workspaceId: scope.workspaceId,
+            sessionId,
+            triggerEventId: "interrupt-event",
+            workflowId,
+          },
         ]);
-        expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
-        expect(interrupts).toHaveLength(0);
       } finally {
         worker.shutdown();
         await run;
@@ -683,13 +692,12 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "idle interrupt pauses the goal before marking the session idle",
+    "idle interrupt uses the atomic interrupt settlement",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const sessionId = crypto.randomUUID();
       const order: string[] = [];
-      const pauses: unknown[] = [];
       const worker = await testWorker(nativeConnection, taskQueue, {
         claimNextQueuedTurn: async () => null,
         markSessionIdle: async () => {
@@ -697,10 +705,8 @@ describe("Temporal workflow integration", () => {
         },
         runAgentTurn: async () => ({ status: "idle" }),
         failSession: async () => undefined,
-        interruptActiveTurn: async () => undefined,
-        pauseGoalForInterrupt: async (input: unknown) => {
-          order.push("pause");
-          pauses.push(input);
+        interruptActiveTurn: async () => {
+          order.push("interrupt");
         },
       });
       const run = worker.run();
@@ -713,12 +719,7 @@ describe("Temporal workflow integration", () => {
         });
         await handle.signal("interrupt", "interrupt-event");
         await handle.result();
-        expect(order).toEqual(["pause", "idle"]);
-        // The trigger event rides along so the activity can recognize (and
-        // skip pausing for) steer-tagged interrupts.
-        expect(pauses).toEqual([
-          { workspaceId: scope.workspaceId, sessionId, triggerEventId: "interrupt-event" },
-        ]);
+        expect(order).toEqual(["interrupt"]);
       } finally {
         worker.shutdown();
         await run;

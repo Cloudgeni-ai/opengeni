@@ -16759,6 +16759,17 @@ export async function clearSessionGoal(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) {
+          throw new Error(`Session not found: ${sessionId}`);
+        }
         const [existing] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -16774,17 +16785,6 @@ export async function clearSessionGoal(
           return { cleared: false, goal: null, event: null };
         }
         await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!session) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
         const sequence = session.lastSequence + 1;
         const [event] = await tx
           .insert(schema.sessionEvents)
@@ -17573,13 +17573,11 @@ export async function claimNextQueuedTurn(
         ) {
           return null;
         }
-
-        // The session row is the single dequeue serialization point. A second
-        // concurrent claim waits for this lock, then must observe the first
-        // claim's active turn instead of starting another queued turn. Clear
-        // only a stale pointer whose turn is already terminal/missing; live
-        // running or approval-wait turns retain exclusive inference ownership.
-        if (session.activeTurnId) {
+        if (session.activeTurnId !== null) {
+          // A stale pointer can survive a crash or an older settlement path.
+          // Reconcile it only when the pointed row is absent or already
+          // terminal. A genuinely live pointer is authoritative and must
+          // refuse a second claim, even when queued work exists behind it.
           const [activeTurn] = await tx
             .select({ status: schema.sessionTurns.status })
             .from(schema.sessionTurns)
@@ -17592,7 +17590,8 @@ export async function claimNextQueuedTurn(
             )
             .for("update")
             .limit(1);
-          if (activeTurn && ["running", "requires_action"].includes(activeTurn.status)) {
+          const liveStatuses = new Set<SessionTurnStatus>(["queued", "running", "requires_action"]);
+          if (activeTurn && liveStatuses.has(activeTurn.status as SessionTurnStatus)) {
             return null;
           }
           await tx
@@ -17792,10 +17791,12 @@ export async function settleSessionIdleWithParentOutbox(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  episodeKey: string,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.transaction(async (tx) => {
+): Promise<
+  | { action: "settled"; changed: boolean; episodeKey: string; events: SessionEvent[] }
+  | { action: "stale"; episodeKey: null; events: [] }
+> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
       await tx
         .select({ id: schema.workspaces.id })
         .from(schema.workspaces)
@@ -17809,16 +17810,56 @@ export async function settleSessionIdleWithParentOutbox(
         .for("update")
         .limit(1);
       if (!session) throw new Error(`Session not found: ${sessionId}`);
+      if (session.activeTurnId !== null) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
+      const [queued] = await tx
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            eq(schema.sessionTurns.status, "queued"),
+          ),
+        )
+        .limit(1);
+      if (queued || !["queued", "running", "idle"].includes(session.status)) {
+        return { action: "stale", episodeKey: null, events: [] } as const;
+      }
       const now = new Date();
+      let sequence = session.lastSequence;
+      const events: SessionEvent[] = [];
       if (session.status === "queued" || session.status === "running") {
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            sequence: ++sequence,
+            type: "session.status.changed",
+            payload: sanitizeEventPayload({ status: "idle" }),
+            occurredAt: now,
+          })
+          .returning();
+        if (event) events.push(mapEvent(event));
         await tx
           .update(schema.sessions)
-          .set({ status: "idle", activeTurnId: null, updatedAt: now })
+          .set({ status: "idle", activeTurnId: null, lastSequence: sequence, updatedAt: now })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
       }
-      if (!session.parentSessionId) return;
+      const episodeKey = String(sequence);
+      if (!session.parentSessionId) {
+        return {
+          action: "settled",
+          changed: events.length > 0,
+          episodeKey,
+          events,
+        } as const;
+      }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
       await tx
         .insert(schema.sessionSystemUpdateOutbox)
@@ -17842,6 +17883,12 @@ export async function settleSessionIdleWithParentOutbox(
             schema.sessionSystemUpdateOutbox.dedupeKey,
           ],
         });
+      return {
+        action: "settled",
+        changed: events.length > 0,
+        episodeKey,
+        events,
+      } as const;
     });
   });
 }
@@ -18471,43 +18518,83 @@ type TurnDispatchAttempt = {
   triggerEventId: string;
 };
 
-function turnDispatchAttempt(metadata: unknown): TurnDispatchAttempt | null {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return null;
+type TurnDispatchMetadata =
+  | { kind: "absent"; generation: 0; attempt: null }
+  | { kind: "valid"; generation: number; attempt: TurnDispatchAttempt | null }
+  | { kind: "malformed"; reason: string };
+
+function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent", generation: 0, attempt: null };
   }
-  const value = (metadata as Record<string, unknown>)[TURN_DISPATCH_ATTEMPT_METADATA_KEY];
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { kind: "malformed", reason: "turn metadata is not an object" };
+  }
+  const record = metadata as Record<string, unknown>;
+  const hasAttempt = Object.prototype.hasOwnProperty.call(
+    record,
+    TURN_DISPATCH_ATTEMPT_METADATA_KEY,
+  );
+  const hasGeneration = Object.prototype.hasOwnProperty.call(
+    record,
+    TURN_DISPATCH_GENERATION_METADATA_KEY,
+  );
+  if (!hasAttempt && !hasGeneration) {
+    return { kind: "absent", generation: 0, attempt: null };
+  }
+
+  const rawGeneration = record[TURN_DISPATCH_GENERATION_METADATA_KEY];
+  if (
+    hasGeneration &&
+    (typeof rawGeneration !== "number" || !Number.isSafeInteger(rawGeneration) || rawGeneration < 0)
+  ) {
+    return { kind: "malformed", reason: "dispatchGeneration is not a safe non-negative integer" };
+  }
+  const generation = hasGeneration ? (rawGeneration as number) : null;
+
+  if (!hasAttempt) {
+    return {
+      kind: "valid",
+      generation: generation ?? 0,
+      attempt: null,
+    };
+  }
+  const value = record[TURN_DISPATCH_ATTEMPT_METADATA_KEY];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+    return { kind: "malformed", reason: "dispatchAttempt is not an object" };
   }
   const attempt = value as Record<string, unknown>;
   if (
     typeof attempt.id !== "string" ||
+    attempt.id.length === 0 ||
     typeof attempt.generation !== "number" ||
     !Number.isSafeInteger(attempt.generation) ||
     attempt.generation < 1 ||
-    typeof attempt.triggerEventId !== "string"
+    typeof attempt.triggerEventId !== "string" ||
+    attempt.triggerEventId.length === 0
   ) {
-    return null;
+    return { kind: "malformed", reason: "dispatchAttempt has an invalid shape" };
+  }
+  if (generation === null || generation !== attempt.generation) {
+    return { kind: "malformed", reason: "dispatchGeneration does not match dispatchAttempt" };
   }
   return {
-    id: attempt.id,
+    kind: "valid",
     generation: attempt.generation,
-    triggerEventId: attempt.triggerEventId,
+    attempt: {
+      id: attempt.id,
+      generation: attempt.generation,
+      triggerEventId: attempt.triggerEventId,
+    },
   };
 }
 
 function turnDispatchGeneration(metadata: unknown): number {
-  const attempt = turnDispatchAttempt(metadata);
-  if (attempt) {
-    return attempt.generation;
+  const parsed = readTurnDispatchMetadata(metadata);
+  if (parsed.kind === "malformed") {
+    throw new Error(`Malformed turn dispatch metadata: ${parsed.reason}`);
   }
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return 0;
-  }
-  const generation = (metadata as Record<string, unknown>)[TURN_DISPATCH_GENERATION_METADATA_KEY];
-  return typeof generation === "number" && Number.isSafeInteger(generation) && generation >= 0
-    ? generation
-    : 0;
+  return parsed.generation;
 }
 
 function metadataWithTurnDispatchAttempt(
@@ -18551,6 +18638,30 @@ function dispatchAttemptMatches(
   );
 }
 
+type WorkerDeathRedispatchMetadata =
+  | { kind: "valid"; count: number }
+  | { kind: "malformed"; reason: string };
+
+function readWorkerDeathRedispatchMetadata(metadata: unknown): WorkerDeathRedispatchMetadata {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "valid", count: 0 };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { kind: "malformed", reason: "turn metadata is not an object" };
+  }
+  const raw = (metadata as Record<string, unknown>).workerDeathRedispatches;
+  if (raw === undefined) {
+    return { kind: "valid", count: 0 };
+  }
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) {
+    return {
+      kind: "malformed",
+      reason: "workerDeathRedispatches is not a safe non-negative integer",
+    };
+  }
+  return { kind: "valid", count: raw };
+}
+
 async function sessionHasNewerInterrupt(
   tx: Database,
   workspaceId: string,
@@ -18585,6 +18696,89 @@ async function sessionHasNewerInterrupt(
     .orderBy(asc(schema.sessionEvents.sequence))
     .limit(1);
   return Boolean(pendingInterrupt);
+}
+
+async function isNewerApprovalTrigger(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  currentTriggerEventId: string,
+  candidateTriggerEventId: string,
+): Promise<boolean> {
+  const rows = await tx
+    .select({
+      id: schema.sessionEvents.id,
+      type: schema.sessionEvents.type,
+      sequence: schema.sessionEvents.sequence,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        inArray(schema.sessionEvents.id, [currentTriggerEventId, candidateTriggerEventId]),
+      ),
+    );
+  const current = rows.find((row) => row.id === currentTriggerEventId);
+  const candidate = rows.find((row) => row.id === candidateTriggerEventId);
+  return Boolean(
+    current &&
+    candidate &&
+    candidate.type === "user.approvalDecision" &&
+    candidate.sequence > current.sequence,
+  );
+}
+
+const GOAL_MUTATION_EVENT_TYPES = [
+  "goal.set",
+  "goal.updated",
+  "goal.completed",
+  "goal.paused",
+  "goal.resumed",
+  "goal.cleared",
+] as const;
+
+function isSteerInterruptPayload(payload: unknown): boolean {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    (payload as { reason?: unknown }).reason === "steer"
+  );
+}
+
+async function hasNewerInterruptEpisodeWork(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  interruptSequence: number,
+): Promise<boolean> {
+  const pendingTurns = await tx
+    .select({ id: schema.sessionTurns.id, triggerEventId: schema.sessionTurns.triggerEventId })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+      ),
+    );
+  for (const pendingTurn of pendingTurns) {
+    const [trigger] = await tx
+      .select({ sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          eq(schema.sessionEvents.id, pendingTurn.triggerEventId),
+        ),
+      )
+      .limit(1);
+    if (trigger && trigger.sequence > interruptSequence) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export type RegisterSessionTurnDispatchResult =
@@ -18662,11 +18856,19 @@ export async function registerSessionTurnDispatch(
         };
       }
 
-      const current = turnDispatchAttempt(turn.metadata);
+      const parsedMetadata = readTurnDispatchMetadata(turn.metadata);
+      if (parsedMetadata.kind === "malformed") {
+        throw new Error(`Malformed turn dispatch metadata: ${parsedMetadata.reason}`);
+      }
+      const current = parsedMetadata.attempt;
       if (current?.id === input.dispatchId && current.triggerEventId === input.triggerEventId) {
         return { action: "registered" as const, dispatchGeneration: current.generation };
       }
-      const dispatchGeneration = turnDispatchGeneration(turn.metadata) + 1;
+      const previousGeneration = turnDispatchGeneration(turn.metadata);
+      if (previousGeneration >= Number.MAX_SAFE_INTEGER) {
+        throw new Error("Turn dispatch generation exhausted; refusing to wrap or reuse it");
+      }
+      const dispatchGeneration = previousGeneration + 1;
       await tx
         .update(schema.sessionTurns)
         .set({
@@ -18754,11 +18956,13 @@ export async function applySessionTurnSettlement(
         .for("update")
         .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
       if (
         !turn ||
+        parsedMetadata.kind === "malformed" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
-        !dispatchAttemptMatches(turnDispatchAttempt(turn.metadata), {
+        !dispatchAttemptMatches(parsedMetadata.kind === "valid" ? parsedMetadata.attempt : null, {
           ...input,
           turnTriggerEventId: turn.triggerEventId,
         }) ||
@@ -18788,16 +18992,39 @@ export async function applySessionTurnSettlement(
         payload: sanitizeEventPayload(event.payload ?? {}),
         clientEventId: event.clientEventId ?? null,
         turnId: input.turnId,
+        turnGeneration: turn.executionGeneration,
+        turnAssociation: "current" as const,
         producerId: event.producerId ?? null,
         producerSeq: event.producerSeq ?? null,
         occurredAt: event.occurredAt ?? now,
       }));
       const inserted =
         values.length > 0 ? await tx.insert(schema.sessionEvents).values(values).returning() : [];
+      const terminal =
+        input.turnStatus === "completed" ||
+        input.turnStatus === "cancelled" ||
+        input.turnStatus === "failed";
       await tx
         .update(schema.sessionTurns)
         .set({
           status: input.turnStatus,
+          deliveryState:
+            input.turnStatus === "completed"
+              ? "acknowledged"
+              : input.turnStatus === "cancelled"
+                ? "cancelled"
+                : input.turnStatus === "failed"
+                  ? "failed"
+                  : turn.deliveryState,
+          acknowledgedAt: input.turnStatus === "completed" ? now : turn.acknowledgedAt,
+          version: turn.version + 1,
+          // A requires_action result is a completed activity attempt. Keep the
+          // generation for monotonic fencing, but remove the old activity id so
+          // a later typed SCHEDULE_TO_START timeout can recover an approval
+          // dispatch that never registered without taking over a newer one.
+          ...(input.turnStatus === "requires_action"
+            ? { metadata: metadataWithoutTurnDispatchAttempt(turn.metadata) }
+            : {}),
           finishedAt:
             input.turnStatus === "queued" ||
             input.turnStatus === "running" ||
@@ -18813,12 +19040,30 @@ export async function applySessionTurnSettlement(
             eq(schema.sessionTurns.id, input.turnId),
           ),
         );
+      if (terminal) {
+        await settleSystemUpdateBundleForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          turn,
+          input.turnStatus as "completed" | "cancelled" | "failed",
+          now,
+        );
+      }
+      if (input.turnStatus === "failed") {
+        await enqueueFailedChildOutboxForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          turn,
+        );
+      }
       await tx
         .update(schema.sessions)
         .set({
           status: input.sessionStatus,
           activeTurnId: input.activeTurnId,
           lastSequence: sequence,
+          queueVersion: session.queueVersion + 1,
           updatedAt: now,
         })
         .where(
@@ -19324,11 +19569,13 @@ export async function applySessionTurnPreemption(
         .for("update")
         .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
+      const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
       if (
         !turn ||
+        parsedMetadata.kind === "malformed" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
-        !dispatchAttemptMatches(turnDispatchAttempt(turn.metadata), {
+        !dispatchAttemptMatches(parsedMetadata.kind === "valid" ? parsedMetadata.attempt : null, {
           ...input,
           turnTriggerEventId: turn.triggerEventId,
         })
@@ -19369,6 +19616,8 @@ export async function applySessionTurnPreemption(
             sequence: ++sequence,
             type: "turn.preempted",
             turnId: input.turnId,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
             payload: sanitizeEventPayload({
               triggerEventId: input.triggerEventId,
               reason: input.reason,
@@ -19384,6 +19633,8 @@ export async function applySessionTurnPreemption(
             sequence: ++sequence,
             type: "session.status.changed",
             turnId: input.turnId,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
             payload: sanitizeEventPayload({ status: "queued" }),
             occurredAt: now,
           },
@@ -19402,6 +19653,10 @@ export async function applySessionTurnPreemption(
             input.resumeWithNotice && preemptedEventId ? preemptedEventId : input.triggerEventId,
           startedAt: null,
           finishedAt: null,
+          deliveryState: "pending",
+          cancelledBy: null,
+          cancelReason: null,
+          version: turn.version + 1,
           metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
           updatedAt: now,
         })
@@ -19419,6 +19674,12 @@ export async function applySessionTurnPreemption(
         // legitimate race. Throwing rolls the events back too.
         throw new Error(`Preemptible session turn changed while locked: ${input.turnId}`);
       }
+      await resetSystemUpdateBundleForTurnTx(
+        tx as unknown as Database,
+        workspaceId,
+        turn,
+        now,
+      );
 
       const [updatedSession] = await tx
         .update(schema.sessions)
@@ -19426,6 +19687,7 @@ export async function applySessionTurnPreemption(
           status: "queued",
           activeTurnId: null,
           lastSequence: sequence,
+          queueVersion: session.queueVersion + 1,
           updatedAt: now,
         })
         .where(
@@ -19449,8 +19711,7 @@ export type ApplySessionTurnWorkerDeathInput = {
   turnId: string;
   triggerEventId: string;
   dispatchId: string;
-  allowLegacyUnregistered?: boolean;
-  allowPriorAttemptForScheduleToStart?: boolean;
+  timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
   resumeWithNotice: boolean;
   text?: string;
   maxRedispatches: number;
@@ -19470,9 +19731,9 @@ export type ApplySessionTurnWorkerDeathResult =
  * Atomically settle a Temporal worker-death boundary. The exact activity id is
  * the dispatch fence for heartbeat timeouts. A schedule-to-start timeout may
  * have no registered attempt because the activity never ran; that explicitly
- * typed case may recover an unregistered claim (or an approval turn's prior
- * registered attempt) but can never replace a different registered activity
- * that actually started for the same trigger.
+ * typed case may recover the unregistered claim, including a fresh approval
+ * trigger after a prior requires_action settlement, but can never replace a
+ * different registered activity that actually started.
  */
 export async function applySessionTurnWorkerDeath(
   db: Database,
@@ -19508,24 +19769,34 @@ export async function applySessionTurnWorkerDeath(
         .for("update")
         .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
-      const attempt = turnDispatchAttempt(turn?.metadata);
+      const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
+      const attempt = parsedMetadata.kind === "valid" ? parsedMetadata.attempt : null;
       const exactAttempt = dispatchAttemptMatches(attempt, {
         dispatchId: input.dispatchId,
         triggerEventId: input.triggerEventId,
         turnTriggerEventId: turn?.triggerEventId ?? "",
-        ...(input.allowLegacyUnregistered !== undefined
-          ? { allowLegacyUnregistered: input.allowLegacyUnregistered }
-          : {}),
       });
       const safeUnstartedSchedule =
-        input.allowPriorAttemptForScheduleToStart === true &&
-        attempt !== null &&
-        attempt.triggerEventId !== input.triggerEventId;
+        input.timeoutType === "SCHEDULE_TO_START" &&
+        attempt === null &&
+        Boolean(turn && turn.triggerEventId === input.triggerEventId);
+      const safeApprovalSchedule =
+        input.timeoutType === "SCHEDULE_TO_START" &&
+        attempt === null &&
+        turn?.status === "requires_action" &&
+        (await isNewerApprovalTrigger(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          turn.triggerEventId,
+          input.triggerEventId,
+        ));
       if (
         !turn ||
+        parsedMetadata.kind === "malformed" ||
         session.activeTurnId !== input.turnId ||
         (turnStatus !== "running" && turnStatus !== "requires_action") ||
-        (!exactAttempt && !safeUnstartedSchedule) ||
+        (!exactAttempt && !safeUnstartedSchedule && !safeApprovalSchedule) ||
         (await sessionHasNewerInterrupt(
           tx as unknown as Database,
           workspaceId,
@@ -19541,12 +19812,25 @@ export async function applySessionTurnWorkerDeath(
         };
       }
 
+      const redispatchMetadata = readWorkerDeathRedispatchMetadata(turn.metadata);
+      if (redispatchMetadata.kind === "malformed") {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
+      if (redispatchMetadata.count >= Number.MAX_SAFE_INTEGER) {
+        return {
+          action: "stale" as const,
+          events: [] as [],
+          turnStatus,
+          activeTurnId: session.activeTurnId,
+        };
+      }
       const metadata = { ...(turn.metadata ?? {}) } as Record<string, unknown>;
-      const priorRedispatches = Number(metadata.workerDeathRedispatches ?? 0);
-      const redispatches =
-        (Number.isSafeInteger(priorRedispatches) && priorRedispatches >= 0
-          ? priorRedispatches
-          : 0) + 1;
+      const redispatches = redispatchMetadata.count + 1;
       metadata.workerDeathRedispatches = redispatches;
 
       const now = new Date();
@@ -19562,6 +19846,8 @@ export async function applySessionTurnWorkerDeath(
               sequence: ++sequence,
               type: "turn.failed",
               turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              turnAssociation: "current",
               payload: sanitizeEventPayload({
                 triggerEventId: input.triggerEventId,
                 code: "worker_death_redispatch_exhausted",
@@ -19577,6 +19863,8 @@ export async function applySessionTurnWorkerDeath(
               sequence: ++sequence,
               type: "session.status.changed",
               turnId: input.turnId,
+              turnGeneration: turn.executionGeneration,
+              turnAssociation: "current",
               payload: sanitizeEventPayload({ status: "failed" }),
               occurredAt: now,
             },
@@ -19584,7 +19872,14 @@ export async function applySessionTurnWorkerDeath(
           .returning();
         await tx
           .update(schema.sessionTurns)
-          .set({ status: "failed", metadata, finishedAt: now, updatedAt: now })
+          .set({
+            status: "failed",
+            deliveryState: "failed",
+            metadata,
+            version: turn.version + 1,
+            finishedAt: now,
+            updatedAt: now,
+          })
           .where(
             and(
               eq(schema.sessionTurns.workspaceId, workspaceId),
@@ -19592,9 +19887,28 @@ export async function applySessionTurnWorkerDeath(
               eq(schema.sessionTurns.id, input.turnId),
             ),
           );
+        await settleSystemUpdateBundleForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          turn,
+          "failed",
+          now,
+        );
+        await enqueueFailedChildOutboxForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          turn,
+        );
         await tx
           .update(schema.sessions)
-          .set({ status: "failed", activeTurnId: null, lastSequence: sequence, updatedAt: now })
+          .set({
+            status: "failed",
+            activeTurnId: null,
+            lastSequence: sequence,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
           .where(
             and(
               eq(schema.sessions.workspaceId, workspaceId),
@@ -19618,6 +19932,8 @@ export async function applySessionTurnWorkerDeath(
             sequence: ++sequence,
             type: "turn.preempted",
             turnId: input.turnId,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
             payload: sanitizeEventPayload({
               triggerEventId: input.triggerEventId,
               reason: "worker_death",
@@ -19634,6 +19950,8 @@ export async function applySessionTurnWorkerDeath(
             sequence: ++sequence,
             type: "session.status.changed",
             turnId: input.turnId,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
             payload: sanitizeEventPayload({ status: "queued" }),
             occurredAt: now,
           },
@@ -19651,6 +19969,10 @@ export async function applySessionTurnWorkerDeath(
           triggerEventId:
             input.resumeWithNotice && preemptedEventId ? preemptedEventId : input.triggerEventId,
           metadata: requeuedMetadata,
+          deliveryState: "pending",
+          cancelledBy: null,
+          cancelReason: null,
+          version: turn.version + 1,
           startedAt: null,
           finishedAt: null,
           updatedAt: now,
@@ -19662,9 +19984,21 @@ export async function applySessionTurnWorkerDeath(
             eq(schema.sessionTurns.id, input.turnId),
           ),
         );
+      await resetSystemUpdateBundleForTurnTx(
+        tx as unknown as Database,
+        workspaceId,
+        turn,
+        now,
+      );
       await tx
         .update(schema.sessions)
-        .set({ status: "queued", activeTurnId: null, lastSequence: sequence, updatedAt: now })
+        .set({
+          status: "queued",
+          activeTurnId: null,
+          lastSequence: sequence,
+          queueVersion: session.queueVersion + 1,
+          updatedAt: now,
+        })
         .where(
           and(
             eq(schema.sessions.workspaceId, workspaceId),
@@ -19681,7 +20015,7 @@ export async function applySessionTurnWorkerDeath(
 }
 
 export type ApplySessionTurnInterruptResult =
-  | { action: "cancelled"; turnId: string; events: SessionEvent[] }
+  | { action: "cancelled"; turnId: string | null; events: SessionEvent[] }
   | {
       action: "stale";
       turnId: string | null;
@@ -19725,7 +20059,7 @@ export async function applySessionTurnInterrupt(
           ),
         )
         .limit(1);
-      if (!interruptEvent || !session.activeTurnId) {
+      if (!interruptEvent) {
         return {
           action: "stale" as const,
           turnId: session.activeTurnId,
@@ -19734,20 +20068,34 @@ export async function applySessionTurnInterrupt(
         };
       }
 
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.id, session.activeTurnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
+      const [turn] = session.activeTurnId
+        ? await tx
+            .select()
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, sessionId),
+                eq(schema.sessionTurns.id, session.activeTurnId),
+              ),
+            )
+            .for("update")
+            .limit(1)
+        : [undefined];
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
-      if (!turn || (turnStatus !== "running" && turnStatus !== "requires_action")) {
+      const steer = isSteerInterruptPayload(interruptEvent.payload);
+      if (!turn && steer) {
+        return {
+          action: "stale" as const,
+          turnId: null,
+          turnStatus: null,
+          events: [] as [],
+        };
+      }
+      if (
+        session.activeTurnId &&
+        (!turn || (turnStatus !== "running" && turnStatus !== "requires_action"))
+      ) {
         return {
           action: "stale" as const,
           turnId: session.activeTurnId,
@@ -19756,99 +20104,200 @@ export async function applySessionTurnInterrupt(
         };
       }
 
-      const [turnTrigger] = await tx
-        .select({ sequence: schema.sessionEvents.sequence })
-        .from(schema.sessionEvents)
-        .where(
-          and(
-            eq(schema.sessionEvents.workspaceId, workspaceId),
-            eq(schema.sessionEvents.sessionId, sessionId),
-            eq(schema.sessionEvents.id, turn.triggerEventId),
-          ),
+      if (turn) {
+        const [turnTrigger] = await tx
+          .select({ sequence: schema.sessionEvents.sequence })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, sessionId),
+              eq(schema.sessionEvents.id, turn.triggerEventId),
+            ),
+          )
+          .limit(1);
+        if (!turnTrigger || interruptEvent.sequence <= turnTrigger.sequence) {
+          return {
+            action: "stale" as const,
+            turnId: turn.id,
+            turnStatus,
+            events: [] as [],
+          };
+        }
+      } else if (
+        await hasNewerInterruptEpisodeWork(
+          tx as unknown as Database,
+          workspaceId,
+          sessionId,
+          interruptEvent.sequence,
         )
-        .limit(1);
-      if (!turnTrigger || interruptEvent.sequence <= turnTrigger.sequence) {
+      ) {
         return {
           action: "stale" as const,
-          turnId: turn.id,
+          turnId: null,
+          turnStatus,
+          events: [] as [],
+        };
+      }
+
+      const [goal] = await tx
+        .select()
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const [newerGoalEvent] =
+        goal && !steer
+          ? await tx
+              .select({ id: schema.sessionEvents.id })
+              .from(schema.sessionEvents)
+              .where(
+                and(
+                  eq(schema.sessionEvents.workspaceId, workspaceId),
+                  eq(schema.sessionEvents.sessionId, sessionId),
+                  inArray(schema.sessionEvents.type, [...GOAL_MUTATION_EVENT_TYPES]),
+                  gt(schema.sessionEvents.sequence, interruptEvent.sequence),
+                ),
+              )
+              .limit(1)
+          : [undefined];
+      if (newerGoalEvent) {
+        return {
+          action: "stale" as const,
+          turnId: turn?.id ?? null,
           turnStatus,
           events: [] as [],
         };
       }
 
       const now = new Date();
-      const [updatedTurn] = await tx
-        .update(schema.sessionTurns)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.id, turn.id),
-            inArray(schema.sessionTurns.status, ["running", "requires_action"]),
-          ),
-        )
-        .returning({ id: schema.sessionTurns.id });
-      if (!updatedTurn) {
-        throw new Error(`Interruptible session turn changed while locked: ${turn.id}`);
+      if (goal && !steer && goal.status === "active") {
+        await tx
+          .update(schema.sessionGoals)
+          .set({
+            status: "paused",
+            pausedReason: "user_interrupt",
+            rationale: null,
+            version: goal.version + 1,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessionGoals.id, goal.id));
+      }
+      if (turn) {
+        const [updatedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            status: "cancelled",
+            deliveryState: "cancelled",
+            cancelledBy: "session_control",
+            cancelReason: steer ? "steer" : "user_interrupt",
+            version: turn.version + 1,
+            finishedAt: now,
+            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, sessionId),
+              eq(schema.sessionTurns.id, turn.id),
+              inArray(schema.sessionTurns.status, ["running", "requires_action"]),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!updatedTurn) {
+          throw new Error(`Interruptible session turn changed while locked: ${turn.id}`);
+        }
+        await settleSystemUpdateBundleForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          turn,
+          "cancelled",
+          now,
+        );
       }
 
       let sequence = session.lastSequence;
+      const eventInputs: AppendEventInput[] = [];
+      if (turn) {
+        eventInputs.push({
+          type: "turn.cancelled",
+          turnId: turn.id,
+          payload: {
+            triggerEventId: interruptEventId,
+            reason: interruptEvent.payload ?? null,
+          },
+        });
+      }
+      if (goal && !steer && goal.status === "active") {
+        eventInputs.push({
+          type: "goal.paused",
+          payload: {
+            goalId: goal.id,
+            actor: "user",
+            reason: "user_interrupt",
+            autoContinuations: goal.autoContinuations,
+            noProgressStreak: goal.noProgressStreak,
+          },
+        });
+      }
+      eventInputs.push({
+        type: "session.status.changed",
+        turnId: turn?.id ?? null,
+        payload: { status: turn ? "queued" : "idle" },
+      });
       const inserted = await tx
         .insert(schema.sessionEvents)
-        .values([
-          {
+        .values(
+          eventInputs.map((event) => ({
             accountId: session.accountId,
             workspaceId,
             sessionId,
             sequence: ++sequence,
-            type: "turn.cancelled",
-            turnId: turn.id,
-            payload: sanitizeEventPayload({
-              triggerEventId: interruptEventId,
-              reason: interruptEvent.payload ?? null,
-            }),
-            occurredAt: now,
-          },
-          {
-            accountId: session.accountId,
-            workspaceId,
-            sessionId,
-            sequence: ++sequence,
-            type: "session.status.changed",
-            turnId: turn.id,
-            payload: sanitizeEventPayload({ status: "queued" }),
-            occurredAt: now,
-          },
-        ])
+            type: event.type,
+            turnId: event.turnId ?? null,
+            turnGeneration: event.turnId && turn ? turn.executionGeneration : null,
+            turnAssociation: event.turnId && turn ? "current" : null,
+            payload: sanitizeEventPayload(event.payload ?? {}),
+            clientEventId: event.clientEventId ?? null,
+            producerId: event.producerId ?? null,
+            producerSeq: event.producerSeq ?? null,
+            occurredAt: event.occurredAt ?? now,
+          })),
+        )
         .returning();
       const [updatedSession] = await tx
         .update(schema.sessions)
         .set({
-          status: "queued",
+          status: turn ? "queued" : "idle",
           activeTurnId: null,
           lastSequence: sequence,
+          queueVersion: session.queueVersion + (turn ? 1 : 0),
           updatedAt: now,
         })
         .where(
           and(
             eq(schema.sessions.workspaceId, workspaceId),
             eq(schema.sessions.id, sessionId),
-            eq(schema.sessions.activeTurnId, turn.id),
+            ...(turn ? [eq(schema.sessions.activeTurnId, turn.id)] : []),
           ),
         )
         .returning({ id: schema.sessions.id });
       if (!updatedSession) {
-        throw new Error(`Active session turn changed while locked: ${turn.id}`);
+        throw new Error(
+          turn
+            ? `Active session turn changed while locked: ${turn.id}`
+            : `Session changed while locked: ${sessionId}`,
+        );
       }
       return {
         action: "cancelled" as const,
-        turnId: turn.id,
+        turnId: turn?.id ?? null,
         events: inserted.map(mapEvent),
       };
     });
@@ -20167,6 +20616,168 @@ export async function cancelTurnFromDyingDispatch(
       return true;
     });
   });
+}
+
+export type ApplySessionOnlySettlementInput = {
+  sessionId: string;
+  status: SessionStatus;
+  events: AppendEventInput[];
+  requireNoActiveTurn?: boolean;
+  requireNoPendingTurns?: boolean;
+};
+
+export type ApplySessionOnlySettlementResult =
+  | { action: "settled"; events: SessionEvent[] }
+  | { action: "stale"; events: [] };
+
+/**
+ * Compatibility settlement for workflow histories that reach a terminal
+ * session state before a turn row exists. It owns the session lock, durable
+ * event append, pointer, and status in one transaction; callers must not
+ * append first and update the session afterward.
+ */
+export async function applySessionOnlySettlement(
+  db: Database,
+  workspaceId: string,
+  input: ApplySessionOnlySettlementInput,
+): Promise<ApplySessionOnlySettlementResult> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
+        if (
+          (input.requireNoActiveTurn !== false && session.activeTurnId !== null) ||
+          (session.status !== "queued" && session.status !== "running")
+        ) {
+          return { action: "stale" as const, events: [] as [] };
+        }
+        if (input.requireNoPendingTurns !== false) {
+          const [pendingTurn] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              ),
+            )
+            .limit(1);
+          if (pendingTurn) {
+            return { action: "stale" as const, events: [] as [] };
+          }
+        }
+        const now = new Date();
+        let sequence = session.lastSequence;
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            input.events.map((event) => ({
+              accountId: session.accountId,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: ++sequence,
+              type: event.type,
+              payload: sanitizeEventPayload(event.payload ?? {}),
+              clientEventId: event.clientEventId ?? null,
+              turnId: event.turnId ?? null,
+              producerId: event.producerId ?? null,
+              producerSeq: event.producerSeq ?? null,
+              occurredAt: event.occurredAt ?? now,
+            })),
+          )
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({ status: input.status, activeTurnId: null, lastSequence: sequence, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { action: "settled" as const, events: inserted.map(mapEvent) };
+      }),
+  );
+}
+
+/**
+ * Atomically transition a session with no active turn to idle. A live pointer
+ * or queued work wins the race and leaves the session untouched.
+ */
+export async function settleSessionIdle(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ changed: boolean; events: SessionEvent[] }> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          )
+          .for("update")
+          .limit(1);
+        if (!session || session.activeTurnId !== null) {
+          return { changed: false, events: [] };
+        }
+        const [queued] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, sessionId),
+              eq(schema.sessionTurns.status, "queued"),
+            ),
+          )
+          .limit(1);
+        if (queued || (session.status !== "queued" && session.status !== "running")) {
+          return { changed: false, events: [] };
+        }
+        const now = new Date();
+        const sequence = session.lastSequence + 1;
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId,
+            sessionId,
+            sequence,
+            type: "session.status.changed",
+            payload: sanitizeEventPayload({ status: "idle" }),
+            occurredAt: now,
+          })
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({ status: "idle", activeTurnId: null, lastSequence: sequence, updatedAt: now })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          );
+        return { changed: true, events: event ? [mapEvent(event)] : [] };
+      }),
+  );
 }
 
 export async function getSessionTurn(
@@ -20829,6 +21440,80 @@ async function settleSystemUpdateBundleForTurnTx(
         inArray(schema.sessionSystemUpdates.deliveryState, ["pending", "delivered"]),
       ),
     );
+}
+
+async function resetSystemUpdateBundleForTurnTx(
+  tx: Database,
+  workspaceId: string,
+  turn: Pick<typeof schema.sessionTurns.$inferSelect, "bundleId">,
+  now: Date,
+): Promise<void> {
+  if (!turn.bundleId) return;
+  await tx
+    .update(schema.sessionSystemUpdateBundles)
+    .set({
+      status: "queued",
+      version: sql`${schema.sessionSystemUpdateBundles.version} + 1`,
+      claimedAt: null,
+      acknowledgedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdateBundles.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdateBundles.id, turn.bundleId),
+      ),
+    );
+  await tx
+    .update(schema.sessionSystemUpdates)
+    .set({
+      deliveryState: "pending",
+      deliveredAt: null,
+      acknowledgedAt: null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.bundleId, turn.bundleId),
+      ),
+    );
+}
+
+async function enqueueFailedChildOutboxForTurnTx(
+  tx: Database,
+  workspaceId: string,
+  session: Pick<typeof schema.sessions.$inferSelect, "id" | "parentSessionId">,
+  turn: Pick<typeof schema.sessionTurns.$inferSelect, "id" | "accountId" | "sessionId">,
+): Promise<void> {
+  if (!session.parentSessionId) return;
+  const dedupeKey = `child-completion:${turn.sessionId}:turn:${turn.id}`;
+  await tx
+    .insert(schema.sessionSystemUpdateOutbox)
+    .values({
+      accountId: turn.accountId,
+      workspaceId,
+      sourceSessionId: turn.sessionId,
+      targetSessionId: session.parentSessionId,
+      dedupeKey,
+      groupingKey: "child-session-terminal:v1",
+      kind: "child_session_update",
+      classification: "failure",
+      sourceId: turn.sessionId,
+      summary: "Child session failed; inspect the durable child timeline.",
+      payload: { childSessionId: turn.sessionId, terminalStatus: "failed", turnId: turn.id },
+      lineage: {
+        childSessionId: turn.sessionId,
+        parentSessionId: session.parentSessionId,
+        turnId: turn.id,
+      },
+    })
+    .onConflictDoNothing({
+      target: [
+        schema.sessionSystemUpdateOutbox.workspaceId,
+        schema.sessionSystemUpdateOutbox.dedupeKey,
+      ],
+    });
 }
 
 export const SYSTEM_UPDATE_INLINE_ITEM_LIMIT = 100;

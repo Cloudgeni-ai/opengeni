@@ -24,6 +24,8 @@ export type EventLogger = {
 
 export type EventBusOptions = {
   logger?: EventLogger;
+  /** Test/host transport seam; production defaults to the nats.js connector. */
+  connect?: typeof connect;
 };
 
 const silentLogger: Required<EventLogger> = {
@@ -274,7 +276,7 @@ export async function createNatsEventBus(
     connectOptions.user = auth.user;
     connectOptions.pass = auth.pass;
   }
-  const nc = await connect(withReconnectDefaults(connectOptions));
+  const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   let connected = true;
   logConnectionStatus(nc, "event-bus", options.logger, (type) => {
     if (
@@ -382,7 +384,7 @@ export async function createResponderConnection(
   auth: NatsConnectAuth,
   subject: string,
   handler: RequestHandler,
-  options: { name?: string; logger?: EventLogger } = {},
+  options: { name?: string; logger?: EventLogger; connect?: typeof connect } = {},
 ): Promise<ResponderConnection> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
   if (options.name) {
@@ -394,7 +396,7 @@ export async function createResponderConnection(
   } else if (auth.kind === "token") {
     connectOptions.token = auth.token;
   }
-  const nc = await connect(withReconnectDefaults(connectOptions));
+  const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   logConnectionStatus(
     nc,
     options.name ? `auth-callout:${options.name}` : "auth-callout",
@@ -435,6 +437,11 @@ export type AppendPublishObserver = {
   onPublish?: (info: { durationSeconds: number; count: number }) => void;
 };
 
+export type AppendPublishOptions = AppendPublishObserver & {
+  /** Test/host persistence seam; production uses the database implementation. */
+  appendSessionEvents?: typeof appendSessionEvents;
+};
+
 /**
  * Invoke a phase-timing callback with the elapsed seconds since `startedAt` and the
  * event count, swallowing any throw so a metrics sink can never break the
@@ -464,12 +471,17 @@ export async function appendAndPublishEvents(
   workspaceId: string,
   sessionId: string,
   events: AppendEventInput[],
-  observe?: AppendPublishObserver,
+  options: AppendPublishOptions = {},
 ): Promise<SessionEvent[]> {
   const appendStartedAt = performance.now();
-  const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
-  observeSince(observe?.onAppend, appendStartedAt, appended.length);
-  await publishDurableSessionEvents(bus, workspaceId, sessionId, appended, observe);
+  const appended = await (options.appendSessionEvents ?? appendSessionEvents)(
+    db,
+    workspaceId,
+    sessionId,
+    events,
+  );
+  observeSince(options.onAppend, appendStartedAt, appended.length);
+  await publishDurableSessionEvents(bus, workspaceId, sessionId, appended, options);
   return appended;
 }
 

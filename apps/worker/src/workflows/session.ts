@@ -322,19 +322,29 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       if (interruptedEventId) {
         const idleInterruptEventId = interruptedEventId;
         interruptedEventId = null;
-        // An idle interrupt is an explicit stop: pause an active goal before
-        // shutting down so a later wake does not auto-continue it. The
-        // activity inspects the trigger and skips the pause for steer-tagged
-        // interrupts (steering redirects work, it does not stop it).
-        await activity.pauseGoalForInterrupt({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          triggerEventId: idleInterruptEventId,
-        });
-        await activity.markSessionIdle({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-        });
+        // New executions use one authoritative atomic idle settlement. The
+        // patch gate preserves replay for histories that already recorded the
+        // old pauseGoalForInterrupt + markSessionIdle command sequence; those
+        // old commands are never scheduled for a new run.
+        if (patched("atomic-idle-interrupt-settlement")) {
+          await activity.interruptActiveTurn({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            triggerEventId: idleInterruptEventId,
+            workflowId,
+          });
+        } else {
+          await activity.pauseGoalForInterrupt({
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            triggerEventId: idleInterruptEventId,
+          });
+          await activity.markSessionIdle({
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+        }
         return;
       }
       if (woke) {

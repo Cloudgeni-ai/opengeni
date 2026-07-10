@@ -920,6 +920,7 @@ describe("DB integration", () => {
         turnId: turn.id,
         triggerEventId: trigger!.id,
         dispatchId: "dispatch-a",
+        timeoutType: "HEARTBEAT",
         resumeWithNotice: true,
         text: "stale crash",
         maxRedispatches: 3,
@@ -952,6 +953,486 @@ describe("DB integration", () => {
     expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
       "completed",
     );
+  });
+
+  test("claim reconciles only missing/terminal active pointers and refuses a live pointer", async () => {
+    const grant = await testGrant(dbClient.db);
+    const makeSessionWithTurn = async (label: string) => {
+      const session = await createSession(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: label,
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+        { type: "user.message", payload: { text: label } },
+      ]);
+      const turn = await enqueueSessionTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        temporalWorkflowId: `session-${session.id}`,
+        source: "user",
+        prompt: label,
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+      });
+      return { session, turn, trigger: trigger! };
+    };
+
+    const missing = await makeSessionWithTurn("missing pointer");
+    await dbClient.db.execute(
+      dbSql`update sessions set status = 'running', active_turn_id = ${crypto.randomUUID()} where id = ${missing.session.id}`,
+    );
+    const reclaimedMissing = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      missing.session.id,
+      `session-${missing.session.id}`,
+    );
+    expect(reclaimedMissing?.id).toBe(missing.turn.id);
+    expect(
+      (await getSession(dbClient.db, grant.workspaceId, missing.session.id))?.activeTurnId,
+    ).toBe(missing.turn.id);
+
+    const terminal = await makeSessionWithTurn("terminal pointer");
+    const terminalTurnId = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: terminal.session.id,
+      triggerEventId: terminal.trigger.id,
+      temporalWorkflowId: `session-${terminal.session.id}`,
+    });
+    await finishTurn(dbClient.db, grant.workspaceId, terminalTurnId, "idle");
+    await dbClient.db.execute(
+      dbSql`update sessions set status = 'running', active_turn_id = ${terminalTurnId} where id = ${terminal.session.id}`,
+    );
+    const reclaimedTerminal = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      terminal.session.id,
+      `session-${terminal.session.id}`,
+    );
+    expect(reclaimedTerminal?.id).toBe(terminal.turn.id);
+
+    const live = await makeSessionWithTurn("live pointer");
+    const liveClaim = await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      live.session.id,
+      `session-${live.session.id}`,
+    );
+    expect(liveClaim?.id).toBe(live.turn.id);
+    const [queuedTrigger] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      live.session.id,
+      [{ type: "user.message", payload: { text: "behind live" } }],
+    );
+    const queuedBehindLive = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: live.session.id,
+      triggerEventId: queuedTrigger!.id,
+      temporalWorkflowId: `session-${live.session.id}`,
+      source: "user",
+      prompt: "behind live",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    expect(
+      await claimNextQueuedTurn(
+        dbClient.db,
+        grant.workspaceId,
+        live.session.id,
+        `session-${live.session.id}`,
+      ),
+    ).toBeNull();
+    expect((await getSession(dbClient.db, grant.workspaceId, live.session.id))?.activeTurnId).toBe(
+      liveClaim!.id,
+    );
+    expect(
+      (await getSessionTurn(dbClient.db, grant.workspaceId, queuedBehindLive.id))?.status,
+    ).toBe("queued");
+  });
+
+  test("heartbeat recovery requires registration; schedule-to-start cannot take over a newer attempt", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "timeout ownership",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "timeout ownership" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "timeout ownership",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "unregistered-heartbeat",
+        timeoutType: "HEARTBEAT",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "unregistered-schedule",
+        timeoutType: "SCHEDULE_TO_START",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "requeued", redispatches: 1 });
+
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "newer-registered-attempt",
+      }),
+    ).toMatchObject({ action: "registered", dispatchGeneration: 2 });
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "old-schedule-timeout",
+        timeoutType: "SCHEDULE_TO_START",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+
+    const [approval] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.approvalDecision", payload: { decision: "approve" } },
+    ]);
+    const approvalSettlement = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "newer-registered-attempt",
+      dispatchGeneration: 2,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn.id,
+      events: [],
+    });
+    expect(approvalSettlement.action).toBe("settled");
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: approval!.id,
+        dispatchId: "unregistered-approval-schedule",
+        timeoutType: "SCHEDULE_TO_START",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "requeued", redispatches: 2 });
+  });
+
+  test("malformed and exhausted dispatch generations fail closed without mutation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "generation guard",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "generation guard" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "generation guard",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+      .lastSequence;
+
+    await dbClient.db.execute(
+      dbSql`update session_turns set metadata = ${JSON.stringify({ dispatchGeneration: "bad" })}::jsonb where id = ${turn.id}`,
+    );
+    await expect(
+      registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "malformed-generation",
+      }),
+    ).rejects.toThrow("Malformed turn dispatch metadata");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
+      sequenceBefore,
+    );
+
+    await dbClient.db.execute(
+      dbSql`update session_turns set metadata = ${JSON.stringify({ dispatchGeneration: Number.MAX_SAFE_INTEGER })}::jsonb where id = ${turn.id}`,
+    );
+    await expect(
+      registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "overflow-generation",
+      }),
+    ).rejects.toThrow("generation exhausted");
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("running");
+
+    await dbClient.db.execute(
+      dbSql`update session_turns set metadata = ${JSON.stringify({
+        dispatchGeneration: 1,
+        dispatchAttempt: {
+          id: "worker-death-counter-owner",
+          generation: 1,
+          triggerEventId: trigger!.id,
+        },
+        workerDeathRedispatches: "bad",
+      })}::jsonb where id = ${turn.id}`,
+    );
+    const beforeMalformedCounter = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+      .lastSequence;
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "worker-death-counter-owner",
+        timeoutType: "HEARTBEAT",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
+      beforeMalformedCounter,
+    );
+
+    await dbClient.db.execute(
+      dbSql`update session_turns set metadata = ${JSON.stringify({
+        dispatchGeneration: 1,
+        dispatchAttempt: {
+          id: "worker-death-counter-owner",
+          generation: 1,
+          triggerEventId: trigger!.id,
+        },
+        workerDeathRedispatches: Number.MAX_SAFE_INTEGER,
+      })}::jsonb where id = ${turn.id}`,
+    );
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "worker-death-counter-owner",
+        timeoutType: "HEARTBEAT",
+        resumeWithNotice: false,
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+  });
+
+  test("interrupt goal pause, cancellation, pointer, and events commit or roll back together", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "atomic interrupt goal",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "stop safely",
+      createdBy: "api",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "atomic interrupt goal" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "atomic interrupt goal",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.interrupt", payload: { reason: "stop" } },
+    ]);
+    const settled = await applySessionTurnInterrupt(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      interrupt!.id,
+    );
+    expect(settled.action).toBe("cancelled");
+    expect(settled.events.map((event) => event.type)).toEqual([
+      "turn.cancelled",
+      "goal.paused",
+      "session.status.changed",
+    ]);
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "paused",
+    );
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+      "cancelled",
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId).toBeNull();
+
+    const rollbackSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "atomic interrupt rollback",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: rollbackSession.id,
+      text: "rollback stop",
+      createdBy: "api",
+    });
+    const [rollbackTrigger] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      rollbackSession.id,
+      [{ type: "user.message", payload: { text: "atomic interrupt rollback" } }],
+    );
+    const rollbackTurn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: rollbackSession.id,
+      triggerEventId: rollbackTrigger!.id,
+      temporalWorkflowId: `session-${rollbackSession.id}`,
+      source: "user",
+      prompt: "atomic interrupt rollback",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(
+      dbClient.db,
+      grant.workspaceId,
+      rollbackSession.id,
+      `session-${rollbackSession.id}`,
+    );
+    const [rollbackInterrupt] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      rollbackSession.id,
+      [{ type: "user.interrupt", payload: {} }],
+    );
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const triggerName = `ope22_goal_pause_fail_${suffix}`;
+    const functionName = `ope22_goal_pause_fail_fn_${suffix}`;
+    await applyRawSql(
+      services.databaseUrl,
+      `create function ${functionName}() returns trigger language plpgsql as $$ begin if new.session_id = '${rollbackSession.id}'::uuid then raise exception 'ope22 goal pause failure'; end if; return new; end $$; create trigger ${triggerName} before update on session_goals for each row execute function ${functionName}();`,
+    );
+    try {
+      await expect(
+        applySessionTurnInterrupt(
+          dbClient.db,
+          grant.workspaceId,
+          rollbackSession.id,
+          rollbackInterrupt!.id,
+        ),
+      ).rejects.toThrow("Failed query");
+      expect(
+        (await getSessionGoal(dbClient.db, grant.workspaceId, rollbackSession.id))?.status,
+      ).toBe("active");
+      expect((await getSessionTurn(dbClient.db, grant.workspaceId, rollbackTurn.id))?.status).toBe(
+        "running",
+      );
+      expect(
+        (await getSession(dbClient.db, grant.workspaceId, rollbackSession.id))?.activeTurnId,
+      ).toBe(rollbackTurn.id);
+      const rollbackEvents = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        rollbackSession.id,
+        0,
+        100,
+      );
+      expect(rollbackEvents.filter((event) => event.type === "turn.cancelled")).toHaveLength(0);
+      expect(rollbackEvents.filter((event) => event.type === "goal.paused")).toHaveLength(0);
+    } finally {
+      await applyRawSql(
+        services.databaseUrl,
+        `drop trigger ${triggerName} on session_goals; drop function ${functionName}();`,
+      );
+    }
   });
 
   test("claim and preemption share one lock order without deadlock or dual active turns", async () => {

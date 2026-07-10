@@ -10,20 +10,22 @@
 //  2. `appendAndPublishEvents` never lets a failed/throwing publish kill the
 //     in-flight turn — the events are already durable in the DB.
 //
-// `bun test` runs EVERY file in ONE shared process, and a top-level `mock.module`
-// is process-global for the WHOLE run (see apps/api/test/auth-callout.test.ts).
-// So both mocks are good citizens: they spread every REAL export and override
-// only a gated slice (a sentinel URL / sentinel workspace), falling through to
-// the real implementation for everyone else.
+// The fakes are injected per call. This deliberately avoids Bun's process-global
+// `mock.module`, so the combined `bun test` process cannot contaminate unrelated
+// event or database tests.
 
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
+import type { AppendEventInput } from "@opengeni/db";
+import {
+  appendAndPublishEvents,
+  createNatsEventBus,
+  createResponderConnection,
+  publishDurableSessionEvents,
+} from "../src/index";
 
 const SENTINEL_URL = "nats://test-sentinel:4222";
 const SENTINEL_WS = "00000000-0000-4000-8000-0000000000ff";
 
-// --- nats mock: capture connect options for the sentinel URL only ------------
-const realNats = await import("nats");
-const realConnect = realNats.connect;
 const captured: Array<{ servers?: unknown } & Record<string, unknown>> = [];
 
 function fakeNatsConnection(): unknown {
@@ -37,61 +39,39 @@ function fakeNatsConnection(): unknown {
     async request() {
       return { data: new Uint8Array() };
     },
+    isClosed: () => false,
+    isDraining: () => false,
   };
 }
 
-mock.module("nats", () => ({
-  ...realNats,
-  connect: async (opts: Record<string, unknown>) => {
-    if (opts?.servers !== SENTINEL_URL) {
-      return realConnect(opts as never);
-    }
-    captured.push(opts);
-    return fakeNatsConnection() as never;
-  },
-}));
+const fakeConnect = async (opts: Record<string, unknown>) => {
+  captured.push(opts);
+  return fakeNatsConnection() as never;
+};
 
-// --- db mock: synthesize durable events for the sentinel workspace only -------
-const realDb = await import("@opengeni/db");
-const realAppend = realDb.appendSessionEvents;
 let sentinelAppendCalls = 0;
-mock.module("@opengeni/db", () => ({
-  ...realDb,
-  appendSessionEvents: async (
-    db: unknown,
-    workspaceId: string,
-    sessionId: string,
-    events: Array<{ type: string; payload?: unknown }>,
-  ) => {
-    if (workspaceId !== SENTINEL_WS) {
-      return realAppend(db as never, workspaceId, sessionId, events as never);
-    }
-    sentinelAppendCalls += 1;
-    // Stand in for the durable append: assign contiguous sequences like the DB.
-    return events.map((event, index) => ({
-      id: `00000000-0000-4000-8000-00000000000${index}`,
-      sessionId,
-      sequence: index + 1,
-      type: event.type,
-      payload: event.payload ?? {},
-      occurredAt: "2026-06-27T00:00:00.000Z",
-      clientEventId: null,
-      turnId: null,
-    }));
-  },
-}));
-
-// Imported AFTER both mocks are installed so it binds them.
-const {
-  createNatsEventBus,
-  createResponderConnection,
-  appendAndPublishEvents,
-  publishDurableSessionEvents,
-} = await import("../src/index");
-
-afterAll(() => {
-  mock.restore();
-});
+const fakeAppendSessionEvents = async (
+  _db: unknown,
+  workspaceId: string,
+  sessionId: string,
+  events: AppendEventInput[],
+) => {
+  if (workspaceId !== SENTINEL_WS) {
+    throw new Error(`unexpected workspace in sentinel append: ${workspaceId}`);
+  }
+  sentinelAppendCalls += 1;
+  return events.map((event, index) => ({
+    id: `00000000-0000-4000-8000-00000000000${index}`,
+    workspaceId,
+    sessionId,
+    sequence: index + 1,
+    type: event.type,
+    payload: event.payload ?? {},
+    occurredAt: "2026-06-27T00:00:00.000Z",
+    clientEventId: event.clientEventId ?? null,
+    turnId: event.turnId ?? null,
+  }));
+};
 
 function expectInfiniteReconnect(opts: Record<string, unknown>): void {
   expect(opts.reconnect).toBe(true);
@@ -106,7 +86,11 @@ function expectInfiniteReconnect(opts: Record<string, unknown>): void {
 describe("long-lived NATS connections survive an indefinite broker outage", () => {
   test("createNatsEventBus connects with infinite reconnect + preserved auth", async () => {
     captured.length = 0;
-    await createNatsEventBus(SENTINEL_URL, { user: "ctrl", pass: "secret" });
+    await createNatsEventBus(
+      SENTINEL_URL,
+      { user: "ctrl", pass: "secret" },
+      { connect: fakeConnect },
+    );
     expect(captured).toHaveLength(1);
     const opts = captured[0]!;
     expect(opts.servers).toBe(SENTINEL_URL);
@@ -122,7 +106,7 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
       { kind: "token", token: "callout-token" },
       "$SYS.REQ.USER.AUTH",
       () => new Uint8Array(),
-      { name: "opengeni-auth-callout" },
+      { name: "opengeni-auth-callout", connect: fakeConnect },
     );
     expect(captured).toHaveLength(1);
     const opts = captured[0]!;
@@ -147,10 +131,9 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
       SENTINEL_WS,
       "00000000-0000-4000-8000-000000000001",
       [{ type: "agent.message.delta", payload: { text: "hi" } }] as never,
+      { appendSessionEvents: fakeAppendSessionEvents as never },
     );
 
-    // The durable append still succeeded and was returned; the rejected publish
-    // was swallowed (consumers reconcile the missed live event from the DB).
     expect(appended).toHaveLength(1);
     expect(appended[0]!.sequence).toBe(1);
   });

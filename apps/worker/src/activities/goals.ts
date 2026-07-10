@@ -12,21 +12,20 @@ import {
 } from "@opengeni/contracts";
 import {
   enqueueSessionTurn,
+  applySessionTurnInterrupt,
   evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
-  getSessionEvent,
   getSessionGoal,
   isCodexBilledTurn,
   recordUsageEvent,
   requireSession,
   setSessionGoalLastContinuationTurn,
-  setSessionGoalStatus,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import type {
   ActivityServices,
   MaybeContinueGoalInput,
@@ -207,13 +206,20 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
 
   async function pauseGoalForInterrupt(input: PauseGoalForInterruptInput): Promise<void> {
     const { db, bus } = await services();
+    // Compatibility activity for older workflow histories. When an interrupt
+    // event exists, route through the authoritative session/turn settlement so
+    // goal state and durable events cannot split. An unfenced legacy call has
+    // no safe target and is deliberately an event-free no-op.
     if (input.triggerEventId) {
-      const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
-      if (isSteerInterrupt(trigger)) {
-        return;
-      }
+      const applied = await applySessionTurnInterrupt(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.triggerEventId,
+      );
+      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, applied.events);
+      return;
     }
-    await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
   }
 
   return {
@@ -242,43 +248,6 @@ export function isSteerInterrupt(
     payload !== null &&
     (payload as { reason?: unknown }).reason === "steer"
   );
-}
-
-/**
- * A user interrupt is the explicit act of stopping, so it pauses an active
- * goal. Shared by the idle-interrupt activity and `interruptActiveTurn` so the
- * loop never auto-continues a goal the user just stopped. Callers gate this
- * on `isSteerInterrupt` first: steer interrupts must NOT pause the goal.
- * No-op when the session has no goal or it is not active.
- */
-export async function pauseActiveGoalOnInterrupt(
-  db: Database,
-  bus: EventBus,
-  workspaceId: string,
-  sessionId: string,
-): Promise<void> {
-  const goal = await getSessionGoal(db, workspaceId, sessionId);
-  if (!goal || goal.status !== "active") {
-    return;
-  }
-  const { goal: paused, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
-    status: "paused",
-    pausedReason: "user_interrupt",
-  });
-  if (changed) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "goal.paused",
-        payload: {
-          goalId: paused.id,
-          actor: "user",
-          reason: "user_interrupt",
-          autoContinuations: paused.autoContinuations,
-          noProgressStreak: paused.noProgressStreak,
-        },
-      },
-    ]);
-  }
 }
 
 export function goalContinuationPrompt(
