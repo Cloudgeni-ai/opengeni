@@ -79,10 +79,14 @@ spec:
           # Contexts running hot (p90 observed input tokens high) while NO
           # compaction has fired in 30m — sessions are drifting toward overflow.
           # The 150k token threshold assumes a ~200k-window model; tune to yours.
+          # `or vector(0)` is load-bearing: on a fresh cluster the compaction
+          # counter has NEVER been created, so a bare `sum(increase(...)) == 0`
+          # is an EMPTY vector, not 0 — the conjunction would silently never fire
+          # exactly when compaction has never fired. The fallback forces a real 0.
           expr: |
             histogram_quantile(0.9, sum by (le) (rate(opengeni_model_input_tokens_bucket[30m]))) > 150000
             and on()
-            sum(increase(opengeni_context_compactions_total[30m])) == 0
+            (sum(increase(opengeni_context_compactions_total[30m])) or vector(0)) == 0
           for: 15m
           labels:
             severity: warning
