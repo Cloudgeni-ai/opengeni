@@ -495,7 +495,11 @@ impl Platform for NativePlatform {
         self.stream_registry.clone()
     }
 
-    async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
+    /// Builds the command (shell vs argv, cwd/env resolution) and spawns it
+    /// inside the shared containment primitive — the streaming job path. The
+    /// per-op cgroup leaf (#351) rides inside the group: placed at spawn, torn
+    /// down after the anchor reap in `wait()`, best-effort in `Drop`.
+    fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
         if req.command.is_empty() {
             return Err(PlatformError::Os {
                 message: "exec: empty command".to_string(),
@@ -516,14 +520,17 @@ impl Platform for NativePlatform {
             cmd.env(k, v);
         }
 
+        spawn_contained(cmd, self.cgroups.as_deref())
+            .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))
+    }
+
+    async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
         let started = Instant::now();
-        // Spawn inside the shared containment primitive. `spawn_contained` configures
-        // piped stdio + kill_on_drop; the group's Drop SIGKILLs the POSIX process
-        // group (Unix) / Job Object (Windows) on any early return, incl. the timeout.
-        // The per-op cgroup leaf (#351) rides inside the group: placed at spawn,
-        // torn down after the anchor reap in wait(), best-effort in Drop.
-        let mut contained = spawn_contained(cmd, self.cgroups.as_deref())
-            .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))?;
+        // Spawn inside the shared containment primitive. `spawn_contained` (via
+        // `spawn_exec`) configures piped stdio + kill_on_drop; the group's Drop
+        // SIGKILLs the POSIX process group (Unix) / Job Object (Windows) on any
+        // early return, incl. the timeout.
+        let mut contained = self.spawn_exec(req)?;
 
         // Feed stdin (if any) then drop the handle so the child sees EOF.
         if req.stdin.is_empty() {

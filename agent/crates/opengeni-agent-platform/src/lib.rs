@@ -105,6 +105,27 @@ pub trait Platform: Send + Sync {
     /// through the platform shell; otherwise `command[0]` is the program.
     async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse>;
 
+    /// Spawns the command described by an `ExecRequest` inside the shared
+    /// containment primitive WITHOUT waiting or assembling a reply — the
+    /// streaming job path: the caller (the op-engine pump) owns the returned
+    /// [`ContainedExec`]'s stdio and lifecycle. Same command construction,
+    /// cwd/env resolution, and containment as [`Platform::exec`] (which is
+    /// implemented over this on the native platform).
+    ///
+    /// The default reports a typed `Unsupported` for platforms that cannot
+    /// stream (test fakes).
+    ///
+    /// # Errors
+    ///
+    /// The spawn IO failure mapped to a typed [`PlatformError`] (missing
+    /// program, empty command), or `Unsupported` from the default impl.
+    fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
+        let _ = req;
+        Err(PlatformError::Unsupported(
+            "streaming exec is not supported by this platform".to_string(),
+        ))
+    }
+
     // --- Channel-A: filesystem -------------------------------------------
 
     /// Reads a file, optionally a byte range. Returns the read bytes plus the
