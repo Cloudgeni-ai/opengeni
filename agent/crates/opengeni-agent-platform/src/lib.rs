@@ -57,7 +57,7 @@ pub use desktop::{
     fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
 };
 pub use error::{PlatformError, PlatformResult};
-pub use native::NativePlatform;
+pub use native::{spawn_contained, ContainedExec, NativePlatform};
 pub use pty::{spawn_pty, PtyProcess};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
