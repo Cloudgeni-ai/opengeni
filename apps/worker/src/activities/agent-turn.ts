@@ -1952,14 +1952,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   epoch: activeSandboxPointer!.activeEpoch,
                 },
                 // HOME semantics for a mid-turn clear-to-null: only a genuine
-                // machine-HOME session (its home IS this machine) resolves null back to
-                // the pinned machine. A Modal-HOME session merely PINNED to a machine
-                // this turn never established its group box, so a clear-to-null has no
-                // home to resolve — the null branch fails typed (`home_not_established`)
-                // rather than silently serving the machine; the detach takes effect next
-                // turn. (Lazy home-box establishment on such a clear is a deferred
-                // follow-up; issue #341.)
-                homeUnestablishedThisTurn: runSettings.sandboxBackend !== "selfhosted",
+                // machine-HOME session (its home IS this machine, session.sandboxBackend
+                // === "selfhosted") resolves null back to the pinned machine. A Modal-HOME
+                // session merely PINNED to a machine this turn never established its group
+                // box, so defaultIsHome:false makes a clear-to-null fail typed
+                // (`home_unavailable_this_turn`) rather than silently serving the machine;
+                // the detach takes effect next turn. (Lazy home-box establishment on such a
+                // clear is a deferred follow-up; issue #341.)
+                defaultIsHome: session.sandboxBackend === "selfhosted",
               },
               established,
             ),
