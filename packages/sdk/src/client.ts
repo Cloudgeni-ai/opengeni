@@ -90,6 +90,8 @@ import type {
   SessionQueueSnapshot,
   SessionSystemUpdateBundlePage,
   SessionControlResponse,
+  WorkspaceInferenceControlResponse,
+  StopSessionDescendantsResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -739,6 +741,29 @@ export class OpenGeniClient {
     options: { reason?: string; clientEventId?: string } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, { mode: "resume", ...options });
+  }
+
+  async stopSessionDescendants(
+    workspaceId: string,
+    sessionId: string,
+    request: { reason?: string; includeRoot?: boolean } = {},
+  ): Promise<StopSessionDescendantsResponse> {
+    return await this.requestJson<StopSessionDescendantsResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control/descendants`,
+      request,
+    );
+  }
+
+  async setWorkspaceInferenceState(
+    workspaceId: string,
+    request: { state: "active" | "killed"; reason: string },
+  ): Promise<WorkspaceInferenceControlResponse> {
+    return await this.requestJson<WorkspaceInferenceControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/inference-control`,
+      request,
+    );
   }
 
   /** Edit a still-queued turn (prompt, model, resources, tools, ...). */

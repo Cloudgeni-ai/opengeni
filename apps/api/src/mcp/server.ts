@@ -35,6 +35,7 @@ import {
   requireFile,
   requireScheduledTask,
   requireSession,
+  requestSessionControl,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   setSessionChildNotificationsMode,
@@ -1403,17 +1404,18 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Post a user message into an existing session; the session queues a turn and resumes if idle.",
+          "Post a human/operator message into an existing session. delivery='queue' (default) appends normally. delivery='steer' atomically inserts and promotes this exact item, fences the active turn, and delivers it next with no intermediate queued inference.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
+          delivery: z4.enum(["queue", "steer"]).optional(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(z4.unknown()).optional(),
         },
       },
-      async ({ sessionId, text, mcpCredentialUpdates }) => {
-        const { accepted, turn } = await acceptSessionUserMessage(
+      async ({ sessionId, text, delivery, mcpCredentialUpdates }) => {
+        const { accepted, turn, interrupted } = await acceptSessionUserMessage(
           deps,
           grant,
           grant.workspaceId,
@@ -1421,12 +1423,14 @@ function registerWorkspaceOrchestrationTools(
           {
             text,
             toolsProvided: false,
+            delivery: delivery ?? "queue",
+            origin: "operator",
             mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
               SessionMcpCredentialUpdateInput.parse(update),
             ),
           },
         );
-        return json({ event: accepted, turnId: turn.id });
+        return json({ event: accepted, turnId: turn.id, interrupted });
       },
     );
 
@@ -1434,38 +1438,36 @@ function registerWorkspaceOrchestrationTools(
       "session_interrupt",
       {
         description:
-          "Interrupt a session in this workspace. mode='stop' (default) cancels the current turn AND pauses the session's active goal so it halts. mode='steer' cancels the current turn WITHOUT pausing the goal, so the session picks up its next queued turn (or, if nothing is queued, continues toward its active goal) — pair it with a preceding session_send_message to redirect a running session. Works whether the target is mid-turn or idle.",
+          "Control the current turn. mode='stop' (default) atomically locks the session, pauses goal/auto-dequeue, preserves queued items inert, and cancels current inference. mode='steer' is a legacy interrupt-current without goal pause; prefer session_send_message(delivery='steer') to atomically target an exact message. Works with empty or nonempty queues.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           mode: z4.enum(["stop", "steer"]).optional(),
         },
       },
       async ({ sessionId, mode }) => {
-        await requireSession(deps.db, grant.workspaceId, sessionId);
-        const appended = await appendAndPublishEvents(
-          deps.db,
-          deps.bus,
-          grant.workspaceId,
-          sessionId,
-          [
-            {
-              type: "user.interrupt",
-              payload: mode === "steer" ? { reason: "steer" } : {},
-            },
-          ],
-        );
-        const accepted = appended[0];
-        if (!accepted) {
-          throw new Error("failed to append interrupt event");
-        }
-        await deps.workflowClient.signalInterrupt({
+        const controlled = await requestSessionControl(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId,
-          eventId: accepted.id,
-          workflowId: workflowIdForSession(sessionId),
+          actor: grant.subjectId,
+          mode: mode === "steer" ? "interrupt" : "stop",
+          reason: mode === "steer" ? "legacy_steer_interrupt" : "mcp_stop",
         });
-        return json({ event: accepted });
+        await deps.bus.publish(grant.workspaceId, sessionId, controlled.events);
+        if (controlled.shouldSignalInterrupt) {
+          await deps.workflowClient.signalInterrupt({
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            eventId: controlled.event.id,
+            workflowId: workflowIdForSession(sessionId),
+          });
+        }
+        return json({
+          event: controlled.event,
+          controlState: controlled.controlState,
+          controlGeneration: controlled.controlGeneration,
+        });
       },
     );
 

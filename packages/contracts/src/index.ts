@@ -550,6 +550,11 @@ export const Workspace = z.object({
   // validated by WorkspaceSettingsSchema; unknown keys are preserved across
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
+  inferenceState: z.enum(["active", "killed"]),
+  inferenceGeneration: z.number().int().nonnegative(),
+  inferenceReason: z.string().nullable(),
+  inferenceChangedBy: z.string().nullable(),
+  inferenceChangedAt: z.string().nullable(),
   // Workspace default rig used by session/scheduled-task create fallback.
   defaultRigId: z.string().uuid().nullable(),
   createdAt: z.string(),
@@ -2114,6 +2119,26 @@ export const SessionControlRequest = z.object({
   clientEventId: z.string().min(1).optional(),
 });
 export type SessionControlRequest = z.infer<typeof SessionControlRequest>;
+
+export const StopSessionDescendantsRequest = z.object({
+  reason: z.string().min(1).optional(),
+  includeRoot: z.boolean().default(false),
+});
+export type StopSessionDescendantsRequest = z.infer<typeof StopSessionDescendantsRequest>;
+
+export const WorkspaceInferenceControlRequest = z.object({
+  state: WorkspaceInferenceState,
+  reason: z.string().min(1),
+});
+export type WorkspaceInferenceControlRequest = z.infer<typeof WorkspaceInferenceControlRequest>;
+
+export const WorkspaceInferenceControlResponse = z.object({
+  state: WorkspaceInferenceState,
+  generation: z.number().int().nonnegative(),
+  affectedSessionIds: z.array(z.string().uuid()),
+  interruptSessionIds: z.array(z.string().uuid()),
+});
+export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenceControlResponse>;
 
 export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
 export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;

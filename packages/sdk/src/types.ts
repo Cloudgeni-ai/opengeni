@@ -1382,6 +1382,11 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
+  inferenceState?: "active" | "killed";
+  inferenceGeneration?: number;
+  inferenceReason?: string | null;
+  inferenceChangedBy?: string | null;
+  inferenceChangedAt?: string | null;
   defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1589,6 +1594,18 @@ export type SessionControlResponse = {
   controlGeneration: number;
   expectedActiveTurnId: string | null;
   shouldSignalInterrupt: boolean;
+};
+
+export type WorkspaceInferenceControlResponse = {
+  state: "active" | "killed";
+  generation: number;
+  affectedSessionIds: string[];
+  interruptSessionIds: string[];
+};
+
+export type StopSessionDescendantsResponse = {
+  affectedSessionIds: string[];
+  interruptSessionIds: string[];
 };
 
 // --- Scheduled tasks: requests + runs ----------------------------------------

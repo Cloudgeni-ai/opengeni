@@ -7,6 +7,7 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
   type AccessContext,
@@ -31,6 +32,7 @@ import {
   updateWorkspace,
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
+  setWorkspaceInferenceControl,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -161,6 +163,47 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       allowedModels: payload.allowedModels ?? null,
     });
     return c.json(policy);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = WorkspaceInferenceControlRequest.parse(await c.req.json());
+    const result = await setWorkspaceInferenceControl(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      actor: grant.subjectId,
+      state: payload.state,
+      reason: payload.reason,
+    });
+    for (const broadcast of result.broadcasts) {
+      await deps.bus.publish(workspaceId, broadcast.sessionId, broadcast.events);
+    }
+    for (const interrupt of result.interrupts) {
+      await deps.workflowClient.signalInterrupt({
+        accountId: interrupt.accountId,
+        workspaceId,
+        sessionId: interrupt.sessionId,
+        eventId: interrupt.eventId,
+        workflowId: interrupt.workflowId,
+      });
+    }
+    if (payload.state === "active") {
+      for (const sessionId of result.wakeSessionIds) {
+        await deps.workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: `session-${sessionId}`,
+        });
+      }
+    }
+    return c.json({
+      state: result.state,
+      generation: result.generation,
+      affectedSessionIds: result.affectedSessionIds,
+      interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
+    }, 202);
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

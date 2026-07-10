@@ -24,6 +24,7 @@ import {
   ReorderSessionTurnsRequest,
   ReorderSessionQueueRequest,
   SessionControlRequest,
+  StopSessionDescendantsRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
@@ -77,6 +78,7 @@ import {
   updateQueuedSessionTurnWithVersion,
   promoteQueuedSessionTurn,
   requestSessionControl,
+  stopSessionDescendants,
   SessionQueueConflictError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
@@ -711,6 +713,37 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       controlGeneration: result.controlGeneration,
       expectedActiveTurnId: result.expectedActiveTurnId,
       shouldSignalInterrupt: result.shouldSignalInterrupt,
+    }, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control/descendants", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = StopSessionDescendantsRequest.parse(await c.req.json());
+    const result = await stopSessionDescendants(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      rootSessionId: sessionId,
+      actor: grant.subjectId,
+      reason: payload.reason ?? null,
+      includeRoot: payload.includeRoot,
+    });
+    for (const broadcast of result.broadcasts) {
+      await bus.publish(workspaceId, broadcast.sessionId, broadcast.events);
+    }
+    for (const interrupt of result.interrupts) {
+      await workflowClient.signalInterrupt({
+        accountId: interrupt.accountId,
+        workspaceId,
+        sessionId: interrupt.sessionId,
+        eventId: interrupt.eventId,
+        workflowId: interrupt.workflowId,
+      });
+    }
+    return c.json({
+      affectedSessionIds: result.affectedSessionIds,
+      interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
     }, 202);
   });
 
