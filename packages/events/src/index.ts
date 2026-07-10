@@ -408,7 +408,15 @@ export type AppendPublishObserver = {
   onPublish?: (info: { durationSeconds: number; count: number }) => void;
 };
 
-function observeSince(
+/**
+ * Invoke a phase-timing callback with the elapsed seconds since `startedAt` and the
+ * event count, swallowing any throw so a metrics sink can never break the
+ * append/publish path. Exported for direct unit testing: the wider test suite
+ * installs a process-global `mock.module("@opengeni/events")` that stubs
+ * `appendAndPublishEvents` (spreading the real module for everything else), so the
+ * observer wiring can only be exercised through a helper that survives that mock.
+ */
+export function observeSince(
   fn: ((info: { durationSeconds: number; count: number }) => void) | undefined,
   startedAt: number,
   count: number,
