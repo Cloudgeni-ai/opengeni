@@ -30,6 +30,16 @@ export const CODEX_MODEL_ID_PREFIX = "codex/";
 // this product allowlist.
 export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
 
+// The ChatGPT/Codex subscription serves a SMALLER effective context window than
+// the raw gpt-5.6 API: production turns hard-rejected with
+// `context_length_exceeded` at ~334-348k input tokens on 2026-07-10. We declare
+// a real per-model window so proactive compaction (threshold = window * ratio,
+// default 0.60) fires WELL before that cliff instead of never firing against
+// the 1.05M global default. 320k (below the empirical ~340k reject) yields a
+// ~192k proactive trigger with a ~148k safety margin. Applies to every codex
+// subscription slug (all gpt-5.6 family on the same subscription window).
+export const CODEX_MODEL_CONTEXT_WINDOW_TOKENS = 320_000;
+
 // Sent as the `version` header and inside the User-Agent. Staging-proven on
 // 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, while the
 // official Codex 0.144.0 release returned all three exact slugs above.

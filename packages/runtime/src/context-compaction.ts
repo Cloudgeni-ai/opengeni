@@ -20,7 +20,14 @@ export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
-export const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.6;
+// 0.9: compact as LATE as possible — retained context is worth more than early
+// headroom now that declared per-model windows are honest (input-effective,
+// empirically measured). Overshoot from estimator skew is absorbed by the
+// fail-closed reactive compact-on-reject ladder, so a late trigger costs at
+// worst one retried call, never a dead session. Was 0.6 when windows lied
+// (1.05M default vs the codex ~340k cliff meant the ratio compensated for the
+// wrong base — fix the base, not the ratio).
+export const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.9;
 export const MIN_COMPACTION_THRESHOLD_RATIO = 0.3;
 export const MAX_COMPACTION_THRESHOLD_RATIO = 0.9;
 export const COMPACTION_FALLBACK_TARGET_RATIO = 0.5;

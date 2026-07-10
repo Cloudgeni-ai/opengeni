@@ -2383,6 +2383,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 promptCacheKey,
               })
           : undefined;
+      // Client-path compaction must budget against the RESOLVED model's real
+      // context window (the codex subscription window is far smaller than the
+      // 1.05M global default), mirroring the SDK path above. Without this the
+      // threshold (window * ratio) uses 1.05M and proactive compaction never
+      // fires for codex turns — histories grow to the ~340k model cliff.
+      const compactionContextWindowTokens =
+        resolvedModel?.configured.contextWindowTokens ?? runSettings.contextWindowTokens;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
@@ -2404,7 +2411,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const outcome = await maybeCompactContext(
             db,
-            runSettings,
+            { ...runSettings, contextWindowTokens: compactionContextWindowTokens },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -2558,6 +2565,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const clientCompactionSettings: Settings = {
           ...runSettings,
           contextCompactionMode: "client",
+          contextWindowTokens: compactionContextWindowTokens,
         };
         const outcome = await maybeCompactContext(
           db,

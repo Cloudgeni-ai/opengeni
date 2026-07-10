@@ -211,15 +211,18 @@ const SettingsSchema = z.object({
   // budget the client path.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
   // Proactive compaction threshold as a ratio of the model context window.
-  // Defaults to 60% and is clamped to [0.3, 0.9] so deployments can tune the
-  // trigger without accidentally disabling compaction or waiting until the
-  // provider is already at the cliff.
+  // Defaults to 90%: compact as late as possible — retained context beats early
+  // headroom now that per-model windows are declared honestly (input-effective,
+  // empirically measured), and the fail-closed reactive compact-on-reject path
+  // absorbs any overshoot as one retried call rather than a dead session.
+  // Clamped to [0.3, 0.9] so deployments can tune the trigger without
+  // accidentally disabling compaction.
   contextCompactionThresholdRatio: z.coerce
     .number()
-    .default(0.6)
+    .default(0.9)
     .transform((value) => {
       if (!Number.isFinite(value)) {
-        return 0.6;
+        return 0.9;
       }
       return Math.min(0.9, Math.max(0.3, value));
     }),

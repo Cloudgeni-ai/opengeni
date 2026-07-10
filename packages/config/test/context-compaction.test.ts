@@ -27,7 +27,7 @@ describe("context compaction config defaults", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.contextCompactionMode).toBe("auto");
     expect(settings.contextWindowTokens).toBe(1_050_000);
-    expect(settings.contextCompactionThresholdRatio).toBeCloseTo(0.6);
+    expect(settings.contextCompactionThresholdRatio).toBeCloseTo(0.9);
     expect(settings.contextReservedOutputTokens).toBe(128_000);
     expect(settings.contextServerCompactThresholdTokens).toBeUndefined();
     expect(settings.contextCompactSoftFraction).toBeCloseTo(0.7);

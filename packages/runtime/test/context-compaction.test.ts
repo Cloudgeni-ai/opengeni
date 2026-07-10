@@ -92,7 +92,7 @@ describe("codex-parity constants and summary marker", () => {
 });
 
 describe("single client compaction threshold", () => {
-  test("computes 60 percent of the model context window by default", () => {
+  test("computes 90 percent of the model context window by default", () => {
     expect(
       clientCompactionThresholdTokens({
         contextWindowTokens: WINDOW,

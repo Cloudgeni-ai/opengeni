@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { parseModelProvidersJson } from "@opengeni/config";
+import { configuredModels, parseModelProvidersJson } from "@opengeni/config";
+import { CODEX_MODEL_CONTEXT_WINDOW_TOKENS } from "@opengeni/codex";
 import * as opengeniDb from "@opengeni/db";
+import { clientCompactionThresholdTokens } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
@@ -23,6 +25,36 @@ describe("withCodexProvider", () => {
     expect(codex?.baseUrl).toBe("https://chatgpt.com/backend-api");
     expect(codex?.models.every((m) => m.id.startsWith("codex/"))).toBe(true);
     expect(codex?.models.some((m) => m.id === "codex/gpt-5.6-sol")).toBe(true);
+  });
+
+  test("declares the codex subscription context window so proactive compaction fires before the reject cliff", () => {
+    const settings = withCodexProvider(testSettings({ modelProvidersJson: "[]" }));
+    const providers = parseModelProvidersJson(settings.modelProvidersJson);
+    const codex = providers.find((p) => p.id === "codex-subscription");
+    // Every codex model carries the (smaller-than-API) subscription window.
+    expect(
+      codex?.models.every((m) => m.contextWindowTokens === CODEX_MODEL_CONTEXT_WINDOW_TOKENS),
+    ).toBe(true);
+    // It flows through to the resolved model catalog.
+    const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-5.6-sol");
+    expect(sol?.contextWindowTokens).toBe(CODEX_MODEL_CONTEXT_WINDOW_TOKENS);
+    // The proactive client-compaction trigger (window * ratio, default 0.60)
+    // lands well below the empirical ~340k reject cliff — and under the 230k bar.
+    const trigger = clientCompactionThresholdTokens({
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      contextReservedOutputTokens: settings.contextReservedOutputTokens,
+      contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
+    });
+    expect(trigger).toBe(192_000);
+    expect(trigger).toBeLessThan(230_000);
+    expect(trigger).toBeLessThan(340_000);
+    // Contrast: the old 1.05M global default never fired before the cliff.
+    const globalTrigger = clientCompactionThresholdTokens({
+      contextWindowTokens: 1_050_000,
+      contextReservedOutputTokens: settings.contextReservedOutputTokens,
+      contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
+    });
+    expect(globalTrigger).toBeGreaterThan(340_000);
   });
 
   test("preserves existing registry providers", () => {
