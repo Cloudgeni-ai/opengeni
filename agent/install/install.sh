@@ -4,7 +4,7 @@
 # OpenGeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
-#   curl -fsSL https://get.opengeni.ai/install.sh | sh
+#   curl -fsSL https://app.opengeni.ai/install.sh | sh
 #
 # READ THIS BEFORE PIPING IT TO A SHELL. This script downloads the
 # `opengeni-agent` binary for your OS/arch, VERIFIES it two independent ways
@@ -21,7 +21,7 @@
 #
 # Environment overrides (all optional):
 #   OPENGENI_INSTALL_BASE_URL  Release asset base URL. Default:
-#                              https://get.opengeni.ai. Point this at a local
+#                              https://app.opengeni.ai. Point this at a local
 #                              mock release dir (file:// or http://localhost)
 #                              to test the verify flow offline.
 #   OPENGENI_AGENT_VERSION     Pin a version (e.g. 1.2.3). Default: "latest",
@@ -44,7 +44,7 @@
 #                              --api-url below) and the interactive `enroll`/`run`
 #                              (the agent reads $OPENGENI_API_URL via clap). Set it
 #                              to target a specific deployment instead of the
-#                              api.opengeni.ai default.
+#                              app.opengeni.ai default.
 #   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
 #                              enroll binds to (the user who approves must hold a
 #                              grant in it). Honored by the agent's `enroll`/`run`
@@ -103,7 +103,7 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 # standalone install. The OPENGENI_INSTALL_BASE_URL env override always wins.
 # Keep this line's shape stable: apps/api/src/routes/install.ts rewrites it by
 # exact match (DEFAULT_BASE_REWRITES).
-OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
+OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
 
@@ -669,7 +669,7 @@ finish() {
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
     # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
-    # (not the api.opengeni.ai default) even when the agent's env-inherit path is
+    # (not the app.opengeni.ai default) even when the agent's env-inherit path is
     # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
     # alone would suffice — this is belt-and-suspenders. The workspace is encoded
     # in the token, so no --workspace-id is needed on this path.

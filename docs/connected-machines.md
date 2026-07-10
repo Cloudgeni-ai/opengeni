@@ -255,6 +255,11 @@ target.
 - **Permanently un-enroll** a machine (so it can never be attached again) is a
   workspace administration action; it is not wrapped as a typed method on the
   `@opengeni/sdk` client as of 0.5.0.
+- **A machine may self-revoke** during a local purge via the exact public
+  `POST /v1/enrollments/self/revoke` route and its own `oge_` bearer. This cannot
+  revoke another enrollment or cross a workspace. A matching already-revoked row
+  returns the normal idempotent no-op response to recover a lost first response;
+  it does not make the bearer usable for the ACTIVE-only NATS auth callout.
 
 ## React components
 

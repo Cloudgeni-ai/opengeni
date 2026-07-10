@@ -4,7 +4,7 @@
 # OpenGeni self-hosted agent uninstaller — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
-#   curl -fsSL https://get.opengeni.ai/uninstall.sh | sh
+#   curl -fsSL https://app.opengeni.ai/uninstall.sh | sh
 #
 # Stops any opt-in service, removes the installed binary, and (only with
 # --purge / OPENGENI_PURGE=1) deletes the persisted enrollment credentials and

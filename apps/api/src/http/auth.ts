@@ -4,6 +4,17 @@ import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 
+// A newly-installed Connected Machine has neither a user session nor the shared
+// deployment key. These exact POST endpoints have their own bootstrap credential
+// (a device code, enroll token, or enrollment bearer) and are deliberately the
+// only enrollment routes that may cross the deployment-key perimeter.
+const enrollmentBootstrapRoutes = new Set([
+  "POST /v1/enrollments/device/start",
+  "POST /v1/enrollments/device/poll",
+  "POST /v1/enrollments/token/exchange",
+  "POST /v1/enrollments/self/revoke",
+]);
+
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
@@ -29,6 +40,9 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   const path = new URL(c.req.url).pathname;
+  if (enrollmentBootstrapRoutes.has(`${c.req.method.toUpperCase()} ${path}`)) {
+    return true;
+  }
   if (path === "/v1/config/client") {
     return true;
   }

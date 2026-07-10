@@ -45,14 +45,14 @@ describe("get.<domain> install routes", () => {
   // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
   // its matching baked agent. The served install scripts must therefore default
   // their asset base URL to THIS deployment's own public origin (so `curl
-  // <host>/install.sh | sh` pulls from the same host — no get.opengeni.ai dep),
+  // <host>/install.sh | sh` pulls from the same host — no hosted archive dependency),
   // while the user's OPENGENI_INSTALL_BASE_URL override still wins.
   test("GET /install.sh rewrites the default asset base URL to the deployment's own origin", async () => {
     const settings = testSettings({ publicBaseUrl: "https://cp.example.com/" });
     const res = await appFor(settings).request("/install.sh");
     const body = await res.text();
     expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://cp.example.com"');
-    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
     // The user-facing override var name is untouched (operator can still repoint).
     expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
   });
@@ -62,14 +62,16 @@ describe("get.<domain> install routes", () => {
     const res = await appFor(settings).request("/install.ps1");
     const body = await res.text();
     expect(body).toContain("$OpengeniInstallDefaultBaseUrl = 'https://cp.example.com'");
-    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'");
+    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
   });
 
-  test("GET /install.sh keeps the public-archive default when no public base URL is configured", async () => {
+  test("GET installers keep the hosted app origin default when no public base URL is configured", async () => {
     const settings = testSettings({ publicBaseUrl: undefined });
-    const res = await appFor(settings).request("/install.sh");
-    const body = await res.text();
-    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    const app = appFor(settings);
+    const unix = await (await app.request("/install.sh")).text();
+    expect(unix).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://app.opengeni.ai"');
+    const windows = await (await app.request("/install.ps1")).text();
+    expect(windows).toContain("$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'");
   });
 
   test("GET /install.ps1 serves the Windows installer", async () => {
@@ -77,6 +79,10 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
+    // The public provisioning wrapper's process-local variables must be printed
+    // back into the interactive command; otherwise they disappear after `iex`.
+    expect(body).toContain("$env:OPENGENI_WORKSPACE_ID = $(Quote-PowerShell");
+    expect(body).toContain("$env:OPENGENI_API_URL = $(Quote-PowerShell");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {
@@ -115,6 +121,21 @@ describe("get.<domain> install routes", () => {
     expect(res.headers.get("location")).toBe(
       "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v1.2.3/opengeni-agent-universal-apple-darwin.minisig",
     );
+  });
+
+  test("GET /agent/stable/manifest.json redirects to the signed moving release asset", async () => {
+    const app = appFor(testSettings());
+    const manifest = await app.request("/agent/stable/manifest.json");
+    expect(manifest.status).toBe(302);
+    expect(manifest.headers.get("location")).toBe(
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-latest/manifest.json",
+    );
+    const signature = await app.request("/agent/stable/manifest.json.minisig");
+    expect(signature.status).toBe(302);
+    expect(signature.headers.get("location")).toBe(
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-latest/manifest.json.minisig",
+    );
+    expect((await app.request("/agent/beta/manifest.json")).status).toBe(400);
   });
 
   test("a configured agentReleasesBaseUrl overrides the redirect target", async () => {
@@ -157,8 +178,9 @@ describe("get.<domain> install routes", () => {
 });
 
 // The "agent ships inside the control-plane" path: when THIS image bakes a binary
-// into agent/install/baked/, the /agent/* routes serve it directly (200) instead of
-// 302-redirecting — for BOTH `latest` and a pinned `v<ver>` — with the binary as an
+// into agent/install/baked/, the /agent/latest/* routes serve it directly (200)
+// instead of 302-redirecting. Pinned `v<ver>` paths are always immutable release
+// redirects and must never return this deployment's baked current binary.
 // octet-stream and the .sha256/.minisig sidecars as text. We stage a throwaway
 // fixture so the test is hermetic and never depends on a real build artifact.
 describe("get.<domain> install routes — baked binary serving", () => {
@@ -183,11 +205,13 @@ describe("get.<domain> install routes — baked binary serving", () => {
     expect(await res.text()).toBe("BAKED-BINARY-BYTES");
   });
 
-  test("GET /agent/v<ver>/<baked-asset> serves the baked binary too (per-SHA image is the source)", async () => {
+  test("GET /agent/v<ver>/<baked-asset> never serves the baked current binary", async () => {
     const res = await appFor(testSettings()).request(`/agent/v9.9.9/${BAKED_FIXTURE}`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
-    expect(await res.text()).toBe("BAKED-BINARY-BYTES");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+    expect(res.headers.get("location")).toBe(
+      `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v9.9.9/${BAKED_FIXTURE}`,
+    );
   });
 
   test("GET the baked .sha256 / .minisig sidecars as text/plain", async () => {

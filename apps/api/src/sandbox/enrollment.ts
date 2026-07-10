@@ -107,7 +107,7 @@ export type DeviceStartInput = {
   machineName?: string | null;
   canOfferDisplay: boolean;
   requestsScreenControl: boolean;
-  // Where the user goes to approve (same origin as the request).
+  // Public web origin where the user goes to approve (may differ from the API).
   verificationOrigin: string;
 };
 
@@ -171,7 +171,7 @@ export async function startDeviceEnrollment(
     throw lastError instanceof Error ? lastError : new Error("failed to start device enrollment");
   }
 
-  const base = input.verificationOrigin.replace(/\/$/, "");
+  const base = input.verificationOrigin.replace(/\/+$/, "");
   const verificationUri = `${base}/device`;
   const verificationUriComplete = `${verificationUri}?user_code=${encodeURIComponent(request.userCode)}`;
   return {

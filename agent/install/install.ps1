@@ -3,7 +3,7 @@
   OpenGeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
-  irm https://get.opengeni.ai/install.ps1 | iex
+  irm https://app.opengeni.ai/install.ps1 | iex
 
   READ THIS BEFORE PIPING IT TO iex. This script downloads the opengeni-agent.exe
   for your arch, VERIFIES it two independent ways (a minisign signature against a
@@ -20,7 +20,7 @@
   placing the new one (the same trick self-update uses).
 
 .PARAMETER -* (environment overrides, all optional)
-  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://get.opengeni.ai).
+  OPENGENI_INSTALL_BASE_URL  Release asset base URL (default https://app.opengeni.ai).
                              Point at a local mock (http://localhost/...) to test offline.
   OPENGENI_AGENT_VERSION     Pin a version (default "latest").
   OPENGENI_INSTALL_DIR       Install dir (default %LOCALAPPDATA%\OpenGeni\bin).
@@ -53,7 +53,7 @@ function Get-EnvOr($name, $default) {
 # installer pulls the matching baked agent from the same host it was fetched from.
 # Keep the line's shape stable (rewritten by exact match). OPENGENI_INSTALL_BASE_URL
 # still wins.
-$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
+$OpengeniInstallDefaultBaseUrl = 'https://app.opengeni.ai'
 $BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 
@@ -170,6 +170,14 @@ function Add-UserPath($dir) {
   }
 }
 
+# Quote a value for a command the installer prints for a human to paste into
+# PowerShell. This is intentionally separate from the API-provided provisioning
+# command: values received through the current process environment need escaping
+# again when they become source text in the next interactive shell.
+function Quote-PowerShell($value) {
+  return "'" + $value.Replace("'", "''") + "'"
+}
+
 function Main {
   $asset = Get-Asset
   $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("og-install-" + [guid]::NewGuid())) -Force
@@ -227,7 +235,18 @@ function Complete-Install($bin) {
   Write-Host "opengeni-agent installed at: $bin"
   Write-Host ""
   Write-Host "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
-  Write-Host "  1. Enroll this machine:   $bin enroll"
+  # The public provisioning command sets these only for the `irm | iex` process.
+  # Preserve them in the printed human command; a bare later `enroll` would lose
+  # the workspace/API binding and must not silently fall back to another host.
+  $enrollPrefix = @()
+  if (-not [string]::IsNullOrEmpty($env:OPENGENI_WORKSPACE_ID)) {
+    $enrollPrefix += "`$env:OPENGENI_WORKSPACE_ID = $(Quote-PowerShell $env:OPENGENI_WORKSPACE_ID)"
+  }
+  if (-not [string]::IsNullOrEmpty($env:OPENGENI_API_URL)) {
+    $enrollPrefix += "`$env:OPENGENI_API_URL = $(Quote-PowerShell $env:OPENGENI_API_URL)"
+  }
+  $enrollPrefix += "& $(Quote-PowerShell $bin) enroll"
+  Write-Host "  1. Enroll this machine:   $($enrollPrefix -join '; ')"
   Write-Host "  2. Run it (online while this runs, offline when you stop it):"
   Write-Host "       $bin run"
   Write-Host ""
