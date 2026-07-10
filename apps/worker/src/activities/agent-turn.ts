@@ -1528,12 +1528,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           getSessionCodexState(db, input.workspaceId, input.sessionId),
         ]);
         const connectedIds = new Set(accounts.map((account) => account.id));
+        // ───────────────────────────────────────────────────────────────────────────
+        // CREDENTIAL-SELECTION CONTRACT (self-contained; safe to lift wholesale into a
+        // future allocator/leasing rework). A codex turn's account is resolved as
+        // pin > workspace-active, where the session PIN carries a SOURCE:
+        //   • manual — the user's in-session account switcher. SACROSANCT: no policy
+        //     path (sharded assignment, rebalance, rotation) ever moves or clears it.
+        //   • policy — the "sharded" strategy's deterministic HOME for this session.
+        //     Assigned LAZILY at the session's first codex turn as
+        //     stableEligible[hash(sessionId) % N] over the HEALTHY (eligible) accounts;
+        //     kept while its account stays eligible (prompt-cache warmth); REBALANCED
+        //     when that account caps by a durable RE-SHARD over the healthy survivors
+        //     (capped accounts EXCLUDED). Rebalance is a PIN REWRITE, never a
+        //     workspace-active-pointer move — selectCodexCredentialForTurn returns a
+        //     pinned account with no exhaustion check, so a pointer-only move would leave
+        //     the session on the capped pin. Re-shard (not first-eligible) so a capped
+        //     account's cohort SPREADS across the pool instead of re-concentrating on one
+        //     failover.
+        //   • null — no pin: the non-sharded strategies rank the workspace-active pointer
+        //     (chooseRotationActive), unchanged.
+        // The decision MATH is pure and orthogonal to strategy identity —
+        // shardCredentialForSession / chooseShardedHome / chooseRotationActive /
+        // isCodexAccountEligible in codex-rotation.ts — so it composes with any affinity
+        // scoring layered on later. "sharded" is only the strategy value; it does not
+        // itself imply an affinity mode.
+        // ───────────────────────────────────────────────────────────────────────────
         const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
         const pinSource = sessionCodex?.pinSource ?? null;
         const strategy = (rotation?.rotationStrategy ?? "most_remaining") as CodexRotationStrategy;
-        // A MANUAL pin is SACRED (AM-1/AM-2): no policy path — sharded or otherwise —
-        // ever moves it. Only 'manual' pins are protected; a 'policy' pin is the
-        // sharded strategy's own home and MAY be re-sharded when its account caps.
+        // A MANUAL pin is SACROSANCT (see contract above): no policy path ever moves it.
         const manualPinned = sessionPin != null && pinSource === "manual";
         // The off-path / P1 default: today's workspace active pointer. Untouched
         // when rotation is off or the session is pinned (byte-identical to P1).
