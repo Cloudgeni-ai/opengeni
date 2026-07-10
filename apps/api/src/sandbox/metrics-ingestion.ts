@@ -37,7 +37,12 @@ import {
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { AgentEvent, Hello, type MetricsSample } from "@opengeni/agent-proto";
+import {
+  AgentEvent,
+  Hello,
+  goingOfflineReasonToJSON,
+  type MetricsSample,
+} from "@opengeni/agent-proto";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.events";
@@ -167,8 +172,23 @@ export async function handleAgentEventPayload(
     });
     return;
   }
+  // A clean GoingOffline is the machine-plane's typed shutdown signal — previously
+  // dropped here. Record it ALWAYS on the machine plane (a Prometheus counter keyed
+  // by the typed reason) so a fleet operator can see clean stops / self-updates /
+  // host shutdowns. It does NOT touch last-seen (a shutdown must not look "more
+  // recently alive" — the derived liveness ages to offline naturally). The
+  // session-plane fan-out (machine.link.lost to sessions with active ops) is a
+  // separate slice.
+  if (event.event?.$case === "goingOffline") {
+    observability?.incrementCounter({
+      name: "opengeni_machine_going_offline_total",
+      help: "Total Connected Machine clean GoingOffline signals by typed reason.",
+      labels: { reason: goingOfflineReasonToJSON(event.event.goingOffline.reason) },
+    });
+    return;
+  }
   if (event.event?.$case !== "heartbeat") {
-    return; // going-offline / unknown → not a metrics point.
+    return; // an unknown event kind → not a metrics point.
   }
   const metrics = event.event.heartbeat.metrics;
   if (!metrics) {

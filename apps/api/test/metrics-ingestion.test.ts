@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   AGENT_EVENTS_SUBJECT,
+  handleAgentEventPayload,
   parseAgentEventSubject,
   wireSampleToDbSample,
 } from "../src/sandbox/metrics-ingestion";
-import type { MetricsSample } from "@opengeni/agent-proto";
+import { AgentEvent, GoingOfflineReason, type MetricsSample } from "@opengeni/agent-proto";
 
 // M10 — the PURE metrics-ingestion helpers (subject parse + wire→DB sample
 // projection). No DB / broker — the round-trip ingestion through createApp + a
@@ -26,6 +27,51 @@ describe("parseAgentEventSubject", () => {
     expect(parseAgentEventSubject("agent.ws.ag.rpc")).toBeNull();
     expect(parseAgentEventSubject("agent.ws.events")).toBeNull();
     expect(parseAgentEventSubject("not.an.agent.subject")).toBeNull();
+  });
+});
+
+describe("handleAgentEventPayload — GoingOffline machine-plane recording", () => {
+  function counterCapture() {
+    const counters: Array<{ name: string; labels?: Record<string, string> }> = [];
+    return { counters, observability: { incrementCounter: (c: never) => counters.push(c) } };
+  }
+
+  test("a clean GoingOffline increments the counter by typed reason (no DB write)", async () => {
+    const { counters, observability } = counterCapture();
+    const payload = AgentEvent.encode({
+      event: {
+        $case: "goingOffline",
+        goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE },
+      },
+    }).finish();
+    // `db` is never touched on the GoingOffline path (the branch returns before any
+    // enrollment lookup), so a bare stub proves the "no DB write" contract.
+    await handleAgentEventPayload(
+      {} as never,
+      observability as never,
+      payload,
+      "agent.11111111-1111-1111-1111-111111111111.agent-abc.events",
+    );
+    expect(counters).toHaveLength(1);
+    expect(counters[0]!.name).toBe("opengeni_machine_going_offline_total");
+    expect(counters[0]!.labels?.reason).toBe("GOING_OFFLINE_REASON_UPDATE");
+  });
+
+  test("a malformed subject is ignored (no counter, no throw)", async () => {
+    const { counters, observability } = counterCapture();
+    const payload = AgentEvent.encode({
+      event: {
+        $case: "goingOffline",
+        goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_USER_STOP },
+      },
+    }).finish();
+    await handleAgentEventPayload(
+      {} as never,
+      observability as never,
+      payload,
+      "not.an.events.subject",
+    );
+    expect(counters).toHaveLength(0);
   });
 });
 
