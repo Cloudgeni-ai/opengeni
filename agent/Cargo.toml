@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/opengeni-agent",
+    "crates/opengeni-agent-engine",
     "crates/opengeni-agent-proto",
     "crates/opengeni-agent-platform",
     "crates/opengeni-agent-macos-ffi",

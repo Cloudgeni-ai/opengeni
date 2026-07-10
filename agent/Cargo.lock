@@ -1575,6 +1575,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-engine"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "opengeni-agent-macos-ffi"
 version = "0.1.7"
 dependencies = [
