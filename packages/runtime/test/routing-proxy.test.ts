@@ -503,6 +503,78 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.stdout.trim()).toBe("laptop-99");
     expect(groupModal.calls).toEqual(["uname"]);
   });
+
+  // REGRESSION (issue #341 Shape 3): a Modal-home turn that starts on its group box,
+  // swaps to a Connected Machine, then clears BACK to the null/default pointer must
+  // re-land the next op on the EXISTING group box — never keep serving the cached
+  // SelfhostedSession the swap built. (The 2026-07-10 failure: activeSandboxId:null in
+  // the list, but the exec hit a SelfhostedControlError from a stale machine session.)
+  test("(Shape 3) swap Modal-home → machine → clear back to null re-lands on the EXISTING group box, never the cached machine session", async () => {
+    const groupModal = new FakeBackend("group-modal");
+    const laptop = new MockAgentResponder({ hostname: "laptop-1" });
+    const ptr = mutablePointer(); // null start == the established Modal group box (home)
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: groupModal,
+      defaultKind: "modal",
+      getSandbox: async (id) =>
+        id === "sbx-self"
+          ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
+          : null,
+      controlRpcFactory: () => laptop,
+      relay: RELAY,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: groupModal, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // Home op: the group Modal box (echoes its tag).
+    expect(((await proxy.exec({ cmd: "0" })) as { stdout: string }).stdout).toBe("group-modal");
+    // Swap to the machine: the op reaches the laptop agent (echoes its hostname).
+    ptr.swap("sbx-self");
+    expect(
+      ((await proxy.exec({ cmd: "echo $HOSTNAME" })) as { stdout: string }).stdout.trim(),
+    ).toBe("laptop-1");
+    // Clear BACK to null: the op re-lands on the EXISTING group box, NOT the machine.
+    ptr.swap(null);
+    const back = await proxy.exec({ cmd: "2" });
+    expect((back as { stdout: string }).stdout).toBe("group-modal");
+    // The group box served both home ops; the machine served only its swapped-to op.
+    expect(groupModal.calls).toEqual(["0", "2"]);
+  });
+
+  // A machine going offline WHILE IT IS NOT ACTIVE (pointer back on the group box)
+  // must never surface on a home op — the null pointer resolves to the group box,
+  // whose availability is independent of the (now offline) machine.
+  test("(Shape 3) a machine offline while not active does not surface on the null/home op", async () => {
+    const groupModal = new FakeBackend("group-modal");
+    // The machine is offline → any op addressed to it would surface agent_offline.
+    const offlineLaptop = new MockAgentResponder({ online: false });
+    const ptr = mutablePointer();
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: groupModal,
+      defaultKind: "modal",
+      getSandbox: async (id) =>
+        id === "sbx-self"
+          ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
+          : null,
+      controlRpcFactory: () => offlineLaptop,
+      relay: RELAY,
+      selfhostedTimeoutMs: 200,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: groupModal, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // The pointer is on the group box (null); the offline machine is irrelevant.
+    expect(((await proxy.exec({ cmd: "home" })) as { stdout: string }).stdout).toBe("group-modal");
+    expect(groupModal.calls).toEqual(["home"]);
+  });
 });
 
 describe("swapTargetEstablishability — the shared admission/establishment predicate (issue #341 invariant A)", () => {

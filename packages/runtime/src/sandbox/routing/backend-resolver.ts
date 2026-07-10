@@ -184,8 +184,14 @@ export function makeActiveBackendResolver(
   deps: ActiveBackendResolverDeps,
 ): (pointer: ActivePointer) => Promise<ResolvedActiveBackend> {
   return async (pointer: ActivePointer): Promise<ResolvedActiveBackend> => {
-    // The DEFAULT target: the session's own group sandbox (backward-compat). The
-    // proxy routes to the already-established box; the lease owns its lifecycle.
+    // NULL == the session's HOME backend (issue #341 invariant 1). `defaultBackend`
+    // is the already-established home the wiring handed us — the Modal group box for a
+    // Modal-home turn, or the machine itself for a machine-home turn. It is NEVER a
+    // swap target's SelfhostedSession: a clear-to-null must re-land on the home, never
+    // keep serving the machine a prior op swapped to. (The proxy caches by the FULL
+    // pointer tuple, so a clear-to-null — epoch-bumped OR a same-epoch FK null —
+    // invalidates the cached machine and re-enters this branch.) The lease owns the
+    // home box lifecycle; the proxy does not re-establish it.
     if (pointer.activeSandboxId === null) {
       return { session: deps.defaultBackend, sandboxId: null, kind: deps.defaultKind };
     }
