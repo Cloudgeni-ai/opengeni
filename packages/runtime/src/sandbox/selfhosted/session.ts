@@ -46,6 +46,7 @@ import {
   defaultSelfhostedRetryClock,
   type SelfhostedRetryClock,
 } from "./retry-policy";
+import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observer";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -236,6 +237,10 @@ export interface SelfhostedSessionDeps {
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
   retryClock?: SelfhostedRetryClock;
+  /** A fire-and-forget observer invoked once per completed control op (out-of-band
+   *  telemetry — metrics + `machine.*` events). The worker/api wire it to the sinks;
+   *  the leaf only invokes it (guarded so it can never break an op). Omitted ⇒ no-op. */
+  onOp?: SelfhostedOpObserver;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn passes to `runtime.buildAgent`'s `sandboxEnvironment` (and that the
@@ -308,6 +313,7 @@ export class SelfhostedSession {
   /** The exec process deadline (falls back to `timeoutMs` when unset). */
   private readonly execTimeoutMs: number | undefined;
   private readonly retryClock: SelfhostedRetryClock;
+  private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly subject: string;
   /** The session working directory — the path/cwd base every op is rooted under
    *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
@@ -356,6 +362,7 @@ export class SelfhostedSession {
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.execTimeoutMs = deps.execTimeoutMs;
     this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
+    this.onOp = deps.onOp;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
     this.workingDir = deps.workingDir ?? "";
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
@@ -387,6 +394,19 @@ export class SelfhostedSession {
     };
   }
 
+  /** Invoke the injected per-op observer, guarded: a telemetry tap must NEVER break
+   *  an op (a throwing sink is swallowed). No-op when no observer is wired. */
+  private emitOp(observation: SelfhostedOpObservation): void {
+    if (!this.onOp) {
+      return;
+    }
+    try {
+      this.onOp(observation);
+    } catch {
+      // A telemetry sink must never surface into the op path.
+    }
+  }
+
   /**
    * Issue a control op, decoding the agent's reply or throwing the mapped
    * `SelfhostedControlError` on an AgentError (incl. a synthesized offline /
@@ -408,6 +428,7 @@ export class SelfhostedSession {
     timeoutMs = this.timeoutMs,
   ): Promise<NonNullable<ControlResponse["result"]>> {
     const opKind = op.$case;
+    const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
@@ -419,6 +440,14 @@ export class SelfhostedSession {
       };
       const res = await this.controlRpc.request(this.subject, req, { timeoutMs });
       if (!res.error && res.result) {
+        const retries = drainingRetries + timeoutRetries + neverSentRetries;
+        this.emitOp({
+          op: opKind,
+          outcome: "ok",
+          healed: retries > 0,
+          retries,
+          durationMs: Date.now() - startedAt,
+        });
         return res.result;
       }
       const error = res.error
@@ -438,6 +467,20 @@ export class SelfhostedSession {
         jitter: this.retryClock.jitter(),
       });
       if (decision.action === "fail") {
+        const retries = drainingRetries + timeoutRetries + neverSentRetries;
+        const encoded = Number(error.detail.encoded_bytes);
+        this.emitOp({
+          op: opKind,
+          outcome: "failed",
+          healed: false,
+          retries,
+          durationMs: Date.now() - startedAt,
+          code: error.code,
+          reason: error.reason,
+          neverSent: error.neverSent,
+          // Known only on a PAYLOAD_TOO_LARGE fault (the agent's encoded_bytes detail).
+          ...(Number.isFinite(encoded) ? { replyBytes: encoded } : {}),
+        });
         // Fold the retry count into the DRAINING copy when we actually retried, so
         // the surfaced message reads "…retried N times first…".
         if (error.draining && drainingRetries > 0) {
@@ -891,6 +934,7 @@ export class SelfhostedSandboxClient {
   private readonly execTimeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
   private readonly workingDir: string | undefined;
+  private readonly onOp: SelfhostedOpObserver | undefined;
   private controlRpcMemo: ControlRpc | undefined;
 
   constructor(opts: {
@@ -916,6 +960,8 @@ export class SelfhostedSandboxClient {
      *  cwd base; see SelfhostedSessionDeps.workingDir). Omitted/empty ⇒ the default
      *  workspace_root behavior. */
     workingDir?: string;
+    /** The per-op observer threaded into every bound session (out-of-band telemetry). */
+    onOp?: SelfhostedOpObserver;
   }) {
     this.workspaceId = opts.workspaceId;
     this.relay = opts.relay;
@@ -926,6 +972,7 @@ export class SelfhostedSandboxClient {
     this.execTimeoutMs = opts.execTimeoutMs;
     this.environment = opts.environment;
     this.workingDir = opts.workingDir;
+    this.onOp = opts.onOp;
   }
 
   private controlRpc(): ControlRpc {
@@ -946,6 +993,7 @@ export class SelfhostedSandboxClient {
       ...(this.execTimeoutMs !== undefined ? { execTimeoutMs: this.execTimeoutMs } : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
+      ...(this.onOp !== undefined ? { onOp: this.onOp } : {}),
     });
   }
 
@@ -1023,6 +1071,8 @@ export interface SelfhostedSessionBuild {
   /** The exec process deadline, distinct from `timeoutMs`. Absent ⇒ falls back to
    *  `timeoutMs` (a real turn threads the long exec budget here). */
   execTimeoutMs?: number;
+  /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
+  onOp?: SelfhostedOpObserver;
 }
 
 /**
@@ -1051,6 +1101,7 @@ export async function buildSelfhostedBackendSession(
     epoch: deps.epoch,
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     ...(deps.execTimeoutMs !== undefined ? { execTimeoutMs: deps.execTimeoutMs } : {}),
+    ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
     ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
   });
