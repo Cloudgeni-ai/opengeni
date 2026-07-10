@@ -267,6 +267,10 @@ export interface SelfhostedExecResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** True when the agent killed the child at the exec deadline. Additive to the
+   *  Channel-A superset (consumers that don't read it are unaffected); `execCommand`
+   *  reads it to surface the deadline hint on the stdout-only SDK path. */
+  timedOut?: boolean;
 }
 
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
@@ -448,19 +452,25 @@ export class SelfhostedSession {
     }
   }
 
+  /** The clamped exec process deadline (ms): the exec-specific budget when threaded,
+   *  else the control timeout. Shared by `exec()` (the wire deadline) and
+   *  `execCommand()` (the timed-out hint's "N-second limit"), so the two never drift. */
+  private execDeadlineMs(): number {
+    // exec gets its OWN (much larger) deadline distinct from the short control
+    // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
+    // when no exec deadline is threaded (unchanged for those callers).
+    return Math.max(
+      1,
+      Math.min(Math.trunc(this.execTimeoutMs ?? this.timeoutMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
+    );
+  }
+
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
     // Keep the process deadline inside the request/reply deadline. Previously the
     // wire carried timeoutMs=0 (unbounded) while the caller stopped waiting after
     // ~30s, leaving accepted work invisible and able to starve control liveness.
-    // exec gets its OWN (much larger) deadline distinct from the short control
-    // timeout — a real command routinely outlives 30s. Falls back to `timeoutMs`
-    // when no exec deadline is threaded (unchanged for those callers).
-    const execDeadlineMs = this.execTimeoutMs ?? this.timeoutMs;
-    const executionTimeoutMs = Math.max(
-      1,
-      Math.min(Math.trunc(execDeadlineMs), SELFHOSTED_MAX_EXEC_TIMEOUT_MS),
-    );
+    const executionTimeoutMs = this.execDeadlineMs();
     const execReq: ExecRequest = {
       // The agent does NOT shell-interpret unless `shell` — Channel-A passes a
       // single shell command string, so run it through the platform shell.
@@ -496,9 +506,22 @@ export class SelfhostedSession {
 
   /** SDK shell capability `execCommand`: run a command and return its stdout (the
    *  `exec_command` tool). Selfhosted exec is non-interactive (no PTY) — `tty` is
-   *  ignored; `supportsPty()` is false so the SDK never offers a stdin session. */
+   *  ignored; `supportsPty()` is false so the SDK never offers a stdin session.
+   *
+   *  On a DEADLINE timeout the SDK path is stdout-only (the model sees `result.output`
+   *  and nothing else), so the deadline hint that `exec()` puts on stderr would be
+   *  invisible — a >deadline command would return `{"output":""}` and the model would
+   *  conclude "no output" with no idea it was killed. So when the result timed out we
+   *  surface the hint HERE, on stdout: the hint alone when stdout is empty, or appended
+   *  after a newline when there is partial output (a timed-out result is already not
+   *  cleanly parseable — silence is worse than an explanatory suffix). The structured
+   *  `exec()` result is left untouched for the Channel-A parsers. */
   async execCommand(args: { cmd: string; workdir?: string; runAs?: string }): Promise<string> {
     const result = await this.exec({ cmd: args.cmd, workdir: args.workdir, runAs: args.runAs });
+    if (result.timedOut) {
+      const hint = execDeadlineHint(Math.round(this.execDeadlineMs() / 1000));
+      return result.output ? `${result.output}\n${hint}` : hint;
+    }
     return result.output;
   }
 
@@ -1058,6 +1081,7 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
     stdout,
     stderr,
     exitCode: res.exitCode,
+    timedOut: res.timedOut,
   };
 }
 

@@ -428,6 +428,53 @@ describe("exec / control deadline split", () => {
     expect(res.stdout).toBe("partial output\n");
     expect(res.stderr).toContain("300-second execution limit");
     expect(res.stderr).toContain("nohup");
+    // The result carries the timedOut flag for the stdout-only execCommand path.
+    expect(res.timedOut).toBe(true);
+  });
+});
+
+describe("execCommand — the deadline hint reaches the stdout-only SDK path", () => {
+  const timedOutExecStep =
+    (stdout: string) =>
+    (req: ControlRequest): ControlResponse => ({
+      requestId: req.requestId,
+      error: undefined,
+      result: {
+        $case: "exec",
+        exec: {
+          exitCode: null,
+          stdout: encoder.encode(stdout),
+          stderr: new Uint8Array(0),
+          timedOut: true,
+          durationMs: "120000",
+        },
+      },
+    });
+
+  test("empty-stdout timeout: execCommand returns the hint (never a silent empty string)", async () => {
+    const rpc = new ScriptedRpc([timedOutExecStep("")]);
+    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({
+      cmd: "sleep 999",
+    });
+    expect(out).not.toBe("");
+    expect(out).toContain("120-second execution limit");
+    expect(out).toContain("nohup");
+  });
+
+  test("partial-stdout timeout: execCommand appends the hint after the output", async () => {
+    const rpc = new ScriptedRpc([timedOutExecStep("partial output\n")]);
+    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({
+      cmd: "sleep 999",
+    });
+    // The original output, then the hint after a newline separator.
+    expect(out).toBe(`partial output\n\n${execDeadlineHint(120)}`);
+  });
+
+  test("non-timeout: execCommand returns stdout unchanged", async () => {
+    const rpc = new ScriptedRpc([execOkStep]);
+    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({ cmd: "echo ok" });
+    expect(out).toBe("ok\n");
+    expect(out).not.toContain("execution limit");
   });
 });
 
