@@ -19,10 +19,14 @@ BEGIN
   END IF;
 END $$;
 
--- Re-grant (verbatim discipline from 0032:15-21) so opengeni_app keeps DML on the altered table.
+-- Re-grant (schema-agnostic, matching 0049/0050) so opengeni_app keeps DML on the altered
+-- table under a dedicated (non-public) schema too.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+    EXECUTE format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO opengeni_app',
+      current_schema()
+    );
   END IF;
 END $$;
