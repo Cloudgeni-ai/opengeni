@@ -244,16 +244,77 @@ function codexToolSearchExecutor(args: {
 
 const NO_NAMESPACES: ReadonlySet<string> = new Set();
 
+/** True when the namespace set contains at least one usable (non-empty string) source — mirrors {@link renderSearchToolDescription}'s filter, so it is TRUE exactly when the render produces the "following sources" list and FALSE when it produces "none currently available". */
+function hasConnectorSources(connectorNamespaces: ReadonlySet<string>): boolean {
+  for (const namespace of connectorNamespaces) {
+    if (typeof namespace === "string" && namespace.length > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A per-TURN freeze cell for the tool_search description (AM-8). The connector Set
+ * `installCodexToolSearch` reads is LIVE and by-reference — it fills as the turn's
+ * codex_apps tools/list resolves and can change between a turn's model calls.
+ * Re-rendering the description per call from a changed Set flips the tools block,
+ * and because tools precede the history in the request prefix, ANY change misses the
+ * ENTIRE conversation prefix from that point on — a proven prompt-cache breaker.
+ *
+ * We therefore freeze the description ONCE, at the first model call whose Set has
+ * been populated (connectors discovered), and reuse that frozen string for the rest
+ * of the turn — trading a slightly staler connector list for a byte-stable prefix.
+ * The freeze is created per {@link installCodexToolSearch} (once per turn) and shared
+ * by reference into every clone re-install, so all of a turn's clones agree.
+ */
+export type CodexToolSearchDescriptionFreeze = { value: string | null };
+
+/**
+ * Resolve the tool_search description for this model call, honoring the per-turn
+ * freeze (AM-8):
+ *  - Already frozen ⇒ return the frozen string (byte-stable for the rest of the turn).
+ *  - Not yet frozen + connectors DISCOVERED (non-empty Set) ⇒ render and FREEZE it,
+ *    locking the discovered list against a later same-turn Set mutation.
+ *  - Not yet frozen + Set still EMPTY ⇒ render live ("none currently available") but
+ *    do NOT freeze. This is the load-bearing safety of AM-8: the Set fills lazily and
+ *    best-effort, so an empty Set means "not discovered yet", not "no connectors".
+ *    Freezing "none" here would silently disable the turn's connectors (capability
+ *    loss). Leaving it unfrozen is still byte-stable while the Set stays empty (the
+ *    empty render is a constant), and lets a later call freeze the real list once it
+ *    resolves — at most ONE prefix transition, versus today's per-call churn.
+ * With no freeze cell (the default / direct callers + tests) this is a live render,
+ * byte-for-byte the pre-AM-8 behavior.
+ */
+function resolveSearchToolDescription(
+  connectorNamespaces: ReadonlySet<string>,
+  freeze?: CodexToolSearchDescriptionFreeze,
+): string {
+  if (freeze?.value != null) {
+    return freeze.value;
+  }
+  const rendered = renderSearchToolDescription(connectorNamespaces);
+  if (freeze && hasConnectorSources(connectorNamespaces)) {
+    freeze.value = rendered;
+  }
+  return rendered;
+}
+
+/** Build the client-executed tool_search tool from an already-rendered description. */
+function buildCodexToolSearchToolFromDescription(description: string): Tool {
+  return toolSearchTool({
+    execution: "client",
+    description,
+    parameters: SEARCH_TOOL_PARAMETERS as unknown as Record<string, unknown>,
+    execute: codexToolSearchExecutor as never,
+  }) as unknown as Tool;
+}
+
 /** Build the client-executed tool_search tool that discloses codex_apps connectors on demand. */
 export function buildCodexToolSearchTool(
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
 ): Tool {
-  return toolSearchTool({
-    execution: "client",
-    description: renderSearchToolDescription(connectorNamespaces),
-    parameters: SEARCH_TOOL_PARAMETERS as unknown as Record<string, unknown>,
-    execute: codexToolSearchExecutor as never,
-  }) as unknown as Tool;
+  return buildCodexToolSearchToolFromDescription(renderSearchToolDescription(connectorNamespaces));
 }
 
 /** True for the built-in tool_search tool (so we never add a second one). */
@@ -281,6 +342,7 @@ function isToolSearchTool(tool: unknown): boolean {
 export function applyCodexToolSearch(
   tools: Tool[],
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
+  descriptionFreeze?: CodexToolSearchDescriptionFreeze,
 ): Tool[] {
   for (const tool of tools) {
     if (
@@ -293,7 +355,10 @@ export function applyCodexToolSearch(
   if (tools.some(isToolSearchTool)) {
     return tools;
   }
-  return [...tools, buildCodexToolSearchTool(connectorNamespaces)];
+  // AM-8: render through the per-turn freeze so the tools-block prefix stays
+  // byte-stable across a turn's model calls once connectors are discovered.
+  const description = resolveSearchToolDescription(connectorNamespaces, descriptionFreeze);
+  return [...tools, buildCodexToolSearchToolFromDescription(description)];
 }
 
 type CloneCapableAgent = {
@@ -325,17 +390,30 @@ export function installCodexToolSearch(
   agent: CloneCapableAgent,
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
 ): void {
+  // ONE freeze cell per install (i.e. per turn), shared BY REFERENCE into every
+  // clone re-install below so the whole turn — the built agent and every clone the
+  // sandbox runtime resolves tools on — agrees on the same frozen description
+  // (AM-8). Created here, at the top-level install, never per clone.
+  installCodexToolSearchWithFreeze(agent, connectorNamespaces, { value: null });
+}
+
+function installCodexToolSearchWithFreeze(
+  agent: CloneCapableAgent,
+  connectorNamespaces: ReadonlySet<string>,
+  descriptionFreeze: CodexToolSearchDescriptionFreeze,
+): void {
   const originalGetAllTools = agent.getAllTools.bind(agent);
   agent.getAllTools = (async (runContext: unknown) =>
     applyCodexToolSearch(
       await originalGetAllTools(runContext),
       connectorNamespaces,
+      descriptionFreeze,
     )) as typeof agent.getAllTools;
   const originalClone = agent.clone?.bind(agent);
   if (originalClone) {
     const cloneWithToolSearch: NonNullable<CloneCapableAgent["clone"]> = (config: unknown) => {
       const cloned = originalClone(config);
-      installCodexToolSearch(cloned, connectorNamespaces);
+      installCodexToolSearchWithFreeze(cloned, connectorNamespaces, descriptionFreeze);
       return cloned;
     };
     agent.clone = cloneWithToolSearch;

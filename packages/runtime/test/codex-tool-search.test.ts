@@ -256,6 +256,111 @@ describe("clone survival (the SandboxAgent path — the REAL staging path)", () 
   });
 });
 
+describe("per-turn description freeze (AM-8 — prefix cache stability)", () => {
+  function buildSandboxAgent(): SandboxAgent<any, any> {
+    return new SandboxAgent({
+      name: "test-agent",
+      model: "gpt-5.6-sol",
+      tools: POOL.map((t) => ({ ...t })) as never,
+    } as never);
+  }
+  function toolSearchDescriptionOf(tools: Tool[]): string {
+    const search = tools.find((t) => (t as { name?: string }).name === "tool_search") as
+      | { providerData?: { description?: string } }
+      | undefined;
+    return search?.providerData?.description ?? "";
+  }
+
+  test("connectors discovered before the first call → description is FROZEN byte-stable across calls, even as the live Set mutates mid-turn", async () => {
+    const agent = buildSandboxAgent();
+    // The LIVE, by-reference Set (as prepareAgentTools threads it), populated
+    // before the first model call — the AM-8 happy path.
+    const namespaces = new Set(["gmail"]);
+    installCodexToolSearch(agent as never, namespaces);
+
+    const call1 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    // Capability parity: a connector discovered pre-first-call IS in the frozen description.
+    expect(call1).toContain("- gmail");
+
+    // A codex_apps tools/list resolving LATER in the same turn adds a namespace.
+    namespaces.add("github");
+    const call2 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    const call3 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+
+    // Frozen: byte-identical across every call, and the late arrival is NOT reflected
+    // (a slightly staler connector list is the deliberate trade for a stable prefix).
+    expect(call2).toBe(call1);
+    expect(call3).toBe(call1);
+    expect(call2).not.toContain("- github");
+  });
+
+  test("empty Set at the first call → falls back to a LIVE render (never freezes 'none'), then freezes the real list once connectors resolve", async () => {
+    const agent = buildSandboxAgent();
+    // Discovery has NOT populated the Set by the first model call (slow/best-effort).
+    const namespaces = new Set<string>();
+    installCodexToolSearch(agent as never, namespaces);
+
+    // Fallback: honest "none", and critically NOT frozen — freezing it would
+    // silently disable the turn's connectors for the whole turn (capability loss).
+    const call1 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    expect(call1).toContain("none currently available");
+
+    // codex_apps tools/list resolves → the Set fills. The NEXT call renders the real
+    // list and freezes it (at most one prefix transition, versus per-call churn).
+    namespaces.add("gmail");
+    const call2 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    expect(call2).toContain("- gmail");
+
+    // A further same-turn change is now ignored (frozen on first non-empty render).
+    namespaces.add("linear");
+    const call3 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    expect(call3).toBe(call2);
+    expect(call3).not.toContain("- linear");
+  });
+
+  test("connector-less account → 'none' is byte-stable across calls (empty render is a constant; nothing to freeze)", async () => {
+    const agent = buildSandboxAgent();
+    const namespaces = new Set<string>();
+    installCodexToolSearch(agent as never, namespaces);
+    const call1 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    const call2 = toolSearchDescriptionOf(await agent.getAllTools({} as never));
+    expect(call1).toContain("none currently available");
+    expect(call2).toBe(call1);
+  });
+
+  test("the freeze cell is SHARED across clones — a clone's frozen description binds the parent (the sandbox runtime resolves tools on clones)", async () => {
+    const agent = buildSandboxAgent();
+    const namespaces = new Set(["gmail"]);
+    installCodexToolSearch(agent as never, namespaces);
+
+    // The sandbox runtime resolves tools on a CLONE. Freeze happens there first.
+    const cloned = (agent as unknown as { clone: (c: unknown) => any }).clone({});
+    const cloneCall = toolSearchDescriptionOf(await cloned.getAllTools({} as never));
+    expect(cloneCall).toContain("- gmail");
+
+    // Mutate the live Set, then read the PARENT: it must return the SAME frozen
+    // string the clone locked in (one shared cell across the turn's agents).
+    namespaces.add("github");
+    const parentCall = toolSearchDescriptionOf(await (agent as any).getAllTools({} as never));
+    expect(parentCall).toBe(cloneCall);
+    expect(parentCall).not.toContain("- github");
+  });
+
+  test("applyCodexToolSearch without a freeze cell live-renders (byte-for-byte pre-AM-8 behavior for direct callers)", () => {
+    const first = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["gmail"]));
+    const search = first.find((t) => (t as { name?: string }).name === "tool_search") as {
+      providerData?: { description?: string };
+    };
+    expect(search.providerData?.description).toContain("- gmail");
+    // A second call with a DIFFERENT set live-renders the new set (no freeze without a cell).
+    const second = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["linear"]));
+    const search2 = second.find((t) => (t as { name?: string }).name === "tool_search") as {
+      providerData?: { description?: string };
+    };
+    expect(search2.providerData?.description).toContain("- linear");
+  });
+});
+
 describe("neutralizeToolSearchItemsInSerializedRunState", () => {
   test("flips frozen tool_search pairs to execution:server in place — counts preserved", () => {
     const blob = JSON.stringify({
