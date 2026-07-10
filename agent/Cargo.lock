@@ -1597,6 +1597,7 @@ dependencies = [
  "async-trait",
  "command-group",
  "image",
+ "nix 0.29.0",
  "opengeni-agent-macos-ffi",
  "opengeni-agent-proto",
  "portable-pty",

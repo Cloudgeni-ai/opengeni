@@ -136,8 +136,10 @@ into an offline transition.
 Exec requests carry a finite agent-side process deadline inside a slightly
 larger request/reply deadline. If that deadline or the connection generation
 ends, the agent cancels the accepted operation and terminates its POSIX process
-group or Windows Job Object, including ordinary descendants spawned by a shell;
-the direct child cannot exit and leave invisible work behind.
+group or Windows Job Object, including ordinary descendants spawned by a shell.
+On Unix a private unreaped group anchor fences the PGID until cleanup has been
+issued, so cancellation cannot signal a recycled group and the requested command
+cannot exit and leave invisible same-group work behind.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 

@@ -24,7 +24,6 @@ opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "rt-multi-thread"] }
-command-group = { workspace = true }
 tracing = { workspace = true }
 prost = { workspace = true }
 
@@ -37,6 +36,12 @@ image = { workspace = true }
 
 # Linux X11 desktop: capture (GetImage) + computer-use input (XTEST) + geometry
 # (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+command-group = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true }
 
