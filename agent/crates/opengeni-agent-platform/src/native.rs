@@ -309,6 +309,21 @@ fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
 
     match killpg(Pid::from_raw(pgid), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        // POSIX delivers the signal to every member the caller has permission
+        // for and reports EPERM only about the rest — members we could never
+        // kill under ANY handling. macOS raises it when the group holds a
+        // transiently unsignalable member (e.g. a zombie mid-reparent from a
+        // child git itself forked — seen live on macOS CI the moment git
+        // gained containment), where Linux reports success. The kill has done
+        // all it can either way; failing the op over it turned a SUCCESSFUL
+        // git commit into a typed error.
+        Err(Errno::EPERM) => {
+            tracing::debug!(
+                group_id = pgid,
+                "group kill reported EPERM (unsignalable member); owned members were signaled"
+            );
+            Ok(())
+        }
         Err(error) => Err(std::io::Error::from(error)),
     }
 }
