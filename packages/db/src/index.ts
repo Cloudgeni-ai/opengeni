@@ -17521,6 +17521,39 @@ export async function claimNextQueuedTurn(
           return null;
         }
 
+        // The session row is the single dequeue serialization point. A second
+        // concurrent claim waits for this lock, then must observe the first
+        // claim's active turn instead of starting another queued turn. Clear
+        // only a stale pointer whose turn is already terminal/missing; live
+        // running or approval-wait turns retain exclusive inference ownership.
+        if (session.activeTurnId) {
+          const [activeTurn] = await tx
+            .select({ status: schema.sessionTurns.status })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, sessionId),
+                eq(schema.sessionTurns.id, session.activeTurnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          if (activeTurn && ["running", "requires_action"].includes(activeTurn.status)) {
+            return null;
+          }
+          await tx
+            .update(schema.sessions)
+            .set({ activeTurnId: null, updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, workspaceId),
+                eq(schema.sessions.id, sessionId),
+                eq(schema.sessions.activeTurnId, session.activeTurnId),
+              ),
+            );
+        }
+
         // A send-and-steer transaction leaves a durable pending control fence
         // while the previously-active turn still owns inference. Never dequeue
         // behind that fence. If the expected turn already settled before the
@@ -17591,7 +17624,7 @@ export async function claimNextQueuedTurn(
             durableQueue
               ? sql`select id from session_turns
                     where workspace_id = ${workspaceId} and session_id = ${sessionId} and status = 'queued'
-                    order by priority asc, promoted_at desc nulls last, position asc, created_at asc, id asc
+                    order by priority asc, position asc, promoted_at desc nulls last, created_at asc, id asc
                     for update skip locked limit 1`
               : sql`select id from session_turns
                     where workspace_id = ${workspaceId} and session_id = ${sessionId} and status = 'queued'
@@ -19308,8 +19341,8 @@ export async function getSessionQueueSnapshot(
       )
       .orderBy(
         asc(schema.sessionTurns.priority),
-        desc(schema.sessionTurns.promotedAt),
         asc(schema.sessionTurns.position),
+        desc(schema.sessionTurns.promotedAt),
         asc(schema.sessionTurns.createdAt),
       );
     return {
@@ -19546,9 +19579,16 @@ export async function reorderQueuedSessionTurnsWithVersion(
       }
       const now = new Date();
       for (const [index, id] of turnIds.entries()) {
+        const row = byId.get(id)!;
+        const routineSystem = row.origin === "system" && row.promotedAt === null;
         await tx
           .update(schema.sessionTurns)
           .set({
+            // Reorder is authoritative within two safety lanes. Human,
+            // operator, and explicitly-promoted system work follow the exact
+            // requested positions; unpromoted routine system work remains in
+            // the lower lane and validation above requires it to come last.
+            priority: routineSystem ? 200 : 50,
             position: index + 1,
             version: sql`${schema.sessionTurns.version} + 1`,
             updatedAt: now,
@@ -19791,8 +19831,8 @@ async function getSessionQueueSnapshotTx(
     )
     .orderBy(
       asc(schema.sessionTurns.priority),
-      desc(schema.sessionTurns.promotedAt),
       asc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.promotedAt),
       asc(schema.sessionTurns.createdAt),
     );
   return {
