@@ -38,16 +38,16 @@ describe("withCodexProvider", () => {
     // It flows through to the resolved model catalog.
     const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-5.6-sol");
     expect(sol?.contextWindowTokens).toBe(CODEX_MODEL_CONTEXT_WINDOW_TOKENS);
-    // The proactive client-compaction trigger (window * ratio, default 0.60)
-    // lands well below the empirical ~340k reject cliff — and under the 230k bar.
+    // The proactive client-compaction trigger (window * ratio, default 0.90 —
+    // compact as late as possible against the honest window) lands below the
+    // empirical ~334-348k reject cliff with margin for estimator skew.
     const trigger = clientCompactionThresholdTokens({
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
       contextReservedOutputTokens: settings.contextReservedOutputTokens,
       contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
     });
-    expect(trigger).toBe(192_000);
-    expect(trigger).toBeLessThan(230_000);
-    expect(trigger).toBeLessThan(340_000);
+    expect(trigger).toBe(288_000);
+    expect(trigger).toBeLessThan(334_000);
     // Contrast: the old 1.05M global default never fired before the cliff.
     const globalTrigger = clientCompactionThresholdTokens({
       contextWindowTokens: 1_050_000,

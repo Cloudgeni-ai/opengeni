@@ -68,8 +68,8 @@ describe("provider-aware capability selection", () => {
       compact_threshold: number;
     }>;
     expect(contextManagement[0]!.type).toBe("compaction");
-    // floor(1_050_000 * 0.60) = 630_000, NOT the SDK's 240_000 fallback.
-    expect(contextManagement[0]!.compact_threshold).toBe(Math.floor(1_050_000 * 0.6));
+    // floor(window * defaultRatio 0.90) = 945_000, NOT the SDK's 240_000 fallback.
+    expect(contextManagement[0]!.compact_threshold).toBe(Math.floor(1_050_000 * 0.9));
     expect(contextManagement[0]!.compact_threshold).not.toBe(240_000);
   });
 });
