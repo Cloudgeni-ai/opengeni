@@ -86,6 +86,7 @@ import {
   gt,
   gte,
   inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
@@ -11385,6 +11386,12 @@ export type EnrollmentRecord = {
   os: EnrollmentOs;
   arch: string;
   lastSeenAt: string | null;
+  /** When the machine announced a clean GoingOffline; the liveness derivation reads
+   *  an un-cleared marker as offline immediately. NULL ⇒ no goodbye pending. */
+  wentOfflineAt: string | null;
+  /** The typed reason string of the pending clean going-offline (e.g.
+   *  GOING_OFFLINE_REASON_UPDATE); NULL when there is no un-cleared marker. */
+  wentOfflineReason: string | null;
   createdAt: string;
   revokedAt: string | null;
   updatedAt: string;
@@ -11404,6 +11411,8 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     os: row.os as EnrollmentOs,
     arch: row.arch,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
+    wentOfflineAt: row.wentOfflineAt ? row.wentOfflineAt.toISOString() : null,
+    wentOfflineReason: row.wentOfflineReason ?? null,
     createdAt: row.createdAt.toISOString(),
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     updatedAt: row.updatedAt.toISOString(),
@@ -11569,6 +11578,13 @@ export async function revokeEnrollment(
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
 // by the online/reconnecting/offline derivation in the Machines surface.
+//
+// A fresh heartbeat is also the definitive "the machine is alive NOW" signal, so
+// it CLEARS any pending clean going-offline marker in the SAME update: a machine
+// that said goodbye but is heartbeating again is not offline. went_offline_at /
+// went_offline_reason go back to NULL alongside the last_seen bump (unconditional —
+// this update always fires on a heartbeat, so a set marker never outlives the next
+// heartbeat).
 export async function touchEnrollmentLastSeen(
   db: Database,
   input: {
@@ -11583,13 +11599,89 @@ export async function touchEnrollmentLastSeen(
     async (scopedDb) => {
       await scopedDb
         .update(schema.enrollments)
-        .set({ lastSeenAt: new Date(), updatedAt: new Date() })
+        .set({
+          lastSeenAt: new Date(),
+          wentOfflineAt: null,
+          wentOfflineReason: null,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
             eq(schema.enrollments.id, input.enrollmentId),
           ),
         );
+    },
+  );
+}
+
+// Record a CLEAN going-offline: the machine announced a typed GoingOffline
+// (user-stop / self-update / host-shutdown). Stamps went_offline_at = now() +
+// the typed reason so the liveness derivation reads the machine OFFLINE
+// immediately (an un-cleared marker beats last_seen aging), for the dashboard AND
+// for anything deciding whether to route work at it. Deliberately does NOT touch
+// last_seen — a shutdown must not look "more recently alive". An unknown enrollment
+// is a no-op (no row → no write).
+export async function setEnrollmentWentOffline(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+    reason: string;
+  },
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .update(schema.enrollments)
+        .set({
+          wentOfflineAt: new Date(),
+          wentOfflineReason: input.reason,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+          ),
+        );
+    },
+  );
+}
+
+// Clear a pending clean going-offline marker: a reconnect Hello re-announced the
+// machine, so the goodbye no longer holds. CHANGE-GUARDED (`went_offline_at IS NOT
+// NULL`) so a steady-state Hello — the overwhelmingly common case — issues NO
+// write and never churns; `cleared` reports whether a marker was actually present,
+// which the ingestion path uses to decide whether a link.restored is warranted (a
+// restored only pairs a prior lost).
+export async function clearEnrollmentWentOffline(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    enrollmentId: string;
+  },
+): Promise<{ cleared: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.enrollments)
+        .set({ wentOfflineAt: null, wentOfflineReason: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.enrollments.workspaceId, input.workspaceId),
+            eq(schema.enrollments.id, input.enrollmentId),
+            isNotNull(schema.enrollments.wentOfflineAt),
+          ),
+        )
+        .returning({ id: schema.enrollments.id });
+      return { cleared: rows.length > 0 };
     },
   );
 }

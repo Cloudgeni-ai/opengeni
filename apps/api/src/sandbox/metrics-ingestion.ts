@@ -28,9 +28,11 @@
 // back-pressures the agent, or breaks its connect.
 
 import {
+  clearEnrollmentWentOffline,
   getEnrollment,
   ingestMachineMetricsSample,
   setEnrollmentDisplayState,
+  setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
   type Database,
   type MachineMetricsSample,
@@ -172,19 +174,40 @@ export async function handleAgentEventPayload(
     });
     return;
   }
-  // A clean GoingOffline is the machine-plane's typed shutdown signal — previously
-  // dropped here. Record it ALWAYS on the machine plane (a Prometheus counter keyed
-  // by the typed reason) so a fleet operator can see clean stops / self-updates /
-  // host shutdowns. It does NOT touch last-seen (a shutdown must not look "more
-  // recently alive" — the derived liveness ages to offline naturally). The
-  // session-plane fan-out (machine.link.lost to sessions with active ops) is a
-  // separate slice.
+  // A clean GoingOffline is the machine-plane's typed shutdown signal. Two things
+  // happen, in this order:
+  //   1. Record it ALWAYS on the machine plane (a Prometheus counter keyed by the
+  //      typed reason) so a fleet operator can see clean stops / self-updates /
+  //      host shutdowns. This fires unconditionally, independent of the DB.
+  //   2. Stamp the enrollment's clean going-offline marker so the liveness
+  //      derivation reads the machine OFFLINE immediately instead of waiting out
+  //      the last_seen dead-detect window. Best-effort + fail-soft (like the rest
+  //      of this module): an unknown enrollment is a no-op and a DB error is
+  //      swallowed so a bad write never tears down the consumer. Deliberately does
+  //      NOT touch last-seen (a shutdown must not look "more recently alive").
   if (event.event?.$case === "goingOffline") {
+    const reason = goingOfflineReasonToJSON(event.event.goingOffline.reason);
     observability?.incrementCounter({
       name: "opengeni_machine_going_offline_total",
       help: "Total Connected Machine clean GoingOffline signals by typed reason.",
-      labels: { reason: goingOfflineReasonToJSON(event.event.goingOffline.reason) },
+      labels: { reason },
     });
+    try {
+      const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId);
+      if (enrollment) {
+        await setEnrollmentWentOffline(db, {
+          accountId: enrollment.accountId,
+          workspaceId: ids.workspaceId,
+          enrollmentId: ids.agentId,
+          reason,
+        });
+      }
+    } catch (error) {
+      observability?.warn?.("Failed to record a machine clean going-offline", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return;
   }
   if (event.event?.$case !== "heartbeat") {
@@ -336,6 +359,26 @@ export async function handleHelloPayload(
     });
   } catch (error) {
     observability?.warn?.("Failed to refresh an enrollment's display from a Hello", {
+      subject,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  // A reconnect Hello re-announces the machine, so any pending clean going-offline
+  // marker no longer holds — clear it so the liveness derivation stops reading the
+  // machine offline. Best-effort + fail-soft, and change-guarded in the DB (a
+  // steady-state Hello with no marker writes nothing), so this never breaks the
+  // agent's connect and never churns.
+  try {
+    const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId);
+    if (enrollment) {
+      await clearEnrollmentWentOffline(db, {
+        accountId: enrollment.accountId,
+        workspaceId: ids.workspaceId,
+        enrollmentId: ids.agentId,
+      });
+    }
+  } catch (error) {
+    observability?.warn?.("Failed to clear a machine going-offline marker on a Hello", {
       subject,
       error: error instanceof Error ? error.message : String(error),
     });

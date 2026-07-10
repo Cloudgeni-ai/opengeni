@@ -119,6 +119,8 @@ async function probeEnrollment(
       allowScreenControl: enrollment.allowScreenControl,
       hasDisplay: enrollment.hasDisplay,
       lastSeenAt: enrollment.lastSeenAt,
+      wentOfflineAt: enrollment.wentOfflineAt,
+      wentOfflineReason: enrollment.wentOfflineReason,
     },
     probeResponded,
   });

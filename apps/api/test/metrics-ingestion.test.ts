@@ -36,7 +36,7 @@ describe("handleAgentEventPayload — GoingOffline machine-plane recording", () 
     return { counters, observability: { incrementCounter: (c: never) => counters.push(c) } };
   }
 
-  test("a clean GoingOffline increments the counter by typed reason (no DB write)", async () => {
+  test("a clean GoingOffline increments the counter by typed reason (counter fires independent of the DB)", async () => {
     const { counters, observability } = counterCapture();
     const payload = AgentEvent.encode({
       event: {
@@ -44,8 +44,10 @@ describe("handleAgentEventPayload — GoingOffline machine-plane recording", () 
         goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE },
       },
     }).finish();
-    // `db` is never touched on the GoingOffline path (the branch returns before any
-    // enrollment lookup), so a bare stub proves the "no DB write" contract.
+    // The machine-plane counter fires FIRST + unconditionally; the enrollment-marker
+    // write that follows is best-effort + fail-soft. A bare stub `db` makes that
+    // write throw, which the branch swallows — so the counter still lands. (The real
+    // DB round-trip through setEnrollmentWentOffline is covered in machines-routes.)
     await handleAgentEventPayload(
       {} as never,
       observability as never,

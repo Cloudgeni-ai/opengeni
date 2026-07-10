@@ -44,6 +44,13 @@ export interface SelfhostedEnrollment {
   allowScreenControl: boolean;
   hasDisplay: boolean;
   lastSeenAt: string | null;
+  /** An un-cleared clean going-offline marker (the machine announced a typed
+   *  GoingOffline). When set, the derivation reads the machine OFFLINE immediately,
+   *  regardless of a still-fresh `lastSeenAt`. NULL ⇒ no pending goodbye. */
+  wentOfflineAt: string | null;
+  /** The typed reason string of the pending goodbye (rides alongside
+   *  `wentOfflineAt`; NULL when there is no un-cleared marker). */
+  wentOfflineReason: string | null;
 }
 
 /** The derived liveness state of a selfhosted machine (the online/offline/
@@ -72,6 +79,8 @@ export const SELFHOSTED_RECONNECT_WINDOW_MS = 30_000;
  * (stale / never seen).
  *
  *   - no enrollment / revoked         → offline (the machine isn't enrolled).
+ *   - un-cleared clean goodbye        → offline (an announced GoingOffline beats
+ *                                       last_seen aging AND a lingering probe).
  *   - probe responded                 → online.
  *   - probe missed, lastSeenAt recent → reconnecting (a transient blip).
  *   - probe missed, lastSeenAt stale  → offline.
@@ -89,6 +98,15 @@ export function selfhostedLiveness(input: {
   }
   const consented = enrollment.exposure === "whole-machine" && enrollment.allowScreenControl;
   const hasDisplay = enrollment.hasDisplay;
+  // A CLEAN going-offline the machine announced takes precedence over BOTH
+  // last_seen aging and a lingering probe: a machine that said "I'm stopping" must
+  // read offline immediately (so no new work is routed at it) until a NEWER
+  // liveness signal — a reconnect Hello or a fresher heartbeat — clears the marker
+  // in the row. `status: "revoked"` above still trumps this (a revoked machine is
+  // offline regardless). This is the #348 lease-waits-on-dead-detect fix.
+  if (enrollment.wentOfflineAt) {
+    return { state: "offline", consented, hasDisplay };
+  }
   if (input.probeResponded) {
     return { state: "online", consented, hasDisplay };
   }

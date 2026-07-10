@@ -18,6 +18,8 @@ function enrollment(overrides: Partial<SelfhostedEnrollment> = {}): SelfhostedEn
     allowScreenControl: true,
     hasDisplay: true,
     lastSeenAt: NOW.toISOString(),
+    wentOfflineAt: null,
+    wentOfflineReason: null,
     ...overrides,
   };
 }
@@ -75,6 +77,47 @@ describe("selfhostedLiveness — the online/reconnecting/offline derivation", ()
       now: NOW,
     });
     expect(live.state).toBe("offline");
+  });
+
+  test("an un-cleared clean goodbye reads OFFLINE even with a fresh lastSeenAt AND a responding probe", () => {
+    // The #348 fix: an announced GoingOffline must read offline immediately, taking
+    // precedence over both last_seen aging (fresh) and a lingering probe (responds).
+    const live = selfhostedLiveness({
+      enrollment: enrollment({
+        lastSeenAt: NOW.toISOString(),
+        wentOfflineAt: NOW.toISOString(),
+        wentOfflineReason: "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+      }),
+      probeResponded: true,
+      now: NOW,
+    });
+    expect(live.state).toBe("offline");
+    // consent/display flags are still derived from the row (the machine's config
+    // didn't change — only its reachability).
+    expect(live.consented).toBe(true);
+    expect(live.hasDisplay).toBe(true);
+  });
+
+  test("revoked STILL trumps a goodbye marker (revoked + wentOfflineAt → offline, flags cleared)", () => {
+    const live = selfhostedLiveness({
+      enrollment: enrollment({ status: "revoked", wentOfflineAt: NOW.toISOString() }),
+      probeResponded: true,
+    });
+    expect(live.state).toBe("offline");
+    // The revoked branch returns before deriving consent/display from the row.
+    expect(live.consented).toBe(false);
+    expect(live.hasDisplay).toBe(false);
+  });
+
+  test("a CLEARED marker (wentOfflineAt back to null) reads ONLINE again on a probe response", () => {
+    // Completes the round-trip at the derivation level: once a newer liveness signal
+    // clears the marker in the row, the machine reads online again exactly as before.
+    const live = selfhostedLiveness({
+      enrollment: enrollment({ wentOfflineAt: null, wentOfflineReason: null }),
+      probeResponded: true,
+      now: NOW,
+    });
+    expect(live.state).toBe("online");
   });
 });
 

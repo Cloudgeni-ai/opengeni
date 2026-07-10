@@ -6,7 +6,12 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { AgentEvent, ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import {
+  AgentEvent,
+  ControlRequest,
+  ControlResponse,
+  GoingOfflineReason,
+} from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
   createDb,
@@ -156,6 +161,21 @@ async function emitHeartbeat(
         },
       },
     },
+  }).finish();
+  await bus.emitAgentEvent(`agent.${workspaceId}.${agentId}.events`, event);
+}
+
+/** Emit a clean GoingOffline AgentEvent, driving the ingestion consumer to stamp
+ *  the enrollment's clean going-offline marker. */
+async function emitGoingOffline(
+  bus: MemoryEventBus,
+  workspaceId: string,
+  agentId: string,
+  reason: GoingOfflineReason,
+): Promise<void> {
+  const event = AgentEvent.encode({
+    agentId,
+    event: { $case: "goingOffline", goingOffline: { reason } },
   }).finish();
   await bus.emitAgentEvent(`agent.${workspaceId}.${agentId}.events`, event);
 }
@@ -338,6 +358,43 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(group!.sandboxId).toBe(session.sandboxGroupId);
     // Both the group box + the enrolled machine are present.
     expect(sessBody.machines.length).toBe(2);
+  }, 90_000);
+
+  test("clean going-offline round-trip: online → GoingOffline reads OFFLINE immediately (probe still responds) → heartbeat reads ONLINE again", async () => {
+    if (!available) return;
+    // seed() registers a ping responder (online) + a fresh last_seen, so WITHOUT a
+    // marker the machine reads online. This proves the marker takes precedence over
+    // BOTH a still-responding probe and a still-fresh last_seen — the #348 fix —
+    // end-to-end through the real ingestion consumer + derivation + endpoint.
+    const { accountId, workspaceId, enrollment, bus } = await seed();
+    const app = appFor(bus);
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const stateNow = async (): Promise<string> => {
+      const body = (await (
+        await app.request(`/v1/workspaces/${workspaceId}/machines`, {
+          headers: { authorization: auth },
+        })
+      ).json()) as { machines: Array<{ state: string }> };
+      return body.machines[0]!.state;
+    };
+
+    // 1. Online: probe responds + last_seen fresh.
+    await emitHeartbeat(bus, workspaceId, enrollment.id, 10);
+    expect(await stateNow()).toBe("online");
+
+    // 2. Clean GoingOffline → OFFLINE immediately, though the probe STILL responds
+    //    and last_seen is still fresh (the marker wins).
+    await emitGoingOffline(
+      bus,
+      workspaceId,
+      enrollment.id,
+      GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN,
+    );
+    expect(await stateNow()).toBe("offline");
+
+    // 3. A fresh heartbeat clears the marker → ONLINE again (round-trip complete).
+    await emitHeartbeat(bus, workspaceId, enrollment.id, 12);
+    expect(await stateNow()).toBe("online");
   }, 90_000);
 
   test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when no responder", async () => {

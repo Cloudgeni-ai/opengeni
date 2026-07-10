@@ -1356,6 +1356,14 @@ export const enrollments = pgTable(
     arch: text("arch").notNull().default("x86_64"),
     // Heartbeat liveness cursor. Null until the first connect.
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    // Clean going-offline marker (migration 0049). Set when the machine announces a
+    // typed GoingOffline (user-stop / self-update / host-shutdown); the liveness
+    // derivation reads an un-cleared marker as OFFLINE immediately, regardless of a
+    // still-fresh last_seen. Any newer liveness signal (a reconnect Hello or a
+    // fresher heartbeat via touchEnrollmentLastSeen) clears BOTH back to NULL. NULL
+    // (the default) ⇒ no goodbye pending — today's last_seen-aging behavior.
+    wentOfflineAt: timestamp("went_offline_at", { withTimezone: true }),
+    wentOfflineReason: text("went_offline_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

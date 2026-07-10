@@ -107,6 +107,8 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
         allowScreenControl: true,
         hasDisplay: true,
         lastSeenAt: new Date().toISOString(),
+        wentOfflineAt: null,
+        wentOfflineReason: null,
       },
       session,
     });
@@ -126,6 +128,8 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
         allowScreenControl: true,
         hasDisplay: true,
         lastSeenAt: new Date(Date.now() - 600_000).toISOString(),
+        wentOfflineAt: null,
+        wentOfflineReason: null,
       },
       session,
     });

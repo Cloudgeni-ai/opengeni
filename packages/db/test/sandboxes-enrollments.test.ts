@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  clearEnrollmentWentOffline,
   createDb,
   createEnrollment,
   createSandbox,
@@ -19,6 +20,7 @@ import {
   readMachineMetricsSeries,
   revokeEnrollment,
   setActiveSandbox,
+  setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
   upsertMachineMetricsLatest,
   type Database,
@@ -166,6 +168,63 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(reactivated.id).toBe(created.id);
     expect(reactivated.status).toBe("active");
     expect(reactivated.revokedAt).toBeNull();
+  }, 60_000);
+
+  test("clean going-offline marker: set → clear-on-heartbeat and clear-on-Hello (change-guarded)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const created = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:GOODBYE",
+      hasDisplay: true,
+    });
+    // A machine reporting a heartbeat first (fresh last_seen, no marker).
+    await touchEnrollmentLastSeen(db, { accountId, workspaceId, enrollmentId: created.id });
+    const online = await getEnrollment(db, workspaceId, created.id);
+    expect(online?.wentOfflineAt).toBeNull();
+    expect(online?.lastSeenAt).not.toBeNull();
+
+    // GoingOffline stamps the marker (WHEN + typed reason) WITHOUT touching last_seen.
+    await setEnrollmentWentOffline(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: created.id,
+      reason: "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+    });
+    const goodbye = await getEnrollment(db, workspaceId, created.id);
+    expect(goodbye?.wentOfflineAt).not.toBeNull();
+    expect(goodbye?.wentOfflineReason).toBe("GOING_OFFLINE_REASON_HOST_SHUTDOWN");
+    // last_seen is NOT bumped by the goodbye (a shutdown must not look more alive).
+    expect(goodbye?.lastSeenAt).toBe(online?.lastSeenAt);
+
+    // A fresh heartbeat clears the marker in the SAME update that bumps last_seen.
+    await touchEnrollmentLastSeen(db, { accountId, workspaceId, enrollmentId: created.id });
+    const revived = await getEnrollment(db, workspaceId, created.id);
+    expect(revived?.wentOfflineAt).toBeNull();
+    expect(revived?.wentOfflineReason).toBeNull();
+
+    // clearEnrollmentWentOffline (the Hello path): reports cleared only when a
+    // marker was present, and is a no-op (cleared:false) on a steady-state clear.
+    await setEnrollmentWentOffline(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: created.id,
+      reason: "GOING_OFFLINE_REASON_USER_STOP",
+    });
+    const firstClear = await clearEnrollmentWentOffline(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: created.id,
+    });
+    expect(firstClear.cleared).toBe(true);
+    expect((await getEnrollment(db, workspaceId, created.id))?.wentOfflineAt).toBeNull();
+    const secondClear = await clearEnrollmentWentOffline(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: created.id,
+    });
+    expect(secondClear.cleared).toBe(false); // nothing to clear → no churn
   }, 60_000);
 
   test("sandbox create: selfhosted requires enrollment, modal forbids it; get + list", async () => {
