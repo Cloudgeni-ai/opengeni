@@ -3924,8 +3924,13 @@ export function isTransientProviderError(error: unknown): boolean {
     typeof error === "object" && error !== null && "status" in error
       ? Number((error as { status?: unknown }).status)
       : undefined;
-  if (status !== undefined && Number.isFinite(status) && status >= 500 && status < 600) {
-    return true;
+  // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
+  // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
+  // a request fault that must NOT auto-retry — even if its body happens to read like
+  // "connection error" or "overloaded". The code/message heuristics below apply ONLY
+  // when no status survived: a network fault or an SDK-rethrown bare Error.
+  if (status !== undefined && Number.isFinite(status)) {
+    return status >= 500 && status < 600;
   }
   const code =
     typeof error === "object" && error !== null && "code" in error

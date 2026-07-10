@@ -887,6 +887,26 @@ describe("transient provider error classifier", () => {
     ).toBe(false);
   });
 
+  test("HTTP status is authoritative: a non-5xx status short-circuits, transient body or not", () => {
+    // The Bugbot catch: a KNOWN 4xx whose body happens to read like a transient
+    // fault must NOT fall through to the message heuristics and auto-retry forever.
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Connection error. (from a validation-rejected request)"), {
+          status: 400,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Our servers are currently overloaded."), { status: 404 }),
+      ),
+    ).toBe(false);
+    // The mirror case: the SAME "connection error" body with NO status survives is
+    // a genuine network fault and IS transient — the heuristics apply only here.
+    expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
+  });
+
   test("agentRunFailurePayload marks transient provider errors retryable, keeping the body", () => {
     const overloaded = Object.assign(
       new Error("Our servers are currently overloaded. Please try again later."),
