@@ -43,7 +43,9 @@
 //! honest-degradation posture the metrics reader uses for its `/proc` sources.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 /// The cgroup v2 unified mount on a standard systemd host.
