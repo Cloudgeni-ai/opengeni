@@ -6,6 +6,7 @@ import {
   getLatestRunState,
   getSandboxSessionEnvelope,
   getSessionEvent,
+  getSessionSystemUpdateBundlePage,
   requireFile,
   type Database,
 } from "@opengeni/db";
@@ -191,6 +192,56 @@ export async function turnInput(
       agent,
       trigger,
       withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote),
+      settings,
+      current,
+    );
+  }
+  if (trigger.type === "system.update.bundle") {
+    const payload = trigger.payload as { bundleId?: unknown; generation?: unknown };
+    if (typeof payload.bundleId !== "string") {
+      throw new Error("system.update.bundle payload is missing bundleId");
+    }
+    const page = await getSessionSystemUpdateBundlePage(
+      db,
+      trigger.workspaceId,
+      trigger.sessionId,
+      payload.bundleId,
+    );
+    if (!page) {
+      throw new Error(`System-update bundle not found: ${payload.bundleId}`);
+    }
+    const structured = JSON.stringify({
+      type: "opengeni.system_update_bundle",
+      bundle: {
+        id: page.bundle.id,
+        generation: page.bundle.generation,
+        memberCount: page.bundle.memberCount,
+        payloadBytes: page.bundle.payloadBytes,
+        overflow: page.bundle.overflow,
+        nextCursor: page.nextCursor,
+      },
+      updates: page.updates.map((update) => ({
+        id: update.id,
+        ordinal: update.ordinal,
+        kind: update.kind,
+        classification: update.classification,
+        sourceId: update.sourceId,
+        summary: update.summary,
+        lineage: update.lineage,
+      })),
+    });
+    const text = [
+      "[SYSTEM UPDATE BUNDLE] Multiple durable system updates were fanned into one wake.",
+      "Treat failures and action_required entries first. Human messages remain separate queue items.",
+      "Every constituent remains auditable and fetchable by bundle/update id; overflow is paginated.",
+      structured,
+    ].join("\n");
+    return await messageInput(
+      db,
+      runtime,
+      agent,
+      trigger,
+      withUnavailableSandboxFilesNote(text, options.unavailableSandboxFilesNote),
       settings,
       current,
     );

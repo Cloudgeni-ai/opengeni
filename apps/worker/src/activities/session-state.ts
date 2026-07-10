@@ -1,5 +1,5 @@
 import {
-  cancelQueuedSessionTurns,
+  applySessionControlInterrupt,
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   countQueuedTurns,
   countTurnSessionHistoryItems,
@@ -13,7 +13,6 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { WORKER_DEATH_RESUME_TEXT } from "./agent-turn";
-import { isSteerInterrupt, pauseActiveGoalOnInterrupt } from "./goals";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
@@ -76,57 +75,15 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
 
   async function interruptActiveTurn(input: RunAgentTurnInput): Promise<void> {
     const { db, bus, observability } = await services();
-    const session = await requireSession(db, input.workspaceId, input.sessionId);
-    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
-    // Pause an active goal before the early return below: an interrupt can
-    // land after the turn already cleared activeTurnId, and skipping the pause
-    // there would let the loop auto-continue the goal the user just stopped.
-    // Steer interrupts are the exception: steering cancels the running turn
-    // only to deliver the steered message next — redirection, not a stop —
-    // so the goal loop stays active.
-    if (!isSteerInterrupt(trigger)) {
-      await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
-      // STOP MEANS STOP: a stop drains the ENTIRE queue, not just the active
-      // turn. Otherwise a flood of machine-injected turns (child-completion
-      // notifications arriving faster than the human can interrupt) survives the
-      // stop and keeps the session churning — the exact "interrupt never
-      // depletes the queue" failure. Steer must NOT drain (it promotes exactly
-      // one steered message), so this is gated inside the non-steer branch.
-      // Emit ONE summary event carrying the drained ids so the timeline shows
-      // the drain honestly instead of N separate cancellations. Idempotent: a
-      // retry drains nothing (no queued rows left) and emits no event.
-      const drainedTurnIds = await cancelQueuedSessionTurns(db, input.workspaceId, input.sessionId);
-      if (drainedTurnIds.length > 0) {
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-          {
-            type: "turn.queue_drained",
-            payload: {
-              triggerEventId: input.triggerEventId,
-              drainedCount: drainedTurnIds.length,
-              drainedTurnIds,
-            },
-          },
-        ]);
-        await refreshQueuedTurnsGauge(db, observability);
-      }
+    const applied = await applySessionControlInterrupt(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.triggerEventId,
+    );
+    if (applied.events.length > 0) {
+      await bus.publish(input.workspaceId, input.sessionId, applied.events);
     }
-    if (!session.activeTurnId) {
-      return;
-    }
-    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-      {
-        turnId: session.activeTurnId,
-        type: "turn.cancelled",
-        payload: { triggerEventId: input.triggerEventId, reason: trigger?.payload ?? null },
-      },
-      {
-        turnId: session.activeTurnId,
-        type: "session.status.changed",
-        payload: { status: "queued" },
-      },
-    ]);
-    await finishTurn(db, input.workspaceId, session.activeTurnId, "cancelled");
-    await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
     await refreshQueuedTurnsGauge(db, observability);
   }
 

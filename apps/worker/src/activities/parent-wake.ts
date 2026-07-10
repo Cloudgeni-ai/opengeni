@@ -3,7 +3,7 @@ import type { Session, SessionGoal } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
-  wakeParentSessionForChildCompletion,
+  addSessionSystemUpdate,
   type Database,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
@@ -68,27 +68,31 @@ export async function notifyParentOfChildTerminal(
     // what re-arms the loop the user just stopped. Suppress the resume nudge and
     // tell the agent to stay stopped. Paired with the goal_set reactivation
     // guard so a nudge that slips through still cannot revive the goal.
-    const parentGoal = await getSessionGoal(svc.db, workspaceId, child.parentSessionId);
-    const parentGoalUserPaused =
-      parentGoal?.status === "paused" && parentGoal.pausedReason === "user_interrupt";
     const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
-    const result = await wakeParentSessionForChildCompletion(svc.db, {
+    const payload = childCompletionPayload(child, goal, terminalStatus);
+    const result = await addSessionSystemUpdate(svc.db, {
+      accountId: child.accountId,
       workspaceId,
-      parentSessionId: child.parentSessionId,
-      clientEventId,
-      childSummary: childCompletionSummary(child, goal, terminalStatus),
-      trailing: childCompletionTrailing(parentGoalUserPaused),
-      childCompletion: childCompletionPayload(child, goal, terminalStatus),
+      sessionId: child.parentSessionId,
+      kind: "child_session_update",
+      classification:
+        terminalStatus === "failed"
+          ? "failure"
+          : goal?.status === "paused"
+            ? "action_required"
+            : "success",
+      sourceId: child.id,
+      dedupeKey: clientEventId,
+      summary: childCompletionSummary(child, goal, terminalStatus),
+      payload,
+      lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
       reasoningEffortFallback: svc.settings.openaiReasoningEffort,
     });
-    if (!result.delivered) {
+    if (!result.added) {
       return;
     }
     await svc.bus.publish(workspaceId, child.parentSessionId, result.events);
-    // Passive (suppressed) completions are a timeline card only — there is no
-    // queued turn to run, so do NOT wake the workflow (waking would spin it up
-    // just to find nothing and idle again).
-    if (!result.passive && svc.wakeSessionWorkflow) {
+    if (result.shouldWake && svc.wakeSessionWorkflow) {
       await svc.wakeSessionWorkflow({
         accountId: child.accountId,
         workspaceId,

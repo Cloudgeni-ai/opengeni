@@ -52,6 +52,7 @@ import {
   saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionStatus,
+  setSessionStatusForTurnGeneration,
   setSessionLastInputTokens,
   sumUsageQuantity,
   heartbeatLeaseHolder,
@@ -68,7 +69,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
   agentsErrorRunState,
@@ -1118,11 +1119,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     let isCodexTurn = false;
+    let executionGeneration = 0;
     // Worker-death redispatch counter observed when THIS dispatch claimed the
     // turn. If a dying-attempt cancel later fences on this and the turn's
     // current value differs, recovery already re-queued/re-dispatched the turn
     // and the zombie must not clobber it.
     let redispatchesAtDispatch = 0;
+    const settleTurnAndSession = async (
+      turnStatus: Parameters<typeof finishTurn>[3],
+      sessionStatus: Parameters<typeof setSessionStatusForTurnGeneration>[5],
+      activeTurnId: string | null = null,
+    ): Promise<boolean> => {
+      if (!turnId) return false;
+      const settled = await finishTurn(
+        db,
+        input.workspaceId,
+        turnId,
+        turnStatus,
+        executionGeneration,
+      );
+      if (!settled) return false;
+      return await setSessionStatusForTurnGeneration(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        turnId,
+        executionGeneration,
+        sessionStatus,
+        activeTurnId,
+      );
+    };
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     // OPE-21: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
@@ -1492,6 +1518,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId,
+              expectedExecutionGeneration: executionGeneration,
               // Tag each row with the codex account that produced it (null on the
               // non-codex path). Resolved at line ~504 before any reconcile pass
               // runs, so this is the turn's effective account. The read path uses
@@ -1594,6 +1621,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
       const capacityWaiterId = turn.metadata?.codexCapacityWaiterId;
       const capacityWaitGeneration = turn.metadata?.codexCapacityWaitGeneration;
       if (
@@ -1712,12 +1740,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerId,
           producerSeq: ++producerSeq,
         }));
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs, {
-          onAppend: ({ durationSeconds }) =>
-            recordSessionEventAppendLatency(observability, { durationSeconds }),
-          onPublish: ({ durationSeconds }) =>
-            recordSessionEventPublishLatency(observability, { durationSeconds }),
-        });
+        const appended = await appendAndPublishTurnEventsFenced(
+          db,
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          turnId!,
+          executionGeneration,
+          inputs,
+        );
+        if (inputs.length > 0 && appended.length === 0) {
+          throw new CancelledFailure("turn execution generation was fenced");
+        }
         activityContext?.heartbeat({
           ...heartbeatDetails,
           phase: "events_published",
@@ -1733,7 +1767,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // turn visibly starts: nothing ran yet, so the requeued turn replays the
       // original trigger cleanly on a healthy worker.
       throwIfWorkerShuttingDown();
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "running", turnId);
+      const executionAllowed = await setSessionStatusForTurnGeneration(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        turnId,
+        executionGeneration,
+        "running",
+        turnId,
+      );
+      if (!executionAllowed) {
+        throw new CancelledFailure("session or workspace inference is stopped");
+      }
       await publish(
         [
           { type: "session.status.changed", payload: { status: "running" } },
@@ -3555,6 +3600,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId: activeTurnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState: stream.state.toString(),
             pendingApprovals: approvals,
             // Record the account freezing this state so a resume on a DIFFERENT
@@ -3568,14 +3614,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ],
             true,
           );
-          await finishTurn(db, input.workspaceId, activeTurnId, "requires_action");
-          await setSessionStatus(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            "requires_action",
-            activeTurnId,
-          );
+          await settleTurnAndSession("requires_action", "requires_action", activeTurnId);
           activityStatus = "requires_action";
           return { status: "requires_action" };
         }
@@ -3603,6 +3642,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId: activeTurnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState: stream.state.toString(),
             pendingApprovals: [],
             frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -3616,9 +3656,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ],
           true,
         );
-        await finishTurn(db, input.workspaceId, activeTurnId, "idle");
+        await settleTurnAndSession("idle", "idle");
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -3723,9 +3762,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ],
               true,
             );
-            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+            await settleTurnAndSession("failed", "idle");
             turnMetricOutcome = "failed";
-            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             activityError = attemptError;
             return { status: "idle" };
@@ -3783,11 +3821,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activityError = attemptError;
                 return { status: "idle" };
               }
-              const [preemptedEvent] = await appendAndPublishEvents(
+              const [preemptedEvent] = await appendAndPublishTurnEventsFenced(
                 db,
                 bus,
                 input.workspaceId,
                 input.sessionId,
+                activeTurnId,
+                executionGeneration,
                 [
                   {
                     turnId: activeTurnId,
@@ -3847,9 +3887,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ],
               true,
             );
-            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+            await settleTurnAndSession("failed", "idle");
             turnMetricOutcome = "failed";
-            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             activityError = attemptError;
             observability.info("context compaction recovery succeeded by compacting and idling", {
@@ -3937,6 +3976,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 turnId: preemptTurnId,
+                expectedExecutionGeneration: executionGeneration,
                 serializedRunState: stream.state.toString(),
                 pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
                 frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -3946,11 +3986,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               resumeWithNotice = false;
             }
           }
-          const [preemptedEvent] = await appendAndPublishEvents(
+          const [preemptedEvent] = await appendAndPublishTurnEventsFenced(
             db,
             bus,
             input.workspaceId,
             input.sessionId,
+            preemptTurnId,
+            executionGeneration,
             [
               {
                 turnId: preemptTurnId,
@@ -4017,6 +4059,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
               {
                 turnId: preemptTurnId,
+                turnGeneration: executionGeneration,
                 type: "turn.cancelled",
                 payload: {
                   triggerEventId: input.triggerEventId,
@@ -4052,6 +4095,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState: maxTurns.serializedRunState,
             pendingApprovals: [],
             frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -4067,9 +4111,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ],
           true,
         );
-        await finishTurn(db, input.workspaceId, turnId, "idle");
+        await settleTurnAndSession("idle", "idle");
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -4453,6 +4496,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState,
             pendingApprovals: [],
             frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -4719,9 +4763,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ],
           true,
         );
-        await finishTurn(db, input.workspaceId, turnId, "failed");
+        await settleTurnAndSession("failed", "idle");
         turnMetricOutcome = "failed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
         if (goalActive) {
@@ -4777,6 +4820,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState: error.serializedRunState,
             pendingApprovals: [],
             frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -4797,9 +4841,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ],
           true,
         );
-        await finishTurn(db, input.workspaceId, turnId, "idle");
+        await settleTurnAndSession("idle", "idle");
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -4841,6 +4884,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId,
+            expectedExecutionGeneration: executionGeneration,
             serializedRunState,
             pendingApprovals: [],
             frozenCodexCredentialId: effectiveCodexCredentialId,
@@ -4860,9 +4904,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ],
           true,
         );
-        await finishTurn(db, input.workspaceId, turnId, "failed");
+        await settleTurnAndSession("failed", "idle");
         turnMetricOutcome = "failed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
         return {
@@ -4891,9 +4934,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ],
         true,
       );
-      await finishTurn(db, input.workspaceId, turnId, "failed");
+      await settleTurnAndSession("failed", "failed");
       turnMetricOutcome = "failed";
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
       // The common failure path ends here: runAgentTurn marks the session
       // failed and returns "failed", and the session workflow then exits
       // WITHOUT calling failSession/markSessionIdle. Wake a spawned worker's

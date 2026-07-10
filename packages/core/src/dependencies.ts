@@ -127,6 +127,6 @@ export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
   "settings" | "db" | "bus"
 > & {
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalInterrupt">;
   objectStorage: ObjectStorageDependency;
 };

@@ -394,6 +394,12 @@ export type Session = {
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
+  queueVersion?: number;
+  controlState?: "active" | "session_stopped" | "workspace_killed";
+  controlGeneration?: number;
+  controlReason?: string | null;
+  controlChangedBy?: string | null;
+  controlChangedAt?: string | null;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -442,7 +448,18 @@ export type SessionTurnStatus =
   | "failed"
   | "cancelled";
 
-export type SessionTurnSource = "user" | "scheduled_task" | "api" | "goal";
+export type SessionTurnSource = "user" | "scheduled_task" | "api" | "goal" | "system";
+
+export type SessionQueueItemKind =
+  | "human_message"
+  | "operator_instruction"
+  | "child_session_update"
+  | "scheduled_wake"
+  | "goal_continuation"
+  | "runtime_notice"
+  | "system_update_bundle";
+
+export type SessionQueueItemOrigin = "human" | "operator" | "system";
 
 export type SessionTurn = {
   id: string;
@@ -460,6 +477,19 @@ export type SessionTurn = {
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
   metadata: Record<string, unknown>;
+  queueKind?: SessionQueueItemKind;
+  origin?: SessionQueueItemOrigin;
+  priority?: number;
+  version?: number;
+  executionGeneration?: number;
+  dedupeKey?: string | null;
+  lineage?: Record<string, unknown>;
+  deliveryState?: string;
+  bundleId?: string | null;
+  acknowledgedAt?: string | null;
+  cancelledBy?: string | null;
+  cancelReason?: string | null;
+  promotedAt?: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;
@@ -507,6 +537,14 @@ export const SESSION_EVENT_TYPES = [
   "goal.resumed",
   "goal.cleared",
   "goal.continuation",
+  "system.update.bundle",
+  "system.update.bundle.updated",
+  "session.control.stopped",
+  "session.control.resumed",
+  "session.control.interrupt_requested",
+  "session.control.steer_requested",
+  "workspace.inference.killed",
+  "workspace.inference.resumed",
   "memory.saved",
   "memory.corrected",
   // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
@@ -579,6 +617,7 @@ export type SessionEvent = {
   occurredAt: string;
   clientEventId?: string | null | undefined;
   turnId?: string | null | undefined;
+  turnGeneration?: number | null | undefined;
 };
 
 export type ToolAuthNeededPayload = {
@@ -1491,6 +1530,65 @@ export type UpdateSessionTurnRequest = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   metadata?: Record<string, unknown> | undefined;
+};
+
+export type SessionQueueSnapshot = {
+  version: number;
+  controlState: "active" | "session_stopped" | "workspace_killed";
+  controlGeneration: number;
+  workspaceInferenceState: "active" | "killed";
+  workspaceInferenceGeneration: number;
+  items: SessionTurn[];
+};
+
+export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
+
+export type SessionSystemUpdate = {
+  id: string;
+  bundleId: string;
+  bundleGeneration: number;
+  ordinal: number;
+  kind: "child_session_update" | "scheduled_wake" | "runtime_notice";
+  classification: SystemUpdateClassification;
+  sourceId: string;
+  dedupeKey: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  lineage: Record<string, unknown>;
+  deliveryState: string;
+  deliveredAt: string | null;
+  acknowledgedAt: string | null;
+  createdAt: string;
+};
+
+export type SessionSystemUpdateBundle = {
+  id: string;
+  sessionId: string;
+  generation: number;
+  status: string;
+  version: number;
+  memberCount: number;
+  payloadBytes: number;
+  overflow: boolean;
+  wakeTurnId: string | null;
+  claimedAt: string | null;
+  acknowledgedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionSystemUpdateBundlePage = {
+  bundle: SessionSystemUpdateBundle;
+  updates: SessionSystemUpdate[];
+  nextCursor: number | null;
+};
+
+export type SessionControlResponse = {
+  event: SessionEvent;
+  controlState: "active" | "session_stopped" | "workspace_killed";
+  controlGeneration: number;
+  expectedActiveTurnId: string | null;
+  shouldSignalInterrupt: boolean;
 };
 
 // --- Scheduled tasks: requests + runs ----------------------------------------

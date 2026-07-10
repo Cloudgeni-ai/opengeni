@@ -60,6 +60,11 @@ export const workspaces = pgTable(
     // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
     // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    inferenceState: text("inference_state").notNull().default("active"),
+    inferenceGeneration: integer("inference_generation").notNull().default(0),
+    inferenceReason: text("inference_reason"),
+    inferenceChangedBy: text("inference_changed_by"),
+    inferenceChangedAt: timestamp("inference_changed_at", { withTimezone: true }),
     // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
     // created without an explicit rig ride no rig (today's behavior exactly). FK
     // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle
@@ -572,6 +577,17 @@ export const sessions = pgTable(
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    queueVersion: integer("queue_version").notNull().default(0),
+    controlState: text("control_state").notNull().default("active"),
+    controlGeneration: integer("control_generation").notNull().default(0),
+    controlReason: text("control_reason"),
+    controlChangedBy: text("control_changed_by"),
+    controlChangedAt: timestamp("control_changed_at", { withTimezone: true }),
+    steerTargetTurnId: uuid("steer_target_turn_id"),
+    pendingControlEventId: uuid("pending_control_event_id"),
+    pendingControlKind: text("pending_control_kind"),
+    pendingControlExpectedTurnId: uuid("pending_control_expected_turn_id"),
+    pendingControlExpectedGeneration: integer("pending_control_expected_generation"),
     lastSequence: integer("last_sequence").notNull().default(0),
     // The session's PINNED Codex account (manual override from the in-session
     // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
@@ -1032,6 +1048,19 @@ export const sessionTurns = pgTable(
     // constrained to the SandboxOs enum (or NULL) in migration 0018.
     sandboxOs: text("sandbox_os"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    queueKind: text("queue_kind").notNull().default("human_message"),
+    origin: text("origin").notNull().default("human"),
+    priority: integer("priority").notNull().default(100),
+    version: integer("version").notNull().default(1),
+    executionGeneration: integer("execution_generation").notNull().default(0),
+    dedupeKey: text("dedupe_key"),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    deliveryState: text("delivery_state").notNull().default("pending"),
+    bundleId: uuid("bundle_id"),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    cancelledBy: text("cancelled_by"),
+    cancelReason: text("cancel_reason"),
+    promotedAt: timestamp("promoted_at", { withTimezone: true }),
     // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
     // by a single conditional UPDATE at tools/call time; the row lock serializes
     // concurrent reservations so exactly `toolspaceMaxCallsPerTurn` succeed.
@@ -1052,6 +1081,60 @@ export const sessionTurns = pgTable(
       table.status,
       table.position,
     ),
+  }),
+);
+
+export const sessionSystemUpdateBundles = pgTable(
+  "session_system_update_bundles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    generation: integer("generation").notNull(),
+    status: text("status").notNull().default("queued"),
+    version: integer("version").notNull().default(1),
+    memberCount: integer("member_count").notNull().default(0),
+    payloadBytes: integer("payload_bytes").notNull().default(0),
+    overflow: boolean("overflow").notNull().default(false),
+    wakeTurnId: uuid("wake_turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    generation: uniqueIndex("system_update_bundles_generation_uq").on(table.workspaceId, table.sessionId, table.generation),
+    sessionStatus: index("system_update_bundles_session_status_idx").on(table.workspaceId, table.sessionId, table.status, table.generation),
+  }),
+);
+
+export const sessionSystemUpdates = pgTable(
+  "session_system_updates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    bundleId: uuid("bundle_id").notNull().references(() => sessionSystemUpdateBundles.id, { onDelete: "cascade" }),
+    bundleGeneration: integer("bundle_generation").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    kind: text("kind").notNull(),
+    classification: text("classification").notNull().default("info"),
+    sourceId: text("source_id").notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    summary: text("summary").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    deliveryState: text("delivery_state").notNull().default("pending"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    dedupe: uniqueIndex("system_updates_dedupe_uq").on(table.workspaceId, table.sessionId, table.dedupeKey),
+    bundleOrdinal: uniqueIndex("system_updates_bundle_ordinal_uq").on(table.workspaceId, table.bundleId, table.ordinal),
   }),
 );
 
@@ -1179,6 +1262,7 @@ export const sessionEvents = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     turnId: uuid("turn_id"),
+    turnGeneration: integer("turn_generation"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
     payload: jsonb("payload").$type<unknown>().notNull().default({}),

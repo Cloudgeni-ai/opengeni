@@ -87,6 +87,9 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionLineageResponse,
+  SessionQueueSnapshot,
+  SessionSystemUpdateBundlePage,
+  SessionControlResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -552,11 +555,10 @@ export class OpenGeniClient {
     sessionId: string,
     options: { reason?: string; clientEventId?: string } = {},
   ): Promise<SessionEvent> {
-    return await this.sendEvent(workspaceId, sessionId, {
-      type: "user.interrupt",
-      ...(options.clientEventId !== undefined ? { clientEventId: options.clientEventId } : {}),
-      payload: options.reason !== undefined ? { reason: options.reason } : {},
-    });
+    return (await this.controlSession(workspaceId, sessionId, {
+      mode: "stop",
+      ...options,
+    })).event;
   }
 
   async sendApprovalDecision(
@@ -628,6 +630,117 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
+  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+    );
+  }
+
+  async editQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: { expectedQueueVersion: number; expectedItemVersion: number; update: UpdateSessionTurnRequest },
+  ): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}`,
+      request,
+    );
+  }
+
+  async cancelQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: { expectedQueueVersion: number; expectedItemVersion: number; reason?: string },
+  ): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/cancel`,
+      request,
+    );
+  }
+
+  async promoteQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: { expectedQueueVersion: number; expectedItemVersion: number },
+  ): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/promote`,
+      request,
+    );
+  }
+
+  async reorderQueue(
+    workspaceId: string,
+    sessionId: string,
+    request: { expectedQueueVersion: number; turnIds: string[] },
+  ): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/reorder`,
+      request,
+    );
+  }
+
+  async getSystemUpdateBundle(
+    workspaceId: string,
+    sessionId: string,
+    bundleId: string,
+    options: { cursor?: number; limit?: number } = {},
+  ): Promise<SessionSystemUpdateBundlePage> {
+    return await this.requestJson<SessionSystemUpdateBundlePage>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/system-update-bundles/${bundleId}`,
+      undefined,
+      {
+        ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  async controlSession(
+    workspaceId: string,
+    sessionId: string,
+    request: { mode: "interrupt" | "stop" | "resume"; reason?: string; clientEventId?: string },
+  ): Promise<SessionControlResponse> {
+    return await this.requestJson<SessionControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`,
+      request,
+    );
+  }
+
+  async interruptCurrent(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, { mode: "interrupt", ...options });
+  }
+
+  async stopSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, { mode: "stop", ...options });
+  }
+
+  async resumeSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, { mode: "resume", ...options });
+  }
+
   /** Edit a still-queued turn (prompt, model, resources, tools, ...). */
   async updateQueuedTurn(
     workspaceId: string,
@@ -691,53 +804,12 @@ export class OpenGeniClient {
     sessionId: string,
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
-    const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    let steerTurn: SessionTurn | null = null;
-    let queued: SessionTurn[] = [];
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      if (attempt > 0) {
-        await delay(150 * attempt);
-      }
-      const turns = await this.listTurns(workspaceId, sessionId);
-      queued = turns
-        .filter((turn) => turn.status === "queued")
-        .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
-      // Match against every turn, whatever its status: a steer turn that is
-      // already running/requires_action (or even finished) was claimed before
-      // this listing — that is delivery, not grounds for an interrupt.
-      steerTurn = turns.find((turn) => turn.triggerEventId === accepted.id) ?? null;
-      if (steerTurn) {
-        break;
-      }
-    }
-    const steerTurnQueued = steerTurn?.status === "queued";
-    if (steerTurn && steerTurnQueued && queued.length > 1) {
-      const front = steerTurn;
-      await this.reorderQueuedTurns(workspaceId, sessionId, [
-        front.id,
-        ...queued.filter((turn) => turn.id !== front.id).map((turn) => turn.id),
-      ]);
-    }
-    // Interrupting is only safe when the next claim is provably this message:
-    // either the steer turn sits queued (now at the front), or no turn
-    // materialized yet AND nothing else is queued. A steer turn observed in
-    // any non-queued state was already claimed — skip the interrupt.
-    const canDeliverNext = steerTurnQueued || (steerTurn === null && queued.length === 0);
-    const session = await this.getSession(workspaceId, sessionId);
-    // If the previously running turn already finished and the session claimed
-    // the steer turn itself, interrupting now would cancel the very message
-    // being steered. `activeTurnId` is the claim check; the residual window
-    // between this read and the interrupt landing is accepted (an interrupt
-    // can never be atomic with a status read over HTTP).
-    const steerTurnAlreadyActive = steerTurn !== null && session.activeTurnId === steerTurn.id;
-    const interrupted =
-      canDeliverNext &&
-      !steerTurnAlreadyActive &&
-      (session.status === "running" || session.status === "requires_action");
-    if (interrupted) {
-      await this.interrupt(workspaceId, sessionId, { reason: "steer" });
-    }
-    return { accepted, turn: steerTurn, interrupted };
+    const input = typeof message === "string" ? { text: message } : message;
+    return await this.requestJson<SteerMessageResult>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
+      input,
+    );
   }
 
   // --- Goals -------------------------------------------------------------------
@@ -2258,8 +2330,4 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

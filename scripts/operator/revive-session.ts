@@ -487,6 +487,16 @@ async function createApplyDependencies(
               signal: "queueChanged",
             });
           },
+          signalInterrupt: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
+            await temporal.workflow.signalWithStart("sessionWorkflow", {
+              taskQueue: settings.temporalTaskQueue,
+              workflowId,
+              workflowIdReusePolicy: "ALLOW_DUPLICATE",
+              args: [{ accountId, workspaceId, sessionId }],
+              signal: "interrupt",
+              signalArgs: [eventId],
+            });
+          },
         },
       },
     };
