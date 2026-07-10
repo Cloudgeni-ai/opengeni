@@ -181,6 +181,10 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxOwnershipEnabled: false,
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
+    // Mirror the production defaults for the split selfhosted op deadlines
+    // (config/src/index.ts): short control window, longer exec budget.
+    sandboxSelfhostedExecTimeoutMs: 120_000,
+    sandboxSelfhostedControlTimeoutMs: 30_000,
     enrollmentSigningSecret: undefined,
     selfhostedNatsUrl: undefined,
     selfhostedRelayUrl: undefined,
