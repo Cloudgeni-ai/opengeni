@@ -42,6 +42,7 @@ import {
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
+  registerSessionTurnDispatch,
   requireScheduledTask,
   saveRunState,
   setSessionStatus,
@@ -1747,32 +1748,34 @@ describe("worker activities integration", () => {
       temporalWorkflowId: "workflow-status-update-fails",
       triggerEventId: trigger!.id,
     });
-    const failingDb = new Proxy(dbClient.db, {
-      get(target, prop, receiver) {
-        if (prop === "transaction") {
-          return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) =>
-            await (target.transaction as any)(
-              async (tx: typeof dbClient.db) => {
-                const failingTx = new Proxy(tx, {
-                  get(txTarget, txProp, txReceiver) {
-                    if (txProp === "update") {
-                      return () => {
-                        throw new Error("status update failed");
-                      };
-                    }
-                    const value = Reflect.get(txTarget, txProp, txReceiver);
-                    return typeof value === "function" ? value.bind(txTarget) : value;
-                  },
-                }) as typeof dbClient.db;
-                return await fn(failingTx);
-              },
-              ...args,
-            );
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof dbClient.db;
+    let updateCalls = 0;
+    const failSecondUpdate = (targetDb: typeof dbClient.db): typeof dbClient.db =>
+      new Proxy(targetDb, {
+        get(target, prop, receiver) {
+          if (prop === "transaction") {
+            return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) =>
+              await (target.transaction as any)(
+                async (tx: typeof dbClient.db) => await fn(failSecondUpdate(tx)),
+                ...args,
+              );
+          }
+          const value = Reflect.get(target, prop, receiver);
+          if (prop === "update" && typeof value === "function") {
+            return (...args: unknown[]) => {
+              updateCalls += 1;
+              // Dispatch registration is update 1. Failing update 2 lands after
+              // the atomic start settlement inserted its events, proving that
+              // the nested transaction rolls those events back with the turn.
+              if (updateCalls === 2) {
+                throw new Error("status update failed");
+              }
+              return value.apply(target, args);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as typeof dbClient.db;
+    const failingDb = failSecondUpdate(dbClient.db);
     const activities = createActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: failingDb,
@@ -3877,6 +3880,12 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       metadata: {},
     });
+    const claimed = await activities.claimNextQueuedTurn({
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: "workflow-goal-continuation",
+    });
+    expect(claimed?.id).toBe(turn.id);
     const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -3940,17 +3949,29 @@ describe("worker activities integration", () => {
     const claimed = await activities.claimNextQueuedTurn(claimScope);
     expect(claimed).not.toBeNull();
     const turnId = claimed!.id;
-    const requeueInput = (triggerEventId: string) => ({
+    const requeueInput = (triggerEventId: string, dispatchId: string) => ({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId,
       workflowId,
       turnId,
+      dispatchId,
+      timeoutType: "HEARTBEAT" as const,
+    });
+    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId,
+      triggerEventId: trigger!.id,
+      dispatchId: "worker-death-dispatch-1",
     });
 
     // Death before any checkpoint: the original trigger replays cleanly.
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
+    expect(
+      await activities.requeueTurnAfterWorkerDeath(
+        requeueInput(trigger!.id, "worker-death-dispatch-1"),
+      ),
+    ).toEqual({
       action: "requeued",
       redispatches: 1,
     });
@@ -3970,6 +3991,12 @@ describe("worker activities integration", () => {
     // through a synthesized resume notice instead of replaying input the
     // model has already seen.
     await activities.claimNextQueuedTurn(claimScope);
+    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId,
+      triggerEventId: trigger!.id,
+      dispatchId: "worker-death-dispatch-2",
+    });
     await appendSessionHistoryItems(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -3977,7 +4004,11 @@ describe("worker activities integration", () => {
       turnId,
       items: [{ position: 0, item: { type: "message", role: "user", content: "long job" } }],
     });
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
+    expect(
+      await activities.requeueTurnAfterWorkerDeath(
+        requeueInput(trigger!.id, "worker-death-dispatch-2"),
+      ),
+    ).toEqual({
       action: "requeued",
       redispatches: 2,
     });
@@ -3997,22 +4028,45 @@ describe("worker activities integration", () => {
     // Crash-loop guard: the counter persists on the turn row; past the
     // ceiling the activity refuses so the workflow fails the session for real.
     await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
+    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId,
+      triggerEventId: notice.id,
+      dispatchId: "worker-death-dispatch-3",
+    });
+    expect(
+      await activities.requeueTurnAfterWorkerDeath(
+        requeueInput(notice.id, "worker-death-dispatch-3"),
+      ),
+    ).toEqual({
       action: "requeued",
       redispatches: WORKER_DEATH_MAX_REDISPATCHES,
     });
+    events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const finalNotice = events.filter((event) => event.type === "turn.preempted").at(-1)!;
     await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
+    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId,
+      triggerEventId: finalNotice.id,
+      dispatchId: "worker-death-dispatch-4",
+    });
+    expect(
+      await activities.requeueTurnAfterWorkerDeath(
+        requeueInput(finalNotice.id, "worker-death-dispatch-4"),
+      ),
+    ).toEqual({
       action: "exceeded",
       redispatches: WORKER_DEATH_MAX_REDISPATCHES,
     });
 
-    // A settled turn (the timed-out attempt was a zombie that actually
-    // finished) is left untouched.
-    await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
-      action: "stale",
-    });
+    // The exceeded transaction already failed the exact turn/session. A late
+    // repeat from the same dead activity is an event-free stale no-op.
+    expect(
+      await activities.requeueTurnAfterWorkerDeath(
+        requeueInput(finalNotice.id, "worker-death-dispatch-4"),
+      ),
+    ).toEqual({ action: "stale" });
   });
 
   test("child completion does not enqueue parent chat work when parent wakes are disabled", async () => {

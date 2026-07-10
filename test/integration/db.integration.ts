@@ -8,6 +8,8 @@ import {
   appendSessionHistoryItems,
   applySessionTurnInterrupt,
   applySessionTurnPreemption,
+  applySessionTurnSettlement,
+  applySessionTurnWorkerDeath,
   applyContextCompaction,
   bootstrapWorkspace,
   claimNextQueuedTurn,
@@ -59,10 +61,8 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   getSessionTurn,
-  cancelTurnFromDyingDispatch,
-  incrementTurnWorkerDeathRedispatches,
   listSessionEvents,
-  requeuePreemptedTurn,
+  registerSessionTurnDispatch,
   saveRunState,
   setSessionStatus,
   updateScheduledTask,
@@ -425,7 +425,7 @@ describe("DB integration", () => {
     await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "idle", null);
   });
 
-  test("requeues a preempted running turn behind a swapped trigger event", async () => {
+  test("atomically requeues registered running and approval attempts behind their resume trigger", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
@@ -436,15 +436,9 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger, resumeTrigger] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      [
-        { type: "user.message", payload: { text: "long task" } },
-        { type: "turn.preempted", payload: { reason: "worker_shutdown", text: "resume" } },
-      ],
-    );
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "long task" } },
+    ]);
     const turn = await enqueueSessionTurn(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -468,10 +462,29 @@ describe("DB integration", () => {
     );
     expect(claimed?.id).toBe(turn.id);
 
-    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id);
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "preempt-dispatch-1",
+      }),
+    ).toEqual({ action: "registered", dispatchGeneration: 1 });
+    const firstPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "preempt-dispatch-1",
+      dispatchGeneration: 1,
+      reason: "worker_shutdown",
+      resumeWithNotice: true,
+      text: "resume",
+    });
+    expect(firstPreemption.action).toBe("requeued");
+    const resumeTrigger = firstPreemption.events.find((event) => event.type === "turn.preempted")!;
     const requeued = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
     expect(requeued?.status).toBe("queued");
-    expect(requeued?.triggerEventId).toBe(resumeTrigger!.id);
+    expect(requeued?.triggerEventId).toBe(resumeTrigger.id);
     expect(requeued?.startedAt).toBeNull();
 
     // The next claim re-dispatches the same turn through the resume trigger.
@@ -482,21 +495,60 @@ describe("DB integration", () => {
       "wf-preempt-db-2",
     );
     expect(reclaimed?.id).toBe(turn.id);
-    expect(reclaimed?.triggerEventId).toBe(resumeTrigger!.id);
+    expect(reclaimed?.triggerEventId).toBe(resumeTrigger.id);
 
     // An approval rerun re-dispatches the same turn without a fresh claim, so
     // a shutdown there preempts a turn still marked requires_action.
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: resumeTrigger.id,
+        dispatchId: "preempt-dispatch-2",
+      }),
+    ).toEqual({ action: "registered", dispatchGeneration: 2 });
     await finishTurn(dbClient.db, grant.workspaceId, turn.id, "requires_action");
-    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, trigger!.id);
+    const [approvalTrigger] = await appendSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      [{ type: "user.approvalDecision", payload: { decision: "approve" } }],
+    );
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: approvalTrigger!.id,
+        dispatchId: "preempt-dispatch-3",
+      }),
+    ).toEqual({ action: "registered", dispatchGeneration: 3 });
+    const approvalPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: approvalTrigger!.id,
+      dispatchId: "preempt-dispatch-3",
+      dispatchGeneration: 3,
+      reason: "worker_shutdown",
+      resumeWithNotice: false,
+    });
+    expect(approvalPreemption.action).toBe("requeued");
     const requeuedFromApproval = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
     expect(requeuedFromApproval?.status).toBe("queued");
-    expect(requeuedFromApproval?.triggerEventId).toBe(trigger!.id);
+    expect(requeuedFromApproval?.triggerEventId).toBe(approvalTrigger!.id);
 
-    // Terminal turns cannot be preempt-requeued.
+    // Terminal turns cannot be preempt-requeued and append no event.
     await finishTurn(dbClient.db, grant.workspaceId, turn.id, "idle");
-    await expect(
-      requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id),
-    ).rejects.toThrow("Preemptible session turn not found");
+    const terminalPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: approvalTrigger!.id,
+      dispatchId: "preempt-dispatch-3",
+      dispatchGeneration: 3,
+      reason: "context_compacted",
+      resumeWithNotice: true,
+      text: "must not append",
+    });
+    expect(terminalPreemption).toMatchObject({ action: "stale", events: [] });
   });
 
   test("terminal interrupt makes a late compaction preempt an event-free stale no-op", async () => {
@@ -510,15 +562,9 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger, interrupt] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      [
-        { type: "user.message", payload: { text: "race terminal settlement" } },
-        { type: "user.interrupt", payload: { reason: "steer" } },
-      ],
-    );
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "race terminal settlement" } },
+    ]);
     const turn = await enqueueSessionTurn(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -535,6 +581,16 @@ describe("DB integration", () => {
       metadata: {},
     });
     await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const dispatch = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "terminal-race-dispatch",
+    });
+    expect(dispatch.action).toBe("registered");
+    const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.interrupt", payload: { reason: "steer" } },
+    ]);
 
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);
@@ -559,6 +615,8 @@ describe("DB integration", () => {
         sessionId: session.id,
         turnId: turn.id,
         triggerEventId: trigger!.id,
+        dispatchId: "terminal-race-dispatch",
+        dispatchGeneration: 1,
         reason: "context_compacted",
         resumeWithNotice: true,
         text: "resume only if the live turn still owns the session",
@@ -585,6 +643,7 @@ describe("DB integration", () => {
         sessionId: session.id,
         turnId: crypto.randomUUID(),
         triggerEventId: trigger!.id,
+        dispatchId: "missing-dispatch",
         reason: "worker_shutdown",
         resumeWithNotice: false,
       });
@@ -612,15 +671,9 @@ describe("DB integration", () => {
           model: "scripted-model",
           sandboxBackend: "none",
         });
-        const [trigger, interrupt] = await appendSessionEvents(
-          dbClient.db,
-          grant.workspaceId,
-          session.id,
-          [
-            { type: "user.message", payload: { text: `concurrent settlement ${attempt}` } },
-            { type: "user.interrupt", payload: { reason: "steer" } },
-          ],
-        );
+        const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+          { type: "user.message", payload: { text: `concurrent settlement ${attempt}` } },
+        ]);
         const turn = await enqueueSessionTurn(dbClient.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
@@ -642,6 +695,20 @@ describe("DB integration", () => {
           session.id,
           `session-${session.id}`,
         );
+        const dispatchId = `concurrent-dispatch-${attempt}`;
+        expect(
+          (
+            await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+              sessionId: session.id,
+              turnId: turn.id,
+              triggerEventId: trigger!.id,
+              dispatchId,
+            })
+          ).action,
+        ).toBe("registered");
+        const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+          { type: "user.interrupt", payload: { reason: "steer" } },
+        ]);
 
         const [control, preempt] = await Promise.all([
           applySessionTurnInterrupt(appDbClient.db, grant.workspaceId, session.id, interrupt!.id),
@@ -649,6 +716,8 @@ describe("DB integration", () => {
             sessionId: session.id,
             turnId: turn.id,
             triggerEventId: trigger!.id,
+            dispatchId,
+            dispatchGeneration: 1,
             reason: "context_compacted",
             resumeWithNotice: true,
             text: "concurrent resume",
@@ -756,93 +825,337 @@ describe("DB integration", () => {
     }
   });
 
-  test("dying-attempt cancel is fenced against worker-death recovery", async () => {
+  test("a superseded dispatch cannot preempt, settle, or worker-death requeue its newer attempt", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      initialMessage: "long task",
+      initialMessage: "dispatch generation fence",
       resources: [],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
     const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "long task" } },
+      { type: "user.message", payload: { text: "dispatch generation fence" } },
     ]);
-    const enqueue = () =>
-      enqueueSessionTurn(dbClient.db, {
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "dispatch generation fence",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "xhigh",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const first = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "dispatch-a",
+    });
+    expect(first).toEqual({ action: "registered", dispatchGeneration: 1 });
+    const requeued = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "dispatch-a",
+      dispatchGeneration: 1,
+      reason: "context_compacted",
+      resumeWithNotice: true,
+      text: "resume generation two",
+    });
+    expect(requeued.action).toBe("requeued");
+    const resumeTrigger = requeued.events.find((event) => event.type === "turn.preempted")!;
+    expect(resumeTrigger).toBeDefined();
+
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    const second = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: resumeTrigger.id,
+      dispatchId: "dispatch-b",
+    });
+    expect(second).toEqual({ action: "registered", dispatchGeneration: 2 });
+    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+      .lastSequence;
+
+    expect(
+      await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "dispatch-a",
+        dispatchGeneration: 1,
+        reason: "worker_shutdown",
+        resumeWithNotice: false,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+    expect(
+      await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "dispatch-a",
+        dispatchGeneration: 1,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [
+          { type: "turn.completed", payload: { output: "stale" } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+    expect(
+      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "dispatch-a",
+        resumeWithNotice: true,
+        text: "stale crash",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
+
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("running");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId).toBe(
+      turn.id,
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
+      sequenceBefore,
+    );
+
+    const completed = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: resumeTrigger.id,
+      dispatchId: "dispatch-b",
+      dispatchGeneration: 2,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [
+        { type: "turn.completed", payload: { output: "current" } },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+    });
+    expect(completed.action).toBe("settled");
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+      "completed",
+    );
+  });
+
+  test("claim and preemption share one lock order without deadlock or dual active turns", async () => {
+    const grant = await testGrant(dbClient.db);
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const session = await createSession(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        temporalWorkflowId: "wf-fence-db",
-        source: "user",
-        prompt: "long task",
+        initialMessage: `lock order ${attempt}`,
         resources: [],
-        tools: [],
-        model: "scripted-model",
-        reasoningEffort: "low",
-        sandboxBackend: "none",
         metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
       });
+      const [firstTrigger, secondTrigger] = await appendSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        [
+          { type: "user.message", payload: { text: `active ${attempt}` } },
+          { type: "user.message", payload: { text: `queued ${attempt}` } },
+        ],
+      );
+      const enqueue = (triggerEventId: string, prompt: string) =>
+        enqueueSessionTurn(dbClient.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId,
+          temporalWorkflowId: `session-${session.id}`,
+          source: "user",
+          prompt,
+          resources: [],
+          tools: [],
+          model: "scripted-model",
+          reasoningEffort: "xhigh",
+          sandboxBackend: "none",
+          metadata: {},
+        });
+      const active = await enqueue(firstTrigger!.id, "active");
+      const queued = await enqueue(secondTrigger!.id, "queued");
+      await claimNextQueuedTurn(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        `session-${session.id}`,
+      );
+      expect(
+        (
+          await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+            sessionId: session.id,
+            turnId: active.id,
+            triggerEventId: firstTrigger!.id,
+            dispatchId: `lock-dispatch-${attempt}`,
+          })
+        ).action,
+      ).toBe("registered");
 
-    // Ordering A — zombie cancels a live turn BEFORE recovery runs: the fence
-    // (counter unchanged since this dispatch claimed) lets it settle.
-    const turnA = await enqueue();
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db");
-    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnA.id, 0)).toBe(
-      true,
-    );
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnA.id))?.status).toBe(
-      "cancelled",
-    );
-    // requeuing that death-artifact cancel (the recovery side) resurrects it.
-    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turnA.id, trigger!.id, [
-      "running",
-      "requires_action",
-      "cancelled",
-    ]);
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnA.id))?.status).toBe("queued");
-    // Retire turnA so it does not shadow turnB in the per-session claim queue.
-    await finishTurn(dbClient.db, grant.workspaceId, turnA.id, "idle");
+      const [preempt, concurrentClaim] = await Promise.all([
+        applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+          sessionId: session.id,
+          turnId: active.id,
+          triggerEventId: firstTrigger!.id,
+          dispatchId: `lock-dispatch-${attempt}`,
+          dispatchGeneration: 1,
+          reason: "worker_shutdown",
+          resumeWithNotice: false,
+        }),
+        claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`),
+      ]);
+      expect(preempt.action).toBe("requeued");
+      const turns = await Promise.all([
+        getSessionTurn(dbClient.db, grant.workspaceId, active.id),
+        getSessionTurn(dbClient.db, grant.workspaceId, queued.id),
+      ]);
+      expect(turns.filter((turn) => turn?.status === "running")).toHaveLength(
+        concurrentClaim ? 1 : 0,
+      );
+      const finalSession = await getSession(dbClient.db, grant.workspaceId, session.id);
+      expect(finalSession?.activeTurnId).toBe(concurrentClaim?.id ?? null);
+    }
+  });
 
-    // Orderings B & C — recovery has ALREADY advanced (counter bumped, then the
-    // turn is either queued or re-claimed to running): a stale zombie that
-    // captured the pre-death counter must NOT clobber it.
-    const turnB = await enqueue();
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db");
-    const bumped = await incrementTurnWorkerDeathRedispatches(
-      dbClient.db,
-      grant.workspaceId,
-      turnB.id,
-    ); // recovery bumps BEFORE requeue
-    expect(bumped).toBe(1);
-    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turnB.id, trigger!.id, [
-      "running",
-      "requires_action",
-      "cancelled",
+  test("preemption rolls back event, turn, and pointer together at injected transaction failures", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "atomic rollback",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "atomic rollback" } },
     ]);
-    // (B) turn is `queued`; stale zombie captured 0.
-    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 0)).toBe(
-      false,
-    );
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe("queued");
-    // (C) a successor re-claims -> running again, but the counter is still 1.
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-fence-db-2");
-    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 0)).toBe(
-      false,
-    );
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe(
-      "running",
-    );
-    // The successor's OWN dispatch (captured counter 1) can still settle its turn.
-    expect(await cancelTurnFromDyingDispatch(dbClient.db, grant.workspaceId, turnB.id, 1)).toBe(
-      true,
-    );
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turnB.id))?.status).toBe(
-      "cancelled",
-    );
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "atomic rollback",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "xhigh",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
+    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: trigger!.id,
+      dispatchId: "rollback-dispatch",
+    });
+    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
+      .lastSequence;
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const turnFunction = `ope22_turn_fail_${suffix}`;
+    const turnTrigger = `ope22_turn_trigger_${suffix}`;
+    const sessionFunction = `ope22_session_fail_${suffix}`;
+    const sessionTrigger = `ope22_session_trigger_${suffix}`;
+    const preempt = () =>
+      applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: trigger!.id,
+        dispatchId: "rollback-dispatch",
+        dispatchGeneration: 1,
+        reason: "context_compacted",
+        resumeWithNotice: true,
+        text: "rollback resume",
+      });
+    const assertUnchanged = async () => {
+      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
+        "running",
+      );
+      const currentSession = await getSession(dbClient.db, grant.workspaceId, session.id);
+      expect(currentSession?.status).toBe("running");
+      expect(currentSession?.activeTurnId).toBe(turn.id);
+      expect(currentSession?.lastSequence).toBe(sequenceBefore);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
+    };
+
+    try {
+      await applyRawSql(
+        services.databaseUrl,
+        `
+          create function ${turnFunction}() returns trigger language plpgsql as $$
+          begin
+            if new.id = '${turn.id}'::uuid and new.status = 'queued' then
+              raise exception 'ope22 injected turn failure';
+            end if;
+            return new;
+          end $$;
+          create trigger ${turnTrigger} before update on session_turns
+          for each row execute function ${turnFunction}();
+        `,
+      );
+      await expect(preempt()).rejects.toThrow("Failed query");
+      await assertUnchanged();
+      await applyRawSql(
+        services.databaseUrl,
+        `drop trigger ${turnTrigger} on session_turns; drop function ${turnFunction}();`,
+      );
+
+      await applyRawSql(
+        services.databaseUrl,
+        `
+          create function ${sessionFunction}() returns trigger language plpgsql as $$
+          begin
+            if new.id = '${session.id}'::uuid and new.status = 'queued' then
+              raise exception 'ope22 injected session failure';
+            end if;
+            return new;
+          end $$;
+          create trigger ${sessionTrigger} before update on sessions
+          for each row execute function ${sessionFunction}();
+        `,
+      );
+      await expect(preempt()).rejects.toThrow("Failed query");
+      await assertUnchanged();
+      await applyRawSql(
+        services.databaseUrl,
+        `drop trigger ${sessionTrigger} on sessions; drop function ${sessionFunction}();`,
+      );
+
+      expect((await preempt()).action).toBe("requeued");
+    } finally {
+      await applyRawSql(
+        services.databaseUrl,
+        `
+          drop trigger if exists ${turnTrigger} on session_turns;
+          drop function if exists ${turnFunction}();
+          drop trigger if exists ${sessionTrigger} on sessions;
+          drop function if exists ${sessionFunction}();
+        `,
+      );
+    }
   });
 
   test("persists scheduled tasks and run history", async () => {

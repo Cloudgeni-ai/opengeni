@@ -408,6 +408,8 @@ describe("worker restart resilience", () => {
           sessionId: input.sessionId,
           turnId: input.turnId!,
           triggerEventId: input.triggerEventId,
+          dispatchId: "late-zombie-test-dispatch",
+          allowLegacyUnregistered: true,
           reason: "context_compacted",
           resumeWithNotice: true,
           text: "late compaction resume",

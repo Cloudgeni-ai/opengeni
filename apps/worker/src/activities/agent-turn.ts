@@ -1,10 +1,9 @@
 import {
+  applySessionTurnSettlement,
   applySessionTurnPreemption,
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   createTurn,
   applyCreditDebitUpToBalance,
-  finishTurn,
-  cancelTurnFromDyingDispatch,
   getBillingBalance,
   getRigName,
   getRigVersion,
@@ -40,6 +39,7 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
+  registerSessionTurnDispatch,
   appendSessionHistoryItems,
   consumeSessionCompactionRequest,
   countSessionHistoryItems,
@@ -51,7 +51,6 @@ import {
   validateCodexCapacityResumeTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
-  setSessionStatusForTurnGeneration,
   setSessionLastInputTokens,
   sumUsageQuantity,
   heartbeatLeaseHolder,
@@ -222,6 +221,7 @@ import {
   evaluateWorkspaceModelPolicy,
   type ResourceRef,
   type SessionEventType,
+  type SessionStatus,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -1104,6 +1104,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       entitlements,
       connectionCredentials,
     } = await services();
+    const activityContext = currentActivityContext();
+    const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
@@ -1123,40 +1125,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     );
     let isCodexTurn = false;
     let executionGeneration = 0;
-    // Worker-death redispatch counter observed when THIS dispatch claimed the
-    // turn. If a dying-attempt cancel later fences on this and the turn's
-    // current value differs, recovery already re-queued/re-dispatched the turn
-    // and the zombie must not clobber it.
+    // Still required by credential-loss/capacity settlements, whose own
+    // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
-    const settleTurnAndSession = async (
-      turnStatus: Parameters<typeof finishTurn>[3],
-      sessionStatus: Parameters<typeof setSessionStatusForTurnGeneration>[5],
-      activeTurnId: string | null = null,
-    ): Promise<boolean> => {
-      if (!turnId) return false;
-      const settled = await finishTurn(
-        db,
-        input.workspaceId,
-        turnId,
-        turnStatus,
-        executionGeneration,
-      );
-      if (!settled) return false;
-      return await setSessionStatusForTurnGeneration(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        turnId,
-        executionGeneration,
-        sessionStatus,
-        activeTurnId,
-      );
-    };
     const saveRunStateFenced = async (state: Parameters<typeof saveRunState>[1]): Promise<void> => {
       if (!(await saveRunState(db, state))) {
         throw new CancelledFailure("turn execution generation was fenced while saving run state");
       }
     };
+    let dispatchGeneration: number | null = null;
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     // OPE-21: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
@@ -1311,6 +1288,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
           immediate?: boolean,
         ) => Promise<void>)
+      | null = null;
+    let settle:
+      | ((input: {
+          events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
+          turnStatus:
+            | "queued"
+            | "running"
+            | "completed"
+            | "failed"
+            | "cancelled"
+            | "requires_action";
+          sessionStatus: SessionStatus;
+          activeTurnId: string | null;
+        }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
@@ -1635,6 +1626,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       turnId = turn.id;
       executionGeneration = turn.executionGeneration;
+      const registeredDispatch = await registerSessionTurnDispatch(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId,
+        triggerEventId: input.triggerEventId,
+        dispatchId,
+      });
+      if (registeredDispatch.action === "stale") {
+        activityStatus = "cancelled";
+        turnMetricOutcome = "cancelled";
+        return { status: "cancelled" };
+      }
+      dispatchGeneration = registeredDispatch.dispatchGeneration;
       const capacityWaiterId = turn.metadata?.codexCapacityWaiterId;
       const capacityWaitGeneration = turn.metadata?.codexCapacityWaitGeneration;
       if (
@@ -1702,7 +1705,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         isCodexTurn,
         entitlements,
       );
-      const activityContext = currentActivityContext();
       // Setup (variableSet load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
       // checks let a graceful shutdown preempt the turn before the worker is
@@ -1737,11 +1739,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // not collide its model-call charges with the prior dispatch's. A genuine
       // activity retry reuses the same activityId, so its re-emitted calls keep
       // deduping (no double charge).
-      const dispatchId = activityContext?.info.activityId ?? null;
       // Local/tests have no Temporal activity id; still generate an execution-
       // unique holder so a second dispatch of the same durable turn fences this
       // one exactly like production.
-      codexLeaseHolderId = dispatchId ?? `local:${randomUUID()}`;
+      codexLeaseHolderId = dispatchId;
+      const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -1774,31 +1776,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await Bun.sleep(0);
         }
       };
+      settle = async (inputSettlement) => {
+        const inputs = inputSettlement.events.map((event) => ({
+          ...event,
+          payload: redact(event.payload),
+          turnId: turnId!,
+          producerId,
+          producerSeq: ++producerSeq,
+        }));
+        const result = await applySessionTurnSettlement(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turnId!,
+          triggerEventId: input.triggerEventId,
+          dispatchId,
+          dispatchGeneration: dispatchGeneration!,
+          turnStatus: inputSettlement.turnStatus,
+          sessionStatus: inputSettlement.sessionStatus,
+          activeTurnId: inputSettlement.activeTurnId,
+          events: inputs,
+        });
+        if (result.action === "stale") {
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return false;
+        }
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+        activityContext?.heartbeat({
+          ...heartbeatDetails,
+          phase: "events_published",
+          producerSeq,
+        });
+        return true;
+      };
       activityContext?.heartbeat({ ...heartbeatDetails, phase: "turn_started" });
 
       // A shutdown that landed during claim/billing setup preempts before the
       // turn visibly starts: nothing ran yet, so the requeued turn replays the
       // original trigger cleanly on a healthy worker.
       throwIfWorkerShuttingDown();
-      const executionAllowed = await setSessionStatusForTurnGeneration(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        turnId,
-        executionGeneration,
-        "running",
-        turnId,
-      );
-      if (!executionAllowed) {
-        throw new CancelledFailure("session or workspace inference is stopped");
+      if (
+        !(await settle({
+          events: [
+            { type: "session.status.changed", payload: { status: "running" } },
+            { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
+          ],
+          turnStatus: "running",
+          sessionStatus: "running",
+          activeTurnId: turnId,
+        }))
+      ) {
+        return { status: "cancelled" };
       }
-      await publish(
-        [
-          { type: "session.status.changed", payload: { status: "running" } },
-          { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
-        ],
-        true,
-      );
       turnStartedPublished = true;
 
       // Multi-account (P1): resolve the effective Codex account for this turn
@@ -2049,7 +2077,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           effectiveCodexCredentialId === null &&
           leased.accounts.length > 0 &&
           leased.accounts.every((account) => !account.allocatorEnabled) &&
-          publish &&
           turnId
         ) {
           const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
@@ -2091,28 +2118,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               };
             }
           }
-          await publish(
-            [
-              {
-                type: "turn.failed",
-                payload: {
-                  error: "All connected Codex subscriptions are disabled for new allocations.",
-                  code: "codex_allocator_disabled",
-                  retryable: false,
-                  recovery: "user_message",
+          if (
+            !(await settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error: "All connected Codex subscriptions are disabled for new allocations.",
+                    code: "codex_allocator_disabled",
+                    retryable: false,
+                    recovery: "user_message",
+                  },
                 },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            true,
-          );
-          await settleTurnAndSession("failed", "idle", null);
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return { status: "cancelled" };
+          }
           turnMetricOutcome = "failed";
           activityStatus = "idle";
           return { status: "idle" };
         }
 
-        if (rotationDecision.kind === "allCapped" && publish && turnId) {
+        if (rotationDecision.kind === "allCapped" && turnId) {
           // Every eligible account is capped/cooling (and a usage refresh did NOT
           // surface a reset): idle the turn AT THE BOUNDARY (no wasted model/sandbox
           // build) until the EARLIEST reset across all accounts — the multi-account
@@ -2172,27 +2204,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               };
             }
           }
-          await publish(
-            [
-              // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
-              // rotation-wait state as the reactive all-capped path, so it must freeze
-              // autoContinuations identically (evaluateGoalContinuation reads this marker)
-              // — a goal waiting out a long reset must not burn its continuation budget on
-              // the proactive path while the reactive path spares it.
-              {
-                type: "turn.failed",
-                payload: {
-                  ...failurePayload,
-                  recovery: goalActive ? "goal_continuation" : "user_message",
-                  runStateSaved: false,
-                  rotated: true,
+          if (
+            !(await settle!({
+              events: [
+                // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
+                // rotation-wait state as the reactive all-capped path, so it must freeze
+                // autoContinuations identically (evaluateGoalContinuation reads this marker)
+                // — a goal waiting out a long reset must not burn its continuation budget on
+                // the proactive path while the reactive path spares it.
+                {
+                  type: "turn.failed",
+                  payload: {
+                    ...failurePayload,
+                    recovery: goalActive ? "goal_continuation" : "user_message",
+                    runStateSaved: false,
+                    rotated: true,
+                  },
                 },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            true,
-          );
-          await settleTurnAndSession("failed", "idle", null);
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return { status: "cancelled" };
+          }
           turnMetricOutcome = "failed";
           activityStatus = "idle";
           // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
@@ -2598,7 +2635,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
-        sandboxHolderId = dispatchId ?? `turn:${turnId}`;
+        sandboxHolderId = dispatchId;
         sandboxGroupId = session.sandboxGroupId;
         // STAGE D honest-label guard: a machine-home session carries
         // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY
@@ -3422,7 +3459,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               responseUsageCount += 1;
               const responseSourceKey = modelUsageSourceKey({
                 responseId: responseUsage.responseId,
-                dispatchId,
+                dispatchId: modelUsageDispatchId,
                 positionalKey: `response-${responseUsageCount}`,
               });
               // Within a turn the serving credential is fixed, so a switch can only
@@ -3550,7 +3587,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
-            dispatchId,
+            dispatchId: modelUsageDispatchId,
             positionalKey: "aggregate",
           });
           await recordModelUsageAndDebitCredits(settings, db, {
@@ -3618,14 +3655,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // codex account strips its account-bound reasoning before replay (HOLE C).
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
-          await publish!(
-            [
-              { type: "session.requiresAction", payload: { approvals } },
-              { type: "session.status.changed", payload: { status: "requires_action" } },
-            ],
-            true,
-          );
-          await settleTurnAndSession("requires_action", "requires_action", activeTurnId);
+          if (
+            !(await settle!({
+              events: [
+                { type: "session.requiresAction", payload: { approvals } },
+                { type: "session.status.changed", payload: { status: "requires_action" } },
+              ],
+              turnStatus: "requires_action",
+              sessionStatus: "requires_action",
+              activeTurnId,
+            }))
+          ) {
+            return { status: "cancelled" };
+          }
           activityStatus = "requires_action";
           return { status: "requires_action" };
         }
@@ -3659,15 +3701,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
-        await publish!(
-          [
-            { type: "agent.message.completed", payload: { text: finalOutput } },
-            { type: "turn.completed", payload: { output: finalOutput } },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await settleTurnAndSession("idle", "idle");
+        if (
+          !(await settle!({
+            events: [
+              { type: "agent.message.completed", payload: { text: finalOutput } },
+              { type: "turn.completed", payload: { output: finalOutput } },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { status: "cancelled" };
+        }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -3757,23 +3804,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if (!progressPersisted) {
               throw new Error(errorMessage, { cause: attemptError });
             }
-            await publish!(
-              [
-                {
-                  type: "turn.failed",
-                  payload: {
-                    error: errorMessage,
-                    code: "context_compaction_failed",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted: false,
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.failed",
+                    payload: {
+                      error: errorMessage,
+                      code: "context_compaction_failed",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted: false,
+                    },
                   },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              true,
-            );
-            await settleTurnAndSession("failed", "idle");
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return { status: "cancelled" };
+            }
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
@@ -3808,24 +3860,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               if (!recoveryProgressed) {
                 const errorMessage =
                   "Context compaction recovery stopped because post-compaction context did not shrink across re-dispatches.";
-                await publish!(
-                  [
-                    {
-                      type: "turn.failed",
-                      payload: {
-                        error: errorMessage,
-                        code: "context_compaction_no_progress",
-                        retryable: false,
-                        recovery: "user_message",
-                        compacted: true,
-                        estimatedTokensAfter: compactionEstimatedTokensAfter,
+                if (
+                  !(await settle!({
+                    events: [
+                      {
+                        type: "turn.failed",
+                        payload: {
+                          error: errorMessage,
+                          code: "context_compaction_no_progress",
+                          retryable: false,
+                          recovery: "user_message",
+                          compacted: true,
+                          estimatedTokensAfter: compactionEstimatedTokensAfter,
+                        },
                       },
-                    },
-                    { type: "session.status.changed", payload: { status: "idle" } },
-                  ],
-                  true,
-                );
-                await settleTurnAndSession("failed", "idle", null);
+                      { type: "session.status.changed", payload: { status: "idle" } },
+                    ],
+                    turnStatus: "failed",
+                    sessionStatus: "idle",
+                    activeTurnId: null,
+                  }))
+                ) {
+                  return { status: "cancelled" };
+                }
                 turnMetricOutcome = "failed";
                 activityStatus = "idle";
                 activityError = attemptError;
@@ -3835,6 +3892,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 sessionId: input.sessionId,
                 turnId: activeTurnId,
                 triggerEventId: input.triggerEventId,
+                dispatchId,
+                dispatchGeneration: dispatchGeneration!,
                 reason: "context_compacted",
                 resumeWithNotice: true,
                 text: CONTEXT_OVERFLOW_RESUME_TEXT,
@@ -3869,26 +3928,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               return { status: "preempted" };
             }
-            await publish!(
-              [
-                {
-                  type: "turn.failed",
-                  payload: {
-                    error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
-                    code:
-                      recoveryKind === "overflow"
-                        ? "context_window_overflow_compacted"
-                        : "context_compacted",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted,
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.failed",
+                    payload: {
+                      error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
+                      code:
+                        recoveryKind === "overflow"
+                          ? "context_window_overflow_compacted"
+                          : "context_compacted",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted,
+                    },
                   },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              true,
-            );
-            await settleTurnAndSession("failed", "idle");
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return { status: "cancelled" };
+            }
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
@@ -3941,6 +4005,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             turnId: preemptTurnId,
             triggerEventId: input.triggerEventId,
+            dispatchId,
+            dispatchGeneration: dispatchGeneration!,
             reason: "sandbox_lease_superseded",
             resumeWithNotice: false,
           });
@@ -4005,6 +4071,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             turnId: preemptTurnId,
             triggerEventId: input.triggerEventId,
+            dispatchId,
+            dispatchGeneration: dispatchGeneration!,
             reason: "worker_shutdown",
             resumeWithNotice,
             ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
@@ -4040,36 +4108,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "cancelled";
         activityError = error;
         await flushRuntimeBatcher();
-        if (preemptTurnId) {
-          // FENCED settle: a heartbeat-timeout death lands here too (it is a
-          // CancelledFailure that is not WORKER_SHUTDOWN), and its zombie must
-          // NOT overwrite a turn worker-death recovery already re-queued or
-          // re-dispatched — that reintroduces the exact orphan stall this
-          // change fixes, in the reverse event order. cancelTurnFromDyingDispatch
-          // only settles a still-live turn whose redispatch counter is unchanged
-          // since this dispatch claimed it; a deliberate user interrupt (turn
-          // still running, counter unchanged) still settles as before.
-          const settled = await cancelTurnFromDyingDispatch(
-            db,
-            input.workspaceId,
-            preemptTurnId,
-            redispatchesAtDispatch,
-          ).catch(() => false);
-          if (settled) {
-            await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-              {
-                turnId: preemptTurnId,
-                turnGeneration: executionGeneration,
-                type: "turn.cancelled",
-                payload: {
-                  triggerEventId: input.triggerEventId,
-                  reason: error.message || "activity_cancelled",
-                },
-              },
-            ]).catch(() => undefined);
-            turnMetricOutcome = "cancelled";
-          }
-        }
+        // The workflow owns cancellation settlement: user/steer controls use
+        // applySessionTurnInterrupt, and heartbeat timeouts use
+        // applySessionTurnWorkerDeath. A dying activity must never append a
+        // competing cancellation or mutate the turn/session on its own.
+        turnMetricOutcome = "cancelled";
         throw error;
       }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
@@ -4101,17 +4144,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
-        await publish(
-          [
-            {
-              type: "turn.completed",
-              payload: { output: "", segmentLimit: "max_turns", runStateSaved },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await settleTurnAndSession("idle", "idle");
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: { output: "", segmentLimit: "max_turns", runStateSaved },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { status: "cancelled" };
+        }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -4746,24 +4794,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             };
           }
         }
-        await publish(
-          [
-            // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to
-            // freeze autoContinuations (a rotation walk must not burn the goal's continuation budget).
-            {
-              type: "turn.failed",
-              payload: {
-                ...failurePayload,
-                recovery: goalActive ? "goal_continuation" : "user_message",
-                runStateSaved,
-                ...(rotated ? { rotated: true } : {}),
+        if (
+          !(await settle!({
+            events: [
+              // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to
+              // freeze autoContinuations (a rotation walk must not burn the goal's continuation budget).
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failurePayload,
+                  recovery: goalActive ? "goal_continuation" : "user_message",
+                  runStateSaved,
+                  ...(rotated ? { rotated: true } : {}),
+                },
               },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await settleTurnAndSession("failed", "idle");
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { status: "cancelled" };
+        }
         turnMetricOutcome = "failed";
         activityStatus = "idle";
         activityError = error;
@@ -4826,22 +4879,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
-        await publish(
-          [
-            {
-              type: "turn.completed",
-              payload: {
-                output: "",
-                segmentLimit: "budget_exhausted",
-                detail: error.message,
-                runStateSaved,
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: {
+                  output: "",
+                  segmentLimit: "budget_exhausted",
+                  detail: error.message,
+                  runStateSaved,
+                },
               },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await settleTurnAndSession("idle", "idle");
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { status: "cancelled" };
+        }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -4890,21 +4948,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
-        await publish(
-          [
-            {
-              type: "turn.failed",
-              payload: {
-                ...failure,
-                recovery: recoveryRouting.recovery,
-                runStateSaved,
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failure,
+                  recovery: recoveryRouting.recovery,
+                  runStateSaved,
+                },
               },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await settleTurnAndSession("failed", "idle");
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return { status: "cancelled" };
+        }
         turnMetricOutcome = "failed";
         activityStatus = "idle";
         activityError = error;
@@ -4927,14 +4990,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // rotate the ambiguous request.
       await flushRuntimeBatcher();
       await reconcileConversationTruth();
-      await publish(
-        [
-          { type: "turn.failed", payload: failure },
-          { type: "session.status.changed", payload: { status: "failed" } },
-        ],
-        true,
-      );
-      await settleTurnAndSession("failed", "failed");
+      if (
+        !(await settle!({
+          events: [
+            { type: "turn.failed", payload: failure },
+            { type: "session.status.changed", payload: { status: "failed" } },
+          ],
+          turnStatus: "failed",
+          sessionStatus: "failed",
+          activeTurnId: null,
+        }))
+      ) {
+        return { status: "cancelled" };
+      }
       turnMetricOutcome = "failed";
       // The common failure path ends here: runAgentTurn marks the session
       // failed and returns "failed", and the session workflow then exits

@@ -73,15 +73,25 @@ export function continuationHoldMs(
  * SCHEDULE_TO_CLOSE timeouts are deliberately excluded: with the 30-day
  * startToClose they mean the turn truly overran, which stays a real failure.
  */
-function isWorkerDeathFailure(error: unknown): boolean {
+function workerDeathFailure(
+  error: unknown,
+): { dispatchId: string; timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" } | null {
   if (!(error instanceof ActivityFailure)) {
-    return false;
+    return null;
   }
   const cause = error.cause;
-  return (
-    cause instanceof TimeoutFailure &&
-    (cause.timeoutType === "HEARTBEAT" || cause.timeoutType === "SCHEDULE_TO_START")
-  );
+  if (
+    !(cause instanceof TimeoutFailure) ||
+    (cause.timeoutType !== "HEARTBEAT" && cause.timeoutType !== "SCHEDULE_TO_START") ||
+    !error.activityId
+  ) {
+    return null;
+  }
+  return { dispatchId: error.activityId, timeoutType: cause.timeoutType };
+}
+
+function activityFailureDispatchId(error: unknown): string | undefined {
+  return error instanceof ActivityFailure ? error.activityId : undefined;
 }
 
 export const userMessage = defineSignal<[string]>("userMessage");
@@ -472,7 +482,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // bounded by a per-turn redispatch counter persisted on the turn row.
       // patched() keeps replays of histories recorded before this branch
       // existed on their original failSession path.
-      if (isWorkerDeathFailure(outcome.error) && patched("worker-death-redispatch")) {
+      const workerDeath = workerDeathFailure(outcome.error);
+      if (workerDeath && patched("worker-death-redispatch")) {
         const requeue = await activity.requeueTurnAfterWorkerDeath({
           accountId,
           workspaceId,
@@ -480,6 +491,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           triggerEventId,
           workflowId,
           turnId,
+          dispatchId: workerDeath.dispatchId,
+          timeoutType: workerDeath.timeoutType,
         });
         if (requeue.action !== "exceeded") {
           // "requeued": the next claim re-dispatches the turn. "stale": the
@@ -487,22 +500,19 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           // after the server gave up on its heartbeats); nothing to redo.
           return true;
         }
-        await activity.failSession({
-          accountId,
-          workspaceId,
-          sessionId,
-          triggerEventId,
-          workflowId,
-          error: `Worker died ${requeue.redispatches + 1} times while running this turn (heartbeat timeout); giving up after ${requeue.redispatches} re-dispatches.`,
-        });
+        // The worker-death activity atomically committed failed turn/session
+        // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
+      const failedDispatchId = activityFailureDispatchId(outcome.error);
       await activity.failSession({
         accountId,
         workspaceId,
         sessionId,
         triggerEventId,
         workflowId,
+        turnId,
+        ...(failedDispatchId ? { dispatchId: failedDispatchId } : {}),
         error: workflowFailureMessage(outcome.error),
       });
       return false;

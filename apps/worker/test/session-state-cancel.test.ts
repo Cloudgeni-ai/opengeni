@@ -30,8 +30,6 @@ const realDbFns = {
   finishTurn: realDb.finishTurn,
   getSessionEvent: realDb.getSessionEvent,
   getSessionTurn: realDb.getSessionTurn,
-  incrementTurnWorkerDeathRedispatches: realDb.incrementTurnWorkerDeathRedispatches,
-  requeuePreemptedTurn: realDb.requeuePreemptedTurn,
   requireSession: realDb.requireSession,
   setSessionStatus: realDb.setSessionStatus,
 };
@@ -114,21 +112,6 @@ mock.module("@opengeni/db", () => ({
     }
     return null;
   }),
-  incrementTurnWorkerDeathRedispatches: mock(
-    async (db: unknown, workspaceId: string, turnId: string) => {
-      if (db !== fakeDb) {
-        return realDbFns.incrementTurnWorkerDeathRedispatches(db as never, workspaceId, turnId);
-      }
-      return 1;
-    },
-  ),
-  requeuePreemptedTurn: mock(
-    async (db: unknown, workspaceId: string, turnId: string, triggerEventId: string) => {
-      if (db !== fakeDb) {
-        return realDbFns.requeuePreemptedTurn(db as never, workspaceId, turnId, triggerEventId);
-      }
-    },
-  ),
   requireSession: mock(async (db: unknown, workspaceId: string, sessionId: string) => {
     if (db !== fakeDb) {
       return realDbFns.requireSession(db as never, workspaceId, sessionId);

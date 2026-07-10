@@ -1,17 +1,17 @@
 import {
   applySessionControlInterrupt,
+  applySessionTurnSettlement,
+  applySessionTurnWorkerDeath,
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   countQueuedTurns,
   countTurnSessionHistoryItems,
-  finishTurn,
   getSessionEvent,
   getSessionTurn,
-  requeueTurnAfterWorkerDeathAtomically,
   requireSession,
   settleSessionIdleWithParentOutbox,
   setSessionStatus,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import { WORKER_DEATH_RESUME_TEXT } from "./agent-turn";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
@@ -34,37 +34,60 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function failSession(input: RunAgentTurnInput & { error?: string }): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
-    // Already terminal: runAgentTurn settled this turn as failed (status failed,
-    // activeTurnId cleared, turn finished) and already woke any parent, then the
-    // workflow still routed here because the activity's finally threw after the
-    // failed return. Re-failing would append a second turn.failed/status.changed
-    // and a second parent wake (a different lastSequence dodges the idle dedupe).
-    // The session is already where this activity would put it, so stop.
     if (session.status === "failed") {
       return;
     }
+    const turnId = input.turnId ?? session.activeTurnId;
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
-    const turnId = session.activeTurnId ?? null;
-    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-      {
-        type: "turn.failed",
-        turnId,
-        payload: {
-          triggerEventId: input.triggerEventId,
-          trigger: trigger?.payload ?? null,
-          error: input.error ?? "Agent activity failed before it could report a terminal state.",
+    if (!turnId) {
+      // Rolling-history/pre-claim compatibility: a legacy workflow can fail
+      // before any turn owns the session. There is no turn CAS to coordinate;
+      // append the session-only terminal audit and transition the session.
+      await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+        {
+          type: "turn.failed",
+          payload: {
+            triggerEventId: input.triggerEventId,
+            trigger: trigger?.payload ?? null,
+            error: input.error ?? "Agent activity failed before it could report a terminal state.",
+          },
         },
-      },
-      {
-        type: "session.status.changed",
-        turnId,
-        payload: { status: "failed" },
-      },
-    ]);
-    if (turnId) {
-      await finishTurn(db, input.workspaceId, turnId, "failed");
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ]);
+      await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
+      await notifyParentOfChildTerminal(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        "failed",
+      );
+      return;
     }
-    await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
+    const result = await applySessionTurnSettlement(db, input.workspaceId, {
+      sessionId: input.sessionId,
+      turnId,
+      triggerEventId: input.triggerEventId,
+      dispatchId: input.dispatchId ?? "legacy-unregistered",
+      allowLegacyUnregistered: true,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        {
+          type: "turn.failed",
+          payload: {
+            triggerEventId: input.triggerEventId,
+            trigger: trigger?.payload ?? null,
+            error: input.error ?? "Agent activity failed before it could report a terminal state.",
+          },
+        },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    if (result.action === "stale") {
+      return;
+    }
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     await notifyParentOfChildTerminal(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
@@ -107,26 +130,9 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function requeueTurnAfterWorkerDeath(
     input: RequeueTurnAfterWorkerDeathInput,
   ): Promise<RequeueTurnAfterWorkerDeathResult> {
-    const { settings, db, bus, observability } = await services();
+    const { settings, db, bus, observability, wakeSessionWorkflow } = await services();
     const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
-    // Reaching this activity PROVES the session workflow classified the turn's
-    // failure as a WORKER DEATH (heartbeat / schedule-to-start timeout): a
-    // deliberate user interrupt never gets here — it resolves the workflow's
-    // interrupt branch and runs interruptActiveTurn instead. So the only ways
-    // the turn is already terminal here are:
-    //   • completed / failed — the zombie genuinely finished (or errored) the
-    //     work after the server gave up on its heartbeats. That outcome is the
-    //     truth; nothing to redo.
-    //   • cancelled — the zombie's OWN CancelledFailure cleanup (agent-turn's
-    //     generic-cancel catch) marked it as it died. That IS the death, not a
-    //     real settle. Requeue it, or the turn — and any goal awaiting it — is
-    //     orphaned until a human intervenes (the 76e2f2ee/Vern 16h stall).
-    const deathArtifactCancel =
-      turn?.status === "cancelled" && turn.cancelledBy === "worker_death_dispatch";
-    if (
-      !turn ||
-      (turn.status !== "running" && turn.status !== "requires_action" && !deathArtifactCancel)
-    ) {
+    if (!turn || (turn.status !== "running" && turn.status !== "requires_action")) {
       return { action: "stale" };
     }
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
@@ -138,26 +144,33 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       !approvalRerun &&
       settings.sessionHistorySource === "items" &&
       (await countTurnSessionHistoryItems(db, input.workspaceId, input.turnId)) > 0;
-    const settlement = await requeueTurnAfterWorkerDeathAtomically(db, {
-      workspaceId: input.workspaceId,
+    const result = await applySessionTurnWorkerDeath(db, input.workspaceId, {
       sessionId: input.sessionId,
       turnId: input.turnId,
-      originalTriggerEventId: input.triggerEventId,
+      triggerEventId: input.triggerEventId,
+      dispatchId: input.dispatchId,
+      allowLegacyUnregistered: true,
+      allowPriorAttemptForScheduleToStart: input.timeoutType === "SCHEDULE_TO_START",
       resumeWithNotice,
+      ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
       maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
-      preemptedPayload: {
-        triggerEventId: input.triggerEventId,
-        reason: "worker_death",
-        resumeWithNotice,
-        ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
-      },
     });
-    if (settlement.events.length > 0) {
-      await bus.publish(input.workspaceId, input.sessionId, settlement.events);
+    if (result.action === "stale") {
+      return { action: "stale" };
     }
-    if (settlement.action !== "requeued") return settlement;
+    await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability);
-    return { action: "requeued", redispatches: settlement.redispatches };
+    if (result.action === "exceeded") {
+      await notifyParentOfChildTerminal(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        "failed",
+        `turn:${input.turnId}`,
+      );
+      return { action: "exceeded", redispatches: result.redispatches };
+    }
+    return { action: "requeued", redispatches: result.redispatches };
   }
 
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {

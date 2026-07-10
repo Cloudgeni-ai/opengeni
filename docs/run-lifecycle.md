@@ -101,15 +101,25 @@ only the newest real user messages that fit one cumulative 20,000-token budget,
 then appends the summary; internal resume notices are never retained as user
 intent. See [`context-compaction.md`](context-compaction.md).
 
-That requeue is one atomic durable settlement: lock the session and exact
-active turn, append `turn.preempted` plus queued status, change the turn back to
-queued, and clear the session's active pointer in the same transaction. A
-missing/already-terminal turn, a newer attempt, or a durable `user.interrupt`
-newer than the current attempt returns a stale no-op and appends nothing. This
-prevents a cancelled activity that keeps running through compaction from
-publishing a contradictory preemption and then failing the session on a later
-row CAS. Interrupt settlement uses the same lock order and current-trigger
-fence, so a delayed old workflow signal cannot cancel a newer turn.
+Before model/tool work, a claimed turn registers its exact Temporal activity id,
+current trigger, and a monotonic dispatch generation in turn metadata. A real
+Temporal activity retry retains the activity id; a re-dispatch registers a new
+id/generation. Every lifecycle writer must match that attempt. A typed
+schedule-to-start timeout is the only no-registration recovery case because its
+activity never ran.
+
+Claim and settlement share one lock order: session, then exact turn. Start,
+requires-action, ordinary terminal, preemption, and worker-death events commit
+with turn status, session status/pointer, and `lastSequence` in one transaction.
+For preemption that transaction appends `turn.preempted` plus queued status,
+changes the turn back to queued, and clears the session's active pointer. A
+missing/already-terminal turn, a superseded dispatch, or a durable
+`user.interrupt` newer than the attempt returns a stale no-op and appends
+nothing. This prevents a cancelled activity that keeps running through
+compaction from publishing contradictory preemption/terminal truth and then
+failing the session on a later row CAS. Interrupt settlement uses the same lock
+order and current-trigger fence, so a delayed old workflow signal cannot cancel
+a newer turn.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
@@ -141,18 +151,21 @@ than overwritten.
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
 kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
 runs the graceful checkpoint; it surfaces to the session workflow as a
-heartbeat-timeout `ActivityFailure`. The workflow does not fail the session
-for that shape: conversation truth was still dual-written after every model
-response during the turn, so the `requeueTurnAfterWorkerDeath` activity puts
-the turn back on the queue and the loop re-dispatches it — through a
+heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
+workflow does not fail the session independently for that shape: conversation
+truth was still dual-written after every model response during the turn, so
+the fenced `requeueTurnAfterWorkerDeath` activity atomically puts the turn back
+on the queue and the loop re-dispatches it — through a
 synthesized `turn.preempted` resume notice (reason `worker_death`) when the
 dead attempt had persisted items for the turn, or by replaying the original
 trigger when nothing was persisted. This is still not an automatic Temporal
 retry of side-effectful work: the resumed attempt sees everything the dead
 attempt checkpointed and is told to verify in-flight side effects before
-repeating them. A per-turn redispatch counter persisted on the turn row
-(ceiling 3) breaks crash loops: a turn that keeps killing workers fails the
-session for real with a clear error.
+repeating them. The dying activity never writes a competing cancellation.
+A per-turn redispatch counter persisted on the turn row (ceiling 3) breaks
+crash loops: the transaction that exceeds the ceiling appends the failure
+events and fails the exact turn/session, and the workflow performs no second
+split failure settlement.
 
 **Failed sessions are revivable by talking to them.** Conversation truth is
 items, so a failed turn does not invalidate history. A new `user.message`

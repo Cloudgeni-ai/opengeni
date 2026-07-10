@@ -231,7 +231,13 @@ describe("Temporal workflow integration", () => {
       const turn = queuedTurn("event-1");
       const queuedTurns = [turn];
       const runs: Array<{ turnId?: string; triggerEventId: string }> = [];
-      const requeues: Array<{ turnId: string; triggerEventId: string }> = [];
+      const activityIds: string[] = [];
+      const requeues: Array<{
+        turnId: string;
+        triggerEventId: string;
+        dispatchId: string;
+        timeoutType: string;
+      }> = [];
       const failures: unknown[] = [];
       const worker = await testWorker(nativeConnection, taskQueue, {
         claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
@@ -239,12 +245,18 @@ describe("Temporal workflow integration", () => {
         runAgentTurn: async (input: { turnId?: string; triggerEventId: string }) => {
           runs.push(input);
           if (runs.length === 1) {
+            activityIds.push(currentActivityContext()!.info.activityId);
             // Ungracefully dead worker: never heartbeats, never returns.
             return await hangWithoutHeartbeating();
           }
           return { status: "idle" };
         },
-        requeueTurnAfterWorkerDeath: async (input: { turnId: string; triggerEventId: string }) => {
+        requeueTurnAfterWorkerDeath: async (input: {
+          turnId: string;
+          triggerEventId: string;
+          dispatchId: string;
+          timeoutType: string;
+        }) => {
           requeues.push(input);
           // Mirror the real activity: the same turn goes back on the queue
           // behind a synthesized worker-death resume trigger.
@@ -269,7 +281,12 @@ describe("Temporal workflow integration", () => {
         expect(runs[0]).toMatchObject({ turnId: turn.id, triggerEventId: "event-1" });
         expect(runs[1]).toMatchObject({ turnId: turn.id, triggerEventId: "death-resume-event" });
         expect(requeues).toEqual([
-          expect.objectContaining({ turnId: turn.id, triggerEventId: "event-1" }),
+          expect.objectContaining({
+            turnId: turn.id,
+            triggerEventId: "event-1",
+            dispatchId: activityIds[0],
+            timeoutType: "HEARTBEAT",
+          }),
         ]);
         expect(failures).toHaveLength(0);
       } finally {
@@ -281,28 +298,33 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "fails the session for real once worker-death re-dispatches exceed the ceiling",
+    "stops after atomic worker-death settlement exceeds the re-dispatch ceiling",
     async () => {
-      // The counter mechanics (persisted per-turn counter, ceiling, stale
-      // detection) are proven against the real requeueTurnAfterWorkerDeath
-      // activity in worker-activity.integration.ts; this proves the workflow
-      // honors the activity's "exceeded" verdict on a real heartbeat-timeout
-      // failure by failing the session with a clear error.
+      // The counter mechanics and atomic terminal write are proven against the
+      // real requeueTurnAfterWorkerDeath activity in worker-activity.integration.ts;
+      // this proves the workflow honors that already-durable "exceeded" winner
+      // on a real heartbeat-timeout failure without a second failSession write.
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
       const turn = queuedTurn("event-1");
       const queuedTurns = [turn];
       const runs: unknown[] = [];
+      const activityIds: string[] = [];
+      const requeues: Array<{ dispatchId: string; timeoutType: string }> = [];
       const failures: Array<{ error?: string }> = [];
       const worker = await testWorker(nativeConnection, taskQueue, {
         claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
         markSessionIdle: async () => undefined,
         runAgentTurn: async (input: unknown) => {
           runs.push(input);
+          activityIds.push(currentActivityContext()!.info.activityId);
           // Crash-looping turn: every dispatch takes its worker down.
           return await hangWithoutHeartbeating();
         },
-        requeueTurnAfterWorkerDeath: async () => ({ action: "exceeded", redispatches: 3 }),
+        requeueTurnAfterWorkerDeath: async (input: { dispatchId: string; timeoutType: string }) => {
+          requeues.push(input);
+          return { action: "exceeded", redispatches: 3 };
+        },
         failSession: async (input: { error?: string }) => {
           failures.push(input);
         },
@@ -318,8 +340,16 @@ describe("Temporal workflow integration", () => {
         });
         await handle.result();
         expect(runs).toHaveLength(1);
-        expect(failures).toHaveLength(1);
-        expect(failures[0]?.error).toContain("giving up after 3 re-dispatches");
+        expect(requeues).toEqual([
+          expect.objectContaining({
+            dispatchId: activityIds[0],
+            timeoutType: "HEARTBEAT",
+          }),
+        ]);
+        // The worker-death activity has already atomically failed the exact
+        // turn/session and appended terminal events. The workflow must not run
+        // a second split failSession settlement after that durable winner.
+        expect(failures).toHaveLength(0);
       } finally {
         worker.shutdown();
         await run;

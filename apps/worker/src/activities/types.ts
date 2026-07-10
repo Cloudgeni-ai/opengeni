@@ -112,6 +112,7 @@ export type RunAgentTurnInput = {
   triggerEventId: string;
   workflowId: string;
   turnId?: string;
+  dispatchId?: string;
 };
 
 export type RequeueTurnAfterWorkerDeathInput = {
@@ -123,6 +124,8 @@ export type RequeueTurnAfterWorkerDeathInput = {
   triggerEventId: string;
   workflowId: string;
   turnId: string;
+  dispatchId: string;
+  timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
 };
 
 export type RequeueTurnAfterWorkerDeathResult =
