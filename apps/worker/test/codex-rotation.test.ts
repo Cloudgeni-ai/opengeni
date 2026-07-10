@@ -4,6 +4,7 @@ import {
   availableAt,
   chooseRotationActive,
   chooseShardedHome,
+  classifyCodexPin,
   computeIdleDelayMs,
   computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
@@ -13,6 +14,7 @@ import {
   REACTIVE_PERSISTENCE_FAULT_FLOOR_MS,
   REACTIVE_ROTATION_MARGIN,
   shardCredentialForSession,
+  type CodexRotationStrategy,
 } from "../src/activities/codex-rotation";
 
 // Multi-account P3 — the PURE rotation ranker. All rotation correctness (most_remaining
@@ -819,5 +821,101 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
     if (decision.kind === "home") {
       expect(decision.rewritePin).toBe(true);
     }
+  });
+});
+
+describe("classifyCodexPin — pin lifecycle (manual sacrosanct, policy meaningful only under sharded)", () => {
+  const NON_SHARDED: CodexRotationStrategy[] = ["most_remaining", "round_robin", "drain_then_next"];
+  const ALL: CodexRotationStrategy[] = [...NON_SHARDED, "sharded"];
+
+  test("a MANUAL pin is honored under EVERY strategy, enabled or disabled", () => {
+    for (const strategy of ALL) {
+      for (const rotationEnabled of [true, false]) {
+        expect(
+          classifyCodexPin({
+            pinnedCredentialId: "acct-1",
+            pinSource: "manual",
+            strategy,
+            rotationEnabled,
+          }),
+        ).toBe("manual");
+      }
+    }
+  });
+
+  test("a leftover POLICY pin under drain_then_next → clearStale (ignore + clear, follow strategy)", () => {
+    expect(
+      classifyCodexPin({
+        pinnedCredentialId: "ex-home",
+        pinSource: "policy",
+        strategy: "drain_then_next",
+        rotationEnabled: true,
+      }),
+    ).toBe("clearStale");
+  });
+
+  test("a POLICY pin is stale under ANY non-sharded strategy (and when rotation is off)", () => {
+    for (const strategy of NON_SHARDED) {
+      expect(
+        classifyCodexPin({
+          pinnedCredentialId: "ex-home",
+          pinSource: "policy",
+          strategy,
+          rotationEnabled: true,
+        }),
+      ).toBe("clearStale");
+    }
+    // sharded strategy but rotation DISABLED → the sharded policy is not active → stale.
+    expect(
+      classifyCodexPin({
+        pinnedCredentialId: "ex-home",
+        pinSource: "policy",
+        strategy: "sharded",
+        rotationEnabled: false,
+      }),
+    ).toBe("clearStale");
+  });
+
+  test("a POLICY pin under an ACTIVE sharded policy → sharded (keep / re-shard, never clear)", () => {
+    expect(
+      classifyCodexPin({
+        pinnedCredentialId: "home",
+        pinSource: "policy",
+        strategy: "sharded",
+        rotationEnabled: true,
+      }),
+    ).toBe("sharded");
+  });
+
+  test("an UNPINNED session under active sharded → sharded (first-turn lazy assignment)", () => {
+    expect(
+      classifyCodexPin({
+        pinnedCredentialId: null,
+        pinSource: null,
+        strategy: "sharded",
+        rotationEnabled: true,
+      }),
+    ).toBe("sharded");
+  });
+
+  test("an UNPINNED session under a non-sharded strategy (or rotation off) → unpinned (follow the active strategy)", () => {
+    for (const strategy of NON_SHARDED) {
+      expect(
+        classifyCodexPin({
+          pinnedCredentialId: null,
+          pinSource: null,
+          strategy,
+          rotationEnabled: true,
+        }),
+      ).toBe("unpinned");
+    }
+    expect(
+      classifyCodexPin({
+        pinnedCredentialId: null,
+        pinSource: null,
+        strategy: "sharded",
+        rotationEnabled: false,
+      }),
+    ).toBe("unpinned");
   });
 });

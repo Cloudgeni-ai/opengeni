@@ -98,6 +98,7 @@ import {
 import {
   chooseRotationActive,
   chooseShardedHome,
+  classifyCodexPin,
   computeIdleDelayMs,
   computeReactiveRotationResume,
   shardCredentialForSession,
@@ -1544,7 +1545,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         //     pinned account with no exhaustion check, so a pointer-only move would leave
         //     the session on the capped pin. Re-shard (not first-eligible) so a capped
         //     account's cohort SPREADS across the pool instead of re-concentrating on one
-        //     failover.
+        //     failover. LIFECYCLE: a policy pin is meaningful ONLY while the sharded
+        //     policy is active. Under any OTHER regime (a non-sharded strategy, or
+        //     rotation disabled) it is IGNORED (never honored as a sticky pin — that would
+        //     re-introduce the no-escape trap) and CLEARED lazily on the session's next
+        //     turn, converging to the active strategy without a migration.
         //   • null — no pin: the non-sharded strategies rank the workspace-active pointer
         //     (chooseRotationActive), unchanged.
         // The decision MATH is pure and orthogonal to strategy identity —
@@ -1556,8 +1561,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
         const pinSource = sessionCodex?.pinSource ?? null;
         const strategy = (rotation?.rotationStrategy ?? "most_remaining") as CodexRotationStrategy;
-        // A MANUAL pin is SACROSANCT (see contract above): no policy path ever moves it.
-        const manualPinned = sessionPin != null && pinSource === "manual";
+        // Classify how the pin governs this turn (pure; see classifyCodexPin). The whole
+        // pin lifecycle — manual sacrosanct, sharded assign/keep/re-shard, stale-policy
+        // clear, unpinned-follow — is decided here in one place.
+        const pinDisposition = classifyCodexPin({
+          pinnedCredentialId: sessionPin,
+          pinSource,
+          strategy,
+          rotationEnabled: Boolean(rotation?.rotationEnabled),
+        });
         // The off-path / P1 default: today's workspace active pointer. Untouched
         // when rotation is off or the session is pinned (byte-identical to P1).
         let chosenActive = rotation?.activeCredentialId ?? null;
@@ -1624,7 +1636,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             : { status: "idle" };
         };
 
-        if (rotation?.rotationEnabled && strategy === "sharded" && !manualPinned) {
+        if (pinDisposition === "clearStale") {
+          // Lazy convergence: a policy pin outlives its policy only until the session's
+          // next turn. Clear it durably (pin + source → null) so the session is treated
+          // as UNPINNED from here on and follows whatever strategy is now active. No
+          // migration-on-switch needed — sessions converge one turn at a time.
+          await setSessionCodexPin(db, input.workspaceId, input.sessionId, null);
+          resolvedSessionPin = null;
+        }
+
+        if (pinDisposition === "sharded") {
           // === SHARDED (AM-4/AM-6/AM-7): pick/health-check this session's HOME. ===
           // Keep an eligible POLICY pin (prompt-cache warmth); otherwise (re-)shard.
           // First turn (no policy pin) assigns lazily; a capped policy pin re-shards
@@ -1679,11 +1700,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             engineMoved = true;
           }
           resolvedSessionPin = shardDecision.credentialId; // selectCodexCredentialForTurn returns it.
-        } else if (rotation?.rotationEnabled && sessionPin == null) {
+        } else if (rotation?.rotationEnabled && resolvedSessionPin == null) {
           // === Classic auto-rotation (unpinned, non-sharded strategies): UNCHANGED. ===
-          // Gated on rotation_enabled and pin-guarded (a pinned session NEVER rotates).
-          // When skipped, chosenActive stays the active pointer and
-          // selectCodexCredentialForTurn is called with byte-identical arguments to today.
+          // Reached by a genuinely unpinned session OR one whose stale policy pin was
+          // just cleared above (both now resolvedSessionPin == null); a MANUAL pin keeps
+          // resolvedSessionPin non-null and so NEVER rotates. When skipped, chosenActive
+          // stays the active pointer and selectCodexCredentialForTurn is called with
+          // byte-identical arguments to today.
           let rankAccounts = accounts;
           rotationDecision = chooseRotationActive({
             rotationStrategy: strategy,
@@ -3543,17 +3566,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // AM-1: a MANUAL pin is sacred and never rebalances; classic rotation runs for
           // UNPINNED sessions; the sharded strategy ALSO rebalances a POLICY-pinned session
           // (re-shard its home off the capped account). manual pin ⇒ today's idle-until-reset.
-          const reactivePinSource = sessionCodex?.pinSource ?? null;
-          const reactiveSessionPin = sessionCodex?.pinnedCredentialId ?? null;
-          const reactiveManualPinned = reactiveSessionPin != null && reactivePinSource === "manual";
+          // A stale policy pin was already cleared by the proactive seam this turn, so by
+          // here it reads UNPINNED and takes the classic path.
           const reactiveStrategy = (rotation?.rotationStrategy ??
             "most_remaining") as CodexRotationStrategy;
-          const reactiveSharded =
-            Boolean(rotation?.rotationEnabled) && reactiveStrategy === "sharded";
-          const rotating =
-            Boolean(rotation?.rotationEnabled) &&
-            !reactiveManualPinned &&
-            (reactiveSharded || reactiveSessionPin == null);
+          const reactiveDisposition = classifyCodexPin({
+            pinnedCredentialId: sessionCodex?.pinnedCredentialId ?? null,
+            pinSource: sessionCodex?.pinSource ?? null,
+            strategy: reactiveStrategy,
+            rotationEnabled: Boolean(rotation?.rotationEnabled),
+          });
+          const reactiveSharded = reactiveDisposition === "sharded";
+          const rotating = Boolean(rotation?.rotationEnabled) && reactiveDisposition !== "manual";
           if (rotating && rotation) {
             const accounts = await listCodexAccountStatuses(db, input.workspaceId).catch(() => []);
             const serving = accounts.find((a) => a.id === effectiveCodexCredentialId) ?? null;

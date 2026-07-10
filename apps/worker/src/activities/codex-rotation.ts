@@ -6,13 +6,54 @@
 // `selectCodexCredentialForTurn` precedence gate (pin > active). Keeping the
 // decision pure makes the whole rotation correctness story unit-testable in
 // isolation (see codex-rotation.test.ts).
-import type { CodexAccountStatus } from "@opengeni/db";
+import type { CodexAccountStatus, CodexPinSource } from "@opengeni/db";
 
 export type CodexRotationStrategy =
   | "most_remaining"
   | "round_robin"
   | "drain_then_next"
   | "sharded";
+
+/**
+ * How a session's codex pin governs THIS turn's account selection (pure). Encodes the
+ * policy-pin LIFECYCLE rule: a 'policy' pin is meaningful ONLY while the sharded policy
+ * is active.
+ *   • "manual"     — a manual pin: honored under EVERY strategy; never moved or cleared.
+ *   • "sharded"    — the sharded policy is active and the pin is non-manual: assign / keep
+ *                    / re-shard the deterministic home (covers an unpinned first turn AND
+ *                    an existing policy pin).
+ *   • "clearStale" — a 'policy' pin while the sharded policy is NOT active: IGNORE it
+ *                    (never honor it as a sticky pin — that is the no-escape trap) and
+ *                    clear it lazily so the session converges to the active strategy.
+ *   • "unpinned"   — no pin (or none that applies): follow the active strategy / workspace
+ *                    active pointer, unchanged.
+ */
+export type CodexPinDisposition = "manual" | "sharded" | "clearStale" | "unpinned";
+
+/** Classify a session's codex pin against the active rotation regime (see {@link CodexPinDisposition}). */
+export function classifyCodexPin(args: {
+  pinnedCredentialId: string | null;
+  pinSource: CodexPinSource | null;
+  strategy: CodexRotationStrategy;
+  rotationEnabled: boolean;
+}): CodexPinDisposition {
+  const { pinnedCredentialId, pinSource, strategy, rotationEnabled } = args;
+  const pinned = pinnedCredentialId != null;
+  // A manual pin is sacrosanct under every strategy — checked FIRST so sharded never
+  // touches it.
+  if (pinned && pinSource === "manual") {
+    return "manual";
+  }
+  const shardedActive = rotationEnabled && strategy === "sharded";
+  if (shardedActive) {
+    return "sharded";
+  }
+  // A policy pin outside the sharded regime is stale → clear it.
+  if (pinned && pinSource === "policy") {
+    return "clearStale";
+  }
+  return "unpinned";
+}
 
 export type RotationDecision =
   // The chosen account. `moved` ⇒ it differs from the current active pointer, so
