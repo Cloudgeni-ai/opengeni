@@ -583,6 +583,33 @@ message Heartbeat {
   // True when the agent is draining for a pending self-update (prefer other
   // sandboxes for new work).
   bool draining = 5;
+  // The runner's measured host capacity — the upward report the server paces
+  // against (LIMITS-DOCTRINE: the runner holds no concurrency policy; the
+  // swarm/scheduler reads this and decides how much to throw at the machine).
+  HostCapacitySample capacity = 6;
+  // Point-in-time op-admission counts (queues only ever fill once a derived
+  // pathology breaker saturates — nonzero queued figures are telemetry-worthy).
+  AdmissionTelemetry admission = 7;
+}
+
+// A point-in-time host-capacity sample: the impure sampler's reading of
+// MemAvailable, spool-filesystem free space, fd/pid headroom, and CPUs. Every
+// runner-side budget/breaker is a fraction of these (rule R), so this is also
+// how the server understands what the machine can take.
+message HostCapacitySample {
+  uint64 mem_available_bytes = 1;
+  uint64 disk_free_bytes = 2;
+  uint64 fd_headroom = 3;
+  uint64 pid_headroom = 4;
+  uint64 nproc = 5;
+}
+
+// Point-in-time op-admission counts, per class.
+message AdmissionTelemetry {
+  uint64 light_running = 1;
+  uint64 light_queued = 2;
+  uint64 heavy_running = 3;
+  uint64 heavy_queued = 4;
 }
 
 message HeartbeatAck {
@@ -795,6 +822,14 @@ message OpExit {
   map<string, string> digests = 5;
   // channel name → total bytes emitted on the channel.
   map<string, uint64> totals = 6;
+  // Set iff the RUNNER failed the op with a typed reason ("OP_OVERFLOW" /
+  // "OP_SPOOL_IO" / "OP_PIPE_IO"); empty for every child-decided outcome
+  // (exit/timeout/cancel). Never an exit-code sentinel — ambiguous renderings
+  // are outlawed (FAILURE-VISIBILITY.md).
+  string failure_code = 7;
+  // Structured detail for failure_code (exact counters: retained bytes, the
+  // IO error text, captured byte totals) — the out-of-band plane's food.
+  map<string, string> failure_detail = 8;
 }
 
 // The op-begin for a STREAMING fs_write (M7): the target is set up here; the bytes

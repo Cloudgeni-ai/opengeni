@@ -1318,6 +1318,41 @@ export interface Heartbeat {
    * sandboxes for new work).
    */
   draining: boolean;
+  /**
+   * The runner's measured host capacity — the upward report the server paces
+   * against (LIMITS-DOCTRINE: the runner holds no concurrency policy; the
+   * swarm/scheduler reads this and decides how much to throw at the machine).
+   */
+  capacity:
+    | HostCapacitySample
+    | undefined;
+  /**
+   * Point-in-time op-admission counts (queues only ever fill once a derived
+   * pathology breaker saturates — nonzero queued figures are telemetry-worthy).
+   */
+  admission: AdmissionTelemetry | undefined;
+}
+
+/**
+ * A point-in-time host-capacity sample: the impure sampler's reading of
+ * MemAvailable, spool-filesystem free space, fd/pid headroom, and CPUs. Every
+ * runner-side budget/breaker is a fraction of these (rule R), so this is also
+ * how the server understands what the machine can take.
+ */
+export interface HostCapacitySample {
+  memAvailableBytes: string;
+  diskFreeBytes: string;
+  fdHeadroom: string;
+  pidHeadroom: string;
+  nproc: string;
+}
+
+/** Point-in-time op-admission counts, per class. */
+export interface AdmissionTelemetry {
+  lightRunning: string;
+  lightQueued: string;
+  heavyRunning: string;
+  heavyQueued: string;
 }
 
 export interface HeartbeatAck {
@@ -1481,6 +1516,18 @@ export interface OpExit {
   digests: { [key: string]: string };
   /** channel name → total bytes emitted on the channel. */
   totals: { [key: string]: string };
+  /**
+   * Set iff the RUNNER failed the op with a typed reason ("OP_OVERFLOW" /
+   * "OP_SPOOL_IO" / "OP_PIPE_IO"); empty for every child-decided outcome
+   * (exit/timeout/cancel). Never an exit-code sentinel — ambiguous renderings
+   * are outlawed (FAILURE-VISIBILITY.md).
+   */
+  failureCode: string;
+  /**
+   * Structured detail for failure_code (exact counters: retained bytes, the
+   * IO error text, captured byte totals) — the out-of-band plane's food.
+   */
+  failureDetail: { [key: string]: string };
 }
 
 export interface OpExit_DigestsEntry {
@@ -1489,6 +1536,11 @@ export interface OpExit_DigestsEntry {
 }
 
 export interface OpExit_TotalsEntry {
+  key: string;
+  value: string;
+}
+
+export interface OpExit_FailureDetailEntry {
   key: string;
   value: string;
 }
@@ -6569,7 +6621,15 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
 };
 
 function createBaseHeartbeat(): Heartbeat {
-  return { seq: "0", uptimeMs: "0", activeSessions: 0, metrics: undefined, draining: false };
+  return {
+    seq: "0",
+    uptimeMs: "0",
+    activeSessions: 0,
+    metrics: undefined,
+    draining: false,
+    capacity: undefined,
+    admission: undefined,
+  };
 }
 
 export const Heartbeat: MessageFns<Heartbeat> = {
@@ -6588,6 +6648,12 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     }
     if (message.draining !== false) {
       writer.uint32(40).bool(message.draining);
+    }
+    if (message.capacity !== undefined) {
+      HostCapacitySample.encode(message.capacity, writer.uint32(50).fork()).join();
+    }
+    if (message.admission !== undefined) {
+      AdmissionTelemetry.encode(message.admission, writer.uint32(58).fork()).join();
     }
     return writer;
   },
@@ -6639,6 +6705,22 @@ export const Heartbeat: MessageFns<Heartbeat> = {
           message.draining = reader.bool();
           continue;
         }
+        case 6: {
+          if (tag !== 50) {
+            break;
+          }
+
+          message.capacity = HostCapacitySample.decode(reader, reader.uint32());
+          continue;
+        }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.admission = AdmissionTelemetry.decode(reader, reader.uint32());
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6663,6 +6745,8 @@ export const Heartbeat: MessageFns<Heartbeat> = {
         : 0,
       metrics: isSet(object.metrics) ? MetricsSample.fromJSON(object.metrics) : undefined,
       draining: isSet(object.draining) ? globalThis.Boolean(object.draining) : false,
+      capacity: isSet(object.capacity) ? HostCapacitySample.fromJSON(object.capacity) : undefined,
+      admission: isSet(object.admission) ? AdmissionTelemetry.fromJSON(object.admission) : undefined,
     };
   },
 
@@ -6683,6 +6767,12 @@ export const Heartbeat: MessageFns<Heartbeat> = {
     if (message.draining !== false) {
       obj.draining = message.draining;
     }
+    if (message.capacity !== undefined) {
+      obj.capacity = HostCapacitySample.toJSON(message.capacity);
+    }
+    if (message.admission !== undefined) {
+      obj.admission = AdmissionTelemetry.toJSON(message.admission);
+    }
     return obj;
   },
 
@@ -6698,6 +6788,276 @@ export const Heartbeat: MessageFns<Heartbeat> = {
       ? MetricsSample.fromPartial(object.metrics)
       : undefined;
     message.draining = object.draining ?? false;
+    message.capacity = (object.capacity !== undefined && object.capacity !== null)
+      ? HostCapacitySample.fromPartial(object.capacity)
+      : undefined;
+    message.admission = (object.admission !== undefined && object.admission !== null)
+      ? AdmissionTelemetry.fromPartial(object.admission)
+      : undefined;
+    return message;
+  },
+};
+
+function createBaseHostCapacitySample(): HostCapacitySample {
+  return { memAvailableBytes: "0", diskFreeBytes: "0", fdHeadroom: "0", pidHeadroom: "0", nproc: "0" };
+}
+
+export const HostCapacitySample: MessageFns<HostCapacitySample> = {
+  encode(message: HostCapacitySample, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.memAvailableBytes !== "0") {
+      writer.uint32(8).uint64(message.memAvailableBytes);
+    }
+    if (message.diskFreeBytes !== "0") {
+      writer.uint32(16).uint64(message.diskFreeBytes);
+    }
+    if (message.fdHeadroom !== "0") {
+      writer.uint32(24).uint64(message.fdHeadroom);
+    }
+    if (message.pidHeadroom !== "0") {
+      writer.uint32(32).uint64(message.pidHeadroom);
+    }
+    if (message.nproc !== "0") {
+      writer.uint32(40).uint64(message.nproc);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): HostCapacitySample {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseHostCapacitySample();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.memAvailableBytes = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.diskFreeBytes = reader.uint64().toString();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.fdHeadroom = reader.uint64().toString();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.pidHeadroom = reader.uint64().toString();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.nproc = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): HostCapacitySample {
+    return {
+      memAvailableBytes: isSet(object.memAvailableBytes)
+        ? globalThis.String(object.memAvailableBytes)
+        : isSet(object.mem_available_bytes)
+        ? globalThis.String(object.mem_available_bytes)
+        : "0",
+      diskFreeBytes: isSet(object.diskFreeBytes)
+        ? globalThis.String(object.diskFreeBytes)
+        : isSet(object.disk_free_bytes)
+        ? globalThis.String(object.disk_free_bytes)
+        : "0",
+      fdHeadroom: isSet(object.fdHeadroom)
+        ? globalThis.String(object.fdHeadroom)
+        : isSet(object.fd_headroom)
+        ? globalThis.String(object.fd_headroom)
+        : "0",
+      pidHeadroom: isSet(object.pidHeadroom)
+        ? globalThis.String(object.pidHeadroom)
+        : isSet(object.pid_headroom)
+        ? globalThis.String(object.pid_headroom)
+        : "0",
+      nproc: isSet(object.nproc) ? globalThis.String(object.nproc) : "0",
+    };
+  },
+
+  toJSON(message: HostCapacitySample): unknown {
+    const obj: any = {};
+    if (message.memAvailableBytes !== "0") {
+      obj.memAvailableBytes = message.memAvailableBytes;
+    }
+    if (message.diskFreeBytes !== "0") {
+      obj.diskFreeBytes = message.diskFreeBytes;
+    }
+    if (message.fdHeadroom !== "0") {
+      obj.fdHeadroom = message.fdHeadroom;
+    }
+    if (message.pidHeadroom !== "0") {
+      obj.pidHeadroom = message.pidHeadroom;
+    }
+    if (message.nproc !== "0") {
+      obj.nproc = message.nproc;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<HostCapacitySample>, I>>(base?: I): HostCapacitySample {
+    return HostCapacitySample.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<HostCapacitySample>, I>>(object: I): HostCapacitySample {
+    const message = createBaseHostCapacitySample();
+    message.memAvailableBytes = object.memAvailableBytes ?? "0";
+    message.diskFreeBytes = object.diskFreeBytes ?? "0";
+    message.fdHeadroom = object.fdHeadroom ?? "0";
+    message.pidHeadroom = object.pidHeadroom ?? "0";
+    message.nproc = object.nproc ?? "0";
+    return message;
+  },
+};
+
+function createBaseAdmissionTelemetry(): AdmissionTelemetry {
+  return { lightRunning: "0", lightQueued: "0", heavyRunning: "0", heavyQueued: "0" };
+}
+
+export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
+  encode(message: AdmissionTelemetry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.lightRunning !== "0") {
+      writer.uint32(8).uint64(message.lightRunning);
+    }
+    if (message.lightQueued !== "0") {
+      writer.uint32(16).uint64(message.lightQueued);
+    }
+    if (message.heavyRunning !== "0") {
+      writer.uint32(24).uint64(message.heavyRunning);
+    }
+    if (message.heavyQueued !== "0") {
+      writer.uint32(32).uint64(message.heavyQueued);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): AdmissionTelemetry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseAdmissionTelemetry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.lightRunning = reader.uint64().toString();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.lightQueued = reader.uint64().toString();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.heavyRunning = reader.uint64().toString();
+          continue;
+        }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.heavyQueued = reader.uint64().toString();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): AdmissionTelemetry {
+    return {
+      lightRunning: isSet(object.lightRunning)
+        ? globalThis.String(object.lightRunning)
+        : isSet(object.light_running)
+        ? globalThis.String(object.light_running)
+        : "0",
+      lightQueued: isSet(object.lightQueued)
+        ? globalThis.String(object.lightQueued)
+        : isSet(object.light_queued)
+        ? globalThis.String(object.light_queued)
+        : "0",
+      heavyRunning: isSet(object.heavyRunning)
+        ? globalThis.String(object.heavyRunning)
+        : isSet(object.heavy_running)
+        ? globalThis.String(object.heavy_running)
+        : "0",
+      heavyQueued: isSet(object.heavyQueued)
+        ? globalThis.String(object.heavyQueued)
+        : isSet(object.heavy_queued)
+        ? globalThis.String(object.heavy_queued)
+        : "0",
+    };
+  },
+
+  toJSON(message: AdmissionTelemetry): unknown {
+    const obj: any = {};
+    if (message.lightRunning !== "0") {
+      obj.lightRunning = message.lightRunning;
+    }
+    if (message.lightQueued !== "0") {
+      obj.lightQueued = message.lightQueued;
+    }
+    if (message.heavyRunning !== "0") {
+      obj.heavyRunning = message.heavyRunning;
+    }
+    if (message.heavyQueued !== "0") {
+      obj.heavyQueued = message.heavyQueued;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<AdmissionTelemetry>, I>>(base?: I): AdmissionTelemetry {
+    return AdmissionTelemetry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<AdmissionTelemetry>, I>>(object: I): AdmissionTelemetry {
+    const message = createBaseAdmissionTelemetry();
+    message.lightRunning = object.lightRunning ?? "0";
+    message.lightQueued = object.lightQueued ?? "0";
+    message.heavyRunning = object.heavyRunning ?? "0";
+    message.heavyQueued = object.heavyQueued ?? "0";
     return message;
   },
 };
@@ -8336,7 +8696,16 @@ export const UpdateMayProceedResponse: MessageFns<UpdateMayProceedResponse> = {
 };
 
 function createBaseOpExit(): OpExit {
-  return { exitCode: 0, timedOut: false, cancelled: false, durationMs: "0", digests: {}, totals: {} };
+  return {
+    exitCode: 0,
+    timedOut: false,
+    cancelled: false,
+    durationMs: "0",
+    digests: {},
+    totals: {},
+    failureCode: "",
+    failureDetail: {},
+  };
 }
 
 export const OpExit: MessageFns<OpExit> = {
@@ -8358,6 +8727,12 @@ export const OpExit: MessageFns<OpExit> = {
     });
     globalThis.Object.entries(message.totals).forEach(([key, value]: [string, string]) => {
       OpExit_TotalsEntry.encode({ key: key as any, value }, writer.uint32(50).fork()).join();
+    });
+    if (message.failureCode !== "") {
+      writer.uint32(58).string(message.failureCode);
+    }
+    globalThis.Object.entries(message.failureDetail).forEach(([key, value]: [string, string]) => {
+      OpExit_FailureDetailEntry.encode({ key: key as any, value }, writer.uint32(66).fork()).join();
     });
     return writer;
   },
@@ -8423,6 +8798,25 @@ export const OpExit: MessageFns<OpExit> = {
           }
           continue;
         }
+        case 7: {
+          if (tag !== 58) {
+            break;
+          }
+
+          message.failureCode = reader.string();
+          continue;
+        }
+        case 8: {
+          if (tag !== 66) {
+            break;
+          }
+
+          const entry8 = OpExit_FailureDetailEntry.decode(reader, reader.uint32());
+          if (entry8.value !== undefined) {
+            message.failureDetail[entry8.key] = entry8.value;
+          }
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8468,6 +8862,28 @@ export const OpExit: MessageFns<OpExit> = {
           {},
         )
         : {},
+      failureCode: isSet(object.failureCode)
+        ? globalThis.String(object.failureCode)
+        : isSet(object.failure_code)
+        ? globalThis.String(object.failure_code)
+        : "",
+      failureDetail: isObject(object.failureDetail)
+        ? (globalThis.Object.entries(object.failureDetail) as [string, any][]).reduce(
+          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+            acc[key] = globalThis.String(value);
+            return acc;
+          },
+          {},
+        )
+        : isObject(object.failure_detail)
+        ? (globalThis.Object.entries(object.failure_detail) as [string, any][]).reduce(
+          (acc: { [key: string]: string }, [key, value]: [string, any]) => {
+            acc[key] = globalThis.String(value);
+            return acc;
+          },
+          {},
+        )
+        : {},
     };
   },
 
@@ -8503,6 +8919,18 @@ export const OpExit: MessageFns<OpExit> = {
         });
       }
     }
+    if (message.failureCode !== "") {
+      obj.failureCode = message.failureCode;
+    }
+    if (message.failureDetail) {
+      const entries = globalThis.Object.entries(message.failureDetail) as [string, string][];
+      if (entries.length > 0) {
+        obj.failureDetail = {};
+        entries.forEach(([k, v]) => {
+          obj.failureDetail[k] = v;
+        });
+      }
+    }
     return obj;
   },
 
@@ -8525,6 +8953,16 @@ export const OpExit: MessageFns<OpExit> = {
       {},
     );
     message.totals = (globalThis.Object.entries(object.totals ?? {}) as [string, string][]).reduce(
+      (acc: { [key: string]: string }, [key, value]: [string, string]) => {
+        if (value !== undefined) {
+          acc[key] = globalThis.String(value);
+        }
+        return acc;
+      },
+      {},
+    );
+    message.failureCode = object.failureCode ?? "";
+    message.failureDetail = (globalThis.Object.entries(object.failureDetail ?? {}) as [string, string][]).reduce(
       (acc: { [key: string]: string }, [key, value]: [string, string]) => {
         if (value !== undefined) {
           acc[key] = globalThis.String(value);
@@ -8685,6 +9123,82 @@ export const OpExit_TotalsEntry: MessageFns<OpExit_TotalsEntry> = {
     const message = createBaseOpExit_TotalsEntry();
     message.key = object.key ?? "";
     message.value = object.value ?? "0";
+    return message;
+  },
+};
+
+function createBaseOpExit_FailureDetailEntry(): OpExit_FailureDetailEntry {
+  return { key: "", value: "" };
+}
+
+export const OpExit_FailureDetailEntry: MessageFns<OpExit_FailureDetailEntry> = {
+  encode(message: OpExit_FailureDetailEntry, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.key !== "") {
+      writer.uint32(10).string(message.key);
+    }
+    if (message.value !== "") {
+      writer.uint32(18).string(message.value);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OpExit_FailureDetailEntry {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOpExit_FailureDetailEntry();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.key = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.value = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OpExit_FailureDetailEntry {
+    return {
+      key: isSet(object.key) ? globalThis.String(object.key) : "",
+      value: isSet(object.value) ? globalThis.String(object.value) : "",
+    };
+  },
+
+  toJSON(message: OpExit_FailureDetailEntry): unknown {
+    const obj: any = {};
+    if (message.key !== "") {
+      obj.key = message.key;
+    }
+    if (message.value !== "") {
+      obj.value = message.value;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OpExit_FailureDetailEntry>, I>>(base?: I): OpExit_FailureDetailEntry {
+    return OpExit_FailureDetailEntry.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OpExit_FailureDetailEntry>, I>>(object: I): OpExit_FailureDetailEntry {
+    const message = createBaseOpExit_FailureDetailEntry();
+    message.key = object.key ?? "";
+    message.value = object.value ?? "";
     return message;
   },
 };
