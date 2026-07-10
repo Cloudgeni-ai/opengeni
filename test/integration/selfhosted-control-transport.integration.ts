@@ -204,7 +204,12 @@ describe("selfhosted control transport over a REAL local NATS", () => {
   // (e) TRANSIENT CONTROL-PLANE CONNECTION ACQUISITION: a process may ask for
   //     the managed NATS connection before it is ready. A null first result must
   //     not be memoized forever; the same ControlRpc retries and recovers.
-  test("(e) transient null connection acquisition recovers on the next request", async () => {
+  test("(e) transient null connection acquisition heals WITHIN the request (never-sent retry)", async () => {
+    // A null factory result is a PRE-SEND fault: the op provably never reached
+    // the machine, so the session's bounded never-sent retry re-issues it — for
+    // ANY op kind — and the next resolution gets the real connection. Before
+    // the never-sent retry class existed this surfaced as a hard agent_offline
+    // on the first op; the healed-in-place behavior is the current contract.
     const mock = new MockAgentResponder({ hostname: "late-nats-vm" });
     const subject = subjectFor(WS_A, AGENT);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
@@ -221,14 +226,8 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     });
     const session = await client.resume({ agentId: AGENT });
     try {
-      let firstError: { agentOffline?: boolean } | undefined;
-      try {
-        await session.exec({ cmd: "true" });
-      } catch (error) {
-        firstError = error as typeof firstError;
-      }
-      expect(firstError?.agentOffline).toBe(true);
-
+      // The transient null is retried inside the SAME exec (a fresh request id
+      // per attempt), so the caller sees a clean success — no surfaced blip.
       expect((await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("late-nats-vm");
       expect(attempts).toBe(2);
     } finally {
