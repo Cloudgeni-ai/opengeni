@@ -20,7 +20,13 @@ use clap::{Parser, Subcommand};
 /// The OpenGeni self-hosted agent: run your own machine as a first-class OpenGeni
 /// sandbox.
 #[derive(Debug, Parser)]
-#[command(name = "opengeni-agent", version, about, long_about = None)]
+#[command(
+    name = "opengeni-agent",
+    version,
+    about,
+    long_about = None,
+    after_help = "Canonical executable: opengeni-agent. It is not a subcommand of another OpenGeni CLI."
+)]
 pub struct Cli {
     /// The subcommand to run. Defaults to `run` when omitted.
     #[command(subcommand)]
@@ -242,6 +248,8 @@ mod tests {
     use super::*;
     use clap::CommandFactory as _;
 
+    const AGENT_CARGO_TOML: &str = include_str!("../Cargo.toml");
+
     #[test]
     fn cli_definition_is_valid() {
         // clap's own assert catches duplicate args / bad definitions at test time.
@@ -253,6 +261,39 @@ mod tests {
         let cli = Cli::parse_from(["opengeni-agent"]);
         assert!(cli.command.is_none());
         assert!(matches!(Command::default(), Command::Run(_)));
+    }
+
+    #[test]
+    fn canonical_command_inventory_has_no_phantom_wrapper_or_plural_alias() {
+        // This is a command/help golden: the installed binary is exactly the
+        // Cargo [[bin]] target, and its CLI has only the actual agent commands.
+        // Do not add an `opengeni` wrapper or invent spaced/plural spellings.
+        assert_eq!(Cli::command().get_name(), "opengeni-agent");
+        assert_eq!(
+            Cli::command()
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .collect::<Vec<_>>(),
+            ["run", "enroll", "service", "update", "uninstall"]
+        );
+        assert_eq!(AGENT_CARGO_TOML.matches("[[bin]]").count(), 1);
+        assert!(AGENT_CARGO_TOML.contains("name = \"opengeni-agent\""));
+        assert!(!AGENT_CARGO_TOML.contains("name = \"opengeni\""));
+
+        for phantom in [
+            ["opengeni-agent", "agent", "run"],
+            ["opengeni-agent", "agents", "run"],
+            ["opengeni", "agent", "run"],
+            ["opengeni", "agents", "run"],
+        ] {
+            assert!(
+                Cli::try_parse_from(phantom).is_err(),
+                "phantom command must remain rejected: {phantom:?}"
+            );
+        }
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Canonical executable: opengeni-agent."));
     }
 
     #[test]

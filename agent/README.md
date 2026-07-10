@@ -16,6 +16,27 @@ under a **per-session working directory** (the control plane's `sessions.working
 threaded to the agent as `workingDir`); the agent's reported `workspace_root` is the
 default base, and the control plane never `git clone`s a repo onto the machine.
 
+## Canonical command inventory
+
+The only installed executable is **`opengeni-agent`**. It is not a subcommand of
+another OpenGeni CLI: there is no standalone `opengeni` executable, and neither
+`opengeni agent` nor `opengeni agents` is a supported command. Do not add a
+wrapper, spaced form, plural alias, or documentation shortcut for them.
+
+The complete command surface is:
+
+```text
+opengeni-agent [--api-url <origin>] run [run options]
+opengeni-agent [--api-url <origin>] enroll [enroll options]
+opengeni-agent service install|uninstall|start|stop|status|logs
+opengeni-agent update [--check] [--base-url <origin>] [--channel <channel>]
+opengeni-agent uninstall [--purge [--local-only]]
+```
+
+There are currently **no CLI compatibility aliases**. Existing persisted-state
+compatibility (for example the legacy `nats_credentials` JSON field) is unrelated
+to the executable command surface and remains unchanged.
+
 ## Crates
 
 | Crate | Role |
