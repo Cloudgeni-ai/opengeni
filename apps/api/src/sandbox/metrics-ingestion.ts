@@ -159,23 +159,38 @@ export async function ingestHeartbeat(
  * plane. Each session's events are stamped on its OWN active turn. No matching
  * session ⇒ nothing is emitted (an idle-machine blip must never spam idle /
  * historical sessions). Called best-effort inside the handlers' fail-soft blocks.
+ *
+ * Each session's emission is ISOLATED: one session's append failing (a
+ * session-specific constraint like a sequence collision from a racing writer, a
+ * transient write error) is logged with that sessionId and skipped, never
+ * aborting the fan-out — one session's failure must never cost the OTHER matching
+ * sessions their events. A partial fan-out stays visible per-session in the logs.
  */
 async function fanOutMachineLinkEvents(
   db: Database,
   bus: EventBus,
+  observability: Observability | undefined,
   workspaceId: string,
   enrollmentId: string,
   build: (activeTurnId: string) => AppendEventInput[],
 ): Promise<void> {
   const sessions = await sessionsWithActiveOpOnEnrollment(db, { workspaceId, enrollmentId });
   for (const session of sessions) {
-    await appendAndPublishEvents(
-      db,
-      bus,
-      workspaceId,
-      session.sessionId,
-      build(session.activeTurnId),
-    );
+    try {
+      await appendAndPublishEvents(
+        db,
+        bus,
+        workspaceId,
+        session.sessionId,
+        build(session.activeTurnId),
+      );
+    } catch (error) {
+      observability?.warn?.("Failed to fan out a machine-link event to a session", {
+        workspaceId,
+        sessionId: session.sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 }
 
@@ -242,15 +257,26 @@ export async function handleAgentEventPayload(
         if (bus) {
           const isSelfUpdate =
             event.event.goingOffline.reason === GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE;
-          await fanOutMachineLinkEvents(db, bus, ids.workspaceId, ids.agentId, (activeTurnId) => {
-            const events: AppendEventInput[] = [
-              { type: "machine.link.lost", turnId: activeTurnId, payload: { reason } },
-            ];
-            if (isSelfUpdate) {
-              events.push({ type: "machine.runner.restarted", turnId: activeTurnId, payload: {} });
-            }
-            return events;
-          });
+          await fanOutMachineLinkEvents(
+            db,
+            bus,
+            observability,
+            ids.workspaceId,
+            ids.agentId,
+            (activeTurnId) => {
+              const events: AppendEventInput[] = [
+                { type: "machine.link.lost", turnId: activeTurnId, payload: { reason } },
+              ];
+              if (isSelfUpdate) {
+                events.push({
+                  type: "machine.runner.restarted",
+                  turnId: activeTurnId,
+                  payload: {},
+                });
+              }
+              return events;
+            },
+          );
         }
       }
     } catch (error) {
@@ -435,9 +461,14 @@ export async function handleHelloPayload(
         enrollmentId: ids.agentId,
       });
       if (cleared && bus) {
-        await fanOutMachineLinkEvents(db, bus, ids.workspaceId, ids.agentId, (activeTurnId) => [
-          { type: "machine.link.restored", turnId: activeTurnId, payload: {} },
-        ]);
+        await fanOutMachineLinkEvents(
+          db,
+          bus,
+          observability,
+          ids.workspaceId,
+          ids.agentId,
+          (activeTurnId) => [{ type: "machine.link.restored", turnId: activeTurnId, payload: {} }],
+        );
       }
     }
   } catch (error) {

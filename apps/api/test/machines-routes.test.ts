@@ -28,7 +28,11 @@ import {
 import { subjectFor } from "@opengeni/runtime";
 import { createApp } from "../src/app";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
-import { handleHelloPayload, startMetricsIngestion } from "../src/sandbox/metrics-ingestion";
+import {
+  handleAgentEventPayload,
+  handleHelloPayload,
+  startMetricsIngestion,
+} from "../src/sandbox/metrics-ingestion";
 
 // Track started ingestion consumers so afterEach can unsubscribe them (each test
 // uses its own bus, but cleaning up keeps subscriptions from leaking).
@@ -707,5 +711,80 @@ describe("machine.link.* fan-out — link-plane session events on going-offline 
       where workspace_id = ${workspaceId}
         and (type like 'machine.link.%' or type = 'machine.runner.restarted')`;
     expect(count).toBe(0);
+  }, 90_000);
+
+  test("a per-session emission failure is ISOLATED: the first session's append rejecting still delivers to the rest + logs the failure", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, sandbox, bus } = await seed();
+
+    // Two sessions with an active op on the machine. sessionA is created first, so
+    // the fan-out's stable order (oldest first) processes it FIRST.
+    const mk = async (msg: string) =>
+      await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: msg,
+        resources: [],
+        metadata: {},
+        model: "gpt-test",
+        sandboxBackend: "modal",
+      });
+    const sessionA = await mk("a");
+    const sessionB = await mk("b");
+    await makeActiveOp(
+      accountId,
+      workspaceId,
+      sessionA.id,
+      sandbox.id,
+      "eeeeeeee-0000-4000-8000-000000000001",
+    );
+    await makeActiveOp(
+      accountId,
+      workspaceId,
+      sessionB.id,
+      sandbox.id,
+      "eeeeeeee-0000-4000-8000-000000000002",
+    );
+
+    // Rig sessionA's NEXT append to REJECT: pre-occupy its next sequence slot so the
+    // unique (workspace, session, sequence) index throws on sessionA's fan-out
+    // append — a faithful stand-in for the session-specific / racing-writer failure
+    // the isolation must survive. sessionB is untouched.
+    const [{ last_sequence: lastSeqA }] = await admin<{ last_sequence: number }[]>`
+      select last_sequence from sessions where id = ${sessionA.id}`;
+    await admin`
+      insert into session_events (account_id, workspace_id, session_id, sequence, type)
+      values (${accountId}, ${workspaceId}, ${sessionA.id}, ${lastSeqA + 1}, 'user.message')`;
+
+    // Capture warns; call the handler directly so the per-session log is observable.
+    const warns: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const observability = {
+      incrementCounter: () => {},
+      warn: (message: string, meta?: Record<string, unknown>) => warns.push({ message, meta }),
+    } as unknown as Parameters<typeof handleAgentEventPayload>[1];
+    const payload = AgentEvent.encode({
+      agentId: enrollment.id,
+      event: {
+        $case: "goingOffline",
+        goingOffline: { reason: GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE },
+      },
+    }).finish();
+    await handleAgentEventPayload(
+      db,
+      observability,
+      payload,
+      `agent.${workspaceId}.${enrollment.id}.events`,
+      bus,
+    );
+
+    // sessionA's append rejected → it got NO machine-link events...
+    expect(await machineLinkEvents(sessionA.id)).toEqual([]);
+    // ...but sessionB, processed AFTER the failure, still received its full set.
+    expect((await machineLinkEvents(sessionB.id)).map((e) => e.type)).toEqual([
+      "machine.link.lost",
+      "machine.runner.restarted",
+    ]);
+    // ...and the failure is visible in the logs, naming the failed sessionId.
+    expect(warns.some((w) => w.meta?.sessionId === sessionA.id)).toBe(true);
   }, 90_000);
 });

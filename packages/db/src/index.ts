@@ -12356,7 +12356,11 @@ export async function sessionsWithActiveOpOnEnrollment(
           eq(schema.sandboxes.enrollmentId, input.enrollmentId),
           isNotNull(schema.sessions.activeTurnId),
         ),
-      );
+      )
+      // Stable fan-out order (oldest session first): makes the emission
+      // deterministic + replayable, so a per-session emission failure is isolated
+      // predictably rather than depending on the planner's row order.
+      .orderBy(asc(schema.sessions.createdAt), asc(schema.sessions.id));
     // active_turn_id is non-null by the WHERE guard; the map narrows the type.
     return rows.flatMap((row) =>
       row.activeTurnId ? [{ sessionId: row.sessionId, activeTurnId: row.activeTurnId }] : [],
