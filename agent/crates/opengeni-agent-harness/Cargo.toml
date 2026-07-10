@@ -18,6 +18,8 @@ path = "src/main.rs"
 # control plane speaks, so it exercises the REAL protocol seam.
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 prost.workspace = true
+# Byte-exact assembly proofs (recompute channel digests vs OpExit's).
+blake3.workspace = true
 
 # Control-plane transport. Same client version the agent dials with.
 async-nats.workspace = true

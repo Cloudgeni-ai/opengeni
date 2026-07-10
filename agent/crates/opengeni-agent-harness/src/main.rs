@@ -21,6 +21,10 @@ mod driver;
 #[cfg(unix)]
 mod nats;
 #[cfg(unix)]
+mod op_scenarios;
+#[cfg(unix)]
+mod opstream;
+#[cfg(unix)]
 mod proc;
 #[cfg(unix)]
 mod report;
@@ -109,6 +113,28 @@ enum Command {
     Soak,
     /// Run scenarios 1-6 in sequence (soak excluded).
     All,
+    /// E1: op-stream happy path (byte-exact assembly, clean Exit).
+    OpBaseline,
+    /// E2: ack-loss healing (drop one ack; heal on the Progress cue).
+    OpAckLoss,
+    /// E3: connected-stall (window gating, bounded RSS, liveness isolation).
+    OpStall,
+    /// E4: detached accumulation ring→spool + typed OP_OVERFLOW.
+    OpDetached,
+    /// E5: dup OpStart idempotency + monotonic ack floor.
+    OpDup,
+    /// E6: attach fan-out / zombie-generation strict fencing.
+    OpZombie,
+    /// E7: reconnect transparency (child survives the blip; replay resumes).
+    OpReconnect,
+    /// E8+E9: cancellation (tree kill, idempotent) + cancel-before-start tombstone.
+    OpCancellation,
+    /// E10: loud eviction + typed lost (evicted / agent_restarted).
+    OpLost,
+    /// E12: scaling sanity (capacity in, scaled telemetry out, no ceiling).
+    OpScaling,
+    /// Run every op-stream scenario (E1-E10 + E12) in sequence.
+    OpAll,
 }
 
 /// Non-unix stub: the harness has no meaning without POSIX process groups +
@@ -160,6 +186,7 @@ fn init_tracing() {
 /// Resolves binaries + paths, then dispatches to the selected scenario(s).
 /// Returns whether all verdicts across all run scenarios passed.
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)] // a flat subcommand dispatch table
 async fn run(cli: Cli) -> Result<bool, String> {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -232,7 +259,96 @@ async fn run(cli: Cli) -> Result<bool, String> {
             Ok(h.soak(cli.soak_secs).await.all_passed())
         }
         Command::All => run_all(&cli, &mk).await,
+        Command::OpBaseline => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_baseline().await.all_passed())
+        }
+        Command::OpAckLoss => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_ack_loss().await.all_passed())
+        }
+        Command::OpStall => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_connected_stall().await.all_passed())
+        }
+        Command::OpDetached => {
+            let mut h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_detached_accumulation().await.all_passed())
+        }
+        Command::OpDup => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_dup_idempotency().await.all_passed())
+        }
+        Command::OpZombie => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_zombie_generation().await.all_passed())
+        }
+        Command::OpReconnect => {
+            let mut h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_reconnect().await.all_passed())
+        }
+        Command::OpCancellation => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_cancellation().await.all_passed())
+        }
+        Command::OpLost => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_lost().await.all_passed())
+        }
+        Command::OpScaling => {
+            let h = Harness::bootstrap(mk(1)).await?;
+            Ok(h.op_scaling().await.all_passed())
+        }
+        Command::OpAll => run_op_all(&mk).await,
     }
+}
+
+/// Runs every op-stream scenario on fresh fleets, returning whether all passed.
+#[cfg(unix)]
+async fn run_op_all(mk: &impl Fn(usize) -> HarnessConfig) -> Result<bool, String> {
+    let mut all = true;
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_baseline().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_ack_loss().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_connected_stall().await.all_passed();
+    drop(h);
+
+    let mut h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_detached_accumulation().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_dup_idempotency().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_zombie_generation().await.all_passed();
+    drop(h);
+
+    let mut h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_reconnect().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_cancellation().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_lost().await.all_passed();
+    drop(h);
+
+    let h = Harness::bootstrap(mk(1)).await?;
+    all &= h.op_scaling().await.all_passed();
+    drop(h);
+
+    Ok(all)
 }
 
 /// Runs scenarios 1-6, each on a fresh fleet, and returns whether all passed.

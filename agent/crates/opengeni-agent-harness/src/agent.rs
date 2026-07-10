@@ -31,6 +31,8 @@ pub struct DisposableAgent {
     log_path: PathBuf,
     child: Option<Child>,
     pid: i32,
+    /// Extra env for this agent (the op-scenario test-override knobs).
+    extra_env: Vec<(String, String)>,
 }
 
 impl DisposableAgent {
@@ -45,6 +47,22 @@ impl DisposableAgent {
         index: usize,
         nats_url: &str,
         log_level: &str,
+    ) -> Result<Self, String> {
+        Self::spawn_with_env(binary, index, nats_url, log_level, Vec::new())
+    }
+
+    /// Like [`spawn`](Self::spawn) with extra child env (the op-scenario
+    /// `OPENGENI_RUNNER_TEST_OVERRIDES` knobs).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`spawn`](Self::spawn).
+    pub fn spawn_with_env(
+        binary: PathBuf,
+        index: usize,
+        nats_url: &str,
+        log_level: &str,
+        extra_env: Vec<(String, String)>,
     ) -> Result<Self, String> {
         let agent_id = format!("hx-agent-{index}");
         let config_dir = tempfile::tempdir().map_err(|e| format!("config tempdir: {e}"))?;
@@ -63,6 +81,7 @@ impl DisposableAgent {
             log_path,
             child: None,
             pid: 0,
+            extra_env,
         };
         agent.launch()?;
         Ok(agent)
@@ -70,7 +89,7 @@ impl DisposableAgent {
 
     /// Spawns the `run` child with the isolated config dir + scratch cwd.
     fn launch(&mut self) -> Result<(), String> {
-        let envs = vec![
+        let mut envs = vec![
             (
                 "OPENGENI_CONFIG_DIR".to_string(),
                 self.config_dir.path().to_string_lossy().into_owned(),
@@ -80,6 +99,7 @@ impl DisposableAgent {
             // scenario drives) are deterministic across hosts.
             ("SHELL".to_string(), "/bin/sh".to_string()),
         ];
+        envs.extend(self.extra_env.iter().cloned());
         let (child, pid) = proc::spawn_grouped(
             &self.binary,
             &["run".to_string()],
@@ -170,6 +190,13 @@ impl DisposableAgent {
     #[must_use]
     pub fn nats_url(&self) -> &str {
         &self.nats_url
+    }
+
+    /// The agent's config dir (the engine spools under `<config>/spool` —
+    /// the detached-accumulation scenario inspects it).
+    #[must_use]
+    pub fn config_dir_path(&self) -> &Path {
+        self.config_dir.path()
     }
 }
 

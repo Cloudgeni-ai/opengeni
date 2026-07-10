@@ -172,6 +172,12 @@ impl Driver {
         self.client.max_payload()
     }
 
+    /// The underlying NATS client (the op-stream plumbing shares it).
+    #[must_use]
+    pub fn raw_client(&self) -> async_nats::Client {
+        self.client.clone()
+    }
+
     /// Subscribes to the fleet events subject and starts the background collector.
     ///
     /// # Errors
@@ -305,6 +311,8 @@ struct EventState {
     beats: BTreeMap<String, Vec<Instant>>,
     /// Per-agent going-offline arrival instants.
     offline: BTreeMap<String, Vec<Instant>>,
+    /// Per-agent LATEST heartbeat payload (capacity/admission telemetry).
+    latest: BTreeMap<String, v1::Heartbeat>,
 }
 
 /// Collects agent-originated events (heartbeats + going-offline) off the fleet
@@ -328,8 +336,13 @@ impl HeartbeatCollector {
                 let now = Instant::now();
                 let mut guard = task_state.lock().unwrap();
                 match event.event {
-                    Some(Event::Heartbeat(_)) => {
-                        guard.beats.entry(event.agent_id).or_default().push(now);
+                    Some(Event::Heartbeat(hb)) => {
+                        guard
+                            .beats
+                            .entry(event.agent_id.clone())
+                            .or_default()
+                            .push(now);
+                        guard.latest.insert(event.agent_id, hb);
                     }
                     Some(Event::GoingOffline(_)) => {
                         guard.offline.entry(event.agent_id).or_default().push(now);
@@ -339,6 +352,12 @@ impl HeartbeatCollector {
             }
         });
         Self { state, task }
+    }
+
+    /// The latest heartbeat payload seen for an agent (telemetry assertions).
+    #[must_use]
+    pub fn latest_heartbeat(&self, agent_id: &str) -> Option<v1::Heartbeat> {
+        self.state.lock().unwrap().latest.get(agent_id).cloned()
     }
 
     /// The number of heartbeats seen for an agent so far.

@@ -1640,6 +1640,7 @@ name = "opengeni-agent-harness"
 version = "0.0.0"
 dependencies = [
  "async-nats",
+ "blake3",
  "clap",
  "futures",
  "hdrhistogram",

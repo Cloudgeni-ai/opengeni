@@ -37,6 +37,8 @@ pub struct Harness {
     pub seed: u64,
     pub no_assert: bool,
     pub agent_version: String,
+    /// The binary under test (op scenarios spawn extra override agents).
+    pub(crate) agent_binary: PathBuf,
     results_dir: PathBuf,
     /// Kept alive so the server/agent log dir is not deleted mid-run.
     _work_dir: tempfile::TempDir,
@@ -95,18 +97,19 @@ impl Harness {
             seed: cfg.seed,
             no_assert: cfg.no_assert,
             agent_version,
+            agent_binary: cfg.agent_binary,
             results_dir: cfg.results_dir,
             _work_dir: work_dir,
         })
     }
 
     /// The primary agent (scenarios 1,3,4,5,6 drive one agent).
-    fn primary(&self) -> &DisposableAgent {
+    pub(crate) fn primary(&self) -> &DisposableAgent {
         &self.agents[0]
     }
 
     /// Assembles + writes + prints a report, returning it.
-    fn finish(
+    pub(crate) fn finish(
         &self,
         scenario: &str,
         config: serde_json::Value,
@@ -734,7 +737,7 @@ impl Harness {
     /// In `--no-assert` mode, force every verdict to `pass` (record, don't fail):
     /// the exit code then reflects only that the RUN completed, not the invariants
     /// (used for baselining current behavior).
-    fn assertable(&self, verdicts: Vec<Verdict>) -> Vec<Verdict> {
+    pub(crate) fn assertable(&self, verdicts: Vec<Verdict>) -> Vec<Verdict> {
         if self.no_assert {
             verdicts
                 .into_iter()
@@ -764,7 +767,7 @@ fn read_agent_version(agent_bin: &std::path::Path) -> String {
 }
 
 /// A per-run-unique exec marker path under `work` (also the `pgrep -f` needle).
-fn unique_marker(work: &str, tag: &str) -> String {
+pub(crate) fn unique_marker(work: &str, tag: &str) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -854,7 +857,7 @@ fn resource_drift(
 }
 
 /// Whether a process whose command line contains `needle` is alive.
-fn pgrep_alive(needle: &str) -> bool {
+pub(crate) fn pgrep_alive(needle: &str) -> bool {
     std::process::Command::new("pgrep")
         .arg("-f")
         .arg(needle)
