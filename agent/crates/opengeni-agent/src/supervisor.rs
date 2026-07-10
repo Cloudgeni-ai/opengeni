@@ -26,7 +26,7 @@
 //! Resiliency here covers TRANSIENT BLIPS WHILE RUNNING (wifi roam, sleep/wake,
 //! NAT rebind). A deliberate stop is offline, not a blip (§23.0).
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,6 +115,48 @@ impl EpochCell {
     }
 }
 
+/// A LEVEL-triggered clean-shutdown signal shared between the signal handler and
+/// the supervise loop.
+///
+/// A bare [`Notify`] is edge-triggered: `notify_waiters()` wakes only the waiters
+/// registered *at that instant* and stores no permit, so a stop signal that lands
+/// while the loop is between `.notified()` registrations — mid-connect, mid-hello,
+/// or in the sync gap before a select re-arms — is lost, and the agent never stops
+/// (or, worse, the loser of a race exits WITHOUT announcing going-offline). This
+/// pairs the notify with a latched flag: callers `await` [`notified`](Self::notified)
+/// to wake promptly AND check [`is_requested`](Self::is_requested) at each decision
+/// point, so a request is never missed and the clean-shutdown path (which publishes
+/// [`GoingOffline`]) is always reached while a client is live (§23.0).
+#[derive(Clone, Default)]
+pub struct ShutdownSignal {
+    requested: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl ShutdownSignal {
+    /// Requests a clean shutdown: latch the flag FIRST (so any subsequent
+    /// [`is_requested`](Self::is_requested) sees it), then wake current waiters.
+    pub fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether a clean shutdown has been requested (level-triggered — true forever
+    /// once requested, regardless of waiter timing).
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// Resolves when a shutdown is requested via a waiter wake. Because
+    /// `notify_waiters` does not latch a permit, ALWAYS pair this with an
+    /// [`is_requested`](Self::is_requested) check at the enclosing loop top so a
+    /// request that fired before this future registered is still observed.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
 /// The supervisor owns the platform, the persisted creds, and a shutdown signal.
 pub struct Supervisor<P: Platform> {
     platform: Arc<P>,
@@ -124,8 +166,8 @@ pub struct Supervisor<P: Platform> {
     epoch: Arc<EpochCell>,
     /// Host-work admission shared across every NATS connection generation.
     rpc_slots: Arc<Semaphore>,
-    /// Notified once a clean shutdown (SIGINT/SIGTERM) is requested.
-    shutdown: Arc<Notify>,
+    /// Latched once a clean shutdown (SIGINT/SIGTERM) is requested.
+    shutdown: ShutdownSignal,
 }
 
 impl<P: Platform + 'static> Supervisor<P> {
@@ -143,14 +185,14 @@ impl<P: Platform + 'static> Supervisor<P> {
             started: Instant::now(),
             epoch: Arc::new(EpochCell::default()),
             rpc_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_CONTROL_RPCS)),
-            shutdown: Arc::new(Notify::new()),
+            shutdown: ShutdownSignal::default(),
         }
     }
 
-    /// A handle that, when triggered, requests a clean shutdown of the run loop.
-    /// Wired to SIGINT/SIGTERM by [`crate::run`].
+    /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
+    /// shutdown of the run loop. Wired to SIGINT/SIGTERM by [`crate::run`].
     #[must_use]
-    pub fn shutdown_handle(&self) -> Arc<Notify> {
+    pub fn shutdown_handle(&self) -> ShutdownSignal {
         self.shutdown.clone()
     }
 
@@ -174,30 +216,35 @@ impl<P: Platform + 'static> Supervisor<P> {
         );
 
         loop {
-            // Race a connection generation against the shutdown signal.
-            tokio::select! {
-                biased;
-                () = self.shutdown.notified() => {
-                    info!("clean shutdown requested before/between connections");
-                    return Ok(());
-                }
-                outcome = self.serve_one_connection(&mut backoff) => {
-                    match outcome {
-                        ConnectionOutcome::CleanShutdown => return Ok(()),
-                        ConnectionOutcome::Disconnected(reason) => {
-                            let delay = backoff.next_delay();
-                            warn!(
-                                attempt = backoff.attempt(),
-                                delay_ms = millis_u64(delay),
-                                reason = %reason,
-                                "connection lost; backing off before reconnect"
-                            );
-                            // Sleep the jittered delay, but wake early on shutdown.
-                            tokio::select! {
-                                () = self.shutdown.notified() => return Ok(()),
-                                () = tokio::time::sleep(delay) => {}
-                            }
-                        }
+            // A shutdown requested before a connection or between connections (e.g.
+            // during the previous backoff sleep) has no live client to announce on,
+            // so exit promptly. This is checked at the loop top — NOT raced against
+            // `serve_one_connection` — because a `notified()` branch here would win
+            // the biased select and return BEFORE `serve_connection_generation`
+            // could publish going-offline, which is exactly the bug this fixes. The
+            // shutdown is now owned by whichever phase holds the live client.
+            if self.shutdown.is_requested() {
+                info!("clean shutdown requested before/between connections");
+                return Ok(());
+            }
+
+            match self.serve_one_connection(&mut backoff).await {
+                ConnectionOutcome::CleanShutdown => return Ok(()),
+                ConnectionOutcome::Disconnected(reason) => {
+                    let delay = backoff.next_delay();
+                    warn!(
+                        attempt = backoff.attempt(),
+                        delay_ms = millis_u64(delay),
+                        reason = %reason,
+                        "connection lost; backing off before reconnect"
+                    );
+                    // Sleep the jittered delay, but wake early on shutdown. There is
+                    // no live client during the sleep, so waking straight to `Ok`
+                    // (no announce) is correct; the loop-top check then re-confirms.
+                    tokio::select! {
+                        biased;
+                        () = self.shutdown.notified() => return Ok(()),
+                        () = tokio::time::sleep(delay) => {}
                     }
                 }
             }
@@ -208,7 +255,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// until the connection drops or shutdown is requested. Resets the backoff on
     /// a successful connect so the NEXT blip starts from the base again.
     async fn serve_one_connection(&self, backoff: &mut Backoff) -> ConnectionOutcome {
-        let client = match self.connect().await {
+        // The dial has no client yet, so a shutdown here just exits (nothing to
+        // announce) — but race it so a hung/slow dial cannot delay a clean stop.
+        let connect = tokio::select! {
+            biased;
+            () = self.shutdown.notified() => return ConnectionOutcome::CleanShutdown,
+            result = self.connect() => result,
+        };
+        let client = match connect {
             Ok(client) => client,
             Err(e @ SupervisorError::Authentication(_)) => {
                 // A CLEAR auth denial (not a panic): log it loudly so the operator
@@ -221,6 +275,12 @@ impl<P: Platform + 'static> Supervisor<P> {
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
         info!(agent_id = %self.creds.agent_id, "connected to control plane");
+
+        // A shutdown latched during the dial select — before any hello established a
+        // lease — has nothing meaningful to announce; close cleanly without a hello.
+        if self.shutdown.is_requested() {
+            return ConnectionOutcome::CleanShutdown;
+        }
 
         // Send the connect hello. A failure here is just a disconnect (retry).
         if let Err(e) = self.send_hello(&client).await {
@@ -255,6 +315,14 @@ impl<P: Platform + 'static> Supervisor<P> {
         let mut rpc_tasks = JoinSet::new();
 
         let outcome = loop {
+            // Level-triggered catch: a shutdown latched between selects — during the
+            // hello/subscribe just completed, or while a heartbeat/admission awaited
+            // — would be missed by the edge-triggered `notified()` branch below (its
+            // wake fired with no waiter registered). Checking the flag at the loop
+            // top guarantees this live generation still reaches the announce path.
+            if self.shutdown.is_requested() {
+                break ConnectionOutcome::CleanShutdown;
+            }
             tokio::select! {
                 biased;
                 // Stop accepting work immediately. Accepted work is cancelled below
@@ -841,5 +909,234 @@ mod tests {
 
         tasks.shutdown().await;
         assert!(matches!(admit_rpc(&slots, &exec), RpcAdmission::Work(_)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_latches_and_wakes_registered_waiters() {
+        let signal = ShutdownSignal::default();
+        assert!(!signal.is_requested(), "not requested initially");
+
+        // A waiter already awaiting when the request lands is woken.
+        let waiter = {
+            let s = signal.clone();
+            tokio::spawn(async move { s.notified().await })
+        };
+        // Let the spawned waiter register before we request.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        signal.request();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("a registered waiter wakes on request")
+            .expect("waiter task did not panic");
+
+        // And the flag stays latched for any LATER checker even though
+        // `notify_waiters` stored no permit — this level-triggering is exactly what
+        // the run loop's `is_requested` checks rely on to never miss a stop that
+        // raced a select (the missed-signal half the fix closes).
+        assert!(signal.is_requested(), "request latches permanently");
+    }
+
+    /// End-to-end regression test for the going-offline-on-clean-shutdown bug: a
+    /// real supervisor over a real local nats-server must publish a `GoingOffline`
+    /// event when a clean shutdown is requested DURING an active connection.
+    ///
+    /// Before the fix, the outer supervise loop's biased `shutdown.notified()`
+    /// branch returned before `serve_connection_generation` could announce, so this
+    /// test would time out waiting for the event.
+    ///
+    /// Self-contained (no harness crate). Skips gracefully when no `nats-server`
+    /// binary is available so a dev's `cargo test` never fails for that reason; CI
+    /// that provides `nats-server` (as the load harness already requires) catches
+    /// the regression.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clean_shutdown_publishes_going_offline_during_active_connection() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!(
+                "SKIP clean_shutdown_publishes_going_offline: no nats-server on PATH or /nix/store"
+            );
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+
+        // A watcher on the agent's outbound events subject.
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let mut events = client
+            .subscribe("agent.hx-test-ws.hx-test-agent.events".to_string())
+            .await
+            .expect("subscribe to events subject");
+
+        // A disposable supervisor over the real native platform, dialing the local
+        // no-auth server (which accepts the throwaway bearer).
+        let supervisor = Supervisor::new(
+            Arc::new(NativePlatform::new()),
+            it::test_credentials(&url),
+            "test-0.0.0",
+        );
+        let shutdown = supervisor.shutdown_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+
+        // Only meaningful once a connection is LIVE (the bug races an active
+        // connection), so wait for the first heartbeat before stopping.
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(10), |e| matches!(
+                e.event,
+                Some(Event::Heartbeat(_))
+            ))
+            .await,
+            "agent should heartbeat once connected"
+        );
+
+        // Clean shutdown during the active connection.
+        shutdown.request();
+
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(5), |e| matches!(
+                e.event,
+                Some(Event::GoingOffline(_))
+            ))
+            .await,
+            "a clean shutdown during an active connection must publish GoingOffline"
+        );
+
+        // And the run loop returns cleanly.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .is_ok(),
+            "supervisor.run should return after a clean shutdown"
+        );
+    }
+
+    /// Test-only integration helpers (a throwaway local nats-server + event
+    /// waiting), kept out of the unit tests above so they stay pure.
+    mod it {
+        use std::path::{Path, PathBuf};
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        use futures::StreamExt as _;
+        use opengeni_agent_proto::v1::AgentEvent;
+        use prost::Message as _;
+
+        use crate::config::StoredCredentials;
+
+        /// Locates a `nats-server` binary on `$PATH`, else scans `/nix/store`
+        /// (this project's dev/CI hosts are NixOS). `None` → the caller skips.
+        pub fn find_nats_server() -> Option<PathBuf> {
+            if let Some(path) = std::env::var_os("PATH") {
+                for dir in std::env::split_paths(&path) {
+                    let candidate = dir.join("nats-server");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            for entry in std::fs::read_dir("/nix/store").ok()?.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.contains("nats-server") && !name.ends_with(".drv") {
+                    let candidate = entry.path().join("bin").join("nats-server");
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            None
+        }
+
+        /// A free localhost TCP port (bind `:0`, read it back).
+        pub fn free_local_port() -> u16 {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind ephemeral port")
+                .local_addr()
+                .expect("local addr")
+                .port()
+        }
+
+        /// A no-auth `nats-server` child, killed on drop.
+        pub struct NatsServerGuard(Child);
+
+        impl NatsServerGuard {
+            pub fn spawn(bin: &Path, port: u16) -> Self {
+                let child = Command::new(bin)
+                    .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn nats-server");
+                Self(child)
+            }
+        }
+
+        impl Drop for NatsServerGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        /// Connects, retrying until the just-spawned server is ready.
+        pub async fn connect_with_retry(url: &str, timeout: Duration) -> async_nats::Client {
+            let deadline = Instant::now() + timeout;
+            loop {
+                match async_nats::connect(url).await {
+                    Ok(client) => return client,
+                    Err(e) if Instant::now() < deadline => {
+                        let _ = e;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => panic!("could not connect to test nats-server: {e}"),
+                }
+            }
+        }
+
+        /// Waits until an `AgentEvent` matching `pred` arrives, or `timeout` elapses.
+        pub async fn wait_for_event(
+            sub: &mut async_nats::Subscriber,
+            timeout: Duration,
+            pred: impl Fn(&AgentEvent) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return false;
+                }
+                match tokio::time::timeout(remaining, sub.next()).await {
+                    Ok(Some(msg)) => {
+                        if AgentEvent::decode(msg.payload.as_ref())
+                            .ok()
+                            .is_some_and(|e| pred(&e))
+                        {
+                            return true;
+                        }
+                    }
+                    Ok(None) | Err(_) => return false,
+                }
+            }
+        }
+
+        /// Throwaway credentials pointing at the local server.
+        pub fn test_credentials(url: &str) -> StoredCredentials {
+            StoredCredentials {
+                agent_id: "hx-test-agent".to_string(),
+                workspace_id: "hx-test-ws".to_string(),
+                nats_bearer: "test-bearer".to_string(),
+                nats_urls: vec![url.to_string()],
+                relay_url: "http://127.0.0.1:9".to_string(),
+                relay_token: String::new(),
+                update_pubkey: String::new(),
+                consented_whole_machine: true,
+                consented_screen_control: false,
+                update_channel: "stable".to_string(),
+                resume_token: String::new(),
+                last_known_epoch: 0,
+            }
+        }
     }
 }

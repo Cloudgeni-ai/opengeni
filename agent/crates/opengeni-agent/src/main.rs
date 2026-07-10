@@ -508,11 +508,11 @@ async fn enroll_with_token(
 }
 
 /// Spawns a task that triggers a clean shutdown on SIGINT or (unix) SIGTERM.
-fn spawn_signal_handler(shutdown: Arc<tokio::sync::Notify>) {
+fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         info!("received stop signal; shutting down cleanly");
-        shutdown.notify_waiters();
+        shutdown.request();
     });
 }
 
