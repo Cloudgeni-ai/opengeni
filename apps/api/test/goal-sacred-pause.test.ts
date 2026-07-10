@@ -2,22 +2,45 @@ import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
 // A user-paused goal is sacred: a MACHINE child-notification turn must not
 // resurrect it via goal_set, while a genuine user turn still redirects freely.
+//
+// The db-read mocks are keyed on a `fakeDb` sentinel and delegate to the REAL
+// implementation for every other db handle. `mock.module` is process-global and
+// does not fully unwind across test files, so a mock that returned fixtures
+// unconditionally would corrupt real-db reads in later suites (it did — it fed
+// "session-1" into a real createSessionForRequest insert). Delegating keeps the
+// override invisible to everyone but this suite.
+const fakeDb = {};
 let goal: any = null;
 let session: any = null;
 let turn: any = null;
 
 const realDb = await import("@opengeni/db");
+// Capture the real function references BEFORE mock.module replaces them —
+// bun's mock.module mutates the module namespace in place, so reading
+// `realDb.getSessionGoal` at call time would resolve to the mock itself
+// (unbounded recursion). The frozen refs let delegation reach the real impl.
+const realDbFns = {
+  getSessionGoal: realDb.getSessionGoal,
+  getSession: realDb.getSession,
+  getSessionTurn: realDb.getSessionTurn,
+};
 mock.module("@opengeni/db", () => ({
   ...realDb,
-  getSessionGoal: mock(async () => goal),
-  getSession: mock(async () => session),
-  getSessionTurn: mock(async () => turn),
+  getSessionGoal: mock(async (db: unknown, ...args: unknown[]) =>
+    db === fakeDb ? goal : (realDbFns.getSessionGoal as any)(db, ...args),
+  ),
+  getSession: mock(async (db: unknown, ...args: unknown[]) =>
+    db === fakeDb ? session : (realDbFns.getSession as any)(db, ...args),
+  ),
+  getSessionTurn: mock(async (db: unknown, ...args: unknown[]) =>
+    db === fakeDb ? turn : (realDbFns.getSessionTurn as any)(db, ...args),
+  ),
 }));
 
 const { assertGoalReactivationAllowed, isMachineChildNotificationTurn } =
   await import("../src/mcp/server");
 
-const deps = { db: {} } as any;
+const deps = { db: fakeDb } as any;
 
 afterAll(() => {
   mock.restore();
