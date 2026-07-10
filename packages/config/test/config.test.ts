@@ -165,9 +165,9 @@ describe("sandbox preparation profiles", () => {
     ).toBe(2_000);
   });
 
-  test("selfhosted exec/control timeouts default to 5min/30s and parse their env vars", () => {
+  test("selfhosted exec/control timeouts default to 2min/30s and parse their env vars", () => {
     const defaults = withEnv({}, () => getSettings());
-    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(300_000);
+    expect(defaults.sandboxSelfhostedExecTimeoutMs).toBe(120_000);
     expect(defaults.sandboxSelfhostedControlTimeoutMs).toBe(30_000);
     const overridden = withEnv(
       {

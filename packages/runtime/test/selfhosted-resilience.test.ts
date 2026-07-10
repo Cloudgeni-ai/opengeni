@@ -16,6 +16,7 @@ import {
   SelfhostedControlError,
   SelfhostedSession,
   SELFHOSTED_DRAINING_MAX_RETRIES,
+  SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
   SELFHOSTED_RETRY_BACKOFF_BASE_MS,
   SELFHOSTED_RETRY_BACKOFF_CAP_MS,
   SELFHOSTED_TIMEOUT_MAX_RETRIES,
@@ -52,8 +53,9 @@ const MUTATING_OPS = [
 const READONLY_OPS = ["ping", "metrics", "fsStat", "fsList", "fsRead"];
 
 describe("decideSelfhostedRetry — the pure retry matrix", () => {
-  test("DRAINING is retried up to the max for ANY op kind (it never started)", () => {
-    for (const opKind of [...MUTATING_OPS, ...READONLY_OPS]) {
+  test("DRAINING is retried up to the SHORT budget for any NON-exec op (it never started)", () => {
+    const nonExec = [...MUTATING_OPS.filter((o) => o !== "exec"), ...READONLY_OPS];
+    for (const opKind of nonExec) {
       for (let n = 0; n < SELFHOSTED_DRAINING_MAX_RETRIES; n++) {
         expect(
           decideSelfhostedRetry({
@@ -65,7 +67,7 @@ describe("decideSelfhostedRetry — the pure retry matrix", () => {
           }).action,
         ).toBe("retry");
       }
-      // Exhausted.
+      // Exhausted at the short budget.
       expect(
         decideSelfhostedRetry({
           opKind,
@@ -76,6 +78,41 @@ describe("decideSelfhostedRetry — the pure retry matrix", () => {
         }).action,
       ).toBe("fail");
     }
+  });
+
+  test("DRAINING for EXEC gets the LONG budget (patient queueing under the flat permit pool)", () => {
+    // exec still retries where the short budget would already have given up.
+    expect(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES).toBeGreaterThan(SELFHOSTED_DRAINING_MAX_RETRIES);
+    expect(
+      decideSelfhostedRetry({
+        opKind: "exec",
+        error: drainingError(),
+        drainingRetries: SELFHOSTED_DRAINING_MAX_RETRIES,
+        timeoutRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("retry");
+    // Retries the whole way up to the exec budget, then surfaces.
+    for (let n = 0; n < SELFHOSTED_EXEC_DRAINING_MAX_RETRIES; n++) {
+      expect(
+        decideSelfhostedRetry({
+          opKind: "exec",
+          error: drainingError(),
+          drainingRetries: n,
+          timeoutRetries: 0,
+          jitter: 0,
+        }).action,
+      ).toBe("retry");
+    }
+    expect(
+      decideSelfhostedRetry({
+        opKind: "exec",
+        error: drainingError(),
+        drainingRetries: SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
+        timeoutRetries: 0,
+        jitter: 0,
+      }).action,
+    ).toBe("fail");
   });
 
   test("a TIMEOUT is retried once — and ONLY for a read-only idempotent op", () => {
@@ -163,12 +200,16 @@ describe("selfhostedRetryBackoffMs — full-jitter bounds", () => {
     expect(selfhostedRetryBackoffMs(20, nearOne)).toBeLessThan(SELFHOSTED_RETRY_BACKOFF_CAP_MS);
   });
 
-  test("the summed worst-case backoff of the DRAINING retries stays well under 5s", () => {
-    let total = 0;
-    for (let attempt = 0; attempt < SELFHOSTED_DRAINING_MAX_RETRIES; attempt++) {
-      total += selfhostedRetryBackoffMs(attempt, 0.999_999);
-    }
-    expect(total).toBeLessThan(5_000);
+  test("non-exec DRAINING worst-case summed backoff stays under 5s; exec under 60s", () => {
+    const worstCaseSum = (retries: number): number => {
+      let total = 0;
+      for (let attempt = 0; attempt < retries; attempt++) {
+        total += selfhostedRetryBackoffMs(attempt, 0.999_999);
+      }
+      return total;
+    };
+    expect(worstCaseSum(SELFHOSTED_DRAINING_MAX_RETRIES)).toBeLessThan(5_000);
+    expect(worstCaseSum(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES)).toBeLessThan(60_000);
   });
 });
 
@@ -265,14 +306,14 @@ describe("SelfhostedSession.call — bounded retry through the transport", () =>
     const res = await sessionWith(rpc, { clock }).exec({ cmd: "true" });
     expect(res.exitCode).toBe(0);
     expect(rpc.requests).toHaveLength(3);
-    // Two backoff sleeps: full-jitter base*2^n at jitter 0.5 → 200, 400.
-    expect(sleeps).toEqual([200, 400]);
+    // Two backoff sleeps: full-jitter base*2^n at jitter 0.5 → 250, 500.
+    expect(sleeps).toEqual([250, 500]);
     // Each attempt is a fresh request (a retry is a new request id).
     const ids = new Set(rpc.requests.map((r) => r.requestId));
     expect(ids.size).toBe(3);
   });
 
-  test("DRAINING exhausted: surfaces a draining error citing the retry count", async () => {
+  test("exec DRAINING exhausted: surfaces after the LONG budget, citing the retry count", async () => {
     const rpc = new ScriptedRpc([drainingStep]); // always draining
     const { clock, sleeps } = fakeClock();
     let err: unknown;
@@ -284,9 +325,24 @@ describe("SelfhostedSession.call — bounded retry through the transport", () =>
     expect(err).toBeInstanceOf(SelfhostedControlError);
     expect((err as SelfhostedControlError).draining).toBe(true);
     expect((err as SelfhostedControlError).message).toContain(
-      `retried ${SELFHOSTED_DRAINING_MAX_RETRIES} times`,
+      `retried ${SELFHOSTED_EXEC_DRAINING_MAX_RETRIES} times`,
     );
-    // 1 initial + max retries attempts; max retries sleeps.
+    // 1 initial + exec-budget retries.
+    expect(rpc.requests).toHaveLength(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES + 1);
+    expect(sleeps).toHaveLength(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES);
+  });
+
+  test("non-exec DRAINING exhausted: surfaces after the SHORT budget", async () => {
+    const rpc = new ScriptedRpc([drainingStep]); // always draining
+    const { clock, sleeps } = fakeClock();
+    let err: unknown;
+    try {
+      await sessionWith(rpc, { clock }).statFile({ path: "/tmp/x" });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(SelfhostedControlError);
+    expect((err as SelfhostedControlError).draining).toBe(true);
     expect(rpc.requests).toHaveLength(SELFHOSTED_DRAINING_MAX_RETRIES + 1);
     expect(sleeps).toHaveLength(SELFHOSTED_DRAINING_MAX_RETRIES);
   });
@@ -312,7 +368,7 @@ describe("SelfhostedSession.call — bounded retry through the transport", () =>
     const res = await sessionWith(rpc, { clock }).statFile({ path: "/tmp/x" });
     expect(res.exists).toBe(true);
     expect(rpc.requests).toHaveLength(2);
-    expect(sleeps).toEqual([200]);
+    expect(sleeps).toEqual([250]);
   });
 
   test("TIMEOUT on a read-only op twice surfaces after the single retry", async () => {

@@ -36,20 +36,34 @@ export const SELFHOSTED_IDEMPOTENT_READONLY_OPS: ReadonlySet<string> = new Set([
   "fsRead",
 ]);
 
-/** DRAINING is a pre-admission backpressure rejection (the op never started), so
- *  it is safe to retry for ANY op kind. Bounded so a relentlessly-saturated
- *  machine still surfaces a clear error instead of hanging the turn. */
+/**
+ * DRAINING is a pre-admission backpressure rejection (the op never started), so it
+ * is safe to retry for ANY op kind. The budget is split by op class:
+ *
+ *  - NON-EXEC control ops (fs/git/desktop/pty) keep a SHORT budget — 3 retries,
+ *    worst-case backoff 500+1000+2000 = 3.5s (≤5s). Their start latency matters
+ *    (fs/git ops gate the model's next step), so a saturated machine should surface
+ *    quickly rather than stall.
+ *  - EXEC gets a LONG, patient budget — 10 retries, worst-case ≈55.5s (<60s). exec
+ *    start is not latency-critical, and the agent-side admission pool is (until a
+ *    later agent release) a FLAT 8 permits with no per-class split: a burst of slow
+ *    execs can hold every permit and blanket-DRAIN all fs/git ops. A patient exec
+ *    retry converts those DRAINING storms into mild queueing instead of a wall of
+ *    failed tool calls, and pairs with the deliberately modest exec deadline (which,
+ *    for the same 8-permit reason, defaults to 2min, not 5).
+ */
 export const SELFHOSTED_DRAINING_MAX_RETRIES = 3;
+export const SELFHOSTED_EXEC_DRAINING_MAX_RETRIES = 10;
 /** A read-only op that timed out is retried at most once (see the at-least-once
  *  note above — even a read gets a single re-issue, not an unbounded loop). */
 export const SELFHOSTED_TIMEOUT_MAX_RETRIES = 1;
 
 /** Full-jitter backoff base (ms). Delay N is sampled in `[0, base * factor^N)`. */
-export const SELFHOSTED_RETRY_BACKOFF_BASE_MS = 400;
+export const SELFHOSTED_RETRY_BACKOFF_BASE_MS = 500;
 export const SELFHOSTED_RETRY_BACKOFF_FACTOR = 2;
-/** Per-delay ceiling so the summed backoff of the bounded retries stays well under
- *  a few seconds (3 DRAINING retries → at most 400+800+1600 ≈ 2.8s of added wait). */
-export const SELFHOSTED_RETRY_BACKOFF_CAP_MS = 2_000;
+/** Per-delay ceiling: 500 → 1s → 2s → 4s → 8s, then flat at 8s. Bounds the summed
+ *  backoff — non-exec (3 retries) ≈3.5s ≤5s; exec (10 retries) ≈55.5s <60s. */
+export const SELFHOSTED_RETRY_BACKOFF_CAP_MS = 8_000;
 
 export type SelfhostedRetryDecision =
   | { readonly action: "fail" }
@@ -71,8 +85,10 @@ export function selfhostedRetryBackoffMs(attempt: number, jitter: number): numbe
  * PURE retry policy for one selfhosted control-op reply.
  *
  *  - `error.draining` (DRAINING — pre-admission host-work backpressure; the op was
- *    rejected at the pool gate and NEVER started) → retry up to
- *    `SELFHOSTED_DRAINING_MAX_RETRIES` for ANY op kind, since nothing executed.
+ *    rejected at the pool gate and NEVER started) → retry for ANY op kind, since
+ *    nothing executed. exec gets the long `SELFHOSTED_EXEC_DRAINING_MAX_RETRIES`
+ *    budget (≈60s of patient queueing under the flat 8-permit pool); every other op
+ *    keeps the short `SELFHOSTED_DRAINING_MAX_RETRIES` budget (≤5s).
  *  - `error.reason === "agent_reconnecting"` (a TIMEOUT / transient blip) → retry
  *    at most `SELFHOSTED_TIMEOUT_MAX_RETRIES`, and ONLY for a read-only
  *    idempotent-safe op (`SELFHOSTED_IDEMPOTENT_READONLY_OPS`). A timed-out
@@ -97,7 +113,11 @@ export function decideSelfhostedRetry(input: {
   const { opKind, error, drainingRetries, timeoutRetries, jitter } = input;
 
   if (error.draining) {
-    if (drainingRetries >= SELFHOSTED_DRAINING_MAX_RETRIES) {
+    // exec is patient (the flat 8-permit pool needs longer than 5s to free a slot);
+    // every other op keeps the short budget so fs/git latency stays snappy.
+    const maxDrainingRetries =
+      opKind === "exec" ? SELFHOSTED_EXEC_DRAINING_MAX_RETRIES : SELFHOSTED_DRAINING_MAX_RETRIES;
+    if (drainingRetries >= maxDrainingRetries) {
       return { action: "fail" };
     }
     return { action: "retry", delayMs: selfhostedRetryBackoffMs(drainingRetries, jitter) };
