@@ -377,6 +377,41 @@ fn create_dir_idempotent(dir: &Path) -> std::io::Result<()> {
     }
 }
 
+// --- oom_score_adj: bias the kernel OOM killer toward host work ----------------
+
+/// The `oom_score_adj` stamped on every exec child. A positive bias makes the
+/// kernel's GLOBAL OOM killer sacrifice a runaway child (and its descendants,
+/// which inherit the value on fork) before the supervisor, which stays at its
+/// default. Raising the value is unprivileged-legal; the mid-range 500 is a strong
+/// bias without pinning the child as the unconditional first victim.
+#[cfg(target_os = "linux")]
+const EXEC_OOM_SCORE_ADJ: i32 = 500;
+
+/// Guards the "log once" of an `oom_score_adj` write failure so a restrictive host
+/// policy is reported once, not per exec.
+#[cfg(target_os = "linux")]
+static OOM_SCORE_ADJ_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Raises `/proc/<pid>/oom_score_adj` on a freshly-spawned exec child so the kernel
+/// OOM killer prefers it over the control supervisor (issue #345). Composes with
+/// the per-op cgroup: this biases the GLOBAL kernel OOM killer, the cgroup gives
+/// systemd-oomd a bounded scope — both apply. Best-effort: a failure (the child
+/// already exited, or a locked-down policy) is logged once and ignored.
+#[cfg(target_os = "linux")]
+pub(crate) fn raise_exec_oom_score_adj(pid: u32) {
+    let path = format!("/proc/{pid}/oom_score_adj");
+    if let Err(error) = std::fs::write(&path, EXEC_OOM_SCORE_ADJ.to_string()) {
+        if !OOM_SCORE_ADJ_WARNED.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                %error,
+                pid,
+                target = EXEC_OOM_SCORE_ADJ,
+                "could not raise exec child oom_score_adj; continuing (logged once)"
+            );
+        }
+    }
+}
+
 // --- Pure, cross-platform helpers (unit-tested on any host) -------------------
 
 /// Extracts the cgroup v2 unified path from `/proc/self/cgroup` — the path after

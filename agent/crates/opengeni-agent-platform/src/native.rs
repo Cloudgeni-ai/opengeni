@@ -192,6 +192,15 @@ impl ExecProcessGroup {
             }
         };
 
+        // Bias the kernel's global OOM killer toward this child (and its inheriting
+        // descendants) so a runaway command is sacrificed before the supervisor.
+        // Always applied on Linux — independent of, and composing with, the per-op
+        // cgroup below (which bounds systemd-oomd's scope).
+        #[cfg(target_os = "linux")]
+        if let Some(child_pid) = child.id() {
+            crate::cgroup::raise_exec_oom_score_adj(child_pid);
+        }
+
         // Place the requested child AND the group anchor into a per-op memory leaf
         // so they share one OOM fate, isolated from the control supervisor. The tiny
         // window between spawn and this move is the accepted post-spawn billing
@@ -1270,6 +1279,49 @@ mod tests {
         let _ = exec_task.await;
 
         assert_process_exits(descendant_pid, "cancelled exec").await;
+    }
+
+    /// Every exec child is stamped `oom_score_adj=500` so the kernel OOM killer
+    /// sacrifices a runaway command before the supervisor (issue #345). This needs
+    /// no cgroup delegation (raising is always unprivileged-legal), so it runs on
+    /// any Linux host. The direct child (the fixture) reports its own PID — the one
+    /// the exec path stamps — and holds it alive long enough to read the value.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exec_child_gets_raised_oom_score_adj() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("oom-score-child.pid");
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_descendant_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let child_pid = recorded_pid(&pid_file).await;
+        // The stamp is written post-spawn, so poll briefly for the raised value
+        // rather than assume it landed before the fixture published its PID.
+        let oom_path = format!("/proc/{child_pid}/oom_score_adj");
+        let mut observed = String::new();
+        for _ in 0..200 {
+            if let Ok(text) = tokio::fs::read_to_string(&oom_path).await {
+                observed = text.trim().to_string();
+                if observed == "500" {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        exec_task.abort();
+        let _ = exec_task.await;
+        assert_eq!(
+            observed, "500",
+            "exec child {child_pid} must have oom_score_adj=500, saw {observed:?}"
+        );
     }
 
     #[tokio::test]
