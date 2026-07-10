@@ -360,15 +360,15 @@ describe("EnrollmentDeviceFlow", () => {
     const r = await renderComponent(
       <EnrollmentDeviceFlow
         userCode="WXYZ-4821"
-        verificationUri="https://get.opengeni.ai/device"
-        installCommand="curl -fsSL https://get.opengeni.ai/install.sh | sh"
+        verificationUri="https://app.opengeni.ai/device"
+        installCommand="curl -fsSL https://app.opengeni.ai/install.sh | sh"
         onCopyCode={() => (copied = true)}
       />,
     );
     await flush();
     expect(r.container.querySelector("[data-enrollment-device-flow]")).not.toBeNull();
     expect(r.container.querySelector("[data-user-code]")?.textContent).toContain("WXYZ-4821");
-    expect(r.container.textContent).toContain("get.opengeni.ai/device");
+    expect(r.container.textContent).toContain("app.opengeni.ai/device");
     (r.container.querySelector("[data-copy-code]") as HTMLButtonElement).click();
     await flush();
     expect(copied).toBe(true);
