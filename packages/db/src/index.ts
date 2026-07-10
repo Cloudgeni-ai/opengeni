@@ -7255,7 +7255,25 @@ export type CodexLeaseAccountStatus = CodexAccountStatus & {
   lastSelectedAt: Date | null;
 };
 
-export type CodexCredentialLeaseSelectionContext = {
+/**
+ * Opaque accepted-turn policy scope resolved while the durable turn is locked.
+ *
+ * OPE-21 deliberately does not know the shape of named pools. A downstream
+ * allocator policy (OPE-32) owns its private scope type and supplies a pure
+ * metadata resolver. The resolved value is handed to the selector in the same
+ * workspace rotation-row transaction as lease acquisition, so future pool
+ * membership filtering cannot race the accepted turn's frozen policy.
+ */
+export type CodexCredentialLeasePolicyScopeResolver<TPolicyScope> = (
+  turnMetadata: Readonly<Record<string, unknown>>,
+) => TPolicyScope | null;
+
+export type CodexCredentialLeaseCandidateFilter<TPolicyScope> = (input: {
+  accounts: readonly CodexLeaseAccountStatus[];
+  policyScope: TPolicyScope | null;
+}) => readonly CodexLeaseAccountStatus[];
+
+export type CodexCredentialLeaseSelectionContext<TPolicyScope = never> = {
   accounts: CodexLeaseAccountStatus[];
   activeCredentialId: string | null;
   rotationEnabled: boolean;
@@ -7264,6 +7282,8 @@ export type CodexCredentialLeaseSelectionContext = {
   rotationStrategy: string;
   /** A still-live idempotent lease for this SAME turn, if one exists. */
   existingCredentialId: string | null;
+  /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
+  policyScope: TPolicyScope | null;
 };
 
 export type CodexCredentialLeaseSelection<T> = {
@@ -7351,6 +7371,71 @@ function mapCodexLeaseCandidate(
   };
 }
 
+function filterCodexLeaseCandidatesForPolicy<TPolicyScope>(
+  accounts: CodexLeaseAccountStatus[],
+  policyScope: TPolicyScope | null,
+  filter: CodexCredentialLeaseCandidateFilter<TPolicyScope> | undefined,
+): CodexLeaseAccountStatus[] {
+  const filtered = filter?.({ accounts, policyScope });
+  if (!filtered) return accounts;
+  const workspaceIds = new Set(accounts.map((account) => account.id));
+  const filteredIds = new Set<string>();
+  for (const account of filtered) {
+    if (!workspaceIds.has(account.id) || filteredIds.has(account.id)) {
+      throw new Error("Codex lease candidate filter returned a foreign or duplicate credential");
+    }
+    filteredIds.add(account.id);
+  }
+  return [...filtered];
+}
+
+async function listCodexLeaseCandidatesInTransaction(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    activeCredentialId: string | null;
+    excludeTurnId?: string | null;
+  },
+): Promise<CodexLeaseAccountStatus[]> {
+  const rows = await tx.execute(sql<CodexLeaseCandidateRow>`
+    select
+      c.id,
+      c.chatgpt_account_id,
+      c.label,
+      c.account_email,
+      c.plan_type,
+      c.status,
+      c.allocator_enabled,
+      c.expires_at,
+      c.last_refresh_at,
+      c.last_error,
+      c.primary_used_percent,
+      c.primary_reset_at,
+      c.secondary_used_percent,
+      c.secondary_reset_at,
+      c.usage_checked_at,
+      c.exhausted_until,
+      c.connector_namespaces,
+      c.connectors_checked_at,
+      c.selection_count,
+      c.last_selected_at,
+      count(l.id) filter (
+        where l.leased_until > now()
+          and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
+      )::int as active_lease_count
+    from codex_subscription_credentials c
+    left join codex_credential_leases l
+      on l.workspace_id = c.workspace_id and l.credential_id = c.id
+    where c.account_id = ${input.accountId} and c.workspace_id = ${input.workspaceId}
+    group by c.id
+    order by c.created_at asc, c.id asc
+  `);
+  return (rows as unknown as CodexLeaseCandidateRow[]).map((row) =>
+    mapCodexLeaseCandidate(row, input.activeCredentialId),
+  );
+}
+
 /**
  * Atomically choose and lease one workspace-owned Codex credential for a turn.
  *
@@ -7365,7 +7450,7 @@ function mapCodexLeaseCandidate(
  * RLS-scoped candidate set before any write, closing a malicious/buggy callback
  * from naming another workspace's row.
  */
-export async function acquireCodexCredentialLease<T>(
+export async function acquireCodexCredentialLease<T, TPolicyScope = never>(
   db: Database,
   input: {
     accountId: string;
@@ -7377,9 +7462,23 @@ export async function acquireCodexCredentialLease<T>(
     advanceActivePointer: boolean;
     /** Exact frozen credential for this same durable turn, if it is resuming. */
     continuationCredentialId?: string | null;
+    /**
+     * Optional downstream parser for private accepted-turn policy metadata.
+     * It is pure, runs under the turn/rotation transaction, and must not query
+     * pool membership itself. OPE-21 stores or interprets no pool identifiers.
+     */
+    resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
+    /**
+     * Optional downstream membership policy for NEW allocations only. A live
+     * lease or validated frozen credential is offered to the selector against
+     * the complete workspace rows first and can never be filtered out here.
+     */
+    filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<TPolicyScope>;
     leaseTtlMs?: number;
   },
-  select: (context: CodexCredentialLeaseSelectionContext) => CodexCredentialLeaseSelection<T>,
+  select: (
+    context: CodexCredentialLeaseSelectionContext<TPolicyScope>,
+  ) => CodexCredentialLeaseSelection<T>,
 ): Promise<CodexCredentialLeaseResult<T>> {
   const leaseTtlMs = input.leaseTtlMs ?? CODEX_CREDENTIAL_LEASE_TTL_MS;
   if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
@@ -7392,36 +7491,6 @@ export async function acquireCodexCredentialLease<T>(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      // Fail closed before taking a credential: the turn and allocator must be
-      // inside exactly the same RLS-scoped workspace/account.
-      const turns = await tx.execute(sql<{ id: string }>`
-        select id from session_turns
-        where account_id = ${input.accountId}
-          and workspace_id = ${input.workspaceId}
-          and id = ${input.turnId}
-        for share
-      `);
-      if (!turns[0]) {
-        throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
-      }
-      const continuationRows = input.continuationCredentialId
-        ? await tx.execute(
-            sql<{ frozen_codex_credential_id: string | null }>`
-              select frozen_codex_credential_id
-              from agent_run_states
-              where account_id = ${input.accountId}
-                and workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-              order by state_version desc
-              limit 1
-            `,
-          )
-        : [];
-      const validatedContinuationCredentialId =
-        continuationRows[0]?.frozen_codex_credential_id === input.continuationCredentialId
-          ? input.continuationCredentialId
-          : null;
-
       // The singleton workspace row is the only serialization point. Never
       // SKIP LOCKED: concurrent replicas wait, then observe the winner's lease.
       await tx.execute(sql`
@@ -7446,6 +7515,39 @@ export async function acquireCodexCredentialLease<T>(
       if (!settingsRow) {
         throw new Error(`Codex rotation settings not visible for workspace ${input.workspaceId}`);
       }
+      // Rotation row -> durable turn is the common allocator/waiter lock order.
+      // Fail closed before taking a credential: the turn and allocator must be
+      // inside exactly the same RLS-scoped workspace/account. A downstream
+      // accepted-turn policy is parsed from this locked metadata while the
+      // rotation transaction is held.
+      const turns = await tx.execute(sql<{ id: string; metadata: Record<string, unknown> | null }>`
+        select id, metadata from session_turns
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and id = ${input.turnId}
+        for share
+      `);
+      if (!turns[0]) {
+        throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
+      }
+      const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
+      const continuationRows = input.continuationCredentialId
+        ? await tx.execute(
+            sql<{ frozen_codex_credential_id: string | null }>`
+              select frozen_codex_credential_id
+              from agent_run_states
+              where account_id = ${input.accountId}
+                and workspace_id = ${input.workspaceId}
+                and turn_id = ${input.turnId}
+              order by state_version desc
+              limit 1
+            `,
+          )
+        : [];
+      const validatedContinuationCredentialId =
+        continuationRows[0]?.frozen_codex_credential_id === input.continuationCredentialId
+          ? input.continuationCredentialId
+          : null;
       const activeCredentialId = settingsRow.active_credential_id;
       const rotationEnabled = settingsRow.rotation_enabled;
       // Fail closed on a torn/manual legacy write. The user-intent bit and the
@@ -7477,49 +7579,43 @@ export async function acquireCodexCredentialLease<T>(
         : [];
       const existingCredentialId = existingRows[0]?.credential_id ?? null;
 
-      const rows = await tx.execute(sql<CodexLeaseCandidateRow>`
-        select
-          c.id,
-          c.chatgpt_account_id,
-          c.label,
-          c.account_email,
-          c.plan_type,
-          c.status,
-          c.allocator_enabled,
-          c.expires_at,
-          c.last_refresh_at,
-          c.last_error,
-          c.primary_used_percent,
-          c.primary_reset_at,
-          c.secondary_used_percent,
-          c.secondary_reset_at,
-          c.usage_checked_at,
-          c.exhausted_until,
-          c.connector_namespaces,
-          c.connectors_checked_at,
-          c.selection_count,
-          c.last_selected_at,
-          count(l.id) filter (
-            where l.leased_until > now() and l.turn_id <> ${input.turnId}
-          )::int as active_lease_count
-        from codex_subscription_credentials c
-        left join codex_credential_leases l
-          on l.workspace_id = c.workspace_id and l.credential_id = c.id
-        where c.account_id = ${input.accountId} and c.workspace_id = ${input.workspaceId}
-        group by c.id
-        order by c.created_at asc, c.id asc
-      `);
-      const accounts = (rows as unknown as CodexLeaseCandidateRow[]).map((row) =>
-        mapCodexLeaseCandidate(row, activeCredentialId),
-      );
-      const selected = select({
+      const allAccounts = await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        activeCredentialId,
+        excludeTurnId: input.turnId,
+      });
+      const sameTurnCredentialId = existingCredentialId ?? validatedContinuationCredentialId;
+      const selectionContext = (accounts: CodexLeaseAccountStatus[]) => ({
         accounts,
         activeCredentialId,
         rotationEnabled,
         leaseRotationEnabled,
         rotationStrategy,
         existingCredentialId,
+        policyScope,
       });
+      let accounts = allAccounts;
+      let selected: CodexCredentialLeaseSelection<T> | undefined;
+      if (sameTurnCredentialId !== null) {
+        const sameTurnSelection = select(selectionContext(allAccounts));
+        if (sameTurnSelection.credentialId === sameTurnCredentialId) {
+          selected = sameTurnSelection;
+        }
+      }
+
+      // Exact-turn continuity is resolved before any future pool membership
+      // filter. The normal selector still owns health validation: a quarantined
+      // live/frozen row falls through to scoped new acquisition rather than
+      // being reused blindly.
+      if (!selected) {
+        accounts = filterCodexLeaseCandidatesForPolicy(
+          allAccounts,
+          policyScope,
+          input.filterNewAllocationCandidates,
+        );
+        selected = select(selectionContext(accounts));
+      }
       if (selected.credentialId === null) {
         if (leaseRotationEnabled && existingCredentialId !== null) {
           await tx.execute(sql`
@@ -7631,6 +7727,1246 @@ export async function acquireCodexCredentialLease<T>(
         leasedUntil,
       };
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OPE-21 durable zero-capacity wait / wake state machine.
+// ---------------------------------------------------------------------------
+
+export type CodexCapacityWaitStatus = "waiting" | "resumed" | "superseded";
+export type CodexCapacityResetKind = "authoritative" | "bounded_refresh";
+
+export type CodexCapacityWait = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  goalId: string;
+  blockedTurnId: string;
+  workflowId: string;
+  generation: number;
+  status: CodexCapacityWaitStatus;
+  goalVersion: number;
+  controlGeneration: number;
+  policyHash: string | null;
+  earliestResetAt: Date | null;
+  nextCheckAt: Date;
+  resetKind: CodexCapacityResetKind;
+  refreshAttempt: number;
+  wakeRevision: number;
+  observedWakeRevision: number;
+  lastWakeReason: string;
+  resumedTurnId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type CodexCapacityWakeTarget = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+  waiterId: string;
+  generation: number;
+  wakeRevision: number;
+};
+
+export type CodexCapacityAvailabilityDecision =
+  | { kind: "available"; credentialId: string; diagnostic?: Record<string, unknown> }
+  | {
+      kind: "unavailable";
+      earliestResetAt: Date | null;
+      resetKind: CodexCapacityResetKind;
+      diagnostic?: Record<string, unknown>;
+    };
+
+export type CodexCapacitySelectionContext<TPolicyScope = never> =
+  CodexCredentialLeaseSelectionContext<TPolicyScope> & {
+    sessionPinnedCredentialId: string | null;
+    sessionLastCredentialId: string | null;
+    policyHash: string | null;
+  };
+
+export type ArmCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
+  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+
+export type ReconcileCodexCapacityWaitResult =
+  | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
+  | {
+      action: "resumed";
+      waiter: CodexCapacityWait;
+      turn: SessionTurn;
+      events: SessionEvent[];
+    }
+  | { action: "superseded"; waiter: CodexCapacityWait; events: SessionEvent[] }
+  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+
+export type ValidateCodexCapacityResumeTurnResult = {
+  valid: boolean;
+  events: SessionEvent[];
+};
+
+export const CODEX_CAPACITY_REFRESH_MIN_MS = 60_000;
+export const CODEX_CAPACITY_REFRESH_MAX_MS = 15 * 60_000;
+
+/**
+ * Unknown/stale reset data uses bounded control-plane refresh backoff. This is
+ * never a model turn and never consumes an entitlement. The value is pure so
+ * crash/timer tests can pin the exact progression.
+ */
+export function codexCapacityRefreshBackoffMs(attempt: number): number {
+  const safeAttempt = Number.isInteger(attempt) && attempt > 0 ? attempt : 0;
+  return Math.min(CODEX_CAPACITY_REFRESH_MIN_MS * 2 ** safeAttempt, CODEX_CAPACITY_REFRESH_MAX_MS);
+}
+
+function mapCodexCapacityWaiter(
+  row: typeof schema.codexCapacityWaiters.$inferSelect,
+): CodexCapacityWait {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    goalId: row.goalId,
+    blockedTurnId: row.blockedTurnId,
+    workflowId: row.workflowId,
+    generation: row.generation,
+    status: row.status as CodexCapacityWaitStatus,
+    goalVersion: row.goalVersion,
+    controlGeneration: row.controlGeneration,
+    policyHash: row.policyHash,
+    earliestResetAt: row.earliestResetAt,
+    nextCheckAt: row.nextCheckAt,
+    resetKind: row.resetKind as CodexCapacityResetKind,
+    refreshAttempt: row.refreshAttempt,
+    wakeRevision: row.wakeRevision,
+    observedWakeRevision: row.observedWakeRevision,
+    lastWakeReason: row.lastWakeReason,
+    resumedTurnId: row.resumedTurnId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function codexCapacityPolicyHashFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = metadata?.codexCredentialPolicyHash;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function codexCapacityControlGenerationFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): number {
+  const value = metadata?.sessionControlGeneration;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+async function lockExistingCodexRotationSettingsForCapacity(
+  tx: Database,
+  workspaceId: string,
+): Promise<{
+  accountId: string;
+  activeCredentialId: string | null;
+  rotationEnabled: boolean;
+  leaseRotationEnabled: boolean;
+  rotationStrategy: string;
+} | null> {
+  const rows = await tx.execute(sql<{
+    account_id: string;
+    active_credential_id: string | null;
+    rotation_enabled: boolean;
+    lease_rotation_enabled: boolean;
+    rotation_strategy: string;
+  }>`
+    select account_id, active_credential_id, rotation_enabled,
+           lease_rotation_enabled, rotation_strategy
+    from codex_rotation_settings
+    where workspace_id = ${workspaceId}
+    for update
+  `);
+  const row = rows[0];
+  return row
+    ? {
+        accountId: row.account_id,
+        activeCredentialId: row.active_credential_id,
+        rotationEnabled: row.rotation_enabled,
+        leaseRotationEnabled: row.rotation_enabled && row.lease_rotation_enabled,
+        rotationStrategy: row.rotation_strategy,
+      }
+    : null;
+}
+
+function nextCodexCapacityCheckAt(
+  earliestResetAt: Date | null,
+  resetKind: CodexCapacityResetKind,
+  refreshAttempt: number,
+  now: Date,
+): Date {
+  if (
+    resetKind === "authoritative" &&
+    earliestResetAt !== null &&
+    earliestResetAt.getTime() > now.getTime()
+  ) {
+    return earliestResetAt;
+  }
+  return new Date(now.getTime() + codexCapacityRefreshBackoffMs(refreshAttempt));
+}
+
+/**
+ * Atomically settle one all-unavailable turn and arm exactly one durable wait.
+ * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
+ * live lease (when a reactive failure owns one) -> waiter. The failed turn,
+ * idle/capacity-paused session, durable events, lease release, and waiter
+ * generation commit together; a crash cannot leave only half of the boundary
+ * visible.
+ */
+export async function armCodexCapacityWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    workflowId: string;
+    goalId: string;
+    goalVersion: number;
+    controlGeneration?: number;
+    policyHash?: string | null;
+    earliestResetAt: Date | null;
+    resetKind: CodexCapacityResetKind;
+    failurePayload: Record<string, unknown>;
+    runStateSaved?: boolean;
+    /** Required on reactive failures that already own a credential lease. */
+    leaseFence?: { holderId: string; generation: number };
+    /** Worker-death dispatch generation observed before model execution. */
+    expectedRedispatches?: number;
+    now?: Date;
+  },
+): Promise<ArmCodexCapacityWaitResult> {
+  const now = input.now ?? new Date();
+  const controlGeneration = input.controlGeneration ?? 0;
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+        if (!rotation || rotation.accountId !== input.accountId) {
+          return { action: "stale", waiter: null, events: [] } as const;
+        }
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [goal] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.id, input.goalId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const leaseRows = input.leaseFence
+          ? await tx.execute(sql<{ holder_id: string; generation: number }>`
+              select holder_id, generation
+              from codex_credential_leases
+              where account_id = ${input.accountId}
+                and workspace_id = ${input.workspaceId}
+                and turn_id = ${input.turnId}
+                and leased_until > now()
+              for update
+            `)
+          : [];
+        const [existing] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+
+        if (
+          existing?.status === "waiting" &&
+          existing.blockedTurnId === input.turnId &&
+          turn?.status === "failed"
+        ) {
+          return {
+            action: "waiting",
+            waiter: mapCodexCapacityWaiter(existing),
+            events: [],
+          } as const;
+        }
+        const policyHash =
+          input.policyHash ?? codexCapacityPolicyHashFromTurnMetadata(turn?.metadata);
+        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
+        const lease = leaseRows[0];
+        const leaseFenceValid =
+          !input.leaseFence ||
+          (lease?.holder_id === input.leaseFence.holderId &&
+            Number(lease.generation) === input.leaseFence.generation &&
+            currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
+        if (
+          !session ||
+          !goal ||
+          !turn ||
+          session.activeTurnId !== input.turnId ||
+          session.status !== "running" ||
+          goal.status !== "active" ||
+          goal.version !== input.goalVersion ||
+          turn.status !== "running" ||
+          !leaseFenceValid ||
+          codexCapacityControlGenerationFromTurnMetadata(turn.metadata) !== controlGeneration ||
+          codexCapacityPolicyHashFromTurnMetadata(turn.metadata) !== policyHash
+        ) {
+          return {
+            action: "stale",
+            waiter: existing ? mapCodexCapacityWaiter(existing) : null,
+            events: [],
+          } as const;
+        }
+
+        const generation = (existing?.generation ?? 0) + 1;
+        const nextCheckAt = nextCodexCapacityCheckAt(
+          input.earliestResetAt,
+          input.resetKind,
+          0,
+          now,
+        );
+        const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
+        const waiterValues = {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          goalId: input.goalId,
+          blockedTurnId: input.turnId,
+          workflowId: input.workflowId,
+          generation,
+          status: "waiting",
+          goalVersion: input.goalVersion,
+          controlGeneration,
+          policyHash,
+          earliestResetAt: input.earliestResetAt,
+          nextCheckAt,
+          resetKind: input.resetKind,
+          refreshAttempt: 0,
+          // Arming follows an allocator evaluation in this same transaction,
+          // so this generation has already observed its own initial revision.
+          // Only a later capacity mutation creates pending outbox work.
+          wakeRevision,
+          observedWakeRevision: wakeRevision,
+          lastWakeReason: "capacity_wait_armed",
+          resumedTurnId: null,
+          updatedAt: now,
+        } as const;
+        const [waiterRow] = existing
+          ? await tx
+              .update(schema.codexCapacityWaiters)
+              .set(waiterValues)
+              .where(eq(schema.codexCapacityWaiters.id, existing.id))
+              .returning()
+          : await tx.insert(schema.codexCapacityWaiters).values(waiterValues).returning();
+        if (!waiterRow) {
+          throw new Error("Codex capacity wait arm returned no waiter row");
+        }
+
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "turn.failed",
+              payload: sanitizeEventPayload({
+                ...input.failurePayload,
+                recovery: "codex_capacity",
+                retryable: false,
+                rotated: true,
+                runStateSaved: input.runStateSaved ?? false,
+                capacityWaiterId: waiterRow.id,
+                capacityWaitGeneration: waiterRow.generation,
+              }),
+              turnId: input.turnId,
+              occurredAt: now,
+            },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 2,
+              type: "codex.capacity.waiting",
+              payload: sanitizeEventPayload({
+                waiterId: waiterRow.id,
+                generation: waiterRow.generation,
+                goalId: input.goalId,
+                goalVersion: input.goalVersion,
+                controlGeneration,
+                policyHash,
+                resetKind: input.resetKind,
+                earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
+                nextCheckAt: nextCheckAt.toISOString(),
+              }),
+              turnId: input.turnId,
+              occurredAt: now,
+            },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 3,
+              type: "session.status.changed",
+              payload: { status: "idle", reason: "codex_capacity" },
+              turnId: input.turnId,
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        await tx
+          .update(schema.sessionTurns)
+          .set({ status: "failed", finishedAt: now, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.status, "running"),
+            ),
+          );
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "idle",
+            activeTurnId: null,
+            lastSequence: session.lastSequence + 3,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.activeTurnId, input.turnId),
+            ),
+          );
+        await tx.execute(sql`
+          delete from codex_credential_leases
+          where account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and turn_id = ${input.turnId}
+        `);
+        return {
+          action: "waiting",
+          waiter: mapCodexCapacityWaiter(waiterRow),
+          events: inserted.map(mapEvent),
+        } as const;
+      }),
+  );
+}
+
+export async function getCodexCapacityWaitForSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CodexCapacityWait | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.codexCapacityWaiters)
+      .where(
+        and(
+          eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
+          eq(schema.codexCapacityWaiters.sessionId, sessionId),
+          eq(schema.codexCapacityWaiters.status, "waiting"),
+        ),
+      )
+      .limit(1);
+    return row ? mapCodexCapacityWaiter(row) : null;
+  });
+}
+
+/**
+ * Same-transaction capacity-mutation/outbox seam for OPE-24 eligibility and
+ * OPE-32 membership/default changes. The allocator rotation row is always the
+ * first lock. Mutations report whether capacity truth changed; only then are
+ * matching waiter wake revisions advanced and returned for best-effort signal.
+ */
+export async function withCodexCapacityMutation<T>(
+  db: Database,
+  input: {
+    workspaceId: string;
+    reason: string;
+    policyHash?: string | null;
+  },
+  mutate: (tx: Database) => Promise<{ result: T; changed: boolean }>,
+): Promise<{ result: T; wakeTargets: CodexCapacityWakeTarget[] }> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+        const mutation = await mutate(tx);
+        if (!mutation.changed) {
+          return { result: mutation.result, wakeTargets: [] };
+        }
+        const rows = await tx
+          .update(schema.codexCapacityWaiters)
+          .set({
+            wakeRevision: sql`${schema.codexCapacityWaiters.wakeRevision} + 1`,
+            lastWakeReason: input.reason,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.status, "waiting"),
+              ...(input.policyHash !== undefined
+                ? [
+                    input.policyHash === null
+                      ? isNull(schema.codexCapacityWaiters.policyHash)
+                      : eq(schema.codexCapacityWaiters.policyHash, input.policyHash),
+                  ]
+                : []),
+            ),
+          )
+          .returning();
+        return {
+          result: mutation.result,
+          wakeTargets: rows.map((row) => ({
+            accountId: row.accountId,
+            workspaceId: row.workspaceId,
+            sessionId: row.sessionId,
+            workflowId: row.workflowId,
+            waiterId: row.id,
+            generation: row.generation,
+            wakeRevision: row.wakeRevision,
+          })),
+        };
+      }),
+  );
+}
+
+export async function listPendingCodexCapacityWakeTargets(
+  db: Database,
+  workspaceId: string,
+): Promise<CodexCapacityWakeTarget[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.codexCapacityWaiters)
+      .where(
+        and(
+          eq(schema.codexCapacityWaiters.workspaceId, workspaceId),
+          eq(schema.codexCapacityWaiters.status, "waiting"),
+          sql`${schema.codexCapacityWaiters.wakeRevision} > ${schema.codexCapacityWaiters.observedWakeRevision}`,
+        ),
+      );
+    return rows.map((row) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sessionId: row.sessionId,
+      workflowId: row.workflowId,
+      waiterId: row.id,
+      generation: row.generation,
+      wakeRevision: row.wakeRevision,
+    }));
+  });
+}
+
+async function supersedeCodexCapacityWaitInTransaction(
+  tx: Database,
+  input: {
+    session: typeof schema.sessions.$inferSelect;
+    waiter: typeof schema.codexCapacityWaiters.$inferSelect;
+    reason: string;
+    now: Date;
+  },
+): Promise<{ waiter: CodexCapacityWait; events: SessionEvent[] }> {
+  const [updated] = await tx
+    .update(schema.codexCapacityWaiters)
+    .set({
+      status: "superseded",
+      observedWakeRevision: input.waiter.wakeRevision,
+      lastWakeReason: input.reason,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.codexCapacityWaiters.id, input.waiter.id),
+        eq(schema.codexCapacityWaiters.status, "waiting"),
+      ),
+    )
+    .returning();
+  if (!updated) {
+    return { waiter: mapCodexCapacityWaiter(input.waiter), events: [] };
+  }
+  const inserted = await tx
+    .insert(schema.sessionEvents)
+    .values({
+      accountId: input.session.accountId,
+      workspaceId: input.session.workspaceId,
+      sessionId: input.session.id,
+      sequence: input.session.lastSequence + 1,
+      type: "codex.capacity.superseded",
+      payload: sanitizeEventPayload({
+        waiterId: updated.id,
+        generation: updated.generation,
+        reason: input.reason,
+      }),
+      turnId: updated.blockedTurnId,
+      occurredAt: input.now,
+    })
+    .returning();
+  await tx
+    .update(schema.sessions)
+    .set({ lastSequence: input.session.lastSequence + 1, updatedAt: input.now })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.session.workspaceId),
+        eq(schema.sessions.id, input.session.id),
+      ),
+    );
+  return { waiter: mapCodexCapacityWaiter(updated), events: inserted.map(mapEvent) };
+}
+
+/**
+ * Row-lock and re-evaluate one waiter. Availability is decided by a pure
+ * caller supplied policy over the same rotation-row transaction as normal
+ * acquisition. If available, one system goal-continuation event and one turn
+ * are committed; duplicate timers/signals observe status=resumed and do no
+ * work. If any goal/control/policy/turn/queue fence changed, the waiter is
+ * superseded without inference.
+ */
+export async function reconcileCodexCapacityWait<TPolicyScope = never>(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waiterId: string;
+    generation: number;
+    now?: Date;
+  },
+  decide: (
+    context: CodexCapacitySelectionContext<TPolicyScope>,
+  ) => CodexCapacityAvailabilityDecision,
+  policy?: {
+    resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
+    filterNewAllocationCandidates?: CodexCredentialLeaseCandidateFilter<TPolicyScope>;
+  },
+): Promise<ReconcileCodexCapacityWaitResult> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
+        if (!rotation || rotation.accountId !== input.accountId) {
+          return { action: "stale", waiter: null, events: [] } as const;
+        }
+        const [waiterRead] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.id, input.waiterId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+            ),
+          )
+          .limit(1);
+        if (!waiterRead || waiterRead.generation !== input.generation) {
+          return {
+            action: "stale",
+            waiter: waiterRead ? mapCodexCapacityWaiter(waiterRead) : null,
+            events: [],
+          } as const;
+        }
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.accountId, input.accountId),
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [goal] = await tx
+          .select()
+          .from(schema.sessionGoals)
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, input.workspaceId),
+              eq(schema.sessionGoals.id, waiterRead.goalId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [blockedTurn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, waiterRead.blockedTurnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [waiter] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(eq(schema.codexCapacityWaiters.id, input.waiterId))
+          .for("update")
+          .limit(1);
+        if (
+          !session ||
+          !goal ||
+          !blockedTurn ||
+          !waiter ||
+          waiter.generation !== input.generation ||
+          waiter.status !== "waiting"
+        ) {
+          return {
+            action: "stale",
+            waiter: waiter ? mapCodexCapacityWaiter(waiter) : null,
+            events: [],
+          } as const;
+        }
+
+        const [pending] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+            ),
+          )
+          .limit(1);
+        const [laterTurn] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              gt(schema.sessionTurns.position, blockedTurn.position),
+            ),
+          )
+          .limit(1);
+        const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
+        const currentControlGeneration = codexCapacityControlGenerationFromTurnMetadata(
+          blockedTurn.metadata,
+        );
+        let supersedeReason: string | null = null;
+        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+          supersedeReason = "goal_changed";
+        } else if (currentControlGeneration !== waiter.controlGeneration) {
+          supersedeReason = "control_generation_changed";
+        } else if (currentPolicyHash !== waiter.policyHash) {
+          supersedeReason = "credential_policy_changed";
+        } else if (session.status !== "idle" || session.activeTurnId !== null) {
+          supersedeReason = "session_not_capacity_idle";
+        } else if (blockedTurn.status !== "failed") {
+          supersedeReason = "blocked_turn_changed";
+        } else if (pending) {
+          supersedeReason = "pending_work_exists";
+        } else if (laterTurn) {
+          supersedeReason = "newer_turn_exists";
+        }
+        if (supersedeReason) {
+          const superseded = await supersedeCodexCapacityWaitInTransaction(tx, {
+            session,
+            waiter,
+            reason: supersedeReason,
+            now,
+          });
+          return { action: "superseded", ...superseded } as const;
+        }
+
+        const allAccounts = await listCodexLeaseCandidatesInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          activeCredentialId: rotation.activeCredentialId,
+          excludeTurnId: waiter.blockedTurnId,
+        });
+        const policyScope = policy?.resolvePolicyScope?.(blockedTurn.metadata ?? {}) ?? null;
+        const accounts = filterCodexLeaseCandidatesForPolicy(
+          allAccounts,
+          policyScope,
+          policy?.filterNewAllocationCandidates,
+        );
+        const decision = decide({
+          accounts,
+          activeCredentialId: rotation.activeCredentialId,
+          rotationEnabled: rotation.rotationEnabled,
+          leaseRotationEnabled: rotation.leaseRotationEnabled,
+          rotationStrategy: rotation.rotationStrategy,
+          existingCredentialId: null,
+          policyScope,
+          sessionPinnedCredentialId: session.codexPinnedCredentialId,
+          sessionLastCredentialId: session.codexLastCredentialId,
+          policyHash: waiter.policyHash,
+        });
+        if (decision.kind === "unavailable") {
+          const refreshAttempt =
+            decision.resetKind === "bounded_refresh" ? waiter.refreshAttempt + 1 : 0;
+          const nextCheckAt = nextCodexCapacityCheckAt(
+            decision.earliestResetAt,
+            decision.resetKind,
+            refreshAttempt,
+            now,
+          );
+          const [updated] = await tx
+            .update(schema.codexCapacityWaiters)
+            .set({
+              earliestResetAt: decision.earliestResetAt,
+              nextCheckAt,
+              resetKind: decision.resetKind,
+              refreshAttempt,
+              observedWakeRevision: waiter.wakeRevision,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.codexCapacityWaiters.id, waiter.id),
+                eq(schema.codexCapacityWaiters.status, "waiting"),
+                eq(schema.codexCapacityWaiters.generation, waiter.generation),
+              ),
+            )
+            .returning();
+          if (!updated) {
+            return { action: "stale", waiter: null, events: [] } as const;
+          }
+          return {
+            action: "waiting",
+            waiter: mapCodexCapacityWaiter(updated),
+            events: [],
+          } as const;
+        }
+
+        const prompt = [
+          "[CODEX CAPACITY RESUME] Codex subscription capacity is available again.",
+          `Continue the existing active goal from durable conversation history: ${goal.text}`,
+          `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
+          "Do not replay completed tool side effects; verify any ambiguous in-flight effect before repeating it.",
+          "If the goal is complete, call opengeni__goal_complete. If blocked for another reason, call opengeni__goal_pause.",
+        ].join("\n");
+        const [continuationEvent] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "goal.continuation",
+            payload: sanitizeEventPayload({
+              goalId: goal.id,
+              goalVersion: goal.version,
+              text: prompt,
+              reason: "codex_capacity",
+              capacityWaiterId: waiter.id,
+              capacityWaitGeneration: waiter.generation,
+            }),
+            occurredAt: now,
+          })
+          .returning();
+        if (!continuationEvent) {
+          throw new Error("Codex capacity resume did not create a continuation event");
+        }
+        const positions = await tx.execute(sql<{ position: number }>`
+          select coalesce(max(position), 0)::int + 1 as position
+          from session_turns
+          where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+        `);
+        const position = Number(positions[0]?.position ?? blockedTurn.position + 1);
+        const [turnRow] = await tx
+          .insert(schema.sessionTurns)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            triggerEventId: continuationEvent.id,
+            temporalWorkflowId: waiter.workflowId,
+            status: "queued",
+            source: "goal",
+            position,
+            prompt,
+            resources: blockedTurn.resources,
+            tools: blockedTurn.tools,
+            model: blockedTurn.model,
+            reasoningEffort: blockedTurn.reasoningEffort,
+            sandboxBackend: blockedTurn.sandboxBackend,
+            sandboxOs: blockedTurn.sandboxOs,
+            metadata: {
+              ...blockedTurn.metadata,
+              goalId: goal.id,
+              codexCapacityWaiterId: waiter.id,
+              codexCapacityWaitGeneration: waiter.generation,
+              codexCapacityBlockedTurnId: waiter.blockedTurnId,
+            },
+          })
+          .returning();
+        if (!turnRow) {
+          throw new Error("Codex capacity resume did not enqueue a turn");
+        }
+        await tx
+          .insert(schema.usageEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            eventType: "agent_run.created",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turnRow.id,
+            idempotencyKey: `agent_run.created:codex-capacity:${input.workspaceId}:${turnRow.id}`,
+            occurredAt: now,
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+        const tailEvents = await tx
+          .insert(schema.sessionEvents)
+          .values([
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 2,
+              type: "codex.capacity.resumed",
+              payload: sanitizeEventPayload({
+                waiterId: waiter.id,
+                generation: waiter.generation,
+                wakeRevision: waiter.wakeRevision,
+                goalId: goal.id,
+                goalVersion: goal.version,
+                controlGeneration: waiter.controlGeneration,
+                policyHash: waiter.policyHash,
+                diagnostic: decision.diagnostic ?? null,
+              }),
+              turnId: turnRow.id,
+              occurredAt: now,
+            },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 3,
+              type: "turn.queued",
+              payload: {
+                turnId: turnRow.id,
+                triggerEventId: continuationEvent.id,
+                source: "goal",
+                reason: "codex_capacity",
+              },
+              turnId: turnRow.id,
+              occurredAt: now,
+            },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 4,
+              type: "session.status.changed",
+              payload: { status: "queued", reason: "codex_capacity" },
+              turnId: turnRow.id,
+              occurredAt: now,
+            },
+          ])
+          .returning();
+        const [updatedWaiter] = await tx
+          .update(schema.codexCapacityWaiters)
+          .set({
+            status: "resumed",
+            resumedTurnId: turnRow.id,
+            observedWakeRevision: waiter.wakeRevision,
+            lastWakeReason: "capacity_available",
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.id, waiter.id),
+              eq(schema.codexCapacityWaiters.status, "waiting"),
+              eq(schema.codexCapacityWaiters.generation, waiter.generation),
+            ),
+          )
+          .returning();
+        if (!updatedWaiter) {
+          throw new Error("Codex capacity waiter changed during atomic resume");
+        }
+        await tx
+          .update(schema.sessionGoals)
+          .set({
+            lastContinuationTurnId: turnRow.id,
+            versionAtLastContinuation: goal.version,
+            updatedAt: now,
+          })
+          .where(eq(schema.sessionGoals.id, goal.id));
+        await tx
+          .update(schema.sessions)
+          .set({
+            status: "queued",
+            activeTurnId: null,
+            lastSequence: session.lastSequence + 4,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              isNull(schema.sessions.activeTurnId),
+            ),
+          );
+        return {
+          action: "resumed",
+          waiter: mapCodexCapacityWaiter(updatedWaiter),
+          turn: mapSessionTurn(turnRow),
+          events: [mapEvent(continuationEvent), ...tailEvents.map(mapEvent)],
+        } as const;
+      }),
+  );
+}
+
+/**
+ * Capacity-resume turns self-validate before provider/model preparation. This
+ * closes the wake->claim race: a manual pause/stop, newer turn, policy/control
+ * change, or duplicate stale turn cancels the resume before inference.
+ */
+export async function validateCodexCapacityResumeTurn(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    waiterId: string;
+    generation: number;
+  },
+): Promise<ValidateCodexCapacityResumeTurnResult> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        // Match the capacity state-machine lock order: session -> goal -> turn
+        // -> waiter. The preliminary waiter read is intentionally unlocked and
+        // is revalidated after the waiter lock.
+        const [waiterRead] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.id, input.waiterId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+            ),
+          )
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [goal] = waiterRead
+          ? await tx
+              .select()
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.id, waiterRead.goalId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1)
+          : [];
+        const [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [waiter] = await tx
+          .select()
+          .from(schema.codexCapacityWaiters)
+          .where(
+            and(
+              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+              eq(schema.codexCapacityWaiters.id, input.waiterId),
+              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const [competingTurn] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              ne(schema.sessionTurns.id, input.turnId),
+            ),
+          )
+          .limit(1);
+        const valid = Boolean(
+          turn &&
+          session &&
+          waiter &&
+          goal &&
+          turn.status === "running" &&
+          session.activeTurnId === input.turnId &&
+          waiter.status === "resumed" &&
+          waiter.resumedTurnId === input.turnId &&
+          waiter.generation === input.generation &&
+          !competingTurn &&
+          goal.status === "active" &&
+          goal.version === waiter.goalVersion &&
+          codexCapacityControlGenerationFromTurnMetadata(turn.metadata) ===
+            waiter.controlGeneration &&
+          codexCapacityPolicyHashFromTurnMetadata(turn.metadata) === waiter.policyHash,
+        );
+        if (!valid && turn?.status === "running") {
+          const now = new Date();
+          const [otherPending] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+                ne(schema.sessionTurns.id, input.turnId),
+              ),
+            )
+            .limit(1);
+          const nextSessionStatus = otherPending ? "queued" : "idle";
+          if (waiter?.status === "resumed" && waiter.resumedTurnId === input.turnId) {
+            await tx
+              .update(schema.codexCapacityWaiters)
+              .set({
+                status: "superseded",
+                observedWakeRevision: waiter.wakeRevision,
+                lastWakeReason: "resume_claim_fence_changed",
+                updatedAt: now,
+              })
+              .where(eq(schema.codexCapacityWaiters.id, waiter.id));
+          }
+          await tx
+            .update(schema.sessionTurns)
+            .set({ status: "cancelled", finishedAt: now, updatedAt: now })
+            .where(eq(schema.sessionTurns.id, turn.id));
+          if (session?.activeTurnId === turn.id) {
+            const inserted = await tx
+              .insert(schema.sessionEvents)
+              .values([
+                {
+                  accountId: session.accountId,
+                  workspaceId: session.workspaceId,
+                  sessionId: session.id,
+                  sequence: session.lastSequence + 1,
+                  type: "codex.capacity.superseded",
+                  payload: sanitizeEventPayload({
+                    waiterId: waiter?.id ?? input.waiterId,
+                    generation: waiter?.generation ?? input.generation,
+                    reason: "resume_claim_fence_changed",
+                  }),
+                  turnId: turn.id,
+                  occurredAt: now,
+                },
+                {
+                  accountId: session.accountId,
+                  workspaceId: session.workspaceId,
+                  sessionId: session.id,
+                  sequence: session.lastSequence + 2,
+                  type: "turn.cancelled",
+                  payload: {
+                    reason: "codex_capacity_resume_stale",
+                    waiterId: waiter?.id ?? input.waiterId,
+                  },
+                  turnId: turn.id,
+                  occurredAt: now,
+                },
+                {
+                  accountId: session.accountId,
+                  workspaceId: session.workspaceId,
+                  sessionId: session.id,
+                  sequence: session.lastSequence + 3,
+                  type: "session.status.changed",
+                  payload: { status: nextSessionStatus, reason: "codex_capacity_resume_stale" },
+                  turnId: turn.id,
+                  occurredAt: now,
+                },
+              ])
+              .returning();
+            await tx
+              .update(schema.sessions)
+              .set({
+                status: nextSessionStatus,
+                activeTurnId: null,
+                lastSequence: session.lastSequence + 3,
+                updatedAt: now,
+              })
+              .where(eq(schema.sessions.id, session.id));
+            return { valid: false, events: inserted.map(mapEvent) };
+          }
+        }
+        return { valid, events: [] };
+      }),
   );
 }
 
@@ -7864,28 +9200,34 @@ export async function recordCodexAccountUsage(
   credentialId: string,
   snapshot: CodexAccountUsageSnapshot,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({
-        primaryUsedPercent: snapshot.primaryUsedPercent,
-        primaryResetAt: snapshot.primaryResetAt,
-        secondaryUsedPercent: snapshot.secondaryUsedPercent,
-        secondaryResetAt: snapshot.secondaryResetAt,
-        usageCheckedAt: snapshot.checkedAt,
-        // NB: no `version` bump and no `updatedAt` touch — usage is non-credential
-        // metadata and must NOT race the (id, version) refresh CAS in
-        // recordCodexTokenRefresh / setCodexCredentialStatus.
-      })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
+  const { result } = await withCodexCapacityMutation(
+    db,
+    { workspaceId, reason: "codex_usage_refreshed" },
+    async (tx) => {
+      const updated = await tx
+        .update(schema.codexSubscriptionCredentials)
+        .set({
+          primaryUsedPercent: snapshot.primaryUsedPercent,
+          primaryResetAt: snapshot.primaryResetAt,
+          secondaryUsedPercent: snapshot.secondaryUsedPercent,
+          secondaryResetAt: snapshot.secondaryResetAt,
+          usageCheckedAt: snapshot.checkedAt,
+          // NB: no `version` bump and no `updatedAt` touch — usage is non-credential
+          // metadata and must NOT race the (id, version) refresh CAS in
+          // recordCodexTokenRefresh / setCodexCredentialStatus.
+        })
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          ),
+        )
+        .returning({ id: schema.codexSubscriptionCredentials.id });
+      const changed = updated.length > 0;
+      return { result: changed, changed };
+    },
+  );
+  return result;
 }
 
 export type CodexRotationSettings = {
@@ -8024,19 +9366,25 @@ export async function setCodexCredentialExhausted(
   credentialId: string,
   until: Date | null,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ exhaustedUntil: until })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
+  const { result } = await withCodexCapacityMutation(
+    db,
+    { workspaceId, reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed" },
+    async (tx) => {
+      const updated = await tx
+        .update(schema.codexSubscriptionCredentials)
+        .set({ exhaustedUntil: until })
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+          ),
+        )
+        .returning({ id: schema.codexSubscriptionCredentials.id });
+      const changed = updated.length > 0;
+      return { result: changed, changed };
+    },
+  );
+  return result;
 }
 
 /**

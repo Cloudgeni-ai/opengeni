@@ -513,6 +513,11 @@ export const SESSION_EVENT_TYPES = [
   "codex.account.switched",
   // OPE-21 metadata-only per-turn credential selection audit.
   "codex.credential.selected",
+  // OPE-21 durable zero-capacity wait lifecycle. These are system/runtime
+  // events, never synthetic user messages.
+  "codex.capacity.waiting",
+  "codex.capacity.resumed",
+  "codex.capacity.superseded",
   // Sandbox durability observability (mirror of contracts SessionEventType):
   // box lifecycle + manifest-env drift, attributable from the DB alone.
   "sandbox.box.created",

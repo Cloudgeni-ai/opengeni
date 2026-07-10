@@ -249,7 +249,11 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
 // P3: PATCH /codex/settings — the rotation toggle/strategy write path. db accessors
 // are spied (poison db), so the route's validation + permission gate is what's tested.
 describe("PATCH /codex/settings — rotation settings", () => {
-  function spySettings(): { ensure: ReturnType<typeof spyOn>; update: ReturnType<typeof spyOn> } {
+  function spySettings(): {
+    ensure: ReturnType<typeof spyOn>;
+    update: ReturnType<typeof spyOn>;
+    mutation: ReturnType<typeof spyOn>;
+  } {
     const ensure = spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined);
     const update = spyOn(opengeniDb, "updateCodexRotationSettings").mockResolvedValue({
       activeCredentialId: ID_A,
@@ -257,9 +261,16 @@ describe("PATCH /codex/settings — rotation settings", () => {
       leaseRotationEnabled: true,
       rotationStrategy: "most_remaining",
     });
+    const mutation = spyOn(opengeniDb, "withCodexCapacityMutation").mockImplementation(
+      async (_db, _input, mutate) => {
+        const result = await mutate({} as never);
+        return { result: result.result, wakeTargets: [] };
+      },
+    );
     restores.push(() => ensure.mockRestore());
     restores.push(() => update.mockRestore());
-    return { ensure, update };
+    restores.push(() => mutation.mockRestore());
+    return { ensure, update, mutation };
   }
 
   test("enables rotation and returns the effective settings", async () => {

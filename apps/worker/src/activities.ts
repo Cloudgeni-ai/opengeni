@@ -6,6 +6,7 @@ import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
+import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createGoalActivities } from "./activities/goals";
@@ -26,6 +27,10 @@ export type {
   IndexDocumentInput,
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
+  CodexCapacityWaitRef,
+  GetCodexCapacityWaitInput,
+  ReconcileCodexCapacityWaitInput,
+  ReconcileCodexCapacityWaitResult,
   PauseGoalForInterruptInput,
   RequeueTurnAfterWorkerDeathInput,
   RequeueTurnAfterWorkerDeathResult,
@@ -119,6 +124,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
     ...createGoalActivities(services),
+    ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
@@ -140,6 +146,8 @@ export const markSessionIdle = defaultActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
 export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
 export const pauseGoalForInterrupt = defaultActivities.pauseGoalForInterrupt;
+export const getCodexCapacityWait = defaultActivities.getCodexCapacityWait;
+export const reconcileCodexCapacityWait = defaultActivities.reconcileCodexCapacityWait;
 export const reapSandboxLeases = defaultActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultActivities.reapExpiredFileUploads;
 export const verifyRigChange = defaultActivities.verifyRigChange;

@@ -32,13 +32,19 @@ provider exhaustion independently and rotates among its own alternatives.
 When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
 `acquireCodexCredentialLease` before model/tool preparation:
 
-1. Start one RLS-scoped Postgres transaction and verify the turn belongs to the
-   exact account/workspace.
-2. Materialize and lock that workspace's `codex_rotation_settings` row with
+1. Start one RLS-scoped Postgres transaction and materialize/lock that
+   workspace's `codex_rotation_settings` row with
    `FOR UPDATE`. Concurrent replicas wait; they do not `SKIP LOCKED`.
+2. Lock the durable turn for share and verify it belongs to the exact
+   account/workspace. If a downstream policy supplies an opaque accepted-turn
+   scope resolver, resolve it from that locked turn metadata while the rotation
+   transaction remains held.
 3. Reap expired workspace leases and read all workspace credentials plus the
    count of unexpired leases held by other turns.
-4. Run the pure strategy and revalidate its chosen id against that candidate set.
+4. Offer a live same-turn lease or validated frozen run-state credential to the
+   pure strategy against the complete workspace rows. Only if this is a new
+   allocation may an optional downstream policy filter the candidate rows. Run
+   the strategy and revalidate its chosen id against that resulting set.
 5. Upsert the unique `(workspace_id, turn_id)` lease, increment the selected
    credential's server-held fairness cursor, and advance the active pointer in
    the same transaction.
@@ -59,6 +65,14 @@ explicit session pin wins while eligible; a pinned credential that becomes
 exhausted, unauthorized, forbidden, or otherwise quarantined may fail over to a
 healthy workspace alternative. `rotation_enabled=false` and
 `drain_then_next` remain explicit sticky product policies.
+
+Named pool membership is intentionally not an OPE-21 concept. The generic
+`CodexCredentialLeasePolicyScopeResolver<TPolicyScope>` and
+`CodexCredentialLeaseCandidateFilter<TPolicyScope>` seams let a downstream
+accepted-turn policy pass a private scope (including its policy hash) into the
+existing rotation-row transaction. OPE-21 stores no pool table or membership
+rule. The new-allocation filter runs only after exact live/frozen same-turn reuse,
+so a later membership/default change cannot move an already accepted holder.
 
 `codex_subscription_credentials.allocator_enabled` is a separate, additive
 new-allocation gate (default `true`); it is not credential health. Setting it
@@ -87,6 +101,42 @@ Both the five-hour and weekly allowance windows bind. A cached capped window who
 provider reset timestamp has elapsed becomes eligible immediately; an all-capped
 pool performs one bounded live usage refresh before idling. Unknown reset data
 always yields a positive bounded delay, never a zero-delay loop.
+
+If no healthy candidate exists for an active goal, `armCodexCapacityWait`
+atomically marks the blocked turn failed once, releases its credential lease,
+idles the session with reason `codex_capacity`, writes the audit events, and
+creates or advances one `codex_capacity_waiters` row. The common lock order is
+workspace rotation row → session → goal → blocked turn → live credential lease
+(when reactive) → waiter. A reactive arm must still own the exact
+holder/generation and worker-redispatch fence. The row records goal/control
+generation, accepted `policyHash`, the earliest authoritative reset (when known),
+bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
+credential material or provider body.
+
+`reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
+under the same rotation-row transaction. It accepts the same opaque
+accepted-turn scope resolver/new-allocation filter as acquisition, so a named
+pool policy can return per-pool diagnostics without union ranking or duplicating
+the waiter. Unavailable decisions return `earliestResetAt`, `resetKind`
+(`authoritative` or `bounded_refresh`), and optional secret-safe diagnostics;
+unknown resets exponentially back off from one to fifteen minutes without
+running a model. Availability commits one system
+`goal.continuation` event and one queued turn, preserving model, reasoning,
+resources, tools, and sandbox policy from the blocked turn. It does not create a
+`user.message` or replay the failed turn row. A second timer/signal observes the
+waiter as resumed/stale and enqueues nothing.
+
+`withCodexCapacityMutation` is the same-transaction mutation/outbox seam for any
+eligibility or future pool membership/default write: it locks the workspace
+rotation row first, applies the mutation, increments matching waiter wake
+revisions only when truth changed, and returns secret-safe signal targets.
+`listPendingCodexCapacityWakeTargets` repairs commit→signal loss. The session
+workflow's `codexCapacityChanged` signal is only a nudge; the Postgres revision
+is authoritative. The workflow reconstructs pending timers on worker/Temporal
+restart and `continueAsNew`, while `validateCodexCapacityResumeTurn` closes the
+wake→claim race against user queue, pause/stop, goal/control/policy changes, and
+duplicate turns before provider/model/tool/billing work starts. Reset/boost
+entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
@@ -184,7 +234,10 @@ correlate those alerts with `codex.credential.selected`,
   `apps/worker/test/codex-usage-limit.test.ts`, and
   `packages/codex/test/fetch.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
-  `packages/db/test/codex-credential-leases.test.ts`.
+  `packages/db/test/codex-credential-leases.test.ts` and
+  `packages/db/test/codex-capacity-waiters.test.ts`.
+- Real Temporal signal/timer/restart/continue-as-new coverage:
+  `test/integration/temporal-workflow.integration.ts`.
 - Production release proof must additionally show concurrent live turns selecting
   distinct eligible credential ids and one controlled exhausted credential
   recovering on another id without a duplicate turn/message.

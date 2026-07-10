@@ -364,6 +364,44 @@ function earliestReset(
 }
 
 /**
+ * Earliest provider/cooldown timestamp that is actually authoritative. The
+ * ranker's `availableAt` deliberately synthesizes a positive default for
+ * unknown/stale state; durable capacity waits must distinguish that bounded
+ * refresh backoff from a real provider reset timer.
+ */
+export function authoritativeCodexCapacityResetAt(
+  accounts: CodexRotationAccount[],
+  nearExhaustionPct: number,
+  now: Date,
+): Date | null {
+  const future: Date[] = [];
+  for (const account of accounts) {
+    if (!account.allocatorEnabled || account.status !== "active") continue;
+    if (account.exhaustedUntil && account.exhaustedUntil.getTime() > now.getTime()) {
+      future.push(account.exhaustedUntil);
+    }
+    if (
+      (account.primaryUsedPercent ?? 0) >= nearExhaustionPct &&
+      account.primaryResetAt &&
+      account.primaryResetAt.getTime() > now.getTime()
+    ) {
+      future.push(account.primaryResetAt);
+    }
+    if (
+      (account.secondaryUsedPercent ?? 0) >= nearExhaustionPct &&
+      account.secondaryResetAt &&
+      account.secondaryResetAt.getTime() > now.getTime()
+    ) {
+      future.push(account.secondaryResetAt);
+    }
+  }
+  if (future.length === 0) return null;
+  return future.reduce((earliest, candidate) =>
+    candidate.getTime() < earliest.getTime() ? candidate : earliest,
+  );
+}
+
+/**
  * The bounded all-capped idle delay: clamp(earliestResetAt − now) into
  * [MIN_IDLE_MS, maxMs]. NEVER 0 and NEVER negative, so a null / elapsed / unknown
  * reset cannot collapse the hold into a tight re-dispatch loop (invariant 4). The two

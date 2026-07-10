@@ -27,6 +27,7 @@ import { activity, workflowFailureMessage } from "./activities";
  * while keeping continueAsNew rare enough that it is not a per-turn cost.
  */
 const TURNS_PER_RUN_BACKSTOP = 2_000;
+const CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP = 512;
 
 /**
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
@@ -87,6 +88,7 @@ export const userMessage = defineSignal<[string]>("userMessage");
 export const queueChanged = defineSignal("queueChanged");
 export const approvalDecision = defineSignal<[string]>("approvalDecision");
 export const interrupt = defineSignal<[string]>("interrupt");
+export const codexCapacityChanged = defineSignal<[number]>("codexCapacityChanged");
 
 export type SessionWorkflowInput = {
   accountId: string;
@@ -98,16 +100,21 @@ export type SessionWorkflowInput = {
   // the boundary without simulating thousands of turns. Never gates correctness
   // — continueAsNewSuggested is the real-world trigger.
   maxTurnsPerRun?: number;
+  // Test-only override for the durable capacity-wait continue-as-new
+  // backstop. Production uses CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP.
+  maxCapacityChecksPerRun?: number;
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
   const approvalQueue: string[] = [];
   let interruptedEventId: string | null = null;
   let wakeups = 0;
+  let capacityWakeups = 0;
   // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
   // for the history-overflow guard below; bounded growth is what makes a
   // weeks-long session survivable.
   let turnsThisRun = 0;
+  let capacityChecksThisRun = 0;
 
   setHandler(userMessage, () => {
     wakeups += 1;
@@ -121,6 +128,75 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   setHandler(interrupt, (eventId) => {
     interruptedEventId = eventId;
   });
+  setHandler(codexCapacityChanged, () => {
+    capacityWakeups += 1;
+  });
+
+  async function waitForCodexCapacity(initial: activities.CodexCapacityWaitRef): Promise<void> {
+    let current = initial;
+    for (;;) {
+      if (interruptedEventId !== null) {
+        return;
+      }
+      const seenWakeups = wakeups;
+      const seenCapacityWakeups = capacityWakeups;
+      const parsedDeadline = Date.parse(current.nextCheckAt);
+      const timerMs = Number.isFinite(parsedDeadline)
+        ? Math.max(0, parsedDeadline - Date.now())
+        : 0;
+      let cause: activities.ReconcileCodexCapacityWaitInput["cause"] = "timer";
+      if (timerMs > 0) {
+        await condition(
+          () =>
+            interruptedEventId !== null ||
+            wakeups !== seenWakeups ||
+            capacityWakeups !== seenCapacityWakeups,
+          timerMs,
+        );
+        if (interruptedEventId !== null) {
+          return;
+        }
+        cause =
+          wakeups !== seenWakeups
+            ? "queue"
+            : capacityWakeups !== seenCapacityWakeups
+              ? "signal"
+              : "timer";
+      }
+      const result = await activity.reconcileCodexCapacityWait({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waiterId: current.waiterId,
+        generation: current.generation,
+        cause,
+      });
+      if (result.action !== "waiting") {
+        return;
+      }
+      capacityChecksThisRun += 1;
+      const capacityCheckBackstop =
+        input.maxCapacityChecksPerRun ?? CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP;
+      if (
+        interruptedEventId === null &&
+        (workflowInfo().continueAsNewSuggested || capacityChecksThisRun >= capacityCheckBackstop)
+      ) {
+        // The waiter/outbox is durable in Postgres. A fresh workflow run reads
+        // it before goal continuation, reconstructs its timer, and turns any
+        // unobserved wake revision into an immediate evaluation.
+        await continueAsNew<typeof sessionWorkflow>({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
+          ...(input.maxCapacityChecksPerRun !== undefined
+            ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
+        });
+      }
+      current = result;
+    }
+  }
 
   while (true) {
     // History-overflow guard. The top of the loop is the only safe
@@ -162,6 +238,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
+          ...(input.maxCapacityChecksPerRun !== undefined
+            ? { maxCapacityChecksPerRun: input.maxCapacityChecksPerRun }
+            : {}),
         });
       }
     }
@@ -172,6 +251,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       workflowId,
     });
     if (!turn) {
+      // A durable Codex capacity waiter replaces the generic goal continuation
+      // loop. This read also repairs the DB-commit -> activity-return boundary:
+      // if runAgentTurn committed the waiter and then its worker died, the fresh
+      // workflow reconstructs the timer here instead of synthesizing work.
+      if (interruptedEventId === null && patched("codex-capacity-wait-v1")) {
+        const capacityWait = await activity.getCodexCapacityWait({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
+        if (capacityWait) {
+          await waitForCodexCapacity(capacityWait);
+          continue;
+        }
+      }
       if (interruptedEventId === null) {
         // With an active goal, idling out is replaced by a synthesized
         // continuation turn; the queue (any non-terminal turn) always wins and
@@ -347,6 +440,16 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.kind === "failure") {
+      // A capacity settlement may have committed just before the activity
+      // transport/worker failed. Recover that durable boundary before generic
+      // failSession can overwrite the capacity-idle session.
+      if (patched("codex-capacity-wait-v1")) {
+        const capacityWait = await activity.getCodexCapacityWait({ workspaceId, sessionId });
+        if (capacityWait) {
+          await waitForCodexCapacity(capacityWait);
+          return true;
+        }
+      }
       // An ungraceful worker death never reaches the activity's graceful
       // preemption path — it surfaces here as a heartbeat-timeout failure.
       // Conversation truth was still dual-written during the turn, so the
@@ -400,6 +503,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // checkpointed conversation truth and put the turn back on the queue
       // before completing. Loop again so the next claim re-dispatches it on a
       // healthy worker (a pending interrupt is honored first by the loop).
+      return true;
+    }
+
+    if (outcome.result.capacityWait) {
+      await waitForCodexCapacity(outcome.result.capacityWait);
       return true;
     }
 

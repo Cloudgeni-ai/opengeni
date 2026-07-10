@@ -560,6 +560,7 @@ export const sessions = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceIdentity: uniqueIndex("sessions_workspace_id_idx").on(table.workspaceId, table.id),
     workspaceCreated: index("sessions_workspace_created_idx").on(
       table.workspaceId,
       table.createdAt,
@@ -940,11 +941,82 @@ export const sessionGoals = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceIdentity: uniqueIndex("session_goals_workspace_id_idx").on(
+      table.workspaceId,
+      table.id,
+    ),
     workspaceSession: uniqueIndex("session_goals_workspace_session_idx").on(
       table.workspaceId,
       table.sessionId,
     ),
     status: index("session_goals_workspace_status_idx").on(table.workspaceId, table.status),
+  }),
+);
+
+// OPE-21: one durable, coalescing capacity waiter per session. The row is both
+// the wait state and the commit->signal outbox: capacity mutations increment
+// wakeRevision in the SAME transaction as the mutation, while the session
+// workflow advances observedWakeRevision only after it has re-evaluated the
+// allocator. Temporal signals are therefore repairable nudges rather than the
+// source of truth. No credential material or provider response is stored here.
+//
+// The session/goal/turn foreign keys are declared in migration 0049 so the
+// table keeps the same composite workspace-integrity posture as credential
+// leases. OPE-18 may later supply a non-zero controlGeneration; legacy rows use
+// zero and remain fenced by goal version + session/queue/turn truth. OPE-32
+// supplies policyHash when accepted-turn pool routing lands.
+export const codexCapacityWaiters = pgTable(
+  "codex_capacity_waiters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    goalId: uuid("goal_id").notNull(),
+    blockedTurnId: uuid("blocked_turn_id").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    generation: integer("generation").notNull().default(1),
+    status: text("status").notNull().default("waiting"), // waiting | resumed | superseded
+    goalVersion: integer("goal_version").notNull(),
+    controlGeneration: integer("control_generation").notNull().default(0),
+    policyHash: text("policy_hash"),
+    earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
+    nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
+    resetKind: text("reset_kind").notNull(), // authoritative | bounded_refresh
+    refreshAttempt: integer("refresh_attempt").notNull().default(0),
+    // Coalescing outbox generation. Every eligibility-affecting mutation bumps
+    // wakeRevision. Duplicate/lost Temporal signals are harmless because only
+    // the row-locked evaluator moves observedWakeRevision and may enqueue work.
+    wakeRevision: integer("wake_revision").notNull().default(1),
+    observedWakeRevision: integer("observed_wake_revision").notNull().default(0),
+    lastWakeReason: text("last_wake_reason").notNull().default("capacity_wait_armed"),
+    resumedTurnId: uuid("resumed_turn_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceSession: uniqueIndex("codex_capacity_waiters_workspace_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
+    workspaceId: uniqueIndex("codex_capacity_waiters_workspace_id_idx").on(
+      table.workspaceId,
+      table.id,
+    ),
+    pending: index("codex_capacity_waiters_pending_idx").on(
+      table.workspaceId,
+      table.status,
+      table.nextCheckAt,
+    ),
+    wakeRepair: index("codex_capacity_waiters_wake_repair_idx").on(
+      table.status,
+      table.wakeRevision,
+      table.observedWakeRevision,
+    ),
   }),
 );
 

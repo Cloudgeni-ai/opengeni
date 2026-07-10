@@ -1062,6 +1062,7 @@ describe("OPE-21 pin and rollout policy", () => {
     leaseRotationEnabled: true,
     rotationStrategy: "most_remaining",
     existingCredentialId,
+    policyScope: null,
   });
 
   test("a healthy explicit pin wins", () => {
@@ -1203,6 +1204,7 @@ describe("OPE-21 pin and rollout policy", () => {
         leaseRotationEnabled: true,
         rotationStrategy: "round_robin",
         existingCredentialId: null,
+        policyScope: null,
       },
       leasingEnabled: true,
       sessionPinnedCredentialId: null,
@@ -1215,17 +1217,18 @@ describe("OPE-21 pin and rollout policy", () => {
 
   test("same-turn frozen continuation keeps a healthy disabled credential without admitting new work", () => {
     const accounts = [leasedAcct("frozen", { allocatorEnabled: false }), leasedAcct("eligible")];
-    const context = {
+    const frozenContext = {
       accounts,
       activeCredentialId: "frozen",
       rotationEnabled: true,
       leaseRotationEnabled: true,
       rotationStrategy: "most_remaining",
       existingCredentialId: null,
+      policyScope: null,
     };
     expect(
       selectCodexCredentialLeaseForTurn({
-        context,
+        context: frozenContext,
         leasingEnabled: true,
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: "frozen",
@@ -1236,7 +1239,7 @@ describe("OPE-21 pin and rollout policy", () => {
     ).toBe("frozen");
     expect(
       selectCodexCredentialLeaseForTurn({
-        context,
+        context: frozenContext,
         leasingEnabled: true,
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: "frozen",

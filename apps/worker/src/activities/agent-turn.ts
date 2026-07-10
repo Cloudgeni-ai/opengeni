@@ -18,6 +18,7 @@ import {
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
+  armCodexCapacityWait,
   heartbeatCodexCredentialLeaseUntil,
   releaseCodexCredentialLease,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
@@ -44,6 +45,7 @@ import {
   requeuePreemptedTurn,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
+  validateCodexCapacityResumeTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionStatus,
@@ -106,6 +108,7 @@ import {
   settingsWithSessionMcpServersForRun,
 } from "./capabilities";
 import {
+  authoritativeCodexCapacityResetAt,
   chooseRotationActive,
   chooseShardedHome,
   classifyCodexPin,
@@ -1574,6 +1577,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      const capacityWaiterId = turn.metadata?.codexCapacityWaiterId;
+      const capacityWaitGeneration = turn.metadata?.codexCapacityWaitGeneration;
+      if (
+        typeof capacityWaiterId === "string" &&
+        typeof capacityWaitGeneration === "number" &&
+        Number.isInteger(capacityWaitGeneration)
+      ) {
+        const capacityResumeValidation = await validateCodexCapacityResumeTurn(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          waiterId: capacityWaiterId,
+          generation: capacityWaitGeneration,
+        });
+        if (!capacityResumeValidation.valid) {
+          if (capacityResumeValidation.events.length > 0) {
+            try {
+              await bus.publish(
+                input.workspaceId,
+                input.sessionId,
+                capacityResumeValidation.events,
+              );
+            } catch {
+              // Postgres is authoritative; SSE replay/gap fill repairs fanout.
+            }
+          }
+          // A manual pause/stop, newer queue item, or policy/control change won
+          // after the capacity wake. The DB helper cancelled this claimed turn;
+          // no provider, model, tool, sandbox, or billing work may start.
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return { status: "cancelled" };
+        }
+      }
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -1746,6 +1783,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leaseRotationEnabled: false,
             rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
             existingCredentialId: null,
+            policyScope: null,
           });
           leased = {
             ...selected,
@@ -1794,6 +1832,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leaseRotationEnabled: false,
               rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
               existingCredentialId: null,
+              policyScope: null,
             });
             leased = {
               ...selected,
@@ -1860,6 +1899,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           publish &&
           turnId
         ) {
+          const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
+            () => null,
+          );
+          if (goal?.status === "active") {
+            const armed = await armCodexCapacityWait(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              workflowId: input.workflowId,
+              goalId: goal.id,
+              goalVersion: goal.version,
+              earliestResetAt: null,
+              resetKind: "bounded_refresh",
+              failurePayload: {
+                error: "All connected Codex subscriptions are disabled for new allocations.",
+                code: "codex_allocator_disabled",
+                detail: "waiting for a credential to be re-enabled, reconnected, or added",
+              },
+            });
+            if (armed.action === "waiting") {
+              try {
+                await bus.publish(input.workspaceId, input.sessionId, armed.events);
+              } catch {
+                // Durable DB events + waiter are authoritative.
+              }
+              turnMetricOutcome = "failed";
+              activityStatus = "idle";
+              return {
+                status: "idle",
+                capacityWait: {
+                  waiterId: armed.waiter.id,
+                  generation: armed.waiter.generation,
+                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                  wakeRevision: armed.waiter.wakeRevision,
+                },
+              };
+            }
+          }
           await publish(
             [
               {
@@ -1905,6 +1983,43 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "all connected Codex subscriptions are rate-limited",
             { allAccounts: true },
           );
+          if (goalActive && goal) {
+            const authoritativeResetAt = authoritativeCodexCapacityResetAt(
+              leased.accounts,
+              settings.codexRotationNearExhaustionPct,
+              new Date(),
+            );
+            const armed = await armCodexCapacityWait(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              workflowId: input.workflowId,
+              goalId: goal.id,
+              goalVersion: goal.version,
+              earliestResetAt: authoritativeResetAt,
+              resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+              failurePayload,
+            });
+            if (armed.action === "waiting") {
+              try {
+                await bus.publish(input.workspaceId, input.sessionId, armed.events);
+              } catch {
+                // Durable DB events + waiter are authoritative.
+              }
+              turnMetricOutcome = "failed";
+              activityStatus = "idle";
+              return {
+                status: "idle",
+                capacityWait: {
+                  waiterId: armed.waiter.id,
+                  generation: armed.waiter.generation,
+                  nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                  wakeRevision: armed.waiter.wakeRevision,
+                },
+              };
+            }
+          }
           await publish(
             [
               // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
@@ -4154,6 +4269,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let rotationResumeMs: number | null = null; // 0 ⇒ a candidate is available; re-dispatch now
         let rotationResumeIdleUntilReset = false; // circuit-breaker fall (Finding 1b) ⇒ MANDATORY hold
         let allCappedResetAt: Date | null = null; // set ⇒ every account capped; idle until this
+        let capacityAuthoritativeResetAt: Date | null = null;
         if (effectiveCodexCredentialId) {
           const [rotation, sessionCodex] = await Promise.all([
             getCodexRotationSettings(db, input.workspaceId).catch(() => null),
@@ -4233,6 +4349,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   settings.codexRotationNearExhaustionPct,
                   new Date(),
                 );
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
+                  fresh,
+                  settings.codexRotationNearExhaustionPct,
+                  new Date(),
+                );
               }
             } else {
               const decision = chooseRotationActive({
@@ -4267,6 +4388,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               } else if (decision.kind === "allCapped") {
                 rotated = true;
                 allCappedResetAt = decision.earliestResetAt;
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
+                  fresh,
+                  settings.codexRotationNearExhaustionPct,
+                  new Date(),
+                );
               }
               // kind:"none" → fall through to today's single-account idle.
             }
@@ -4287,6 +4413,60 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               usageLimit,
               error instanceof Error ? error.message : String(error),
             );
+        // A live alternate is still handled by the existing immediate,
+        // same-policy continuation path. When no alternate exists (all capped,
+        // or a single non-rotating account), persist the native capacity wait
+        // instead of an in-memory delay/user-message recovery.
+        if (goalActive && goal && rotationResumeMs === null) {
+          const providerResetAt =
+            capacityAuthoritativeResetAt ??
+            (usageLimit.resetsInSeconds !== null &&
+            Number.isFinite(usageLimit.resetsInSeconds) &&
+            usageLimit.resetsInSeconds > 0
+              ? new Date(Date.now() + Math.ceil(usageLimit.resetsInSeconds) * 1000)
+              : null);
+          const armed = await armCodexCapacityWait(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            workflowId: input.workflowId,
+            goalId: goal.id,
+            goalVersion: goal.version,
+            earliestResetAt: providerResetAt,
+            resetKind: providerResetAt ? "authoritative" : "bounded_refresh",
+            failurePayload,
+            runStateSaved,
+            ...(codexLeaseHolderId && codexLeaseGeneration !== null
+              ? {
+                  leaseFence: {
+                    holderId: codexLeaseHolderId,
+                    generation: codexLeaseGeneration,
+                  },
+                  expectedRedispatches: redispatchesAtDispatch,
+                }
+              : {}),
+          });
+          if (armed.action === "waiting") {
+            try {
+              await bus.publish(input.workspaceId, input.sessionId, armed.events);
+            } catch {
+              // Durable DB events + waiter are authoritative.
+            }
+            turnMetricOutcome = "failed";
+            activityStatus = "idle";
+            activityError = error;
+            return {
+              status: "idle",
+              capacityWait: {
+                waiterId: armed.waiter.id,
+                generation: armed.waiter.generation,
+                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
+                wakeRevision: armed.waiter.wakeRevision,
+              },
+            };
+          }
+        }
         await publish(
           [
             // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to

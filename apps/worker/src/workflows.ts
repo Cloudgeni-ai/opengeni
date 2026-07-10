@@ -1,6 +1,7 @@
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
   approvalDecision,
+  codexCapacityChanged,
   interrupt,
   queueChanged,
   sessionWorkflow,

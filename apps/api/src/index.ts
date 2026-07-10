@@ -77,6 +77,22 @@ export async function createTemporalWorkflowClient(
         signal: "queueChanged",
       });
     },
+    signalCodexCapacity: async ({
+      accountId,
+      workspaceId,
+      sessionId,
+      workflowId,
+      wakeRevision,
+    }) => {
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [{ accountId, workspaceId, sessionId }],
+        signal: "codexCapacityChanged",
+        signalArgs: [wakeRevision],
+      });
+    },
     signalApprovalDecision: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("approvalDecision", eventId);
     },

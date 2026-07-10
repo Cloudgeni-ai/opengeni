@@ -20,6 +20,16 @@ export type SessionWorkflowClient = {
     sessionId: string;
     workflowId: string;
   }) => Promise<void>;
+  // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.
+  // Optional for embedded/back-compat clients: callers may fall back to the
+  // generic queueChanged wake because Postgres wakeRevision is authoritative.
+  signalCodexCapacity?: (input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    workflowId: string;
+    wakeRevision: number;
+  }) => Promise<void>;
   signalApprovalDecision: (input: {
     sessionId: string;
     eventId: string;

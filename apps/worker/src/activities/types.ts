@@ -67,6 +67,32 @@ export type ActivityServices = {
   connectionCredentials?: ConnectionCredentialsPort | null;
 };
 
+export type CodexCapacityWaitRef = {
+  waiterId: string;
+  generation: number;
+  nextCheckAt: string;
+  wakeRevision: number;
+};
+
+export type GetCodexCapacityWaitInput = {
+  workspaceId: string;
+  sessionId: string;
+};
+
+export type ReconcileCodexCapacityWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waiterId: string;
+  generation: number;
+  cause: "timer" | "signal" | "queue" | "recovery";
+};
+
+export type ReconcileCodexCapacityWaitResult =
+  | ({ action: "waiting" } & CodexCapacityWaitRef)
+  | { action: "resumed"; turnId: string }
+  | { action: "superseded" | "stale" };
+
 export type ActivityDependencies = Partial<ActivityServices>;
 
 export type RunAgentTurnInput = {
@@ -171,4 +197,8 @@ export type RunAgentTurnResult = {
   // "continue now" (invariant 4: NO THRASH). Distinct from a normal continueDelayMs:0
   // which legitimately means "a rotation candidate is ready, re-dispatch immediately".
   idleUntilReset?: boolean;
+  // Durable native zero-pool wait. Unlike continueDelayMs, this reference is
+  // persisted in Postgres and reconstructed after workflow/worker restart.
+  // The workflow must not call maybeContinueGoal while this waiter is active.
+  capacityWait?: CodexCapacityWaitRef;
 };

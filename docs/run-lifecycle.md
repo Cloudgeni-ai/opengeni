@@ -58,6 +58,20 @@ failures never rotate or blindly replay. The allocator, strict workspace scope,
 five-hour reset semantics, and rollout fence are canonical in
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md).
 
+When every allocator-enabled Codex credential is unavailable and the session
+still has an active goal, this recovery boundary becomes a durable capacity
+wait. The worker atomically settles the blocked turn once, idles the session,
+and stores one session-scoped waiter fenced by goal version, control generation,
+accepted policy hash, and blocked turn. The workflow waits for the earliest
+authoritative provider reset or a bounded secret-safe metadata refresh, and
+capacity-affecting writes increment a same-transaction wake revision before a
+best-effort Temporal signal. Duplicate/lost signals are harmless: row-locked
+re-evaluation is the sole continuation writer, and unobserved revisions repair
+commit-to-signal loss after restart or `continueAsNew`. Capacity return enqueues
+one normal, queue-respecting goal continuation with the blocked turn's effective
+model/reasoning/resources/tools; it does not create a user message, replay the
+failed full turn, poll with inference, or redeem a reset/boost entitlement.
+
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
 `runAgentTurn` forces client-side compaction through a bounded recovery

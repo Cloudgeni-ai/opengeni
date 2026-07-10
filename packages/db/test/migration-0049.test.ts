@@ -196,6 +196,7 @@ describe("migration 0049 (Codex credential leases)", () => {
           leaseRotationEnabled: false,
           rotationStrategy: "most_remaining",
           existingCredentialId: null,
+          policyScope: null,
         },
         leasingEnabled: false,
         sessionPinnedCredentialId: null,
@@ -351,5 +352,6 @@ function rollbackSelectionContext(credentialA: string, credentialB: string) {
     leaseRotationEnabled: true,
     rotationStrategy: "most_remaining",
     existingCredentialId: null,
+    policyScope: null,
   };
 }
