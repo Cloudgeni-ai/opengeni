@@ -50,6 +50,8 @@
 //! final flag ignored.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use opengeni_agent_engine::flow::{AckOutcome, AttachOutcome, CreditFlow};
@@ -136,6 +138,10 @@ pub struct JobParams {
     pub deadline: Option<Instant>,
     /// Pump tuning.
     pub config: JobConfig,
+    /// The pump publishes its high watermark (the last assigned seq) here after
+    /// every append, attached or not — the supervisor reads it to answer
+    /// `OpQuery`/`OpStatus.next_seq` without reaching into the pump.
+    pub watermark: Arc<AtomicU64>,
 }
 
 /// The typed terminal outcome of a job — the engine-side form of the wire
@@ -271,6 +277,7 @@ pub async fn run_job(params: JobParams, mailbox: mpsc::Receiver<JobCommand>, hoo
         spool_dir,
         deadline,
         config,
+        watermark,
     } = params;
 
     let stdout = child.stdout.take();
@@ -282,6 +289,7 @@ pub async fn run_job(params: JobParams, mailbox: mpsc::Receiver<JobCommand>, hoo
         retention_config: retention,
         flow: CreditFlow::new(),
         hooks,
+        watermark,
         child,
         child_done: false,
         child_code: -1,
@@ -345,6 +353,8 @@ struct Pump {
     retention_config: RetentionConfig,
     flow: CreditFlow,
     hooks: JobHooks,
+    /// Mirror of `retention.high_seq()` for supervisor-side status answers.
+    watermark: Arc<AtomicU64>,
     child: ContainedExec,
     child_done: bool,
     /// The child's exit code once `child_done` (`-1` for signal deaths,
@@ -588,24 +598,38 @@ impl Pump {
     /// below the retention floor resumes at the floor (those frames are freed;
     /// serving from the floor is safe because server reassembly is
     /// seq-idempotent).
+    ///
+    /// The tail is walked through [`RetentionLog::replay_bounded`] with the
+    /// remaining send allowance as the budget, so a huge spooled backlog is
+    /// read in window-sized bites instead of being materialized whole.
     fn catch_up(&mut self) -> Result<(), RetentionError> {
-        if !self.flow.is_attached() {
-            return Ok(());
-        }
-        let from = self.flow.sent_hi().max(self.retention.floor());
-        if from >= self.retention.high_seq() {
-            return Ok(());
-        }
-        let frames = self.retention.replay(from)?;
-        for frame in frames {
-            if !self.flow.may_send(payload_len(&frame.body)) {
-                // Window exhausted mid-catch-up: the cursor holds; the next
-                // current-generation ack resumes from here.
-                break;
+        loop {
+            if !self.flow.is_attached() {
+                return Ok(());
             }
-            self.send(frame);
+            let from = self.flow.sent_hi().max(self.retention.floor());
+            if from >= self.retention.high_seq() {
+                return Ok(());
+            }
+            let budget = self.flow.allowance();
+            if budget == 0 {
+                return Ok(());
+            }
+            let frames = self.retention.replay_bounded(from, budget)?;
+            if frames.is_empty() {
+                return Ok(());
+            }
+            for frame in frames {
+                if !self.flow.may_send(payload_len(&frame.body)) {
+                    // Window exhausted mid-catch-up: the cursor holds; the
+                    // next current-generation ack resumes from here.
+                    return Ok(());
+                }
+                self.send(frame);
+            }
+            // Everything in this bite was sent; loop for the next bite (the
+            // cursor advanced, so the walk always terminates).
         }
-        Ok(())
     }
 
     /// Appends a frame to retention and emits it immediately iff the pump is
@@ -618,6 +642,7 @@ impl Pump {
             && self.flow.may_send(len);
         let live_copy = live.then(|| body.clone());
         let seq = self.retention.append(body)?;
+        self.watermark.store(seq, Ordering::Relaxed);
         if let Some(body) = live_copy {
             self.send(Frame { seq, body });
         }
@@ -833,6 +858,7 @@ mod tests {
                     let _ = exit_tx.send((exit_seq, exit.clone()));
                 },
             );
+            let watermark = Arc::new(AtomicU64::new(0));
             let params = JobParams {
                 child,
                 stdin: self.stdin,
@@ -840,6 +866,7 @@ mod tests {
                 spool_dir: dir.path().join("spool"),
                 deadline: self.deadline_after.map(|after| Instant::now() + after),
                 config: self.config,
+                watermark: watermark.clone(),
             };
             let task = tokio::spawn(run_job(params, cmd_rx, hooks));
             TestJob {
@@ -849,6 +876,7 @@ mod tests {
                 task,
                 dir,
                 wait: self.wait,
+                watermark,
             }
         }
     }
@@ -860,6 +888,7 @@ mod tests {
         task: tokio::task::JoinHandle<()>,
         dir: tempfile::TempDir,
         wait: Duration,
+        watermark: Arc<AtomicU64>,
     }
 
     impl TestJob {
@@ -1038,6 +1067,11 @@ mod tests {
         let (exit_seq, exit) = job.wait_exit().await;
         assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
         assert_eq!(exit_seq, Some(2), "data seq 1, exit seq 2");
+        assert_eq!(
+            job.watermark.load(Ordering::Relaxed),
+            2,
+            "the shared watermark mirrors the high seq for OpStatus.next_seq"
+        );
         job.no_frame_for(Duration::from_millis(150)).await;
 
         // A late consumer collects the completed op by attach + replay.

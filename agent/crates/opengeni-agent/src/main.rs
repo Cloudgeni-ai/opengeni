@@ -34,9 +34,17 @@
 #![doc(html_root_url = "https://docs.rs/opengeni-agent")]
 
 mod backoff;
+// The impure HostCapacity sampler (LIMITS-DOCTRINE rule R); feeds the engine
+// assembly's derived budgets. Wired to the supervisor in the next commit.
+#[allow(dead_code)]
+mod capacity;
 mod cli;
 mod config;
 mod dispatch;
+// The impure assembly of the pure op engine (registry/admission/derived
+// budgets/spool ledger/routing). Wired to the supervisor in the next commit.
+#[allow(dead_code)]
+mod engine;
 mod enrollment;
 mod instance_lock;
 // The op-stream job pump. Fully unit-tested here; the supervisor wires it to the
