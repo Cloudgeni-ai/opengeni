@@ -143,6 +143,23 @@ cannot exit and leave invisible same-group work behind.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
+### Streaming exec (op-stream)
+
+Runners that advertise the `op_stream` capability can serve exec over the
+op-stream protocol instead of the monolithic request/reply, when the server
+also sets `OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default off; the legacy
+exec remains the permanent fallback wire form and the only form for older
+runners). Output streams as sequenced, credit-flowed frames the runner retains
+for replay: a connection blip mid-command detaches instead of killing the
+child, and the server re-attaches and collects the complete output byte-exact
+(blake3-verified). Each exec carries a durable op id derived from the model's
+tool call, and starting an op is idempotent by that id — a worker-death
+re-dispatch that re-executes the same tool call attaches to the
+already-running or completed op instead of re-running the command. The
+oversized-reply wall does not apply on this path; output is instead bounded by
+the runner's retention quotas, and exceeding them fails typed with exact
+counters, never silently truncated.
+
 ## Swap the active sandbox
 
 A session points at one active sandbox at a time. `swapActiveSandbox` re-points
