@@ -20,6 +20,8 @@
 //!   no randomness — callers pass `now_ms`, tests own time.
 //!
 //! Modules:
+//! * [`admission`] — class-aware job admission with a bounded fair wait
+//!   queue and a host-pressure gate.
 //! * [`retention`] — the seq-addressed retention log (memory ring → disk
 //!   spool) that backs replay-after-reattach.
 //! * [`flow`] — the credit window (send-side flow control + attach-generation
@@ -27,6 +29,7 @@
 //! * [`registry`] — op lifecycle: idempotent begin, cancel tombstones,
 //!   bounded completed-op retention with loud eviction.
 
+pub mod admission;
 pub mod flow;
 pub mod registry;
 pub mod retention;
