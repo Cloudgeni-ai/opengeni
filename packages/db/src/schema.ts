@@ -1342,6 +1342,9 @@ export const enrollments = pgTable(
       .notNull()
       .default("whole-machine"),
     hasDisplay: boolean("has_display").notNull().default(false),
+    // Refreshed from every connect Hello (Capabilities.op_stream); false for
+    // agents predating the op-stream engine.
+    opStream: boolean("op_stream").notNull().default(false),
     // When the machine has a display it CANNOT capture (macOS Screen Recording / TCC
     // not granted), the agent reports has_display=false AND a human, actionable reason
     // here (e.g. "grant Screen Recording in System Settings"). NULL means capture is
