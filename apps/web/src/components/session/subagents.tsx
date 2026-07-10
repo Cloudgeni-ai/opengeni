@@ -254,7 +254,7 @@ export function SpawnedByBreadcrumb({
       to="/workspaces/$workspaceId/sessions/$sessionId"
       params={{ workspaceId, sessionId: parent.id }}
       title={`Spawned by ${label}`}
-      className="inline-flex min-w-0 items-center gap-1 text-2xs text-fg-subtle outline-none transition-colors hover:text-fg-muted focus-visible:text-fg-muted"
+      className="inline-flex min-w-0 items-center gap-1 text-2xs text-fg-muted outline-none transition-colors hover:text-fg focus-visible:text-fg"
     >
       <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
       <span className="min-w-0 truncate">spawned by {label}</span>

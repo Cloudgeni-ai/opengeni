@@ -73,6 +73,7 @@
     "@uiw/react-codemirror": "^4.25.10"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.10.2",
     "@changesets/cli": "^2.27.11",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/api-router": "workspace:*",

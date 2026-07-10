@@ -64,7 +64,10 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5">
+    <header
+      data-ope26-session-header
+      className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5"
+    >
       {leading}
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 overflow-hidden">
         {/* Child sessions link back to the manager that spawned them. */}
@@ -76,10 +79,10 @@ export function SessionHeader({
             soup — the model·effort token (the model earns a touch more weight,
             the effort stays quiet), then the sandbox pill (its own shape, no
             interposed dot), then the codex indicator. */}
-        <div className="hidden min-w-0 items-center gap-2 overflow-hidden text-2xs leading-4 text-fg-subtle sm:flex">
+        <div className="hidden min-w-0 items-center gap-2 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex">
           <span className="min-w-0 shrink truncate font-medium text-fg-muted">
             {session.model}
-            <span className="font-normal text-fg-subtle">
+            <span className="font-normal text-fg-muted">
               {" "}
               · {String(session.metadata.reasoningEffort ?? "low")}
             </span>

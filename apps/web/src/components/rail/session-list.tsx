@@ -343,12 +343,23 @@ export function SessionList() {
     return preferred >= 0 ? preferred : flat.length > 0 ? 0 : -1;
   }, [activeSessionId, flat, focusedSessionId]);
 
-  // Keep the keyboard focus index pinned to the active session when the route
-  // changes (so ArrowDown continues from where the user is).
+  // Follow the active session only when the ROUTE changes. Polls, pagination,
+  // pin reorder, and cross-device reconciliation also replace `flat`; those
+  // refreshes must preserve a keyboard user's still-visible roving target
+  // instead of stealing focus back to the route-active row.
+  const previousActiveSessionId = useRef(activeSessionId);
   useEffect(() => {
-    if (activeSessionId && flat.some((session) => session.id === activeSessionId)) {
-      setFocusedSessionId(activeSessionId);
-    }
+    const routeChanged = previousActiveSessionId.current !== activeSessionId;
+    previousActiveSessionId.current = activeSessionId;
+    setFocusedSessionId((current) => {
+      if (!routeChanged && current && flat.some((session) => session.id === current)) {
+        return current;
+      }
+      if (activeSessionId && flat.some((session) => session.id === activeSessionId)) {
+        return activeSessionId;
+      }
+      return flat[0]?.id ?? null;
+    });
   }, [activeSessionId, flat]);
 
   const onKeyDown = useCallback(
@@ -408,7 +419,7 @@ export function SessionList() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1 pt-1">
-        <span className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+        <span className="text-2xs font-semibold uppercase tracking-wider text-fg-muted">
           Sessions
         </span>
         <Tooltip>
@@ -419,7 +430,7 @@ export function SessionList() {
               size="icon-xs"
               aria-label="New session"
               onClick={rail.startNewSession}
-              className="text-fg-muted hover:text-fg"
+              className="text-fg-muted hover:text-fg pointer-coarse:size-11"
             >
               <PlusIcon className="size-3.5" />
             </Button>
@@ -453,8 +464,9 @@ export function SessionList() {
 
       <div
         ref={listRef}
-        role="list"
+        role="region"
         aria-label="Sessions"
+        data-ope26-session-list
         onKeyDown={onKeyDown}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
@@ -578,10 +590,17 @@ function SessionGroup(props: {
 }) {
   return (
     <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
-      <p className="px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+      <p
+        id={`session-group-${props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+        className="px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+      >
         {props.label}
       </p>
-      <div className="grid min-w-0 grid-cols-1 gap-px">
+      <div
+        role="list"
+        aria-label={`${props.label} sessions`}
+        className="grid min-w-0 grid-cols-1 gap-px"
+      >
         {props.nodes.map((node) => (
           <SessionTreeRow
             key={node.session.id}
@@ -703,7 +722,7 @@ function SessionRow(props: {
   const indentStyle = props.depth > 0 ? { paddingLeft: props.depth * 14 } : undefined;
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-11",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-11 pointer-coarse:py-0",
     "hover:bg-surface-2",
     props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
     props.focused && !props.active ? "bg-surface-2/60" : "",
@@ -786,7 +805,7 @@ function SessionRow(props: {
             }${hasChildren ? `. ${props.childCount} spawned sessions` : ""}`}
             onFocus={props.onFocus}
             onClick={() => props.onSelect(props.session.id)}
-            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
+            className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
           >
             <RailStatusDot status={props.session.status} />
             <span className="sr-only">{props.session.status}. </span>
@@ -797,7 +816,7 @@ function SessionRow(props: {
                 the activity isn't hidden with the subtree; the count badge sits
                 beside it. Both stay visible on hover (the time yields instead). */}
             {hasChildren ? (
-              <span className="flex shrink-0 items-center gap-1 text-2xs tabular-nums text-fg-subtle">
+              <span className="flex shrink-0 items-center gap-1 text-2xs tabular-nums text-fg-muted">
                 {!props.expanded && props.hasActiveDescendant ? (
                   <span className="relative inline-flex size-1.5 rounded-full bg-status-running">
                     <span className="absolute inset-0 animate-og-pulse rounded-full bg-status-running" />
@@ -809,7 +828,7 @@ function SessionRow(props: {
             {/* Relative time is visible at rest (the list is grouped by recency),
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
-            <span className="shrink-0 text-2xs tabular-nums text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
+            <span className="shrink-0 text-2xs tabular-nums text-fg-muted transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
               {relativeTimeLabel(props.session.updatedAt)}
             </span>
           </button>

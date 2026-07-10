@@ -45,7 +45,7 @@ export function SessionSandboxSwitcher({
   const hasChoices = machines.length > 1 && fleet.canAttach;
   if (!hasChoices) {
     return (
-      <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-subtle">
+      <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-muted">
         <ServerIcon className="size-3 shrink-0" />
         <span className="shrink-0">on</span>
         <span className="truncate text-fg-muted">{activeName}</span>
@@ -60,7 +60,7 @@ export function SessionSandboxSwitcher({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-subtle hover:border-border hover:bg-surface-2 hover:text-fg"
+          className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <ServerIcon className="size-3 shrink-0" />
           {/* Natural-language "on {target}" — semantic without the colon-label

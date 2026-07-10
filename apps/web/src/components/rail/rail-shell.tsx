@@ -231,6 +231,7 @@ export function RailShell({ children }: { children: ReactNode }) {
             <SheetContent
               side="left"
               showCloseButton={false}
+              aria-label="Session navigation"
               className="w-[260px] max-w-[85vw] gap-0 p-0"
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
