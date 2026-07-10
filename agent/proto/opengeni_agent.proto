@@ -893,6 +893,10 @@ message OpAttach {
   // The runner serves replay/credit only for the HIGHEST generation seen; a
   // lower-generation (zombie) consumer's acks are ignored.
   uint64 attach_generation = 3;
+  // The fresh send-credit window for the resumed attachment, in bytes
+  // (0 => reuse the window granted at OpStart). OpAck's absolute credit_bytes
+  // resizes it thereafter.
+  uint64 window_bytes = 4;
 }
 
 // The current status of an op (server←runner reply to OpCancel/OpQuery/OpAttach,

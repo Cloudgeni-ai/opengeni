@@ -119,7 +119,6 @@ pub async fn serve_exec<P: Platform>(
                     final_ack: true,
                 })
                 .await;
-            engine.final_ack(&op_id);
 
             let taken = std::mem::take(&mut *buffers.lock().expect("reply buffer lock"));
             let response = build_reply(request_id, &record, taken, breaker);

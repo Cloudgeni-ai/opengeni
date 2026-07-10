@@ -1620,6 +1620,12 @@ export interface OpAttach {
    * lower-generation (zombie) consumer's acks are ignored.
    */
   attachGeneration: string;
+  /**
+   * The fresh send-credit window for the resumed attachment, in bytes
+   * (0 => reuse the window granted at OpStart). OpAck's absolute credit_bytes
+   * resizes it thereafter.
+   */
+  windowBytes: string;
 }
 
 /**
@@ -9703,7 +9709,7 @@ export const OpQuery: MessageFns<OpQuery> = {
 };
 
 function createBaseOpAttach(): OpAttach {
-  return { opId: "", fromSeq: "0", attachGeneration: "0" };
+  return { opId: "", fromSeq: "0", attachGeneration: "0", windowBytes: "0" };
 }
 
 export const OpAttach: MessageFns<OpAttach> = {
@@ -9716,6 +9722,9 @@ export const OpAttach: MessageFns<OpAttach> = {
     }
     if (message.attachGeneration !== "0") {
       writer.uint32(24).uint64(message.attachGeneration);
+    }
+    if (message.windowBytes !== "0") {
+      writer.uint32(32).uint64(message.windowBytes);
     }
     return writer;
   },
@@ -9751,6 +9760,14 @@ export const OpAttach: MessageFns<OpAttach> = {
           message.attachGeneration = reader.uint64().toString();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.windowBytes = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -9777,6 +9794,11 @@ export const OpAttach: MessageFns<OpAttach> = {
         : isSet(object.attach_generation)
         ? globalThis.String(object.attach_generation)
         : "0",
+      windowBytes: isSet(object.windowBytes)
+        ? globalThis.String(object.windowBytes)
+        : isSet(object.window_bytes)
+        ? globalThis.String(object.window_bytes)
+        : "0",
     };
   },
 
@@ -9791,6 +9813,9 @@ export const OpAttach: MessageFns<OpAttach> = {
     if (message.attachGeneration !== "0") {
       obj.attachGeneration = message.attachGeneration;
     }
+    if (message.windowBytes !== "0") {
+      obj.windowBytes = message.windowBytes;
+    }
     return obj;
   },
 
@@ -9802,6 +9827,7 @@ export const OpAttach: MessageFns<OpAttach> = {
     message.opId = object.opId ?? "";
     message.fromSeq = object.fromSeq ?? "0";
     message.attachGeneration = object.attachGeneration ?? "0";
+    message.windowBytes = object.windowBytes ?? "0";
     return message;
   },
 };

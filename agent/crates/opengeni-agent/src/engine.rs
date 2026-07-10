@@ -33,14 +33,16 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use opengeni_agent_engine::admission::{
     AdmissionConfig, AdmissionOutcome, AdmissionSnapshot, AdmissionState, JobClass, RefusalReason,
 };
-use opengeni_agent_engine::registry::{BeginOutcome, OpRegistry, QueryAnswer, RegistryConfig};
+use opengeni_agent_engine::registry::{
+    BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig,
+};
 use opengeni_agent_engine::retention::RetentionConfig;
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
 use opengeni_agent_platform::ContainedExec;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use crate::job::{run_job, JobCommand, JobConfig, JobExit, JobHooks, JobParams};
+use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
 
 /// The admission-fairness origin for legacy request/reply work (legacy
 /// requests carry no session identity; they share one fairness domain).
@@ -111,6 +113,9 @@ pub struct OpHandles {
     pub exit: Arc<OnceLock<JobExit>>,
     /// The legacy adapter's encoded `ControlResponse`, for dedup replays.
     pub legacy_reply: Arc<OnceLock<Vec<u8>>>,
+    /// The send window granted at OpStart — the fallback for an `OpAttach`
+    /// that carries `window_bytes: 0` (reuse the original grant).
+    pub window_bytes: Arc<AtomicU64>,
 }
 
 /// Outcome of [`Engine::start_job`].
@@ -256,7 +261,6 @@ impl Engine {
     }
 
     /// The last installed capacity sample (heartbeat telemetry).
-    #[allow(dead_code)] // wired at the op-stream heartbeat-telemetry step
     #[must_use]
     pub fn capacity(&self) -> HostCapacity {
         *self.capacity.read().expect("capacity lock")
@@ -492,7 +496,17 @@ impl Engine {
         let engine = self.clone();
         let id = op_id.clone();
         tokio::spawn(async move {
-            run_job(params, mailbox_rx, hooks).await;
+            let end = run_job(params, mailbox_rx, hooks).await;
+            if end == JobEnd::FinalAcked {
+                // The pump is the single authority on final-ack acceptance
+                // (it fences consumer generations); only then may the
+                // registry entry GC quietly.
+                engine
+                    .registry
+                    .lock()
+                    .expect("registry lock")
+                    .final_ack(&id);
+            }
             engine.routes.lock().expect("routes lock").remove(&id);
             engine.release_spool(granted);
         });
@@ -506,7 +520,6 @@ impl Engine {
     /// Delivers a wire command to a job's mailbox without blocking. `false`
     /// when the op is unknown/ended or its mailbox is saturated (fire-and-
     /// forget wire messages are healed by repetition — ruling M1).
-    #[allow(dead_code)] // wired at the op-stream serving step (OpAck/OpAttach routing)
     pub fn route_command(&self, op_id: &OpId, cmd: JobCommand) -> bool {
         let Some(sender) = self.routes.lock().expect("routes lock").get(op_id).cloned() else {
             return false;
@@ -531,19 +544,35 @@ impl Engine {
     }
 
     /// The op's current phase (for `OpQuery`/`OpStarted` answers).
-    #[allow(dead_code)] // wired at the op-stream serving step (OpQuery answers)
     #[must_use]
     pub fn query(&self, op_id: &OpId) -> QueryAnswer {
         self.registry.lock().expect("registry lock").query(op_id)
     }
 
-    /// Marks an op's result fully consumed (wire `OpAck.final`): the registry
-    /// entry becomes GC-eligible. The pump learns through its own mailbox.
-    pub fn final_ack(&self, op_id: &OpId) {
-        self.registry
+    /// Requests cancellation: flags/tombstones in the registry (ruling M5) and,
+    /// for a running op, delivers the kill to its pump. Idempotent.
+    pub fn cancel(&self, op_id: &OpId) -> CancelOutcome {
+        let outcome = self
+            .registry
             .lock()
             .expect("registry lock")
-            .final_ack(op_id);
+            .cancel(op_id, self.now_ms());
+        if outcome == CancelOutcome::KillRunning {
+            self.route_command(op_id, JobCommand::Cancel);
+        }
+        outcome
+    }
+
+    /// The live state handles of a known (Running/Complete) op.
+    #[must_use]
+    pub fn handles(&self, op_id: &OpId) -> Option<OpHandles> {
+        use opengeni_agent_engine::registry::OpEntry;
+        match self.registry.lock().expect("registry lock").get_mut(op_id) {
+            Some(OpEntry::Running { state, .. } | OpEntry::Complete { state, .. }) => {
+                Some(state.clone())
+            }
+            None => None,
+        }
     }
 
     /// One GC pass: expire tombstones, drop consumed/expired completed ops
@@ -845,25 +874,27 @@ mod tests {
             _ => panic!("expected Known"),
         }
 
-        // Final ack ends the pump task; the route disappears.
-        engine.final_ack(&op);
-        assert!(
-            started
-                .mailbox
-                .send(JobCommand::Ack {
-                    generation: 1,
-                    acked_seq: u64::MAX,
-                    credit_bytes: 0,
-                    final_ack: true,
-                })
-                .await
-                .is_err()
-                || {
-                    // The pump may still be draining the send; wait for the route to
-                    // clear as the task ends.
-                    true
-                }
-        );
+        // Collection requires an attached consumer: strict generation fencing
+        // refuses acks (including final) from a generation that never
+        // attached. Attach as generation 1, then final-ack; the pump ends and
+        // the wrapper marks the registry entry final-acked (JobEnd::FinalAcked).
+        let _ = started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 1,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await;
+        let _ = started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: u64::MAX,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await;
         for _ in 0..200 {
             if !engine.route_command(&op, JobCommand::Detach) {
                 break;

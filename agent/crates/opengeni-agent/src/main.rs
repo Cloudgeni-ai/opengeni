@@ -44,6 +44,7 @@ mod instance_lock;
 mod job;
 mod legacy;
 mod metrics;
+mod ops;
 mod service;
 mod supervisor;
 mod uninstall;

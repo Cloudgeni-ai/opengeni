@@ -14,11 +14,13 @@
 //!   the gate is `flow.allowance() > 0` (window exhaustion stops reads → the
 //!   child blocks on write(2) → end-to-end throttle); while detached, and while
 //!   draining after child exit, the gate is retention headroom (ruling M2).
-//! * Ack accounting order is THE documented one (flow.rs module docs): freed
-//!   sent-bytes are computed against retention BEFORE `retention.ack`, then
-//!   `flow.on_ack`. The retention floor advances on any generation's ack
-//!   (ruling B2: acks are taken monotonically regardless of source); the
-//!   window/credit side ignores stale generations.
+//! * Ack accounting: freed sent-bytes are computed against retention BEFORE
+//!   anything is freed (the frames are gone afterwards), and EVERY ack side
+//!   effect — the credit window, the retention floor, final-ack honoring — is
+//!   gated on the flow's `Applied` outcome (strict generation fencing,
+//!   design-review ruling 2026-07-10: only the exact current attach
+//!   generation speaks for the live consumer; stale AND future generations
+//!   are refused wholesale).
 //! * Frames are emitted in strictly ascending seq order — the engine's
 //!   `on_sent` contract. When a frame cannot be sent at append time (window
 //!   exhausted, detached, or mid-replay exhaustion) it stays retained and
@@ -71,8 +73,9 @@ pub enum JobCommand {
     /// A cumulative ack + absolute credit grant from the consumer
     /// (wire: `OpAck`).
     Ack {
-        /// The consumer's attach generation (stale generations are ignored on
-        /// the credit side; the retention floor advances regardless).
+        /// The consumer's attach generation. Only the exact current
+        /// generation applies (strict fencing); every side effect of a
+        /// refused ack is discarded.
         generation: u64,
         /// Cumulative: every frame with `seq <= acked_seq` is acknowledged.
         acked_seq: u64,
@@ -96,7 +99,6 @@ pub enum JobCommand {
     Detach,
     /// Kill the job (wire: `OpCancel`). Terminates the process group and
     /// produces `Exit{cancelled}`. Idempotent; a no-op once terminal.
-    #[allow(dead_code)] // constructed by the op-stream OpCancel route (next step)
     Cancel,
 }
 
@@ -265,12 +267,29 @@ impl JobHooks {
     }
 }
 
+/// How a job task ended — the pump is the single authority on final-ack
+/// acceptance (it fences generations), so the caller uses this to decide
+/// whether the registry entry may GC quietly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobEnd {
+    /// A current-generation final ack confirmed full consumption of the
+    /// terminal frame.
+    FinalAcked,
+    /// The mailbox was dropped/closed before a final ack (orphaned op, or
+    /// supervisor-driven GC).
+    Orphaned,
+}
+
 /// Runs one job to completion: pump the child's output into retention and (as
 /// credit allows) out through the emit hook, service the mailbox, enforce the
 /// deadline, then linger post-exit for result collection. See module docs for
 /// the full contract. The future resolves when the job is fully collected
 /// (current-generation final ack) or abandoned (mailbox dropped).
-pub async fn run_job(params: JobParams, mailbox: mpsc::Receiver<JobCommand>, hooks: JobHooks) {
+pub async fn run_job(
+    params: JobParams,
+    mailbox: mpsc::Receiver<JobCommand>,
+    hooks: JobHooks,
+) -> JobEnd {
     let JobParams {
         mut child,
         stdin,
@@ -310,11 +329,12 @@ pub async fn run_job(params: JobParams, mailbox: mpsc::Receiver<JobCommand>, hoo
     };
     // Boxed: the pump future carries the read buffers' state machine and this
     // sits at a task's root, so one heap allocation per job is the right trade.
-    Box::pin(pump.run()).await;
+    let end = Box::pin(pump.run()).await;
 
     // Op teardown removes the whole spool dir (retention.rs relies on this for
     // any segment an unlink failure leaked). Best-effort; absent dir is fine.
     let _ = std::fs::remove_dir_all(&spool_dir);
+    end
 }
 
 /// Feeds the child's stdin from a buffer on a side task (writing inline could
@@ -381,7 +401,7 @@ struct Pump {
 impl Pump {
     /// The main loop: run until the child is reaped AND both pipes hit EOF,
     /// then emit the terminal record and linger for collection.
-    async fn run(mut self) {
+    async fn run(mut self) -> JobEnd {
         let period = self.config.progress_interval;
         let mut ticker = tokio::time::interval_at(self.started + period, period);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -457,12 +477,12 @@ impl Pump {
             }
         }
 
-        self.finish().await;
+        self.finish().await
     }
 
     /// Emits the terminal record exactly once, then lingers serving
     /// replay/acks until a current-generation final ack or mailbox drop.
-    async fn finish(mut self) {
+    async fn finish(mut self) -> JobEnd {
         let outcome = self.pending_outcome.take().unwrap_or(JobOutcome::Exited {
             exit_code: self.child_code,
         });
@@ -501,6 +521,11 @@ impl Pump {
                 break;
             };
             self.handle_command(cmd);
+        }
+        if self.final_acked {
+            JobEnd::FinalAcked
+        } else {
+            JobEnd::Orphaned
         }
     }
 
@@ -548,20 +573,23 @@ impl Pump {
         self.child_done && self.stdout.is_none() && self.stderr.is_none()
     }
 
-    /// THE documented ack-accounting order (flow.rs module docs): freed
-    /// sent-bytes computed against retention BEFORE the floor moves, then the
-    /// flow update. Returns whether the credit side applied (current gen).
+    /// The ack-accounting order: freed sent-bytes are computed against
+    /// retention FIRST (the frames are gone once freed), then the flow rules
+    /// on the generation, and only an `Applied` outcome touches anything —
+    /// the retention floor moves and catch-up runs for the live consumer
+    /// alone (strict fencing: a zombie or never-attached generation's ack
+    /// must not free frames or grant credit). Returns whether it applied.
     fn apply_ack(&mut self, generation: u64, acked_seq: u64, credit_bytes: u64) -> bool {
         let upper = acked_seq.min(self.flow.sent_hi());
         let freed = self
             .retention
             .payload_bytes_in_range(self.retention.floor(), upper);
-        self.retention.ack(acked_seq);
         let applied = matches!(
             self.flow.on_ack(generation, credit_bytes, freed),
             AckOutcome::Applied
         );
         if applied {
+            self.retention.ack(acked_seq);
             self.drive_catch_up();
         }
         applied
@@ -803,6 +831,7 @@ mod tests {
         deadline_after: Option<Duration>,
         config: JobConfig,
         wait: Duration,
+        exit_payload_bytes: Option<usize>,
     }
 
     fn job(script: &str) -> JobBuilder {
@@ -813,6 +842,7 @@ mod tests {
             deadline_after: None,
             config: JobConfig::default(),
             wait: WAIT,
+            exit_payload_bytes: None,
         }
     }
 
@@ -843,6 +873,13 @@ mod tests {
             self
         }
 
+        /// Encode Exit frames as a fixed blob of this size (drives the
+        /// exit-cannot-be-retained path deterministically).
+        fn exit_payload(mut self, bytes: usize) -> Self {
+            self.exit_payload_bytes = Some(bytes);
+            self
+        }
+
         fn start(self) -> TestJob {
             let dir = tempfile::tempdir().expect("tempdir");
             let mut cmd = tokio::process::Command::new("/bin/sh");
@@ -853,11 +890,15 @@ mod tests {
             let (cmd_tx, cmd_rx) = mpsc::channel(64);
             let (frame_tx, frame_rx) = mpsc::unbounded_channel();
             let (exit_tx, exit_rx) = oneshot::channel();
+            let exit_payload_bytes = self.exit_payload_bytes;
             let hooks = JobHooks::new(
                 move |frame| {
                     let _ = frame_tx.send(frame);
                 },
-                |exit| format!("{exit:?}").into_bytes(),
+                move |exit| match exit_payload_bytes {
+                    Some(n) => vec![0xEE; n],
+                    None => format!("{exit:?}").into_bytes(),
+                },
                 move |exit_seq, exit: &JobExit| {
                     let _ = exit_tx.send((exit_seq, exit.clone()));
                 },
@@ -889,7 +930,7 @@ mod tests {
         commands: Option<mpsc::Sender<JobCommand>>,
         frames: mpsc::UnboundedReceiver<Frame>,
         exit: Option<oneshot::Receiver<(Option<u64>, JobExit)>>,
-        task: tokio::task::JoinHandle<()>,
+        task: tokio::task::JoinHandle<JobEnd>,
         dir: tempfile::TempDir,
         wait: Duration,
         watermark: Arc<AtomicU64>,
@@ -1352,11 +1393,10 @@ mod tests {
         assert_eq!(first.seq, 1);
         job.no_frame_for(Duration::from_millis(150)).await;
 
-        // A zombie generation-1 consumer acks with a huge grant: the credit
-        // side must ignore it — the pump stays throttled. (Its cumulative ack
-        // still advances the retention floor, per B2's "monotonic regardless
-        // of source"; that is exercised below when generation 2's ack finds
-        // zero freed bytes yet resumes on the absolute window replacement.)
+        // A zombie generation-1 consumer acks with a huge grant: STRICT
+        // fencing refuses it wholesale (design-review ruling 2026-07-10) —
+        // no credit, no retention-floor movement, no catch-up. The pump
+        // stays throttled.
         job.ack(1, 1, 1 << 20).await;
         job.no_frame_for(Duration::from_millis(250)).await;
 
@@ -1414,9 +1454,13 @@ mod tests {
 
     #[tokio::test]
     async fn retention_overflow_terminates_with_a_typed_exit() {
-        // 4 KiB memory cap, spooling disabled: retention can hold exactly four
-        // 1 KiB frames. The consumer grants credit far beyond retention while
-        // never acking, so reads outrun frees — the typed OP_OVERFLOW path.
+        // 4 KiB memory cap, spooling disabled. Retention is RECORD-denominated
+        // (payload + a per-frame overhead constant), so the exact frame count
+        // before overflow is the engine's business — the pins here are the
+        // TYPED death, the in-order emitted-then-silent frame stream, and (via
+        // an Exit payload larger than the whole budget) the exit-not-
+        // retainable path. The consumer grants credit far beyond retention
+        // while never acking, so reads outrun frees — the OP_OVERFLOW path.
         let mut job = job("while :; do head -c 1024 /dev/zero; done")
             .frame_bytes(1024)
             .retention(RetentionConfig {
@@ -1425,6 +1469,7 @@ mod tests {
                 spool_max_bytes: 0,
                 spool_segment_bytes: 4096,
             })
+            .exit_payload(8192)
             .start();
         job.attach(1, 0, 1 << 20).await;
 
@@ -1440,15 +1485,17 @@ mod tests {
             "retention is exhausted, so even the Exit frame cannot be retained"
         );
 
-        // Exactly the four retainable frames were emitted, and none after the
+        // The retainable frames were emitted in order; nothing follows the
         // typed death.
-        for expected_seq in 1..=4 {
-            assert_eq!(job.next_frame().await.seq, expected_seq);
+        let mut last_seq = 0;
+        while let Ok(Some(frame)) = timeout(Duration::from_millis(150), job.frames.recv()).await {
+            assert_eq!(frame.seq, last_seq + 1, "consecutive emission");
+            last_seq = frame.seq;
         }
-        job.no_frame_for(Duration::from_millis(150)).await;
+        assert!(last_seq >= 2, "several data frames flowed before the death");
 
         // The result is still collectable/finishable: a final ack ends the task.
-        job.final_ack(1, 4, 1 << 20).await;
+        job.final_ack(1, last_seq, 1 << 20).await;
         job.join().await;
     }
 

@@ -57,6 +57,14 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(5);
 const HOUSEKEEPING_TICK: Duration = Duration::from_secs(30);
 /// Host-capacity resample cadence (budgets track the host over time) — pacing.
 const CAPACITY_RESAMPLE: Duration = Duration::from_secs(60);
+/// Op frames queued toward the bulk publisher. A pipe diameter for the
+/// fire-and-forget lane: a full channel DROPS the frame (allowed — op frames
+/// are healed by gap-detection + OpAttach replay), it never blocks a pump.
+const BULK_CHANNEL_DEPTH: usize = 1024;
+
+/// The current generation's bulk frame channel: (subject, encoded OpFrame)
+/// pairs toward the bulk publisher task. `None` between generations.
+type BulkLane = Arc<std::sync::RwLock<Option<tokio::sync::mpsc::Sender<(String, Vec<u8>)>>>>;
 
 /// Errors that abort the supervisor's *current connection* (it then backs off and
 /// retries). Both variants are transient — a deliberate stop is a clean shutdown,
@@ -161,6 +169,12 @@ impl ShutdownSignal {
 struct WorkspaceLink {
     creds: StoredCredentials,
     epoch: Arc<EpochCell>,
+    /// The CURRENT generation's bulk frame channel (op-frame publishes ride a
+    /// second NATS connection so saturated op flow cannot head-of-line-block
+    /// control liveness — invariant #4). Job emit hooks read this per frame;
+    /// `None` between generations (frames drop; replay heals — fire-and-forget
+    /// by protocol design).
+    bulk_tx: BulkLane,
 }
 
 /// The supervisor owns the platform, the shared op engine, the workspace
@@ -196,6 +210,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             links: vec![WorkspaceLink {
                 creds,
                 epoch: Arc::new(EpochCell::default()),
+                bulk_tx: Arc::new(std::sync::RwLock::new(None)),
             }],
             agent_version: agent_version.into(),
             started: Instant::now(),
@@ -344,8 +359,42 @@ impl<P: Platform + 'static> Supervisor<P> {
         };
         debug!(subject = %link.creds.rpc_subject(), "subscribed to rpc subject");
 
-        self.serve_connection_generation(link, &client, subscription)
-            .await
+        // The ack subject rides the SAME control connection (PROTOCOL.md
+        // §Subjects: subscribed alongside rpc at establishment).
+        let ack_subscription = match client.subscribe(link.creds.ack_subject()).await {
+            Ok(sub) => sub,
+            Err(e) => return ConnectionOutcome::Disconnected(format!("ack subscribe failed: {e}")),
+        };
+
+        // The BULK connection: op frames publish here so a saturated stream
+        // can never head-of-line-block control liveness (invariant #4). Its
+        // loss is a generation loss (conservative: detach + reconnect).
+        let bulk_client = match self.connect(link).await {
+            Ok(client) => client,
+            Err(e) => return ConnectionOutcome::Disconnected(format!("bulk dial failed: {e}")),
+        };
+        let (bulk_tx, mut bulk_rx) =
+            tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
+        let publisher = tokio::spawn(async move {
+            while let Some((subject, bytes)) = bulk_rx.recv().await {
+                if let Err(error) = bulk_client.publish(subject, bytes.into()).await {
+                    // Fire-and-forget: a lost frame is healed by gap-detect +
+                    // OpAttach replay; never a reason to fail the op.
+                    warn!(%error, "op frame publish failed (replay heals)");
+                }
+            }
+        });
+        *link.bulk_tx.write().expect("bulk lock") = Some(bulk_tx);
+
+        let outcome = self
+            .serve_connection_generation(link, &client, subscription, ack_subscription)
+            .await;
+
+        // Tear the bulk lane down with the generation: hooks see None and
+        // drop frames until the next generation re-attaches consumers.
+        *link.bulk_tx.write().expect("bulk lock") = None;
+        publisher.abort();
+        outcome
     }
 
     /// Serves one subscribed NATS generation until shutdown or disconnect. Host
@@ -356,6 +405,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         link: &WorkspaceLink,
         client: &async_nats::Client,
         mut subscription: async_nats::Subscriber,
+        mut ack_subscription: async_nats::Subscriber,
     ) -> ConnectionOutcome {
         let mut heartbeat = tokio::time::interval(DEFAULT_HEARTBEAT);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -393,6 +443,22 @@ impl<P: Platform + 'static> Supervisor<P> {
                         warn!(error = %join_error, "control rpc task failed");
                     }
                 }
+                // Ack/credit frames: pure routing into the op pumps (the pump
+                // owns generation fencing and final-ack acceptance) — cheap,
+                // served inline.
+                ack = ack_subscription.next() => match ack {
+                    Some(message) => {
+                        match v1::OpAck::decode(message.payload.as_ref()) {
+                            Ok(ack) => crate::ops::handle_op_ack(&self.engine, &ack),
+                            Err(error) => warn!(%error, "undecodable OpAck dropped"),
+                        }
+                    }
+                    None => {
+                        break ConnectionOutcome::Disconnected(
+                            "ack subscription ended".to_string(),
+                        );
+                    }
+                },
                 // Decode + route inbound control work. Only `ping` executes
                 // inline; everything else runs on its own task through engine
                 // admission (fair ordering + derived breakers — never a cap).
@@ -484,6 +550,25 @@ impl<P: Platform + 'static> Supervisor<P> {
                 )
                 .await;
             }
+            Route::OpStart(start) => {
+                self.spawn_op_start(link, client, &request, start, reply, label, rpc_tasks);
+            }
+            Route::OpControl => {
+                use v1::control_request::Op;
+                let response = match &request.op {
+                    Some(Op::OpCancel(cancel)) => {
+                        crate::ops::serve_op_cancel(&self.engine, request_id, cancel)
+                    }
+                    Some(Op::OpQuery(query)) => {
+                        crate::ops::serve_op_query(&self.engine, request_id, query)
+                    }
+                    Some(Op::OpAttach(attach)) => {
+                        crate::ops::serve_op_attach(&self.engine, request_id, attach)
+                    }
+                    _ => unreachable!("classified OpControl"),
+                };
+                publish_response(client, reply, response, label, max_payload).await;
+            }
             Route::LegacyExec(exec) => {
                 let client = client.clone();
                 let platform = self.platform.clone();
@@ -521,6 +606,47 @@ impl<P: Platform + 'static> Supervisor<P> {
                 });
             }
         }
+    }
+
+    /// Spawns an `OpStart` onto its own task (admission may park) with the
+    /// frame sink bound to the op's subject on the link's CURRENT bulk lane
+    /// (`None` between generations — frames drop and OpAttach replay heals;
+    /// fire-and-forget by protocol design).
+    #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
+    fn spawn_op_start(
+        &self,
+        link: &WorkspaceLink,
+        client: &async_nats::Client,
+        request: &ControlRequest,
+        start: v1::OpStart,
+        reply: async_nats::Subject,
+        label: &'static str,
+        rpc_tasks: &mut JoinSet<()>,
+    ) {
+        let max_payload = client.server_info().max_payload;
+        let client = client.clone();
+        let engine = self.engine.clone();
+        let platform = self.platform.clone();
+        let ctx = self.ctx(link, max_payload);
+        let request_id = request.request_id.clone();
+        let (request_epoch, held_epoch) = (request.epoch, ctx.epoch);
+        let subject = link.creds.op_subject(&request_id);
+        let bulk = link.bulk_tx.clone();
+        let sink: crate::ops::FrameSink = Arc::new(move |bytes: Vec<u8>| {
+            if let Some(tx) = bulk.read().expect("bulk lock").as_ref() {
+                if tx.try_send((subject.clone(), bytes)).is_err() {
+                    debug!("bulk lane full/closed; op frame dropped (replay heals)");
+                }
+            }
+        });
+        rpc_tasks.spawn(async move {
+            let response = if request_epoch != 0 && request_epoch < held_epoch {
+                dispatch::fenced_reply(request_id, request_epoch, held_epoch)
+            } else {
+                crate::ops::serve_op_start(&engine, &platform, sink, request_id, start).await
+            };
+            publish_response(&client, reply, response, label, max_payload).await;
+        });
     }
 
     /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
@@ -652,10 +778,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             consented_screen_control: link.creds.consented_screen_control,
             display,
             desktop_unavailable_reason: capture_blocked.unwrap_or_default(),
-            // The op-stream protocol types exist but no runtime serves them yet, so
-            // this runner does NOT advertise the capability — the server keeps using
-            // the legacy monolithic ops. Flipped to true when the op engine is wired.
-            op_stream: false,
+            // The op engine is wired: OpStart/OpCancel/OpQuery/OpAttach are
+            // served, frames publish on the bulk lane, acks route to pumps.
+            // The server uses this path iff its own feature flag is also on
+            // (PROTOCOL.md §Compatibility — no flag day, rollback safe).
+            op_stream: true,
         }
     }
 
@@ -689,6 +816,10 @@ impl<P: Platform + 'static> Supervisor<P> {
         let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
             .await
             .unwrap_or_default();
+        // The upward capacity report (LIMITS-DOCTRINE: the runner holds no
+        // concurrency policy — the server paces against these figures).
+        let capacity = self.engine.capacity();
+        let admission = self.engine.admission_snapshot();
         let event = AgentEvent {
             agent_id: link.creds.agent_id.clone(),
             event: Some(Event::Heartbeat(Heartbeat {
@@ -697,6 +828,19 @@ impl<P: Platform + 'static> Supervisor<P> {
                 active_sessions: 0,
                 metrics: Some(metrics),
                 draining: false,
+                capacity: Some(v1::HostCapacitySample {
+                    mem_available_bytes: capacity.mem_available_bytes,
+                    disk_free_bytes: capacity.disk_free_bytes,
+                    fd_headroom: capacity.fd_headroom,
+                    pid_headroom: capacity.pid_headroom,
+                    nproc: capacity.nproc,
+                }),
+                admission: Some(v1::AdmissionTelemetry {
+                    light_running: admission.light_running as u64,
+                    light_queued: admission.light_queued as u64,
+                    heavy_running: admission.heavy_running as u64,
+                    heavy_queued: admission.heavy_queued as u64,
+                }),
             })),
         };
         client
@@ -740,6 +884,11 @@ enum Route {
     Liveness,
     /// Runs as an engine job through the legacy exec adapter.
     LegacyExec(v1::ExecRequest),
+    /// Starts an op-stream job (admission may park; runs on its own task).
+    OpStart(v1::OpStart),
+    /// Op-control (cancel/query/attach): engine state + routing only — served
+    /// inline like liveness (admission gates job STARTS, never byte flow).
+    OpControl,
     /// Runs on its own task behind an engine admission ticket of this class.
     Work(JobClass),
 }
@@ -752,6 +901,8 @@ fn classify(request: &ControlRequest) -> Route {
     match &request.op {
         Some(Op::Ping(_)) => Route::Liveness,
         Some(Op::Exec(req)) => Route::LegacyExec(req.clone()),
+        Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
+        Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
         Some(Op::Git(_)) => Route::Work(JobClass::Heavy),
         _ => Route::Work(JobClass::Light),
     }
@@ -1080,6 +1231,162 @@ mod tests {
                 .is_ok(),
             "supervisor.run should return after a clean shutdown"
         );
+    }
+
+    /// The op-stream wire round trip against a REAL nats-server + real
+    /// supervisor: OpStart over rpc → OpFrames on the op subject (via the bulk
+    /// connection) → cumulative + final OpAck on the ack subject → OpQuery.
+    /// This is the end-to-end proof of the served protocol (invariant #1's
+    /// delivery half: every byte arrives, digest-verified).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one linear wire scenario; splitting would hide the story
+    async fn op_stream_full_wire_round_trip() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(nats_bin) = it::find_nats_server() else {
+            eprintln!("SKIP op_stream_full_wire_round_trip: no nats-server on PATH or /nix/store");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&nats_bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+
+        let op_id = "wire-op-1";
+        // Subscription-before-start (protocol invariant).
+        let mut op_frames = client
+            .subscribe(format!("agent.hx-test-ws.hx-test-agent.op.{op_id}"))
+            .await
+            .expect("subscribe op subject");
+        let mut events = client
+            .subscribe("agent.hx-test-ws.hx-test-agent.events".to_string())
+            .await
+            .expect("subscribe events");
+
+        let supervisor = Supervisor::new(
+            Arc::new(NativePlatform::with_root(std::env::temp_dir())),
+            it::test_credentials(&url),
+            "test-0.0.0",
+        );
+        let shutdown = supervisor.shutdown_handle();
+        let run = tokio::spawn(async move { supervisor.run().await });
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(10), |e| matches!(
+                e.event,
+                Some(Event::Heartbeat(_))
+            ))
+            .await,
+            "agent online"
+        );
+
+        // OpStart{exec} over the rpc subject.
+        let start = ControlRequest {
+            request_id: op_id.to_string(),
+            epoch: 0,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["printf over-the-wire".to_string()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 0,
+                deadline_ms: 0,
+                origin_id: "session-e2e".to_string(),
+            })),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.request(
+                "agent.hx-test-ws.hx-test-agent.rpc".to_string(),
+                start.encode_to_vec().into(),
+            ),
+        )
+        .await
+        .expect("OpStarted within timeout")
+        .expect("request ok");
+        let started = v1::ControlResponse::decode(reply.payload.as_ref()).expect("decodes");
+        match started.result {
+            Some(v1::control_response::Result::OpStart(s)) => {
+                assert!(s.accepted, "fresh op accepted");
+            }
+            other => panic!("expected OpStarted, got {other:?} / {:?}", started.error),
+        }
+
+        // Collect frames off the op subject until the Exit frame.
+        let mut stdout = Vec::new();
+        let (exit, exit_seq) = loop {
+            let msg = tokio::time::timeout(Duration::from_secs(10), op_frames.next())
+                .await
+                .expect("frame within timeout")
+                .expect("op subject open");
+            let frame = v1::OpFrame::decode(msg.payload.as_ref()).expect("frame decodes");
+            assert_eq!(frame.op_id, op_id);
+            match frame.body {
+                Some(v1::op_frame::Body::Data(d)) if d.channel == v1::OpChannel::Stdout as i32 => {
+                    stdout.extend_from_slice(&d.bytes);
+                }
+                Some(v1::op_frame::Body::Exit(e)) => {
+                    break (e, frame.seq);
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(stdout, b"over-the-wire");
+        assert_eq!(exit.exit_code, 0);
+        assert_eq!(
+            exit.digests.get("stdout").map(String::as_str),
+            Some(blake3::hash(b"over-the-wire").to_hex().as_str()),
+            "digest proves byte-exact wire assembly"
+        );
+
+        // Final cumulative ack on the ack subject (generation 1 = the
+        // runner-side initial attachment).
+        client
+            .publish(
+                "agent.hx-test-ws.hx-test-agent.ack".to_string(),
+                v1::OpAck {
+                    op_id: op_id.to_string(),
+                    acked_seq: exit_seq,
+                    credit_bytes: 1 << 20,
+                    r#final: true,
+                    attach_generation: 1,
+                }
+                .encode_to_vec()
+                .into(),
+            )
+            .await
+            .expect("ack publish");
+
+        // OpQuery answers COMPLETE with the terminal record.
+        let query = ControlRequest {
+            request_id: "q-wire-1".to_string(),
+            epoch: 0,
+            op: Some(v1::control_request::Op::OpQuery(v1::OpQuery {
+                op_id: op_id.to_string(),
+            })),
+        };
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request(
+                "agent.hx-test-ws.hx-test-agent.rpc".to_string(),
+                query.encode_to_vec().into(),
+            ),
+        )
+        .await
+        .expect("status within timeout")
+        .expect("request ok");
+        let status = v1::ControlResponse::decode(reply.payload.as_ref()).expect("decodes");
+        match status.result {
+            Some(v1::control_response::Result::OpStatus(s)) => {
+                assert_eq!(s.state, v1::OpState::Complete as i32);
+                assert_eq!(s.exit.expect("terminal record").exit_code, 0);
+                assert_eq!(s.next_seq, exit_seq + 1);
+            }
+            other => panic!("expected OpStatus, got {other:?} / {:?}", status.error),
+        }
+
+        shutdown.request();
+        let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
     }
 
     /// Test-only integration helpers (a throwaway local nats-server + event
