@@ -373,6 +373,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       expect(modal.sandbox.kind).toBe("modal");
       expect(modal.sandbox.name).toBe("extra-box");
       expect(modal.sandbox.enrollmentId).toBeNull();
+      // Honest copy (issue #341): the note must say plainly that the provisioned Modal
+      // box is NOT yet attachable as a swap target — not imply an attach that is rejected.
+      expect(modal.note).toMatch(/not yet attachable|not supported yet|rejected/i);
     }
   }, 60_000);
 

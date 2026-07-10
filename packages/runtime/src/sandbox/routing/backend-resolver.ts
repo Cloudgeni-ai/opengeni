@@ -86,6 +86,20 @@ export interface ActiveBackendResolverDeps {
    * path (which always builds fresh — it has no pre-established turn session).
    */
   pinnedSelfhosted?: { sandboxId: string; epoch: number; session: RoutableBackendSession };
+  /**
+   * TRUE when `defaultBackend` is NOT the session's home box — i.e. this turn started
+   * pinned to a machine (machine-primary on a Modal-HOME session) and never established
+   * the session's Modal group box. The null pointer (== home) then has nothing to
+   * resolve to THIS turn: rather than silently keep serving the pinned machine as if the
+   * detach never happened, the null branch throws a typed `home_not_established` error —
+   * the detach's pointer commit stands and takes effect on the NEXT turn, which starts on
+   * a null pointer and establishes the home box normally. Lazily establishing the home box
+   * mid-turn on such a clear-to-null is a deferred follow-up (issue #341); until then this
+   * flag makes the gap fail typed-and-specific, never silent. Omitted/false for a genuine
+   * machine-HOME turn (home IS the machine) and for a Modal-home turn that started on its
+   * group box (defaultBackend IS the home).
+   */
+  homeUnestablishedThisTurn?: boolean;
 }
 
 /** Why a persisted pointer / swap target cannot be turned into a live backend. A
@@ -99,12 +113,17 @@ export interface ActiveBackendResolverDeps {
  *   - `unsupported_backend_context` — a target no turn routing context can establish
  *                                     (a non-group Modal sibling; an unknown kind).
  *   - `transient_establishment`     — a momentary establish failure worth a retry (reserved;
- *                                     control-plane timeouts surface as their own typed error). */
+ *                                     control-plane timeouts surface as their own typed error).
+ *   - `home_not_established`        — the pointer was cleared to the session default (home)
+ *                                     mid-turn, but this turn started pinned to a machine and
+ *                                     never established the home box, so null has nothing to
+ *                                     resolve to THIS turn (the detach takes effect next turn). */
 export type BackendUnresolvableCode =
   | "stale_pointer"
   | "offline_enrollment"
   | "unsupported_backend_context"
-  | "transient_establishment";
+  | "transient_establishment"
+  | "home_not_established";
 
 /** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
  *  target with no establisher in this context). The caller maps it to a 409.
@@ -193,6 +212,19 @@ export function makeActiveBackendResolver(
     // invalidates the cached machine and re-enters this branch.) The lease owns the
     // home box lifecycle; the proxy does not re-establish it.
     if (pointer.activeSandboxId === null) {
+      // A machine-pinned turn (Modal-home session pinned to a machine) never
+      // established its home box, so a mid-turn clear-to-null has no home to resolve
+      // THIS turn. Fail typed-and-specific — the detach was accepted and its pointer
+      // commit STANDS, taking effect on the next turn (which starts null and
+      // establishes the home box) — instead of silently serving the pinned machine as
+      // if the clear never happened. (Lazily establishing the home box mid-turn on
+      // such a clear is a deferred follow-up; issue #341.)
+      if (deps.homeUnestablishedThisTurn) {
+        throw new ActiveBackendUnresolvableError(
+          "home_not_established",
+          "the active sandbox was detached to the session default (home), but this turn started pinned to a machine and never established the session's home box; the detach is accepted and takes effect on the next turn — this turn has no active home box",
+        );
+      }
       return { session: deps.defaultBackend, sandboxId: null, kind: deps.defaultKind };
     }
 

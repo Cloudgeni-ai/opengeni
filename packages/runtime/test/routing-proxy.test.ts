@@ -706,3 +706,87 @@ describe("RoutingSandboxSession — native-desktop surface (machine-primary comp
     expect(shot.height).toBe(900);
   });
 });
+
+describe("homeUnestablishedThisTurn — a machine-pinned turn's clear-to-null fails typed (issue #341, deferred sliver)", () => {
+  const machineSandbox: RoutableSandbox = {
+    id: "sbx-self",
+    kind: "selfhosted",
+    name: "laptop",
+    enrollmentId: "enroll-1",
+  };
+
+  test("a clear-to-null on a machine-pinned turn throws typed home_not_established, never routes to the machine", async () => {
+    // A Modal-HOME session pinned to a machine never established its group box this
+    // turn. A mid-turn clear-to-null must fail typed-and-specific — the detach is
+    // accepted (its pointer commit stands, effective next turn) and this turn has no
+    // home box — rather than silently keep serving the pinned machine.
+    const machine = new FakeBackend("pinned-machine");
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: machine,
+      defaultKind: "selfhosted",
+      getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },
+      homeUnestablishedThisTurn: true,
+    });
+
+    // The pinned machine pointer still resolves to the machine (normal machine ops).
+    const pinned = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 3 });
+    expect(pinned.session).toBe(machine);
+
+    // A clear-to-null has NO established home this turn → typed, specific error.
+    const err = await resolve({ activeSandboxId: null, activeEpoch: 4 }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("home_not_established");
+    expect((err as Error).message).toMatch(/detach|next turn|no active home/i);
+    // The machine was NOT returned as the null answer (no silent re-route).
+    expect((err as Error).message).not.toMatch(/pinned-machine/);
+  });
+
+  test("without the flag (machine-home / null-start Modal-home), null resolves to the home default as before", async () => {
+    const home = new FakeBackend("home-box");
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: home,
+      defaultKind: "selfhosted",
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const r = await resolve({ activeSandboxId: null, activeEpoch: 0 });
+    expect(r.session).toBe(home);
+    expect(r.sandboxId).toBeNull();
+  });
+
+  test("the proxy surfaces the typed error to the op (never a silent machine landing)", async () => {
+    const machine = new FakeBackend("pinned-machine");
+    const ptr = mutablePointer({ activeSandboxId: "sbx-self", activeEpoch: 3 });
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: machine,
+      defaultKind: "selfhosted",
+      getSandbox: async (id) => (id === "sbx-self" ? machineSandbox : null),
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 3, session: machine },
+      homeUnestablishedThisTurn: true,
+    });
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: machine, sandboxId: "sbx-self", kind: "selfhosted" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    // First op on the pinned machine works.
+    expect(((await proxy.exec({ cmd: "0" })) as { stdout: string }).stdout).toBe("pinned-machine");
+    // Clear to null (the detach) → the next op fails typed, does NOT land on the machine.
+    ptr.swap(null);
+    const err = await proxy.exec({ cmd: "1" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ActiveBackendUnresolvableError);
+    expect((err as ActiveBackendUnresolvableError).code).toBe("home_not_established");
+    // The machine only ever saw the pre-detach op.
+    expect(machine.calls).toEqual(["0"]);
+  });
+});

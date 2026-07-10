@@ -518,8 +518,10 @@ export async function provisionSandbox(
       note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
     };
   }
-  // modal: create a first-class named modal sandbox record (a swap target). The
-  // box is materialized lazily on first swap (Modal lifecycle unchanged).
+  // modal: create a first-class named modal sandbox record. NOTE: a session cannot
+  // yet be swapped onto a second Modal box — cross-group Modal routing is not built,
+  // so `sandbox_swap` to this id is rejected (unsupported_backend_context). The
+  // response says so plainly rather than implying an attach that does not work.
   const { createSandbox } = await import("@opengeni/db");
   const sandbox = await createSandbox(services.db, {
     accountId: ctx.accountId,
@@ -530,6 +532,6 @@ export async function provisionSandbox(
   return {
     kind: "modal",
     sandbox,
-    note: "A named Modal sandbox record was created. Its box is materialized when first swapped-to; the session's own group box remains the default until then.",
+    note: "A named Modal sandbox record was created, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so a sandbox_swap to this id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
   };
 }

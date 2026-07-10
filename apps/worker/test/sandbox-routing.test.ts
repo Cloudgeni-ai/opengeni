@@ -33,6 +33,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { buildManifest, subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
+import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
 import {
   wrapLazyTurnBoxWithRouting,
   wrapTurnBoxWithRouting,
@@ -421,5 +422,84 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
     expect(persisted.activeSandboxId).toBe(machine.id);
     expect(persisted.activeEpoch).toBe(2);
+  }, 60_000);
+
+  // BEHAVIORAL "pointer untouched" (issue #341 invariant A / Shape 1): a rejected
+  // Modal-sibling swap must not move the pointer, proven by ROUTING — the next op
+  // still lands on the pre-swap backend, not by DB inspection alone.
+  test("a rejected sibling swap leaves the pointer untouched: the next op still routes to the pre-swap backend", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("reject-untouched");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+    const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
+
+    // Pre-swap: pin the session to the machine (the pre-swap backend the ops route to).
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: 0,
+    });
+    const before = (await readActiveSandbox(db, workspaceId, session.id))!;
+
+    const established = wrapTurnBoxWithRouting(
+      { db, settings, bus },
+      { workspaceId, sessionId: session.id },
+      fakeGroupBox("group-box-marker"),
+    );
+    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    // The op currently routes to the machine (the pre-swap backend).
+    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+
+    // Attempt to swap onto the Modal sibling → REJECTED before the CAS.
+    const ctx: FleetContext = {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      sessionBackend: "modal",
+      sessionGroupId: session.sandboxGroupId,
+    };
+    const rejected = await swapActiveSandbox({ db, settings, bus }, ctx, sibling.id);
+    expect(rejected.swapped).toBe(false);
+    expect(rejected.code).toBe("unsupported_backend_context");
+
+    // The pointer never moved: the next op STILL routes to the pre-swap machine, and
+    // the persisted pointer/epoch are unchanged.
+    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+    const after = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(after.activeSandboxId).toBe(machine.id);
+    expect(after.activeEpoch).toBe(before.activeEpoch);
   }, 60_000);
 });
