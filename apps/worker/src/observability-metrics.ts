@@ -1,6 +1,12 @@
+import { errorCodeToJSON } from "@opengeni/agent-proto";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
-import type { RuntimeMetricsHooks } from "@opengeni/runtime";
+import {
+  SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  type RuntimeMetricsHooks,
+  type SelfhostedOpObservation,
+  type SelfhostedOpObserver,
+} from "@opengeni/runtime";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "preempted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
@@ -81,6 +87,125 @@ export function runtimeMetricsHooksForObservability(
         help: "Total sandbox warming timeouts.",
       });
     },
+    onSandboxOp: ({ backend, op, outcome, code, healed, durationSeconds, replyBytes }) => {
+      observability.incrementCounter({
+        name: "opengeni_machine_op_total",
+        help: "Total Connected Machine control ops by op, outcome, and typed fault code.",
+        labels: { backend, op, outcome, code: code ?? "" },
+      });
+      observability.observeHistogram({
+        name: "opengeni_machine_op_duration_seconds",
+        help: "Connected Machine control-op duration in seconds by op.",
+        labels: { backend, op },
+        value: durationSeconds,
+      });
+      // The healed-fault leading indicator: an op that only succeeded after a retry
+      // (a blip/backpressure the transport absorbed). The doctrine: healed faults are
+      // the leading indicator of the next unhealed one, so they are always recorded.
+      if (healed) {
+        observability.incrementCounter({
+          name: "opengeni_machine_op_healed_total",
+          help: "Connected Machine ops that succeeded only after ≥1 in-call retry.",
+          labels: { backend, op },
+        });
+      }
+      // The payload-wall indicator (bytes known only on a PAYLOAD_TOO_LARGE fault today).
+      if (replyBytes !== undefined) {
+        observability.observeHistogram({
+          name: "opengeni_machine_op_reply_bytes",
+          help: "Connected Machine control-op reply size in bytes (payload-wall indicator).",
+          labels: { backend, op },
+          value: replyBytes,
+        });
+      }
+    },
+  };
+}
+
+/**
+ * Adapt the runtime's transport-agnostic `SelfhostedOpObserver` to the metrics
+ * hooks: map a completed-op observation onto `onSandboxOp`, converting the wire
+ * `ErrorCode` to its stable enum-name string (a bounded metric label) and the
+ * duration to seconds. Wired into the selfhosted session build so every Connected
+ * Machine control op meters.
+ */
+export function selfhostedOpObserverForMetrics(hooks: RuntimeMetricsHooks): SelfhostedOpObserver {
+  return (o) => {
+    hooks.onSandboxOp?.({
+      backend: "selfhosted",
+      op: o.op,
+      outcome: o.outcome,
+      healed: o.healed,
+      retries: o.retries,
+      durationSeconds: o.durationMs / 1000,
+      ...(o.code !== undefined ? { code: errorCodeToJSON(o.code) } : {}),
+      ...(o.replyBytes !== undefined ? { replyBytes: o.replyBytes } : {}),
+    });
+  };
+}
+
+/** A session-scoped `machine.op.*` event mapped from a completed-op observation. */
+export type MachineOpSessionEvent = {
+  type: "machine.op.failed" | "machine.op.recovered";
+  payload: { op: string; faultClass: string; attempts: number; machineId?: string };
+};
+
+/** Map an observation to a `machine.op.*` session event, or null if it is not
+ *  eventable. `machine.op.failed` fires ONLY for infrastructure fault classes (a
+ *  semantic miss the model asked about is an outcome, not an infra fault);
+ *  `machine.op.recovered` fires for a healed op (success after ≥1 retry). */
+export function machineOpSessionEventFor(o: SelfhostedOpObservation): MachineOpSessionEvent | null {
+  if (
+    o.outcome === "failed" &&
+    o.faultClass &&
+    SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES.has(o.faultClass)
+  ) {
+    return {
+      type: "machine.op.failed",
+      payload: {
+        op: o.op,
+        faultClass: o.faultClass,
+        attempts: o.retries,
+        ...(o.machineId ? { machineId: o.machineId } : {}),
+      },
+    };
+  }
+  if (o.outcome === "ok" && o.healed) {
+    return {
+      type: "machine.op.recovered",
+      payload: {
+        op: o.op,
+        faultClass: o.faultClass ?? "unknown",
+        attempts: o.retries,
+        ...(o.machineId ? { machineId: o.machineId } : {}),
+      },
+    };
+  }
+  return null;
+}
+
+/**
+ * The Connected Machine op observer wired into a turn: it meters EVERY op (the
+ * metrics sink) and BUFFERS the eventable ops (infra failures + healed recoveries)
+ * as `machine.op.*` session events. The observer is SYNC (fire-and-forget), so the
+ * turn drains the buffer to durable session events at a known checkpoint (turn end),
+ * awaited — never an unawaited DB write inside the Temporal activity.
+ */
+export function makeMachineOpObserver(hooks: RuntimeMetricsHooks): {
+  observer: SelfhostedOpObserver;
+  drainEvents(): MachineOpSessionEvent[];
+} {
+  const meter = selfhostedOpObserverForMetrics(hooks);
+  const buffered: MachineOpSessionEvent[] = [];
+  return {
+    observer: (o) => {
+      meter(o);
+      const event = machineOpSessionEventFor(o);
+      if (event) {
+        buffered.push(event);
+      }
+    },
+    drainEvents: () => buffered.splice(0, buffered.length),
   };
 }
 

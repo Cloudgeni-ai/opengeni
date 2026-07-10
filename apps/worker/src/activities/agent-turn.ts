@@ -152,6 +152,7 @@ import {
   lazyProvisionEnabled,
 } from "../sandbox-routing";
 import {
+  makeMachineOpObserver,
   recordCreditMicros,
   runtimeMetricsHooksForObservability,
   turnLifecycleMetricsFor,
@@ -999,6 +1000,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let turnId: string | undefined;
+    // The Connected Machine op observer for this turn: meters every op AND buffers
+    // the eventable ones (infra failures + healed recoveries) as machine.op.* session
+    // events, drained (awaited) at turn end in the finally below. ONE instance shared
+    // by the machine-primary establish + both routing wraps.
+    const machineOpObserver = makeMachineOpObserver(
+      runtimeMetricsHooksForObservability(observability),
+    );
     // Worker-death redispatch counter observed when THIS dispatch claimed the
     // turn. If a dying-attempt cancel later fences on this and the turn's
     // current value differs, recovery already re-queued/re-dispatched the turn
@@ -1935,7 +1943,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // bind (no NATS round-trip), so build it FIRST; if the lease then fences,
           // there is nothing to clean up.
           const established = await establishSelfhostedTurnSession(
-            { db, settings, bus },
+            {
+              db,
+              settings,
+              bus,
+              onOp: machineOpObserver.observer,
+            },
             {
               workspaceId: input.workspaceId,
               agentId: activeSandboxRecord!.enrollmentId!,
@@ -1963,7 +1976,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // write (via the proxy's `state` getter) and the per-op reads hit ONE
             // instance — no two-instance manifest divergence.
             established: wrapTurnBoxWithRouting(
-              { db, settings, bus },
+              {
+                db,
+                settings,
+                bus,
+                onOp: machineOpObserver.observer,
+              },
               {
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
@@ -2345,7 +2363,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
         lazyOwnedSandbox = wrapLazyTurnBoxWithRouting(
-          { db, settings, bus },
+          {
+            db,
+            settings,
+            bus,
+            onOp: machineOpObserver.observer,
+          },
           {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -3629,6 +3652,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         },
         error: activityError,
       });
+      // Drain the buffered Connected Machine op events (infra failures + healed
+      // recoveries) to durable session events — awaited, best-effort, never blocking
+      // the turn. Sync observer → buffer → single awaited append here (no unawaited
+      // DB write inside the activity). Scoped to this turn; skipped if no turnId
+      // (the op ran under a turn, so on the normal path turnId is set).
+      const machineOpEvents = machineOpObserver.drainEvents();
+      if (machineOpEvents.length > 0) {
+        await appendAndPublishEvents(
+          db,
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          machineOpEvents.map((event) => ({ ...event, turnId: turnId ?? null })),
+        ).catch(() => undefined);
+      }
       // Multi-account P4: flush the serving account's free per-turn caches ONCE,
       // best-effort (same discipline as today's usage write). Both writers skip
       // version/updatedAt, so neither can race the token-refresh CAS.

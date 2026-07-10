@@ -3121,6 +3121,22 @@ export const SessionEventType = z.enum([
   // must NEVER gain a rendered timeline item without regenerating the golden
   // snapshots (dossier §7.3 golden-grammar gate).
   "workspace.revision.captured",
+  // Connected Machine (selfhosted) op-outcome observability (failure-visibility
+  // doctrine, out-of-band plane). SESSION-scoped facts only: these fire for the
+  // session whose turn ran the op (the two-planes rule — machine-plane facts like
+  // pressure live in the M10 metrics DB, never as session events). Payloads carry
+  // the op kind + a typed fault class + attempt count — NEVER command content.
+  //
+  // `machine.op.failed` fires ONLY for INFRASTRUCTURE fault classes (offline,
+  // draining-exhausted, payload-too-large, reconnecting-timeout, OS/stream/protocol)
+  // — a semantic miss the model asked about (a missing path, a consent gate, a
+  // nonzero exit) is an OUTCOME, not an infra fault, and never fires this.
+  // `machine.op.recovered` is the healed-fault leading indicator (a blip/backpressure
+  // the transport absorbed): announce-only, quiet. Both hit the timeline projection's
+  // quiet status-tick tier (the severity split's "degraded"); adding a rendered item
+  // requires regenerating the golden snapshots (the golden-grammar gate).
+  "machine.op.failed",
+  "machine.op.recovered",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 

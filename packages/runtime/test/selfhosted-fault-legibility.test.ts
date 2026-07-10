@@ -24,6 +24,8 @@ import {
   offlineAgentError,
   offlineControlResponse,
   renderSelfhostedFault,
+  selfhostedFaultClass,
+  SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   timeoutAgentError,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
@@ -134,6 +136,30 @@ describe("renderSelfhostedFault — the retry verdict is correct per class", () 
       expect(renderSelfhostedFault(error)).not.toContain("Please try again");
     }
   });
+});
+
+describe("selfhostedFaultClass — the out-of-band class taxonomy + infra filter", () => {
+  const expectations: Array<[ErrorCode, string, boolean]> = [
+    [ErrorCode.ERROR_CODE_AGENT_OFFLINE, "offline", true],
+    [ErrorCode.ERROR_CODE_DRAINING, "draining", true],
+    [ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE, "payload_too_large", true],
+    [ErrorCode.ERROR_CODE_TIMEOUT, "reconnecting", true],
+    [ErrorCode.ERROR_CODE_OS, "os", true],
+    [ErrorCode.ERROR_CODE_STREAM, "stream", true],
+    [ErrorCode.ERROR_CODE_PROTOCOL, "protocol", true],
+    // Semantic misses + routing — NOT infrastructure faults.
+    [ErrorCode.ERROR_CODE_NOT_FOUND, "not_found", false],
+    [ErrorCode.ERROR_CODE_CONSENT_REQUIRED, "consent", false],
+    [ErrorCode.ERROR_CODE_FENCED, "fenced", false],
+  ];
+
+  for (const [code, expectedClass, isInfra] of expectations) {
+    test(`${expectedClass}: class + infra=${isInfra}`, () => {
+      const cls = selfhostedFaultClass(mapped(code));
+      expect(cls).toBe(expectedClass);
+      expect(SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES.has(cls)).toBe(isInfra);
+    });
+  }
 });
 
 describe("G5 — PAYLOAD_TOO_LARGE is a typed, distinguishable fault", () => {

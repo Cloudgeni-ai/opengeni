@@ -202,8 +202,13 @@ export {
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+// The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
+// + machine.* events; the op-engine's op-stream client emits through this too).
+export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
 // The four-field in-band fault renderer (the failure-visibility doctrine).
 export {
+  selfhostedFaultClass,
+  SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   renderSelfhostedFault,
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,

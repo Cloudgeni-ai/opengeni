@@ -19,6 +19,7 @@
 // API/worker pass a resume-by-id closure for the sibling box's lease).
 
 import { buildSelfhostedBackendSession, type SelfhostedRelayConfig } from "../selfhosted/session";
+import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import type {
   ActivePointer,
@@ -67,6 +68,9 @@ export interface ActiveBackendResolverDeps {
    *  control timeout (a swapped-to machine runs real commands too). Absent ⇒ falls
    *  back to the control timeout, as in the session leaf. */
   selfhostedExecTimeoutMs?: number;
+  /** The per-op observer threaded into a selfhosted swap/pin target (out-of-band
+   *  telemetry — metrics + machine.* events). Absent ⇒ no-op. */
+  selfhostedOnOp?: SelfhostedOpObserver;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn threads into the agent's TARGET manifest (and into the group box at
@@ -284,6 +288,7 @@ export function makeActiveBackendResolver(
         ...(deps.selfhostedExecTimeoutMs !== undefined
           ? { execTimeoutMs: deps.selfhostedExecTimeoutMs }
           : {}),
+        ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).
