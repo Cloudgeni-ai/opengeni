@@ -16,9 +16,12 @@ import {
   filterUnmaterializedSandboxFileDownloads,
   historyRowsToAppend,
   isLazySandboxProvisionRetryable,
+  isTransientProviderError,
   isWorkerShutdownCancellation,
   modelUsageSourceKey,
   pointerReconcileReason,
+  PROVIDER_BACKPRESSURE_DELAY_MS,
+  providerRetryRecovery,
   resolveActiveSandboxBackend,
   shouldStartOnTurnRecording,
   WORKER_SHUTDOWN_RESUME_TEXT,
@@ -829,6 +832,125 @@ describe("escaped MCP transport timeout classifier", () => {
     ).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+  });
+});
+
+// A model-provider 5xx / overload / dropped connection is transient backpressure,
+// not a session fault. It must classify retryable so the turn routes into the idle +
+// goal-continuation recovery instead of a terminal session.failed — the gap that
+// hard-failed a fleet of prod sessions during a provider degradation window.
+describe("transient provider error classifier", () => {
+  test("classifies 5xx status codes as transient (status is authoritative)", () => {
+    for (const status of [500, 502, 503, 504, 529]) {
+      const err = Object.assign(new Error("Service failure"), { status });
+      expect(isTransientProviderError(err)).toBe(true);
+    }
+  });
+
+  test("classifies the observed provider transient messages when no status survives", () => {
+    // The exact bodies that hard-failed prod sessions, thrown as bare Errors.
+    expect(
+      isTransientProviderError(
+        new Error(
+          "An error occurred while processing your request. You can retry your request, " +
+            "or contact us through our help center. Please include the request ID abc123.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isTransientProviderError(
+        new Error("Our servers are currently overloaded. Please try again later."),
+      ),
+    ).toBe(true);
+    expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
+  });
+
+  test("classifies node/undici network fault codes as transient", () => {
+    for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
+      expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);
+    }
+  });
+
+  test("does NOT treat 4xx request faults or usage caps as transient", () => {
+    expect(isTransientProviderError(Object.assign(new Error("Bad Request"), { status: 400 }))).toBe(
+      false,
+    );
+    expect(
+      isTransientProviderError(Object.assign(new Error("Unprocessable Entity"), { status: 422 })),
+    ).toBe(false);
+    expect(isTransientProviderError(Object.assign(new Error("Not Found"), { status: 404 }))).toBe(
+      false,
+    );
+    // A 429 is handled by the dedicated rate-limit / usage-cap branches, never here.
+    expect(
+      isTransientProviderError(Object.assign(new Error("Too Many Requests"), { status: 429 })),
+    ).toBe(false);
+  });
+
+  test("agentRunFailurePayload marks transient provider errors retryable, keeping the body", () => {
+    const overloaded = Object.assign(
+      new Error("Our servers are currently overloaded. Please try again later."),
+      { status: 503 },
+    );
+    expect(agentRunFailurePayload(overloaded)).toEqual({
+      error: "Our servers are currently overloaded. Please try again later.",
+      code: "provider_unavailable",
+      retryable: true,
+    });
+
+    const generic500 = Object.assign(
+      new Error(
+        "An error occurred while processing your request. You can retry your request. " +
+          "Please include the request ID 8afe928d.",
+      ),
+      { status: 500 },
+    );
+    const payload = agentRunFailurePayload(generic500);
+    expect(payload.retryable).toBe(true);
+    expect(payload.code).toBe("provider_unavailable");
+    expect(payload.error).toContain("request ID 8afe928d");
+  });
+
+  test("agentRunFailurePayload still hard-fails a non-transient 4xx (no retryable marker)", () => {
+    const validation = Object.assign(new Error("Invalid 'input': expected a string"), {
+      status: 400,
+    });
+    const payload = agentRunFailurePayload(validation);
+    expect(payload.retryable).toBeUndefined();
+    expect(payload.code).toBeUndefined();
+    expect(payload.error).toBe("Invalid 'input': expected a string");
+  });
+
+  test("a 503 with an active goal idles and auto-continues instead of failing (end-to-end routing)", () => {
+    // Classifier → retryable, then the retryable turn-failure branch's recovery
+    // routing → idle + goal_continuation + backpressure delay. This is the exact
+    // path that was missing when ~29 prod sessions hard-failed on provider 5xx.
+    const failure = agentRunFailurePayload(
+      Object.assign(new Error("Our servers are currently overloaded. Please try again later."), {
+        status: 503,
+      }),
+    );
+    expect(failure.retryable).toBe(true); // enters the retryable branch (not the terminal one)
+    expect(providerRetryRecovery(true)).toEqual({
+      recovery: "goal_continuation",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+    // A goal-less session idles too, but waits for the next user message (no auto-continue).
+    expect(providerRetryRecovery(false)).toEqual({ recovery: "user_message" });
+  });
+
+  test("agentRunFailurePayload keeps a ChatGPT/Codex usage cap non-retryable (429 that won't clear)", () => {
+    // A usage cap is also a 429; the cap classifier runs BEFORE this transient
+    // branch and must win, staying retryable:false. Shape mirrors the real
+    // upstream payload (see codex-usage-limit.test.ts).
+    const cap = Object.assign(new Error("429 You have hit your usage limit"), {
+      status: 429,
+      type: "usage_limit_reached",
+      error: { type: "usage_limit_reached", resets_in_seconds: 7200 },
+    });
+    const payload = agentRunFailurePayload(cap);
+    expect(payload.retryable).toBe(false);
+    expect(payload.code).toBe("codex_usage_limit_reached");
   });
 });
 

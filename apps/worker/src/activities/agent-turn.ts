@@ -188,6 +188,25 @@ import { randomUUID } from "node:crypto";
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
 /**
+ * Recovery routing for a turn failed by a RETRYABLE provider error, once the
+ * activity knows whether the session still has an active goal: a goal-bearing
+ * session idles and auto-continues after the backpressure delay, a goal-less one
+ * idles and waits for the next user message. A NON-retryable failure never reaches
+ * here — it takes the terminal session.failed path — so the contrast this encodes
+ * is "retryable provider blip ⇒ idle-with-recovery, not a dead session." Single
+ * source of truth for the recovery mode and continuation delay the retryable
+ * turn-failure branch publishes.
+ */
+export function providerRetryRecovery(goalActive: boolean): {
+  recovery: "goal_continuation" | "user_message";
+  continueDelayMs?: number;
+} {
+  return goalActive
+    ? { recovery: "goal_continuation", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS }
+    : { recovery: "user_message" };
+}
+
+/**
  * Resolve which Codex account a turn runs on (multi-account P1): session-pin >
  * workspace-active. No rotation in P1. The selected id must still be in the
  * connected set — a disconnected pin was FK-nulled, so a stale id can't appear,
@@ -3585,6 +3604,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
+        const recoveryRouting = providerRetryRecovery(goalActive);
         await flushRuntimeBatcher();
         // Provider/MCP errors rarely carry SDK run state; a null falls back to
         // the previous snapshot, same degraded-context contract as the
@@ -3610,7 +3630,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               type: "turn.failed",
               payload: {
                 ...failure,
-                recovery: goalActive ? "goal_continuation" : "user_message",
+                recovery: recoveryRouting.recovery,
                 runStateSaved,
               },
             },
@@ -3623,9 +3643,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
-        return goalActive
-          ? { status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS }
-          : { status: "idle" };
+        return {
+          status: "idle",
+          ...(recoveryRouting.continueDelayMs !== undefined
+            ? { continueDelayMs: recoveryRouting.continueDelayMs }
+            : {}),
+        };
       }
       activityStatus = "failed";
       activityError = error;
@@ -3875,6 +3898,48 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   };
 }
 
+/**
+ * True when the error is transient upstream backpressure — a model-provider 5xx,
+ * a "server had a bad minute" body, or a dropped/again-able network connection —
+ * rather than a request the session got wrong. These are safe to retry: the turn
+ * routes into the SAME idle + goal-continuation recovery the rate-limit branch
+ * uses (a goal-bearing session auto-continues after PROVIDER_BACKPRESSURE_DELAY_MS;
+ * a goal-less one waits for the next user message), and the resume notice tells the
+ * model to re-check side effects before repeating them.
+ *
+ * This is the classification gap that hard-failed a fleet of prod sessions during a
+ * provider degradation window: their errors ("Our servers are currently overloaded",
+ * the generic 500 "An error occurred while processing your request", "Connection
+ * error") carried no retryable marker and fell through to a terminal session.failed.
+ *
+ * HTTP status is authoritative when present — EVERY 5xx is a server-side failure that
+ * is safe to retry, while 4xx (validation, auth, 404) is a request fault that must
+ * still hard-fail. The code/message matches are the fallback for network faults and
+ * SDK-rethrown bare Errors that carry no status. A ChatGPT/Codex usage cap (a 429
+ * that will NOT clear on retry) is classified and returned BEFORE this in
+ * agentRunFailurePayload, so it never reaches here.
+ */
+export function isTransientProviderError(error: unknown): boolean {
+  const status =
+    typeof error === "object" && error !== null && "status" in error
+      ? Number((error as { status?: unknown }).status)
+      : undefined;
+  if (status !== undefined && Number.isFinite(status) && status >= 500 && status < 600) {
+    return true;
+  }
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : undefined;
+  if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+    message,
+  );
+}
+
 export function agentRunFailurePayload(error: unknown): {
   error: string;
   code?: string;
@@ -3922,6 +3987,13 @@ export function agentRunFailurePayload(error: unknown): {
       retryable: true,
       ...(message && message !== "Too Many Requests" ? { detail: message } : {}),
     };
+  }
+  // Transient upstream backpressure (5xx / overloaded / dropped connection): keep
+  // the provider's own message (it is already user-meaningful) but mark it
+  // retryable so a goal-bearing session idles and auto-continues instead of going
+  // terminal on a provider's bad minute. See isTransientProviderError.
+  if (isTransientProviderError(error)) {
+    return { error: message, code: "provider_unavailable", retryable: true };
   }
   return { error: message };
 }
