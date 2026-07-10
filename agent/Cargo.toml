@@ -15,7 +15,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"
@@ -36,6 +36,10 @@ thiserror = "2"
 # methods on the `Platform` trait.
 tokio = { version = "1", default-features = false }
 async-trait = "0.1"
+# Cross-platform exec containment: POSIX process groups on Unix and Job Objects
+# on Windows, behind one safe Tokio API. A timed-out shell must not leave its
+# descendants consuming the Connected Machine after the caller is gone.
+command-group = { version = "5.0.1", features = ["with-tokio"] }
 
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
 # subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests (dossier §10.1).

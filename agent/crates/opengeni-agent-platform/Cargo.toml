@@ -24,6 +24,7 @@ opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "rt-multi-thread"] }
+command-group = { workspace = true }
 tracing = { workspace = true }
 prost = { workspace = true }
 

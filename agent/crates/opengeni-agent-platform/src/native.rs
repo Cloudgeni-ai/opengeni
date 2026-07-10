@@ -7,13 +7,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use opengeni_agent_proto::v1;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
@@ -111,6 +112,85 @@ impl NativePlatform {
     }
 }
 
+/// One native exec and every ordinary descendant it spawns, contained as a
+/// POSIX process group on Unix or a Job Object on Windows.
+///
+/// `tokio::process::Command::kill_on_drop` terminates only the direct child. A
+/// shell can therefore leave reparented grandchildren behind. Keeping the group
+/// handle outside the wait future lets both an explicit process deadline and
+/// cancellation of the entire exec future synchronously initiate group cleanup.
+struct ExecProcessGroup {
+    child: AsyncGroupChild,
+    running: bool,
+}
+
+impl ExecProcessGroup {
+    fn new(child: AsyncGroupChild) -> Self {
+        Self {
+            child,
+            running: true,
+        }
+    }
+
+    fn inner(&mut self) -> &mut tokio::process::Child {
+        self.child.inner()
+    }
+
+    async fn wait_with_output(&mut self) -> std::io::Result<Output> {
+        // Take the pipes before borrowing the group for `wait`. Reading both
+        // concurrently avoids the usual stdout/stderr pipe deadlock while the
+        // group wait ensures descendants have exited, not only the leader.
+        let (stdin, stdout, stderr) = {
+            let child = self.child.inner();
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        };
+        drop(stdin);
+
+        let (status, stdout, stderr) = tokio::try_join!(
+            self.child.wait(),
+            read_optional_pipe(stdout),
+            read_optional_pipe(stderr),
+        )?;
+        self.running = false;
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+}
+
+impl Drop for ExecProcessGroup {
+    fn drop(&mut self) {
+        if !self.running {
+            return;
+        }
+        let group_id = self.child.id();
+        if let Err(error) = self.child.start_kill() {
+            // A group that exited between cancellation and Drop is already clean.
+            // Other failures matter because the caller can no longer observe the
+            // command; log only identifiers/error metadata, never command text.
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+            ) {
+                tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
+            }
+        }
+    }
+}
+
+async fn read_optional_pipe<R>(pipe: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
+}
+
 #[async_trait]
 impl Platform for NativePlatform {
     fn host_identity(&self) -> HostIdentity {
@@ -153,25 +233,27 @@ impl Platform for NativePlatform {
         for (k, v) in &req.env {
             cmd.env(k, v);
         }
-        // The control plane has a request/reply deadline outside this process
-        // deadline. If either deadline or a connection-generation cancellation
-        // drops `wait_with_output`, the child must not keep consuming the machine
-        // after its caller can no longer observe it.
+        // Keep the direct-child backstop in addition to the group wrapper. The
+        // builder's kill-on-drop enables Windows Job Object cleanup; on Unix the
+        // wrapper's Drop sends SIGKILL to the POSIX process group.
         cmd.kill_on_drop(true);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         let started = Instant::now();
-        let mut child = cmd
+        let child = cmd
+            .group()
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))?;
+        let mut child = ExecProcessGroup::new(child);
 
         // Feed stdin (if any) then drop the handle so the child sees EOF.
         if req.stdin.is_empty() {
             // Close stdin immediately so a child reading stdin does not hang.
-            drop(child.stdin.take());
-        } else if let Some(mut stdin) = child.stdin.take() {
+            drop(child.inner().stdin.take());
+        } else if let Some(mut stdin) = child.inner().stdin.take() {
             let _ = stdin.write_all(&req.stdin).await;
             let _ = stdin.shutdown().await;
         }
@@ -182,8 +264,8 @@ impl Platform for NativePlatform {
             match tokio::time::timeout(dur, wait).await {
                 Ok(out) => out.map_err(|e| PlatformError::from_io("exec wait", &e))?,
                 Err(_) => {
-                    // Dropping the wait future owns and kills the child because the
-                    // command was configured with `kill_on_drop(true)` above.
+                    // Dropping `child` below synchronously initiates process-group
+                    // cleanup before this typed timeout becomes unobservable work.
                     return Ok(v1::ExecResponse {
                         exit_code: -1,
                         stdout: prost::bytes::Bytes::new(),
@@ -661,6 +743,85 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn descendant_loop_command(pid_file: &Path) -> String {
+        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        format!(
+            "/bin/sh -c 'printf \"%s\" \"$$\" > \"$1\"; while :; do :; done' nested '{quoted_pid_file}' & wait"
+        )
+    }
+
+    #[cfg(windows)]
+    fn descendant_loop_command(pid_file: &Path) -> String {
+        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "''");
+        format!(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Set-Content -NoNewline -LiteralPath '{quoted_pid_file}' -Value $PID; while ($true) {{}}\""
+        )
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn recorded_pid(pid_file: &Path) -> u32 {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(raw_pid) = tokio::fs::read_to_string(pid_file).await {
+                    break raw_pid.trim().parse::<u32>().expect("descendant pid");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant should publish its pid")
+    }
+
+    #[cfg(unix)]
+    async fn process_exists(pid: u32) -> bool {
+        tokio::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(windows)]
+    async fn process_exists(pid: u32) -> bool {
+        let probe = format!(
+            "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}"
+        );
+        tokio::process::Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(probe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn assert_process_exits(pid: u32, context: &str) {
+        for _ in 0..100 {
+            if !process_exists(pid).await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Keep a failing regression test from becoming the orphan it detects.
+        #[cfg(unix)]
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .await;
+        #[cfg(windows)]
+        let _ = tokio::process::Command::new("taskkill.exe")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status()
+            .await;
+        panic!("{context} descendant {pid} survived process-group cleanup");
+    }
+
     #[tokio::test]
     async fn exec_captures_stdout_and_exit_code() {
         let (platform, _dir) = rooted();
@@ -730,21 +891,18 @@ mod tests {
         );
     }
 
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn exec_timeout_kills_and_flags() {
-        let (platform, _dir) = rooted();
-        if cfg!(windows) {
-            return; // `sleep` semantics differ; the timeout path is unix-covered.
-        }
-        // A pure-shell busy loop (a builtin `while`) rather than `sleep` so the test
-        // needs NO coreutil fork — under heavy parallel load this sandbox's
-        // coreutil fork/exec intermittently ENOENTs, which would make the loop exit
-        // early and flake the timeout assertion. The 200ms wall-clock timeout kills
-        // the loop, exercising the same timeout path deterministically.
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("timed-out-descendant.pid");
+        // The outer exec shell launches a nested, pure-shell busy loop. Recording
+        // that nested PID catches the regression where kill-on-drop terminated
+        // only the outer shell and reparented its still-running descendant.
         let req = ExecRequest {
-            command: vec!["while :; do :; done".to_string()],
+            command: vec![descendant_loop_command(&pid_file)],
             shell: true,
-            timeout_ms: 200,
+            timeout_ms: 1_000,
             ..Default::default()
         };
         // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT (a
@@ -755,18 +913,17 @@ mod tests {
             .expect("exec");
         assert!(resp.timed_out, "the loop should be killed by the timeout");
         assert_eq!(resp.exit_code, -1);
+        let descendant_pid = recorded_pid(&pid_file).await;
+        assert_process_exits(descendant_pid, "timed-out exec").await;
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
-    async fn cancelling_exec_future_kills_child() {
+    async fn cancelling_exec_future_kills_descendant_tree() {
         let (platform, dir) = rooted();
-        let pid_file = dir.path().join("cancelled-exec.pid");
-        let quoted_pid_file = pid_file.to_string_lossy().replace('\'', "'\\''");
+        let pid_file = dir.path().join("cancelled-descendant.pid");
         let req = ExecRequest {
-            command: vec![format!(
-                "printf '%s' \"$$\" > '{quoted_pid_file}'; while :; do :; done"
-            )],
+            command: vec![descendant_loop_command(&pid_file)],
             shell: true,
             timeout_ms: 0,
             ..Default::default()
@@ -775,16 +932,7 @@ mod tests {
         let task_platform = platform.clone();
         let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
 
-        let pid = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if let Ok(raw_pid) = tokio::fs::read_to_string(&pid_file).await {
-                    break raw_pid.trim().parse::<u32>().expect("shell pid");
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("child should publish its pid before cancellation");
+        let descendant_pid = recorded_pid(&pid_file).await;
 
         // `JoinSet::shutdown` aborts the dispatch task when a NATS connection
         // generation ends. Aborting this task exercises the same drop path: the
@@ -792,20 +940,7 @@ mod tests {
         exec_task.abort();
         let _ = exec_task.await;
 
-        let proc_path = PathBuf::from(format!("/proc/{pid}"));
-        for _ in 0..100 {
-            if !proc_path.exists() {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        // Keep a failing regression test from becoming the orphan it detects.
-        let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()
-            .await;
-        panic!("cancelled exec child {pid} survived after its future was dropped");
+        assert_process_exits(descendant_pid, "cancelled exec").await;
     }
 
     #[tokio::test]

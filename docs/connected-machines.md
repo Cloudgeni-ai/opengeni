@@ -135,7 +135,9 @@ into an offline transition.
 
 Exec requests carry a finite agent-side process deadline inside a slightly
 larger request/reply deadline. If that deadline or the connection generation
-ends, the agent cancels the accepted operation and terminates its child process.
+ends, the agent cancels the accepted operation and terminates its POSIX process
+group or Windows Job Object, including ordinary descendants spawned by a shell;
+the direct child cannot exit and leave invisible work behind.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
