@@ -28,6 +28,8 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { SelfhostedControlError } from "../selfhosted/control-rpc";
+import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -357,6 +359,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
   }
 
+  /**
+   * The failure-visibility boundary for the `exec_command` SDK capability tool — the
+   * dominant fault surface, and the one whose thrown `SelfhostedControlError` reaches
+   * the model wrapped by the SDK's generic tool-error function as
+   * "…Please try again. Error: …" — actively wrong for a machine that is offline, a
+   * consent that is not granted, or an oversized reply. Since the SDK closure-captures
+   * its `errorFunction` (there is no seam to attach one to its internally-built tools),
+   * we render the fault into the doctrine's four fields HERE and return it as the
+   * tool's string result — legible, in-band, and free of the misleading wrapper.
+   * (`apply_patch` already surfaces `error.message` via the SDK's own catch; the
+   * skills / `view_image` tools consume their session methods internally, so they are
+   * rendered elsewhere or left to their own SDK renderers — not this string boundary.)
+   *
+   * A FENCE error is re-thrown, NEVER rendered: `dispatch` already retries it against
+   * a re-resolved backend, and a fence that escapes retries is a routing condition the
+   * turn handles, not a model-facing fault. Any non-selfhosted error (a Modal fault, a
+   * `RoutingUnsupportedError`) is re-thrown unchanged.
+   */
+  private renderSelfhostedFaultOrThrow(error: unknown): string {
+    if (error instanceof SelfhostedControlError && !error.fenced) {
+      return renderSelfhostedFault(error);
+    }
+    throw error;
+  }
+
   // ── The forwarded structural surface ──────────────────────────────────────
   // Every method is PRESENT on the proxy (the SDK binds presence once) and
   // dispatches to the active backend at call-time. A missing backend method
@@ -376,16 +403,22 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async execCommand(args: unknown): Promise<string> {
-    return this.dispatch("execCommand", async (s) => {
-      if (s.execCommand) {
-        return s.execCommand(args);
-      }
-      if (s.exec) {
-        const r = (await s.exec(args)) as { stdout?: string; output?: string };
-        return r.stdout ?? r.output ?? "";
-      }
-      throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
-    });
+    try {
+      return await this.dispatch("execCommand", async (s) => {
+        if (s.execCommand) {
+          return s.execCommand(args);
+        }
+        if (s.exec) {
+          const r = (await s.exec(args)) as { stdout?: string; output?: string };
+          return r.stdout ?? r.output ?? "";
+        }
+        throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
+      });
+    } catch (error) {
+      // Render a terminal selfhosted fault as the tool's result (four fields, correct
+      // verdict) instead of letting the SDK mislabel it "Please try again".
+      return this.renderSelfhostedFaultOrThrow(error);
+    }
   }
 
   async writeStdin(args: unknown): Promise<string> {

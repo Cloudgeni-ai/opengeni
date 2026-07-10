@@ -198,9 +198,18 @@ export {
   payloadTooLargeMessage,
   drainingMessage,
   execDeadlineHint,
+  NEVER_SENT_DETAIL_KEY,
   type NatsRequestConnection,
   type SelfhostedUnavailableReason,
 } from "./selfhosted/control-rpc";
+// The four-field in-band fault renderer (the failure-visibility doctrine).
+export {
+  renderSelfhostedFault,
+  FAULT_FIELD_WHAT_HAPPENED,
+  FAULT_FIELD_WHICH_LAYER,
+  FAULT_FIELD_WHAT_PRESERVED,
+  FAULT_FIELD_WHAT_TO_TRY,
+} from "./selfhosted/fault-rendering";
 // The selfhosted control-op retry policy (the pure decision + the injected clock).
 export {
   decideSelfhostedRetry,
@@ -210,6 +219,7 @@ export {
   SELFHOSTED_DRAINING_MAX_RETRIES,
   SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
   SELFHOSTED_TIMEOUT_MAX_RETRIES,
+  SELFHOSTED_NEVER_SENT_MAX_RETRIES,
   SELFHOSTED_RETRY_BACKOFF_BASE_MS,
   SELFHOSTED_RETRY_BACKOFF_FACTOR,
   SELFHOSTED_RETRY_BACKOFF_CAP_MS,
