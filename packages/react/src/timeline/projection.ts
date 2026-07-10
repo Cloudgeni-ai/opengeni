@@ -650,6 +650,17 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       }
     } else if (event.type === "turn.cancelled" && turnId) {
       cancelledTurnIds.add(turnId);
+    } else if (event.type === "turn.queue_drained") {
+      // A stop drained the whole queue in one shot (one summary event carrying
+      // the cancelled ids). Treat every drained turn exactly like an
+      // individually-cancelled never-started turn so its queued anchor folds
+      // away as a calm retraction instead of lingering as still-queued.
+      const drainedTurnIds = Array.isArray(payload.drainedTurnIds) ? payload.drainedTurnIds : [];
+      for (const drainedId of drainedTurnIds) {
+        if (typeof drainedId === "string") {
+          cancelledTurnIds.add(drainedId);
+        }
+      }
     }
 
     if (turnId && event.type !== "turn.queued" && event.type !== "turn.cancelled") {

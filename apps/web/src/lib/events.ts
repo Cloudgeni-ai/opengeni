@@ -252,6 +252,7 @@ export function eventLabel(type: string): string {
     "user.interrupt": "User interrupt",
     "user.approvalDecision": "Approval decision",
     "turn.queued": "Turn queued",
+    "turn.queue_drained": "Queue cleared by stop",
     "turn.updated": "Turn updated",
     "turn.started": "Turn started",
     "turn.completed": "Turn completed",

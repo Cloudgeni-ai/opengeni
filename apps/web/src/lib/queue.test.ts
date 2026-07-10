@@ -112,17 +112,23 @@ describe("deliveryModeExplanation", () => {
     expect(deliveryModeExplanation("queue", "idle")).toContain("starts immediately");
   });
 
-  test("steer mode admits there is nothing to interrupt on idle sessions", () => {
-    expect(deliveryModeExplanation("steer", "running")).toContain("interrupts the running turn");
+  test("steer mode tells the truth: cancel the step, run next, goal continues", () => {
+    const running = deliveryModeExplanation("steer", "running");
+    expect(running).toContain("cancels the current step and runs your message next");
+    expect(running).toContain("the goal continues");
+    // No overpromise: steering does not inject mid-turn.
+    expect(running).not.toContain("injects this message now");
     expect(deliveryModeExplanation("steer", "idle")).toContain("Nothing is running");
     expect(deliveryModeExplanation("steer", "failed")).toContain("Nothing is running");
   });
 
-  // The hint must match steerMessage's actual behavior per status: interrupt
-  // only on running/requires_action, promote-without-interrupt on queued.
-  test("requires_action steers as an interrupt of the approval-blocked turn, not a plain send", () => {
+  // The hint must match steerMessage's actual behavior per status: cancel the
+  // current step and run next on running/requires_action (goal continues),
+  // promote-without-interrupt on queued.
+  test("requires_action steers by cancelling the approval-blocked step, not a plain send", () => {
     const steer = deliveryModeExplanation("steer", "requires_action");
-    expect(steer).toContain("interrupts the turn waiting on approval");
+    expect(steer).toContain("cancels the step waiting on approval");
+    expect(steer).toContain("the goal continues");
     expect(steer).not.toContain("Nothing is running");
   });
 

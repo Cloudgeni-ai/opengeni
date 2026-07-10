@@ -38,7 +38,8 @@ export function ConsoleComposer(props: {
   controls?: ReactNode;
   /**
    * Show the queue-vs-steer delivery choice. Queue (default) stacks the
-   * message behind the running turn; steer interrupts and injects it now.
+   * message behind the running turn; steer cancels the current step and runs
+   * this message next (the goal keeps going).
    */
   showDeliveryMode?: boolean;
   /**
@@ -125,7 +126,7 @@ function DeliveryModeToggle({
         aria-checked={composer.mode === "steer"}
         disabled={disabled}
         onClick={() => composer.setMode("steer")}
-        title="Steer: interrupt the running turn and inject this message now"
+        title="Steer: cancel the current step and run this message next (the goal keeps going)"
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
           composer.mode === "steer"

@@ -17,6 +17,7 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionTurn,
   getVariableSet,
   getVariableSetByName,
   listGitHubInstallationIdsForWorkspace,
@@ -614,6 +615,53 @@ function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSur
   }
 }
 
+/**
+ * A turn injected by the machine to notify a manager that a spawned worker
+ * reached a terminal state — either a coalesced child-notification digest turn
+ * (source 'child_notification') or a legacy per-child wake (source 'user' with
+ * a `childCompletion` marker). NOT a genuine human message.
+ */
+export function isMachineChildNotificationTurn(turn: {
+  source: string;
+  metadata: Record<string, unknown> | null;
+}): boolean {
+  if (turn.source === "child_notification") {
+    return true;
+  }
+  return Boolean(turn.metadata && "childCompletion" in turn.metadata);
+}
+
+/**
+ * Sacred user pause: a goal a human stopped (pausedReason 'user_interrupt') must
+ * never be resurrected by a MACHINE turn. Child-completion notification turns
+ * carry a "resume it now" nudge; without this guard the agent processing one of
+ * them would call goal_set and re-arm the exact autonomous loop the user just
+ * stopped (the runaway that made "stop" feel broken). A genuine user message
+ * still redirects freely (it is not a child-notification turn), and the
+ * human-driven API resume path (PATCH /goal) is unaffected.
+ */
+export async function assertGoalReactivationAllowed(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  const goal = await getSessionGoal(deps.db, workspaceId, sessionId);
+  if (!goal || goal.status !== "paused" || goal.pausedReason !== "user_interrupt") {
+    return;
+  }
+  const session = await getSession(deps.db, workspaceId, sessionId);
+  const activeTurnId = session?.activeTurnId ?? null;
+  if (!activeTurnId) {
+    return;
+  }
+  const turn = await getSessionTurn(deps.db, workspaceId, activeTurnId);
+  if (turn && isMachineChildNotificationTurn(turn)) {
+    throw new Error(
+      "This session was paused by the user (stop). A worker-completion turn cannot resume or replace the goal — only the user can. Report your findings for the user and stop; do not call goal_set.",
+    );
+  }
+}
+
 function registerGoalTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -634,6 +682,7 @@ function registerGoalTools(
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
       await requireSession(deps.db, grant.workspaceId, sessionId);
+      await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId);
       const { goal, replaced } = await upsertSessionGoal(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,

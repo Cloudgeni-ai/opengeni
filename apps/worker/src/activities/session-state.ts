@@ -1,4 +1,5 @@
 import {
+  cancelQueuedSessionTurns,
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   countQueuedTurns,
   countTurnSessionHistoryItems,
@@ -85,6 +86,29 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     // so the goal loop stays active.
     if (!isSteerInterrupt(trigger)) {
       await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
+      // STOP MEANS STOP: a stop drains the ENTIRE queue, not just the active
+      // turn. Otherwise a flood of machine-injected turns (child-completion
+      // notifications arriving faster than the human can interrupt) survives the
+      // stop and keeps the session churning — the exact "interrupt never
+      // depletes the queue" failure. Steer must NOT drain (it promotes exactly
+      // one steered message), so this is gated inside the non-steer branch.
+      // Emit ONE summary event carrying the drained ids so the timeline shows
+      // the drain honestly instead of N separate cancellations. Idempotent: a
+      // retry drains nothing (no queued rows left) and emits no event.
+      const drainedTurnIds = await cancelQueuedSessionTurns(db, input.workspaceId, input.sessionId);
+      if (drainedTurnIds.length > 0) {
+        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+          {
+            type: "turn.queue_drained",
+            payload: {
+              triggerEventId: input.triggerEventId,
+              drainedCount: drainedTurnIds.length,
+              drainedTurnIds,
+            },
+          },
+        ]);
+        await refreshQueuedTurnsGauge(db, observability);
+      }
     }
     if (!session.activeTurnId) {
       return;

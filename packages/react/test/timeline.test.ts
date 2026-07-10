@@ -1783,3 +1783,54 @@ describe("buildTimeline — memory writes", () => {
     expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
   });
 });
+
+describe("turn.queue_drained (stop-drains-the-queue)", () => {
+  const userItems = (items: ReturnType<typeof buildTimeline>) =>
+    items.filter((item) => item.kind === "user-message");
+
+  test("a drained queued turn is retracted exactly like an individually-cancelled one", () => {
+    reset();
+    const msgCancel = event("user.message", { text: "hi" }, { turnId: null });
+    const cancelled = buildTimeline([
+      msgCancel,
+      event(
+        "turn.queued",
+        { turnId: "turn-9", triggerEventId: msgCancel.id },
+        { turnId: "turn-9" },
+      ),
+      event("turn.cancelled", {}, { turnId: "turn-9" }),
+    ]);
+
+    reset();
+    const msgDrain = event("user.message", { text: "hi" }, { turnId: null });
+    const drained = buildTimeline([
+      msgDrain,
+      event("turn.queued", { turnId: "turn-9", triggerEventId: msgDrain.id }, { turnId: "turn-9" }),
+      event(
+        "turn.queue_drained",
+        { drainedCount: 1, drainedTurnIds: ["turn-9"] },
+        { turnId: null },
+      ),
+    ]);
+
+    // Same disposition: the drained queued message folds away just like a
+    // cancelled one, so the timeline reflects the stop honestly.
+    expect(userItems(drained).length).toBe(userItems(cancelled).length);
+  });
+
+  test("a queue_drained that does not name a turn leaves it queued", () => {
+    reset();
+    const msg = event("user.message", { text: "hi" }, { turnId: null });
+    const items = buildTimeline([
+      msg,
+      event("turn.queued", { turnId: "turn-9", triggerEventId: msg.id }, { turnId: "turn-9" }),
+      event(
+        "turn.queue_drained",
+        { drainedCount: 1, drainedTurnIds: ["turn-OTHER"] },
+        { turnId: null },
+      ),
+    ]);
+    // turn-9 was not drained, so its queued message survives.
+    expect(userItems(items).length).toBe(1);
+  });
+});

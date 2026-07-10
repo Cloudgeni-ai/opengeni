@@ -56,12 +56,21 @@ export async function notifyParentOfChildTerminal(
       return;
     }
     const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
+    // Sacred user pause: if the MANAGER's own goal was stopped by the user, the
+    // wake must not tell it to "resume it now" — that instruction is exactly
+    // what re-arms the loop the user just stopped. Suppress the resume nudge and
+    // tell the agent to stay stopped. Paired with the goal_set reactivation
+    // guard so a nudge that slips through still cannot revive the goal.
+    const parentGoal = await getSessionGoal(svc.db, workspaceId, child.parentSessionId);
+    const parentGoalUserPaused =
+      parentGoal?.status === "paused" && parentGoal.pausedReason === "user_interrupt";
     const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
     const result = await wakeParentSessionForChildCompletion(svc.db, {
       workspaceId,
       parentSessionId: child.parentSessionId,
       clientEventId,
-      text: childCompletionWakeText(child, goal, terminalStatus),
+      childSummary: childCompletionSummary(child, goal, terminalStatus),
+      trailing: childCompletionTrailing(parentGoalUserPaused),
       childCompletion: childCompletionPayload(child, goal, terminalStatus),
       reasoningEffortFallback: svc.settings.openaiReasoningEffort,
     });
@@ -113,7 +122,15 @@ function childCompletionPayload(
   };
 }
 
-function childCompletionWakeText(
+/**
+ * The worker-specific lines for one child (what happened + its goal), WITHOUT
+ * the trailing "what to do next" instruction. Kept separate so N child
+ * completions can be coalesced into ONE digest turn: the DB layer stores each
+ * child's summary and rebuilds a single numbered digest with ONE shared
+ * trailing instruction, instead of enqueuing N turns (N model runs) that a
+ * human's stop button can never outrun.
+ */
+export function childCompletionSummary(
   child: Session,
   goal: SessionGoal | null,
   terminalStatus: "idle" | "failed",
@@ -143,8 +160,17 @@ function childCompletionWakeText(
       lines.push(`Pause rationale: ${goal.rationale}`);
     }
   }
-  lines.push(
-    "Read the worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting this worker, resume it now.",
-  );
   return lines.join("\n");
+}
+
+/**
+ * The single trailing instruction appended to a child-completion (or digest)
+ * wake. Suppresses the "resume it now" nudge when the manager's own goal was
+ * stopped by the user — that nudge is exactly what re-arms the loop the user
+ * just stopped (paired with the goal_set reactivation guard).
+ */
+export function childCompletionTrailing(parentGoalUserPaused: boolean): string {
+  return parentGoalUserPaused
+    ? "Read each worker's session events/notebook output for its result. This session was paused by the user — do NOT resume or replace your goal; summarize the result for the user and stop."
+    : "Read each worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting these workers, resume it now.";
 }

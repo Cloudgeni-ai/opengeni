@@ -463,6 +463,7 @@ export const SESSION_EVENT_TYPES = [
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
+  "turn.queue_drained",
   "turn.preempted",
   "agent.message.delta",
   "agent.message.completed",

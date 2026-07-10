@@ -505,8 +505,8 @@ export function ChatComposer({
                       transition={{ duration: 0.15, ease: "easeOut" }}
                       onClick={() => void composer.interrupt()}
                       disabled={composer.interrupting}
-                      aria-label="Stop the current turn"
-                      title="Stop the current turn"
+                      aria-label="Stop the session"
+                      title="Stop: cancels the current turn, clears any queued messages, and pauses the goal"
                       className={cn(
                         "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
                         "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",

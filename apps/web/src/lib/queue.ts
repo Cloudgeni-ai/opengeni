@@ -118,9 +118,9 @@ export function deliveryModeExplanation(
   if (mode === "steer") {
     switch (status) {
       case "running":
-        return "Steer interrupts the running turn and injects this message now.";
+        return "Steer cancels the current step and runs your message next — the goal continues.";
       case "requires_action":
-        return "Steer interrupts the turn waiting on approval — the pending approval is abandoned and this message runs instead.";
+        return "Steer cancels the step waiting on approval (the pending approval is abandoned) and runs your message next — the goal continues.";
       case "queued":
         return "Nothing is running yet — sends now and jumps to the front of the queue.";
       default:
