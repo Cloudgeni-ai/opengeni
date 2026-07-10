@@ -27,6 +27,7 @@ macos-desktop = ["opengeni-agent-platform/macos-desktop"]
 
 [dependencies]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+opengeni-agent-engine = { path = "../opengeni-agent-engine" }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 opengeni-agent-stream = { path = "../opengeni-agent-stream" }
 opengeni-agent-update = { path = "../opengeni-agent-update" }
@@ -56,6 +57,10 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
+
+# Per-channel output digests in the op-stream Exit frame (byte-exact assembly
+# proof, PROTOCOL.md §Wire messages). Already a workspace dep (update cohorting).
+blake3 = { workspace = true }
 
 clap = { workspace = true }
 hostname = { workspace = true }

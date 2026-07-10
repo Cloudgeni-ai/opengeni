@@ -16,6 +16,8 @@
 //!   → `ControlResponse` table; a handler error is a typed `AgentError`, never a
 //!   panic.
 //! * [`backoff`] — full-jitter exponential backoff (the resiliency headline).
+//! * [`job`] — the op-stream job pump: one task per op, streaming a contained
+//!   child through the engine's retention/credit-flow to an injected frame sink.
 //! * [`metrics`] — the heartbeat metrics sample (deepened in M10).
 //! * [`supervisor`] — dial → serve → reconnect, forever, with heartbeats + the
 //!   clean going-offline.
@@ -37,6 +39,11 @@ mod config;
 mod dispatch;
 mod enrollment;
 mod instance_lock;
+// The op-stream job pump. Fully unit-tested here; the supervisor wires it to the
+// live OpStart/OpAck path in the next engine step, so the non-test build does not
+// reference it yet.
+#[allow(dead_code)]
+mod job;
 mod metrics;
 mod service;
 mod supervisor;
