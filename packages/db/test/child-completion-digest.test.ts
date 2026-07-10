@@ -9,6 +9,8 @@ import {
   finishTurn,
   getSessionEvent,
   listPendingSessionTurns,
+  listSessionEvents,
+  setSessionChildNotificationsMode,
   wakeParentSessionForChildCompletion,
   createDb,
   type Database,
@@ -115,7 +117,7 @@ describe("wakeParentSessionForChildCompletion coalescing", () => {
     expect(r1.delivered).toBe(true);
     expect(r2.delivered).toBe(true);
     expect(r3.delivered).toBe(true);
-    if (r1.delivered && r2.delivered && r3.delivered) {
+    if (r1.delivered && !r1.passive && r2.delivered && !r2.passive && r3.delivered && !r3.passive) {
       expect(r1.folded).toBe(false); // opened the digest
       expect(r2.folded).toBe(true); // folded in
       expect(r3.folded).toBe(true);
@@ -170,7 +172,7 @@ describe("wakeParentSessionForChildCompletion coalescing", () => {
       wakeInput(workspaceId, parent.id, "child-1"),
     );
     expect(first.delivered).toBe(true);
-    if (!first.delivered) return;
+    if (!first.delivered || first.passive) return;
     // Simulate the workflow claiming the digest turn (queued -> running).
     await admin`update session_turns set status = 'running' where id = ${first.turn.id}`;
 
@@ -179,7 +181,7 @@ describe("wakeParentSessionForChildCompletion coalescing", () => {
       wakeInput(workspaceId, parent.id, "child-2"),
     );
     expect(next.delivered).toBe(true);
-    if (next.delivered) {
+    if (next.delivered && !next.passive) {
       expect(next.folded).toBe(false); // could not fold into a running turn
       expect(next.turn.id).not.toBe(first.turn.id);
     }
@@ -240,5 +242,111 @@ describe("cancelQueuedSessionTurns (stop-drains-the-queue)", () => {
     await finishTurn(db, workspaceId, running.id, "cancelled");
     const afterFinish = await listPendingSessionTurns(db, workspaceId, session.id);
     expect(afterFinish.length).toBe(0);
+  });
+});
+
+describe("human messages preempt machine notifications (lever 5)", () => {
+  function humanTurn(accountId: string, workspaceId: string, sessionId: string, preempt: boolean) {
+    return enqueueSessionTurn(db, {
+      accountId,
+      workspaceId,
+      sessionId,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${sessionId}`,
+      source: "user" as const,
+      prompt: "human message",
+      resources: [],
+      tools: [],
+      model: "gpt",
+      reasoningEffort: "medium" as const,
+      sandboxBackend: "none" as const,
+      metadata: {},
+      preemptChildNotifications: preempt,
+    });
+  }
+
+  test("a human turn jumps AHEAD of queued child-completion turns", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+    // Two machine notifications sit in the queue (folded into one digest turn).
+    await wakeParentSessionForChildCompletion(db, wakeInput(workspaceId, parent.id, "child-1"));
+    await wakeParentSessionForChildCompletion(db, wakeInput(workspaceId, parent.id, "child-2"));
+
+    const human = await humanTurn(accountId, workspaceId, parent.id, true);
+
+    // Ordered by claim position: the human turn is first, the machine digest after.
+    const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
+    expect(pending[0]!.id).toBe(human.id);
+    expect(pending[0]!.metadata).not.toHaveProperty("childCompletion");
+    expect(pending[pending.length - 1]!.metadata).toHaveProperty("childCompletion");
+  });
+
+  test("without the flag, a human turn appends to the back (unchanged default)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+    await wakeParentSessionForChildCompletion(db, wakeInput(workspaceId, parent.id, "child-1"));
+
+    const human = await humanTurn(accountId, workspaceId, parent.id, false);
+    const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
+    // Machine turn was queued first, so it stays ahead of a non-preempting turn.
+    expect(pending[pending.length - 1]!.id).toBe(human.id);
+  });
+});
+
+describe("child-completion suppression opt-in (lever 6)", () => {
+  test("passive mode lands a card event with NO queued turn and no wake", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+    await setSessionChildNotificationsMode(db, workspaceId, parent.id, "passive");
+
+    const result = await wakeParentSessionForChildCompletion(
+      db,
+      wakeInput(workspaceId, parent.id, "child-1"),
+    );
+    expect(result.delivered).toBe(true);
+    if (result.delivered) {
+      expect(result.passive).toBe(true);
+    }
+    // No queued turn = no model run.
+    const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
+    expect(pending.length).toBe(0);
+    // The completion is still visible as a card event in the timeline.
+    const events = await listSessionEvents(db, workspaceId, parent.id, {});
+    const card = events.find(
+      (e) => e.type === "user.message" && (e.payload as any)?.childCompletion,
+    );
+    expect(card).toBeDefined();
+  });
+
+  test("passive mode stays idempotent per child episode", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+    await setSessionChildNotificationsMode(db, workspaceId, parent.id, "passive");
+    await wakeParentSessionForChildCompletion(db, wakeInput(workspaceId, parent.id, "child-1"));
+    const dup = await wakeParentSessionForChildCompletion(
+      db,
+      wakeInput(workspaceId, parent.id, "child-1"),
+    );
+    expect(dup.delivered).toBe(false);
+  });
+
+  test("digest remains the default when no mode is set", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+    const result = await wakeParentSessionForChildCompletion(
+      db,
+      wakeInput(workspaceId, parent.id, "child-1"),
+    );
+    expect(result.delivered).toBe(true);
+    if (result.delivered) {
+      expect(result.passive).toBe(false);
+    }
+    const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
+    expect(pending.length).toBe(1);
   });
 });

@@ -1834,6 +1834,11 @@ export type EnqueueSessionTurnInput = {
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
   metadata: Record<string, unknown>;
+  // When true, this turn is placed AHEAD of any queued machine child-completion
+  // notification turns instead of at the back of the queue: a genuine human
+  // message must never wait behind a flood of "worker FAILED" notices. Only the
+  // human-message enqueue path sets it; machine wakes never do.
+  preemptChildNotifications?: boolean;
 };
 
 export type UpdateQueuedSessionTurnInput = Partial<{
@@ -13520,6 +13525,32 @@ export async function updateSessionTitle(
   });
 }
 
+export type ChildNotificationsMode = "digest" | "passive";
+
+/**
+ * Set how a manager session receives spawned-worker completion notifications:
+ * `digest` (default) enqueues a coalesced turn the manager processes; `passive`
+ * lands each completion as a timeline card only, never a queued turn / model run
+ * (the "don't bring spawned sessions back into my chat" opt-in). Merges the one
+ * key into `metadata` (jsonb `||`) so nothing else on the row is clobbered.
+ */
+export async function setSessionChildNotificationsMode(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  mode: ChildNotificationsMode,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb
+      .update(schema.sessions)
+      .set({
+        metadata: sql`${schema.sessions.metadata} || jsonb_build_object('childNotificationsMode', ${mode}::text)`,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -13944,11 +13975,7 @@ export async function enqueueSessionTurn(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const position = await nextTurnPosition(
-          tx as unknown as Database,
-          input.workspaceId,
-          input.sessionId,
-        );
+        const position = await positionForEnqueue(tx as unknown as Database, input);
         const [row] = await tx
           .insert(schema.sessionTurns)
           .values({
@@ -14069,11 +14096,21 @@ export type WakeParentForChildCompletionResult =
   | { delivered: false; reason: "already_delivered" | "parent_cancelled" }
   | {
       delivered: true;
+      passive: false;
       // True when this child folded into an already-queued child-notification
       // digest turn (no new turn created); false when it opened a new one.
       folded: boolean;
       turn: SessionTurn;
       triggerEvent: SessionEvent;
+      events: SessionEvent[];
+      temporalWorkflowId: string;
+    }
+  | {
+      // Suppression mode: the completion landed as a passive card event only (no
+      // turn, no model run). The caller publishes `events` but must NOT wake the
+      // workflow — there is nothing to claim.
+      delivered: true;
+      passive: true;
       events: SessionEvent[];
       temporalWorkflowId: string;
     };
@@ -14150,6 +14187,54 @@ export async function wakeParentSessionForChildCompletion(
           .limit(1);
         if (existing) {
           return { delivered: false, reason: "already_delivered" as const };
+        }
+
+        const passiveMode =
+          (parent.metadata as { childNotificationsMode?: unknown } | null)
+            ?.childNotificationsMode === "passive";
+        if (passiveMode) {
+          // SUPPRESSION OPT-IN: the parent asked not to have spawned-session
+          // completions come back as queued messages. Land exactly one passive
+          // card event — the worker-result card still renders in the timeline —
+          // but create NO turn and change NO status, so it never forces a model
+          // run. The caller publishes this event and does NOT wake the workflow.
+          const passiveText = buildChildCompletionDigest([input.childSummary], input.trailing);
+          const now = new Date();
+          const sequence = parent.lastSequence + 1;
+          const [passiveRow] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: parent.accountId,
+              workspaceId: parent.workspaceId,
+              sessionId: parent.id,
+              sequence,
+              type: "user.message",
+              payload: sanitizeEventPayload({
+                text: passiveText,
+                childCompletion: input.childCompletion,
+              }),
+              clientEventId: input.clientEventId,
+              turnId: null,
+              producerId: null,
+              producerSeq: null,
+              occurredAt: now,
+            })
+            .returning();
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: sequence, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, parent.id),
+              ),
+            );
+          return {
+            delivered: true as const,
+            passive: true as const,
+            events: passiveRow ? [mapEvent(passiveRow)] : [],
+            temporalWorkflowId: parent.temporalWorkflowId ?? `session-${parent.id}`,
+          };
         }
 
         // Child completion is follow-up work for the manager turn that spawned
@@ -14381,6 +14466,7 @@ export async function wakeParentSessionForChildCompletion(
 
         return {
           delivered: true as const,
+          passive: false as const,
           folded,
           turn,
           triggerEvent,
@@ -15176,6 +15262,48 @@ async function latestStartedSessionTurnRow(
     .orderBy(desc(schema.sessionEvents.sequence))
     .limit(1);
   return row?.turn ?? null;
+}
+
+/**
+ * The queue position for a newly enqueued turn. Default: the back of the queue
+ * (nextTurnPosition). With `preemptChildNotifications`, a genuine human message
+ * jumps AHEAD of any queued machine child-completion notification turns — it
+ * takes the earliest such turn's slot and shifts that whole machine band back
+ * by one, so it claims strictly before them while staying behind the running
+ * turn and any earlier human turns. This is what stops a person's message from
+ * being buried behind a flood of "worker FAILED" notices (and cancelled by its
+ * own author's stop-spree before it ever runs).
+ */
+async function positionForEnqueue(db: Database, input: EnqueueSessionTurnInput): Promise<number> {
+  if (!input.preemptChildNotifications) {
+    return await nextTurnPosition(db, input.workspaceId, input.sessionId);
+  }
+  const [{ minPos } = { minPos: null }] = await db
+    .select({ minPos: sql<number | null>`min(${schema.sessionTurns.position})` })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.status, "queued"),
+        sql`jsonb_exists(${schema.sessionTurns.metadata}, 'childCompletion')`,
+      ),
+    );
+  if (minPos === null || minPos === undefined) {
+    return await nextTurnPosition(db, input.workspaceId, input.sessionId);
+  }
+  await db
+    .update(schema.sessionTurns)
+    .set({ position: sql`${schema.sessionTurns.position} + 1`, updatedAt: new Date() })
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.status, "queued"),
+        gte(schema.sessionTurns.position, minPos),
+      ),
+    );
+  return Number(minPos);
 }
 
 async function nextTurnPosition(

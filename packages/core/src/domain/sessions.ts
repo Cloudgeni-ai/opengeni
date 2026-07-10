@@ -725,6 +725,11 @@ export async function postUserMessageTurn(input: {
       reasoningEffortForSession(session.metadata, settings.openaiReasoningEffort),
     sandboxBackend: session.sandboxBackend,
     metadata: {},
+    // A human's message jumps ahead of any queued machine child-completion
+    // notification turns — it must never wait behind a flood of "worker FAILED"
+    // notices (the burial that spent the user's stop-spree and killed his own
+    // message). Stays behind the running turn and earlier human turns.
+    preemptChildNotifications: true,
   });
   await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
     {

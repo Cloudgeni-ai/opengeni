@@ -37,6 +37,7 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  setSessionChildNotificationsMode,
   setSessionGoalStatus,
   setVariableSetVariable,
   updateScheduledTask,
@@ -145,6 +146,18 @@ export function buildOpenGeniMcpServer(
       async ({ title }) => {
         const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
         return json({ ok: true, updated: result.updated, title: result.title ?? title });
+      },
+    );
+    server.registerTool(
+      "set_child_notifications_mode",
+      {
+        description:
+          "Control how workers you spawn report back when they finish. 'digest' (default): their completions arrive as a coalesced turn you process. 'passive': their completions appear only as quiet cards in your timeline and never queue a turn or a model run — use this when spawned-session completions are flooding your chat and you want them out of the way.",
+        inputSchema: { mode: z4.enum(["digest", "passive"]) },
+      },
+      async ({ mode }) => {
+        await setSessionChildNotificationsMode(deps.db, grant.workspaceId, sessionId, mode);
+        return json({ ok: true, mode });
       },
     );
   }

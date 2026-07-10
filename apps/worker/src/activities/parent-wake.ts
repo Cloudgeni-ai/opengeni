@@ -78,7 +78,10 @@ export async function notifyParentOfChildTerminal(
       return;
     }
     await svc.bus.publish(workspaceId, child.parentSessionId, result.events);
-    if (svc.wakeSessionWorkflow) {
+    // Passive (suppressed) completions are a timeline card only — there is no
+    // queued turn to run, so do NOT wake the workflow (waking would spin it up
+    // just to find nothing and idle again).
+    if (!result.passive && svc.wakeSessionWorkflow) {
       await svc.wakeSessionWorkflow({
         accountId: child.accountId,
         workspaceId,
