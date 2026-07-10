@@ -38,10 +38,6 @@ futures.workspace = true
 # Deterministic op mixes (seeded StdRng) + reproducible request ids.
 rand.workspace = true
 
-# POSIX signals to the child process groups (SIGSTOP/SIGCONT/SIGKILL/SIGTERM) and
-# process-group cleanup — the SAFE nix binding (no unsafe of our own).
-nix = { workspace = true, features = ["signal", "process"] }
-
 # Report shape + config echo.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -58,6 +54,14 @@ clap.workspace = true
 # Structured status logs for the harness itself.
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+# The harness drives POSIX process groups + signals + /proc, so it is unix-only.
+# Its one unix-only dependency lives here; on Windows the crate compiles to an empty
+# stub binary (see src/main.rs) so a `cargo build/test --workspace` stays green.
+[target.'cfg(unix)'.dependencies]
+# POSIX signals to the child process groups (SIGSTOP/SIGCONT/SIGKILL/SIGTERM) and
+# process-group cleanup — the SAFE nix binding (no unsafe of our own).
+nix = { workspace = true, features = ["signal", "process"] }
 
 [lints]
 workspace = true

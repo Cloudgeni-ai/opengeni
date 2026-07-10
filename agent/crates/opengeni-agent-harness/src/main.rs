@@ -9,22 +9,39 @@
 //!
 //! See `README.md` for what each scenario proves and how to run it.
 
+// The harness drives POSIX process groups, Unix signals, and `/proc` sampling, so
+// the entire program is gated to unix. On non-unix targets the crate still COMPILES
+// (to the empty stub `main` at the bottom) — that keeps a `cargo build/test
+// --workspace` green on Windows CI — but the binary refuses to run there, since the
+// harness is meaningless without process groups and signals.
+#[cfg(unix)]
 mod agent;
+#[cfg(unix)]
 mod driver;
+#[cfg(unix)]
 mod nats;
+#[cfg(unix)]
 mod proc;
+#[cfg(unix)]
 mod report;
+#[cfg(unix)]
 mod scenario;
 
+#[cfg(unix)]
 use std::path::PathBuf;
 
+#[cfg(unix)]
 use clap::{Parser, Subcommand};
+#[cfg(unix)]
 use tracing_subscriber::EnvFilter;
 
+#[cfg(unix)]
 use nats::NatsServer;
+#[cfg(unix)]
 use scenario::{Harness, HarnessConfig};
 
 /// Deterministic load/chaos harness for the opengeni-agent control plane.
+#[cfg(unix)]
 #[derive(Debug, Parser)]
 #[command(name = "og-agent-harness", version, about)]
 struct Cli {
@@ -70,6 +87,7 @@ struct Cli {
     command: Command,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// MILESTONE 0: bring one disposable agent online, confirm heartbeats + a ping
@@ -93,6 +111,18 @@ enum Command {
     All,
 }
 
+/// Non-unix stub: the harness has no meaning without POSIX process groups +
+/// signals, so it compiles (keeping a workspace build green) but refuses to run.
+#[cfg(not(unix))]
+fn main() -> std::process::ExitCode {
+    eprintln!(
+        "og-agent-harness is unix-only: it drives POSIX process groups, signals, and \
+         /proc sampling, which this platform does not provide."
+    );
+    std::process::ExitCode::FAILURE
+}
+
+#[cfg(unix)]
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     init_tracing();
@@ -117,6 +147,7 @@ async fn main() -> std::process::ExitCode {
 
 /// Initializes tracing (default `info`; the agent's own logs are captured to
 /// per-agent files, not this stream).
+#[cfg(unix)]
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,og_agent_harness=info"));
@@ -128,6 +159,7 @@ fn init_tracing() {
 
 /// Resolves binaries + paths, then dispatches to the selected scenario(s).
 /// Returns whether all verdicts across all run scenarios passed.
+#[cfg(unix)]
 async fn run(cli: Cli) -> Result<bool, String> {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -204,6 +236,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
 }
 
 /// Runs scenarios 1-6, each on a fresh fleet, and returns whether all passed.
+#[cfg(unix)]
 async fn run_all(cli: &Cli, mk: &impl Fn(usize) -> HarnessConfig) -> Result<bool, String> {
     let mut all = true;
 
@@ -236,6 +269,7 @@ async fn run_all(cli: &Cli, mk: &impl Fn(usize) -> HarnessConfig) -> Result<bool
 
 /// MILESTONE 0: prove one disposable agent comes online (heartbeats) and answers
 /// a ping round-trip. Reports the exact failure (with the agent log tail) if not.
+#[cfg(unix)]
 async fn milestone0(cfg: HarnessConfig) -> Result<bool, String> {
     let h = Harness::bootstrap(cfg).await?;
     let agent = &h.agents[0];
