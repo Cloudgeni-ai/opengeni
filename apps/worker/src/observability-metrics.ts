@@ -1,4 +1,5 @@
 import { errorCodeToJSON } from "@opengeni/agent-proto";
+import type { SessionEventType } from "@opengeni/contracts";
 import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import {
@@ -386,5 +387,190 @@ export function recordCreditMicros(
     help: "Total credit micros recorded by kind.",
     labels: { kind },
     amount: amountMicros,
+  });
+}
+
+// ── Streaming SLIs ────────────────────────────────────────────────────────────
+// Instruments the token-streaming pipeline so "streaming is sluggish" is a number,
+// not a vibe. Split across the three attributable stages so an operator can tell
+// WHERE the latency lives: the model (TTFT + inter-delta gaps), our durable write
+// path (append latency), or delivery (publish latency + batcher flush shape). All
+// labels are bounded (provider from the model registry, a two-value delta class) —
+// never a session id or a raw user-supplied model string.
+
+export type StreamDeltaClass = "message" | "reasoning";
+
+/** Content-delta classes only. A `null` return means "not a content delta" — the
+ *  event that re-arms the TTFT anchor and closes an inter-delta run. */
+function contentDeltaClass(type: SessionEventType): StreamDeltaClass | null {
+  if (type === "agent.message.delta") {
+    return "message";
+  }
+  if (type === "agent.reasoning.delta") {
+    return "reasoning";
+  }
+  return null;
+}
+
+// TTFT and inter-delta live on a human-perceptible scale (tens of ms to a few
+// seconds), so they get their own SHORT buckets — the default duration buckets
+// (which run to 3600s) would collapse every real streaming value into one bucket.
+const STREAM_TTFT_BUCKETS = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10];
+const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
+
+/**
+ * Per-turn stream-timing tracker fed every normalized runtime event in push order.
+ * It emits two model-responsiveness SLIs from the worker's seat on the stream:
+ *
+ *   - `opengeni_stream_ttft_seconds{provider}` — time from a model (re)start to its
+ *     first streamed content delta. The anchor starts at construction (≈ runStream
+ *     start, so the first observation is "how long until text appears") and re-arms
+ *     on every non-content event (a tool call, a completed message, a usage frame),
+ *     so a post-tool response measures the model's restart latency, NOT our own
+ *     tool-execution time.
+ *   - `opengeni_stream_inter_delta_gap_seconds{provider,class}` — gap between
+ *     consecutive content deltas of the SAME class. The run resets on any
+ *     non-content event so a gap never spans a tool call or a model boundary — it
+ *     measures only the choppiness of a live token stream.
+ *
+ * Purely observational and clock-injectable; it never touches the events it sees.
+ */
+export class StreamTimingMetrics {
+  private readonly now: () => number;
+  private ttftAnchor: number;
+  private ttftArmed = true;
+  private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
+
+  constructor(
+    private readonly observability: Observability,
+    private readonly options: { provider: string; now?: () => number },
+  ) {
+    this.now = options.now ?? (() => performance.now());
+    this.ttftAnchor = this.now();
+  }
+
+  onEvent(type: SessionEventType): void {
+    const deltaClass = contentDeltaClass(type);
+    if (deltaClass === null) {
+      // A non-content event: the model paused emitting. Re-arm TTFT so the next
+      // content delta measures (re)start latency, and close every inter-delta run
+      // so no gap spans a tool call / model boundary.
+      this.ttftAnchor = this.now();
+      this.ttftArmed = true;
+      this.lastDeltaAt.clear();
+      return;
+    }
+    const at = this.now();
+    if (this.ttftArmed) {
+      this.observability.observeHistogram({
+        name: "opengeni_stream_ttft_seconds",
+        help: "Seconds from a model (re)start to its first streamed content delta.",
+        buckets: STREAM_TTFT_BUCKETS,
+        labels: { provider: this.options.provider },
+        value: Math.max(0, (at - this.ttftAnchor) / 1000),
+      });
+      this.ttftArmed = false;
+    }
+    const last = this.lastDeltaAt.get(deltaClass);
+    if (last !== undefined) {
+      this.observability.observeHistogram({
+        name: "opengeni_stream_inter_delta_gap_seconds",
+        help: "Seconds between consecutive streamed content deltas of the same class.",
+        buckets: STREAM_INTER_DELTA_BUCKETS,
+        labels: { provider: this.options.provider, class: deltaClass },
+        value: Math.max(0, (at - last) / 1000),
+      });
+    }
+    this.lastDeltaAt.set(deltaClass, at);
+  }
+}
+
+// Batch shapes: sizes are small integers; durations are the append+publish round
+// trip the flush performs (sub-ms to a couple seconds under contention).
+const STREAM_BATCH_SIZE_BUCKETS = [1, 2, 5, 10, 20, 50, 100, 200, 500];
+const STREAM_IO_BUCKETS = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5];
+
+/** Flush shape of the streaming batcher: how many events coalesced into one flush
+ *  (the coalescing win) and how long that flush took (append + publish). */
+export function recordBatchFlush(
+  observability: Observability,
+  input: { events: number; durationSeconds: number },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_stream_batch_flush_events",
+    help: "Session events coalesced into one streaming batcher flush.",
+    buckets: STREAM_BATCH_SIZE_BUCKETS,
+    value: input.events,
+  });
+  observability.observeHistogram({
+    name: "opengeni_stream_batch_flush_duration_seconds",
+    help: "Duration in seconds of one streaming batcher flush (append + publish).",
+    buckets: STREAM_IO_BUCKETS,
+    value: input.durationSeconds,
+  });
+}
+
+/** Latency of the durable `appendSessionEvents` DB write — the write path. A p99
+ *  climb here is our Postgres, not the model or NATS. */
+export function recordSessionEventAppendLatency(
+  observability: Observability,
+  input: { durationSeconds: number },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_session_event_append_seconds",
+    help: "Duration in seconds of an appendSessionEvents DB write (the durable write path).",
+    buckets: STREAM_IO_BUCKETS,
+    value: input.durationSeconds,
+  });
+}
+
+/** Latency of the best-effort NATS live fan-out — the delivery path. A p99 climb
+ *  here (with append healthy) is delivery, not the write path. */
+export function recordSessionEventPublishLatency(
+  observability: Observability,
+  input: { durationSeconds: number },
+): void {
+  observability.observeHistogram({
+    name: "opengeni_session_event_publish_seconds",
+    help: "Duration in seconds of the best-effort NATS live fan-out publish (the delivery path).",
+    buckets: STREAM_IO_BUCKETS,
+    value: input.durationSeconds,
+  });
+}
+
+// Context tokens per response span a wide range; buckets track the pressure toward
+// a model's window so "sessions are running hot but never compacting" is queryable.
+const MODEL_INPUT_TOKENS_BUCKETS = [
+  1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 150_000, 200_000, 300_000, 500_000, 1_000_000,
+];
+
+/** Observed input (context) tokens per model response — the context-pressure
+ *  signal. Paired with `opengeni_context_compactions_total`, it makes the
+ *  "compaction never firing while contexts run hot" failure mode expressible. */
+export function recordModelInputTokens(
+  observability: Observability,
+  provider: string,
+  inputTokens: number,
+): void {
+  if (!(inputTokens > 0)) {
+    return;
+  }
+  observability.observeHistogram({
+    name: "opengeni_model_input_tokens",
+    help: "Observed input (context) tokens per model response, by provider.",
+    buckets: MODEL_INPUT_TOKENS_BUCKETS,
+    labels: { provider },
+    value: inputTokens,
+  });
+}
+
+/** A context compaction actually fired, by trigger (operator | overflow | proactive
+ *  | auto). The rate of this — against the input-tokens histogram above — is how an
+ *  operator sees compaction working (or silently not). */
+export function recordContextCompaction(observability: Observability, trigger: string): void {
+  observability.incrementCounter({
+    name: "opengeni_context_compactions_total",
+    help: "Total context compactions performed, by trigger.",
+    labels: { trigger },
   });
 }

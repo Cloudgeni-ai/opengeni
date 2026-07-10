@@ -396,14 +396,44 @@ export async function createResponderConnection(
   };
 }
 
+/**
+ * Optional timing seam for {@link appendAndPublishEvents}: `onAppend` fires after
+ * the durable DB write, `onPublish` after the best-effort live fan-out (on both
+ * success AND failure of the publish, so a broker blip still records its latency).
+ * Kept as a plain callback so the events package takes no dependency on the
+ * observability package; the worker wires it to Prometheus histograms.
+ */
+export type AppendPublishObserver = {
+  onAppend?: (info: { durationSeconds: number; count: number }) => void;
+  onPublish?: (info: { durationSeconds: number; count: number }) => void;
+};
+
+function observeSince(
+  fn: ((info: { durationSeconds: number; count: number }) => void) | undefined,
+  startedAt: number,
+  count: number,
+): void {
+  if (!fn) {
+    return;
+  }
+  try {
+    fn({ durationSeconds: Math.max(0, (performance.now() - startedAt) / 1000), count });
+  } catch {
+    // Metrics emission must never affect the append/publish path.
+  }
+}
+
 export async function appendAndPublishEvents(
   db: Database,
   bus: EventBus,
   workspaceId: string,
   sessionId: string,
   events: AppendEventInput[],
+  observe?: AppendPublishObserver,
 ): Promise<SessionEvent[]> {
+  const appendStartedAt = performance.now();
   const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
+  observeSince(observe?.onAppend, appendStartedAt, appended.length);
   // The DB append above is the durable system of record; the publish is only a
   // best-effort LIVE fan-out. Guard it so NO EventBus implementation can throw an
   // in-flight agent turn to death on a transient NATS disconnect — consumers
@@ -411,6 +441,7 @@ export async function appendAndPublishEvents(
   // endpoint (DB replay + gap-backfill). The managed `createNatsEventBus` bus
   // already swallows internally, so this catch is the belt-and-suspenders guard
   // for any other bus impl (and a fully CLOSED connection during shutdown).
+  const publishStartedAt = performance.now();
   try {
     await bus.publish(workspaceId, sessionId, appended);
   } catch (error) {
@@ -419,6 +450,7 @@ export async function appendAndPublishEvents(
       error,
     );
   }
+  observeSince(observe?.onPublish, publishStartedAt, appended.length);
   return appended;
 }
 

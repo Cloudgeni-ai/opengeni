@@ -137,4 +137,38 @@ describe("createRuntimeBatcher", () => {
     await batcher.flush();
     expect(flushes.length).toBe(0);
   });
+
+  test("onFlush reports coalesced size and duration for each flush (success and failure)", async () => {
+    const seen: Array<{ events: number; durationSeconds: number }> = [];
+    let clock = 0;
+    let fail = false;
+    const batcher = createRuntimeBatcher(
+      async () => {
+        clock += 5; // simulate 5ms of flush work
+        if (fail) {
+          throw new Error("append failed");
+        }
+      },
+      { onFlush: (info) => seen.push(info), now: () => clock },
+    );
+
+    // A structural event flushes one event immediately.
+    await batcher.push(delta(0, TOOLCALL));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ events: 1, durationSeconds: 0.005 });
+
+    // Three coalesced deltas ride out on the next structural flush → size 4.
+    await batcher.push(delta(1));
+    await batcher.push(delta(2));
+    await batcher.push(delta(3));
+    await batcher.push(delta(4, TOOLCALL));
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.events).toBe(4);
+
+    // A FAILED flush still reports its shape (onFlush runs in the finally).
+    fail = true;
+    await expect(batcher.push(delta(5, TOOLCALL))).rejects.toThrow("append failed");
+    expect(seen).toHaveLength(3);
+    expect(seen[2]!.events).toBe(1); // the single structural delta(5) that failed to flush
+  });
 });

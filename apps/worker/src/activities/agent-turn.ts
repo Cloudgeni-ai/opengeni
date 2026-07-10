@@ -153,8 +153,14 @@ import {
 } from "../sandbox-routing";
 import {
   makeMachineOpObserver,
+  recordBatchFlush,
+  recordContextCompaction,
   recordCreditMicros,
+  recordModelInputTokens,
+  recordSessionEventAppendLatency,
+  recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
+  StreamTimingMetrics,
   turnLifecycleMetricsFor,
   type TurnOutcome,
 } from "../observability-metrics";
@@ -1443,7 +1449,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerId,
           producerSeq: ++producerSeq,
         }));
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs);
+        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs, {
+          onAppend: ({ durationSeconds }) =>
+            recordSessionEventAppendLatency(observability, { durationSeconds }),
+          onPublish: ({ durationSeconds }) =>
+            recordSessionEventPublishLatency(observability, { durationSeconds }),
+        });
         activityContext?.heartbeat({
           phase: "events_published",
           sessionId: input.sessionId,
@@ -2452,6 +2463,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           if (outcome.compacted) {
             const trigger = forced ? "operator" : undefined;
+            recordContextCompaction(observability, trigger ?? "auto");
             await publish([
               {
                 type: "session.context.compacted",
@@ -2604,6 +2616,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { force: true, requireShrink: true },
         );
         if (outcome.compacted) {
+          recordContextCompaction(observability, triggerLabel);
           await publish!([
             {
               type: "session.context.compacted",
@@ -2660,9 +2673,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             contextCompactionSignalTokens: () => lastInputTokensObserved,
           });
         stream = await withCodex(runStreamOnce);
-        batcher = createRuntimeBatcher(async (events) => {
-          await publish!(events);
-        });
+        // Bounded provider label for the streaming SLIs — the resolved registry
+        // provider id (or the built-in OpenAI/Azure provider), never a raw
+        // user-supplied model string.
+        const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
+        const streamTiming = new StreamTimingMetrics(observability, { provider: streamProvider });
+        batcher = createRuntimeBatcher(
+          async (events) => {
+            await publish!(events);
+          },
+          {
+            onFlush: ({ events, durationSeconds }) =>
+              recordBatchFlush(observability, { events, durationSeconds }),
+          },
+        );
 
         const iterator = stream.toStream()[Symbol.asyncIterator]();
         let streamDone = false;
@@ -2707,6 +2731,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               };
               const observed = responseUsage.usage?.inputTokens;
               if (typeof observed === "number" && observed > 0) {
+                recordModelInputTokens(observability, streamProvider, observed);
                 lastInputTokensObserved = observed;
                 await setSessionLastInputTokens(
                   db,
@@ -2772,6 +2797,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ) {
                 event.payload = { ...modelUsageEventContext, ...event.payload };
               }
+              streamTiming.onEvent(event.type);
               await batcher.push(event);
             }
           }

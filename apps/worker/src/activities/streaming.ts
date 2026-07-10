@@ -9,7 +9,20 @@ import { Context } from "@temporalio/activity";
 // cheaper than the per-delta DB round-trip it replaces).
 const TRAILING_FLUSH_MS = 33;
 
-export function createRuntimeBatcher(flushEvents: (events: AppendEventInput[]) => Promise<void>) {
+/** Optional metrics seam for the batcher. `onFlush` fires once per flush (on both
+ *  success and failure) with the coalesced event count and the flush duration, so
+ *  the worker can meter batch shape without the batcher knowing about Observability.
+ *  `now` is injectable for deterministic tests. Both are optional; absent ⇒ no-op. */
+export type RuntimeBatcherOptions = {
+  onFlush?: (info: { events: number; durationSeconds: number }) => void;
+  now?: () => number;
+};
+
+export function createRuntimeBatcher(
+  flushEvents: (events: AppendEventInput[]) => Promise<void>,
+  options: RuntimeBatcherOptions = {},
+) {
+  const now = options.now ?? (() => performance.now());
   let pending: AppendEventInput[] = [];
   let lastFlush = Date.now();
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -92,8 +105,19 @@ export function createRuntimeBatcher(flushEvents: (events: AppendEventInput[]) =
     const events = pending;
     pending = [];
     lastFlush = Date.now();
+    const startedAt = now();
     inFlight = flushEvents(events).finally(() => {
       inFlight = null;
+      if (options.onFlush) {
+        try {
+          options.onFlush({
+            events: events.length,
+            durationSeconds: Math.max(0, (now() - startedAt) / 1000),
+          });
+        } catch {
+          // Metrics emission must never affect a flush.
+        }
+      }
     });
     return inFlight;
   }
