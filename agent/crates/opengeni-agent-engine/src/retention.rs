@@ -234,11 +234,34 @@ impl RetentionLog {
     /// Replays every retained frame with `seq > from_exclusive`, in order.
     /// Returns owned frames (spooled bodies are read back from disk).
     ///
+    /// Prefer [`RetentionLog::replay_bounded`] in send paths: the send window
+    /// bounds how much can leave anyway, and materializing a multi-hundred-MiB
+    /// spooled tail per catch-up burst is a large transient allocation.
+    ///
     /// # Errors
     ///
     /// [`RetentionError::ReplayBelowFloor`] if the consumer asks for frames
     /// already freed; [`RetentionError::SpoolIo`] on a disk read failure.
     pub fn replay(&mut self, from_exclusive: u64) -> Result<Vec<Frame>, RetentionError> {
+        self.replay_bounded(from_exclusive, u64::MAX)
+    }
+
+    /// Replays retained frames with `seq > from_exclusive`, in order, stopping
+    /// after the frame that brings cumulative payload bytes to `max_bytes` or
+    /// beyond. Always yields at least one frame when any is retained past
+    /// `from_exclusive` (a frame larger than `max_bytes` is returned whole —
+    /// progress beats stall). The caller resumes from the last returned seq;
+    /// repeated calls walk the tail without ever materializing all of it.
+    ///
+    /// # Errors
+    ///
+    /// [`RetentionError::ReplayBelowFloor`] if the consumer asks for frames
+    /// already freed; [`RetentionError::SpoolIo`] on a disk read failure.
+    pub fn replay_bounded(
+        &mut self,
+        from_exclusive: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<Frame>, RetentionError> {
         if from_exclusive < self.floor {
             return Err(RetentionError::ReplayBelowFloor {
                 from: from_exclusive,
@@ -246,12 +269,20 @@ impl RetentionLog {
             });
         }
         match &mut self.mode {
-            Mode::Memory(frames) => Ok(frames
-                .iter()
-                .filter(|f| f.seq > from_exclusive)
-                .cloned()
-                .collect()),
-            Mode::Spooled(spool) => spool.read_from(from_exclusive),
+            Mode::Memory(frames) => {
+                let mut out = Vec::new();
+                let mut budget: u64 = 0;
+                for frame in frames.iter().filter(|f| f.seq > from_exclusive) {
+                    budget =
+                        budget.saturating_add(u64::try_from(frame.body.payload_len()).unwrap_or(0));
+                    out.push(frame.clone());
+                    if budget >= max_bytes {
+                        break;
+                    }
+                }
+                Ok(out)
+            }
+            Mode::Spooled(spool) => spool.read_from(from_exclusive, max_bytes),
         }
     }
 
@@ -493,9 +524,17 @@ impl Spool {
         freed
     }
 
-    fn read_from(&mut self, from_exclusive: u64) -> Result<Vec<Frame>, RetentionError> {
+    /// Reads frames past `from_exclusive`, stopping after the frame that
+    /// brings cumulative payload to `max_bytes` (always at least one frame —
+    /// progress beats stall). Bounded reads never materialize the whole tail.
+    fn read_from(
+        &mut self,
+        from_exclusive: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<Frame>, RetentionError> {
         let mut out = Vec::new();
         let mut open: Option<(u64, fs::File)> = None;
+        let mut budget: u64 = 0;
         for loc in self.index.iter().filter(|l| l.seq > from_exclusive) {
             // Make sure appended bytes are on disk before reading them back
             // through a second handle.
@@ -534,6 +573,10 @@ impl Spool {
                     source,
                 })?;
             out.push(decode_record(&record, loc)?);
+            budget = budget.saturating_add(loc.payload_len);
+            if budget >= max_bytes {
+                break;
+            }
         }
         Ok(out)
     }
@@ -836,5 +879,64 @@ mod tests {
         let a = log.replay(0).unwrap();
         let b = log.replay(0).unwrap();
         assert_eq!(a, b, "replay must not consume");
+    }
+
+    #[test]
+    fn bounded_replay_walks_the_tail_in_resumable_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = log_in(&dir, RetentionConfig::default());
+        for _ in 0..5 {
+            log.append(data(&[7u8; 10])).unwrap(); // seqs 1..=5, 10 bytes each
+        }
+        // 25-byte budget covers frames 1-2 and is crossed BY frame 3.
+        let first = log.replay_bounded(0, 25).unwrap();
+        assert_eq!(
+            first.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        // Resume from the last returned seq: the walk continues, no overlap.
+        let rest = log.replay_bounded(3, 25).unwrap();
+        assert_eq!(rest.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![4, 5]);
+        // Chunks concatenate to exactly the unbounded replay.
+        let all = log.replay(0).unwrap();
+        assert_eq!([first, rest].concat(), all);
+    }
+
+    #[test]
+    fn bounded_replay_yields_an_oversized_frame_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = log_in(&dir, RetentionConfig::default());
+        log.append(data(&[9u8; 100])).unwrap();
+        // Progress beats stall: a frame larger than the budget returns whole.
+        let frames = log.replay_bounded(0, 1).unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].body.payload_len(), 100);
+    }
+
+    #[test]
+    fn bounded_replay_is_bounded_in_spooled_mode_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = log_in(&dir, small_config());
+        let payload = [5u8; 30];
+        for _ in 0..6 {
+            log.append(data(&payload)).unwrap(); // overflows the 64B ring -> spool
+        }
+        assert!(log.is_spooled());
+        let first = log.replay_bounded(0, 30).unwrap();
+        assert_eq!(first.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![1]);
+        let second = log.replay_bounded(1, 60).unwrap();
+        assert_eq!(second.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![2, 3]);
+        // The walk covers the whole tail byte-exactly.
+        let mut walked = [first, second].concat();
+        let mut from = walked.last().map_or(0, |f| f.seq);
+        loop {
+            let chunk = log.replay_bounded(from, 60).unwrap();
+            if chunk.is_empty() {
+                break;
+            }
+            from = chunk.last().expect("non-empty").seq;
+            walked.extend(chunk);
+        }
+        assert_eq!(walked, log.replay(0).unwrap());
     }
 }
