@@ -47,6 +47,7 @@ import {
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   buildConnectionTokenResolver,
+  getEnrollment,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
@@ -151,6 +152,7 @@ import {
   routingEnabled,
   lazyProvisionEnabled,
 } from "../sandbox-routing";
+import { makeTurnOpJournal, type TurnHeartbeatDetails } from "../op-journal";
 import {
   makeMachineOpObserver,
   recordCreditMicros,
@@ -1018,6 +1020,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
+    // routing proxy): held so the turn's completion can final-ack this turn's
+    // settled op-stream ops AFTER the results are durably persisted.
+    let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
@@ -1414,11 +1420,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw reason;
         }
       };
-      heartbeatTimer = startActivityHeartbeat(activityContext, {
+      // ONE shared details object for every heartbeat this activity sends (each
+      // site spreads it + its own phase), so cross-site fields — the op-stream
+      // settled roster in particular — survive last-write-wins instead of being
+      // clobbered by whichever site heartbeated most recently.
+      const heartbeatDetails: TurnHeartbeatDetails = {
         phase: "running",
         sessionId: input.sessionId,
         turnId,
-      });
+        opAcks: {},
+      };
+      const opJournal = makeTurnOpJournal(activityContext, heartbeatDetails);
+      heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
       let producerSeq = 0;
       // One producer per activity execution, not per turn: a turn can run
       // again on the same workflow (preemption resume, approval rerun), and
@@ -1445,16 +1458,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }));
         await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs);
         activityContext?.heartbeat({
+          ...heartbeatDetails,
           phase: "events_published",
-          sessionId: input.sessionId,
-          turnId,
           producerSeq,
         });
         if (immediate) {
           await Bun.sleep(0);
         }
       };
-      activityContext?.heartbeat({ phase: "turn_started", sessionId: input.sessionId, turnId });
+      activityContext?.heartbeat({ ...heartbeatDetails, phase: "turn_started" });
 
       // A shutdown that landed during claim/billing setup preempts before the
       // turn visibly starts: nothing ran yet, so the requeued turn replays the
@@ -1942,21 +1954,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // stop, and bills ZERO warm-seconds). The session is a harmless in-memory
           // bind (no NATS round-trip), so build it FIRST; if the lease then fences,
           // there is nothing to clean up.
+          // Whether the machine's latest Hello advertised the op-stream engine
+          // (refreshed on every connect). Read only when the server flag is on —
+          // one indexed lookup, and the flag off keeps this path byte-identical.
+          const machineOpStream =
+            settings.agentOpStreamEnabled === true
+              ? (await getEnrollment(db, input.workspaceId, activeSandboxRecord!.enrollmentId!))
+                  ?.opStream === true
+              : false;
           const established = await establishSelfhostedTurnSession(
             {
               db,
               settings,
               bus,
               onOp: machineOpObserver.observer,
+              opJournal,
             },
             {
               workspaceId: input.workspaceId,
               agentId: activeSandboxRecord!.enrollmentId!,
+              opStream: machineOpStream,
               epoch: activeSandboxPointer!.activeEpoch,
               environment: sandboxEnvironment,
               workingDir: activeSandboxPointer!.workingDir,
             },
           );
+          // The machine-primary establish narrows `session` to SelfhostedSession
+          // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
+          machinePrimarySession =
+            established.session as import("@opengeni/runtime").SelfhostedSession;
           const lease = await acquireSelfhostedLeaseForTurn(
             { db, settings },
             {
@@ -2862,6 +2888,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
         const finalOutput = String(stream.finalOutput ?? "");
         await reconcileConversationTruth();
+        // Op-stream durability fence: the tool outputs are now durably in the
+        // history store (a redispatch would NOT re-execute them), so this
+        // turn's settled ops may advance their acked frontier — journal persist
+        // then wire final ack (licensing the runner to GC its retained
+        // frames). Best-effort: a miss leaves the runner's retention TTL to
+        // reap, never fails a completed turn.
+        if (machinePrimarySession) {
+          try {
+            await machinePrimarySession.finalizeOpStreamOps();
+          } catch {
+            // The runner's retention TTL owns the fallback.
+          }
+        }
         if (settings.sessionHistorySource !== "items") {
           // Legacy conversation memory; in items mode the blob is only written
           // for requires_action pauses (the one RunState-only resume path).

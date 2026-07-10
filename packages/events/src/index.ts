@@ -176,6 +176,19 @@ export interface RequestConnection {
 }
 
 /**
+ * The raw subscribe/publish surface the selfhosted OP-STREAM transport consumes
+ * (structurally identical to `@opengeni/runtime`'s `NatsOpStreamConnection`):
+ * a plain subscription for the runner's fire-and-forget op frames
+ * (`agent.<ws>.<id>.op.<op_id>`) and a plain publish for the server's acks
+ * (`agent.<ws>.<id>.ack`). Same managed connection as everything else — a NATS
+ * connection natively supports all of it; there is NEVER a second connection.
+ */
+export interface OpStreamConnection {
+  subscribe(subject: string): AsyncIterable<{ data: Uint8Array }> & { unsubscribe(): void };
+  publish(subject: string, payload: Uint8Array): void;
+}
+
+/**
  * A handler answering a request/reply on a subscribed subject: given the request
  * bytes (+ the concrete subject the message landed on, for `agent.<ws>.<id>.rpc`
  * style wildcard routing), return the response bytes to reply with. A thrown error
@@ -232,6 +245,12 @@ export type EventBus = {
    * plane injects this so the transport never opens a second connection.
    */
   getRequestConnection: () => RequestConnection;
+  /**
+   * The `OpStreamConnection` accessor the selfhosted op-stream transport
+   * consumes (`NatsOpStreamTransport`) — the same managed connection again.
+   * Optional so bus test doubles that never exercise op-stream stay valid.
+   */
+  getOpStreamConnection?: () => OpStreamConnection;
   isConnected?: () => boolean;
   close: () => Promise<void>;
 };
@@ -270,6 +289,12 @@ export async function createNatsEventBus(
   });
   const requestConnection: RequestConnection = {
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
+  };
+  const opStreamConnection: OpStreamConnection = {
+    subscribe: (subject) => nc.subscribe(subject),
+    publish: (subject, payload) => {
+      nc.publish(subject, payload);
+    },
   };
   return {
     publish: async (workspaceId, sessionId, events) => {
@@ -310,6 +335,7 @@ export async function createNatsEventBus(
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler),
     subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
     getRequestConnection: () => requestConnection,
+    getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
     close: async () => {
       await nc.drain();

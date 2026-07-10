@@ -21,6 +21,7 @@ import {
   buildSelfhostedBackendSession,
   makeActiveBackendResolver,
   NatsControlRpc,
+  NatsOpStreamTransport,
   RoutingSandboxSession,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -29,6 +30,8 @@ import {
   type RoutableSandbox,
   type SelfhostedOpObserver,
   type SelfhostedRelayConfig,
+  type OpStreamJournal,
+  type SelfhostedOpStreamDeps,
 } from "@opengeni/runtime";
 
 export type RoutingWiringServices = {
@@ -41,6 +44,11 @@ export type RoutingWiringServices = {
   /** The per-op observer wired into every selfhosted session this turn builds
    *  (out-of-band telemetry — op metrics + machine.* events). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
+  /** The op-stream durable-resume journal (the Temporal adaptation from
+   *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
+   *  the runtime defaults (generation "1", no persistence) — tests / non-turn
+   *  callers. Only consulted when op-stream is actually enabled for the turn. */
+  opJournal?: OpStreamJournal;
 };
 
 export type RoutingWiringIds = {
@@ -332,12 +340,37 @@ type LegacySelfhostedTurnSessionArgs = Omit<SelfhostedTurnSessionArgs, "opStream
  * No NATS round-trip happens here — `resume()` just re-addresses the subject — so a
  * headless/offline machine binds fine; its ops surface agent_offline lazily.
  */
+/**
+ * The op-stream injection for a machine-primary turn: present iff the machine
+ * advertised `Capabilities.op_stream` in its latest Hello AND the server flag
+ * is on AND a bus exists to carry frames. The transport rides the SAME managed
+ * NATS connection as the control rpc (the bus's op-stream accessor); a bus
+ * without the accessor (a test double) simply yields no connection and the
+ * session falls back to the legacy exec on first use. Swap TARGETS resolved
+ * mid-turn stay legacy for now — their capability row is not at hand in the
+ * resolver, and legacy is always correct.
+ */
+function opStreamDepsFor(
+  services: RoutingWiringServices,
+  machineAdvertisesOpStream: boolean,
+): SelfhostedOpStreamDeps | undefined {
+  const { settings, bus, opJournal } = services;
+  if (!machineAdvertisesOpStream || settings.agentOpStreamEnabled !== true || !bus) {
+    return undefined;
+  }
+  return {
+    transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+    ...(opJournal !== undefined ? { journal: opJournal } : {}),
+  };
+}
+
 export async function establishSelfhostedTurnSession(
   services: RoutingWiringServices,
   args: SelfhostedTurnSessionArgs | LegacySelfhostedTurnSessionArgs,
 ): Promise<EstablishedSandboxSession> {
   const { settings, bus, onOp } = services;
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
+  const opStream = opStreamDepsFor(services, "opStream" in args && args.opStream === true);
   const { client, session } = await buildSelfhostedBackendSession({
     workspaceId: args.workspaceId,
     agentId: args.agentId,
@@ -352,6 +385,10 @@ export async function establishSelfhostedTurnSession(
     execTimeoutMs,
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
+    // The streaming exec transport — present iff the machine advertised the
+    // capability AND the server flag is on (latched per-op at OpStart; the
+    // legacy exec stays the permanent fallback wire form).
+    ...(opStream !== undefined ? { opStream } : {}),
   });
   return {
     client,
