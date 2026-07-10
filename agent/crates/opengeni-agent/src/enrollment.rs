@@ -1061,7 +1061,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_rejects_forged_success_and_server_errors_without_leaking_bearer() {
         let secret = "oge_never_print_this";
-        let malformed = mock_once(200, r#"{}"#, secret);
+        let malformed = mock_once(200, r"{}", secret);
         let error = revoke_self(&malformed, secret)
             .await
             .expect_err("malformed success");

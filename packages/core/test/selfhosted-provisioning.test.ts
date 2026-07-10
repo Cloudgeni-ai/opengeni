@@ -39,8 +39,6 @@ describe("Connected Machine provisioning command contract", () => {
     expect(result.verificationUri).toBe("https://app.opengeni.ai/device");
     expect(`${result.instructions} ${result.note}`).toContain("human");
     expect(`${result.instructions} ${result.note}`).toContain("whole-machine");
-    expect(
-      `${result.installCommandUnix} ${result.installCommandWindows}`,
-    ).not.toContain("--token");
+    expect(`${result.installCommandUnix} ${result.installCommandWindows}`).not.toContain("--token");
   });
 });

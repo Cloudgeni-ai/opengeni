@@ -83,6 +83,11 @@ describe("get.<domain> install routes", () => {
     // back into the interactive command; otherwise they disappear after `iex`.
     expect(body).toContain("$env:OPENGENI_WORKSPACE_ID = $(Quote-PowerShell");
     expect(body).toContain("$env:OPENGENI_API_URL = $(Quote-PowerShell");
+    // A piped `irm | iex` can still run in an interactive PowerShell host. The
+    // installer must print the run command for the human, never invoke it and
+    // turn a successful install into an opaque foreground hang.
+    expect(body).not.toContain("& $bin run");
+    expect(body).not.toContain("starting a foreground run");
   });
 
   test("GET /uninstall.sh serves the uninstall script", async () => {

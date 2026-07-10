@@ -40,7 +40,7 @@ import {
   type EnrollmentArch,
   type EnrollmentOs,
 } from "@opengeni/contracts";
-import { getWorkspace, listEnrollments, revokeEnrollment } from "@opengeni/db";
+import { getEnrollment, getWorkspace, listEnrollments, revokeEnrollment } from "@opengeni/db";
 import { resolveEnrollmentSigningSecret } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";

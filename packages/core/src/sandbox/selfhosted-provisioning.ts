@@ -26,10 +26,7 @@ export function buildSelfhostedProvisioningInstructions(input: {
   publicBaseUrl?: string | undefined;
   workspaceId: string;
 }): SelfhostedProvisioningInstructions {
-  const base = (input.publicBaseUrl ?? HOSTED_PUBLIC_BASE_URL).replace(
-    /\/+$/,
-    "",
-  );
+  const base = (input.publicBaseUrl ?? HOSTED_PUBLIC_BASE_URL).replace(/\/+$/, "");
   const installUrl = `${base}/install.sh`;
   const windowsInstallUrl = `${base}/install.ps1`;
 
