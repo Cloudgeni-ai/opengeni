@@ -65,8 +65,10 @@ pub struct ClassLimits {
 }
 
 /// Admission configuration. The default is **fully unbounded** — capable, not
-/// constrained. Use [`AdmissionConfig::derive`] to install headroom-derived
-/// breakers at wiring time.
+/// constrained. Production construction goes through
+/// [`AdmissionConfig::derive`] at wiring time (headroom-derived breakers);
+/// the `Default` exists for tests and as the no-policy floor
+/// (LIMITS-DOCTRINE), never as deployment tuning.
 #[derive(Debug, Clone, Default)]
 pub struct AdmissionConfig {
     /// Breakers for light ops.

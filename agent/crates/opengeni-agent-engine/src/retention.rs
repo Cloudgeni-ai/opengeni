@@ -45,6 +45,11 @@ pub struct RetentionConfig {
 }
 
 impl Default for RetentionConfig {
+    /// TEST-FLOOR values (LIMITS-DOCTRINE rule R): production construction
+    /// derives these as fractions of measured [`crate::HostCapacity`] (the
+    /// wiring layer's `EngineBudgets::derive`), with these absolutes as
+    /// FLOORS. The defaults exist so tests are deterministic, never as
+    /// deployment tuning.
     fn default() -> Self {
         Self {
             memory_max_bytes: 16 * 1024 * 1024,

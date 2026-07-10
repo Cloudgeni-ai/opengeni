@@ -112,6 +112,11 @@ pub struct JobConfig {
 }
 
 impl Default for JobConfig {
+    /// TEST-FLOOR values (LIMITS-DOCTRINE): production construction happens
+    /// in the engine assembly, which derives `max_frame_bytes` from the
+    /// NEGOTIATED transport `max_payload` (rule T) — the 128 KiB here is the
+    /// no-transport fallback floor, never a ceiling. The progress interval is
+    /// a pacing constant (rule P).
     fn default() -> Self {
         Self {
             max_frame_bytes: 128 * 1024,

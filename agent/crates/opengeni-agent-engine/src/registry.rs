@@ -41,6 +41,10 @@ pub struct RegistryConfig {
 }
 
 impl Default for RegistryConfig {
+    /// TEST-FLOOR values (LIMITS-DOCTRINE): production construction goes
+    /// through the wiring layer, which may override these from measured
+    /// capacity or harness knobs. The absolute figures here are floors and
+    /// B-breakers for tests, never deployment tuning.
     fn default() -> Self {
         Self {
             max_completed: 2048,
@@ -147,6 +151,12 @@ pub struct RegistryCounters {
     pub evicted_unacked_total: u64,
     /// Tombstones evicted early because the tombstone table hit its cap.
     pub tombstones_capped_total: u64,
+    /// Lost MARKERS evicted because the marker table hit its cap — each one
+    /// silently degrades a later query for that op from a typed
+    /// `Lost(reason)` to `Unknown`, so the flip must be counted (design
+    /// review finding 7): an Unknown answer is honest only while this
+    /// counter says how many precise answers were given up.
+    pub lost_markers_capped_total: u64,
 }
 
 /// Report from one GC pass.
@@ -372,7 +382,12 @@ impl<T> OpRegistry<T> {
     }
 
     /// Registers an op as lost (e.g. every journaled-but-unrecovered op at
-    /// runner boot → `RunnerRestarted`). Bounded FIFO.
+    /// runner boot → `RunnerRestarted`). Bounded FIFO: a marker evicted past
+    /// [`RegistryConfig::max_lost_markers`] degrades that op's later queries
+    /// from `Lost(reason)` to `Unknown` — a LOUD counted event
+    /// ([`RegistryCounters::lost_markers_capped_total`]), never a silent
+    /// flip. (Markers cost ~an id string + a discriminant each — the default
+    /// cap holds well under a megabyte, a B-breaker, not a working figure.)
     pub fn record_lost(&mut self, id: OpId, reason: LostReason) {
         if reason == LostReason::Evicted {
             self.counters.evicted_unacked_total += 1;
@@ -380,6 +395,7 @@ impl<T> OpRegistry<T> {
         if self.lost.len() >= self.config.max_lost_markers {
             if let Some(oldest) = self.lost_order.pop_front() {
                 self.lost.remove(&oldest);
+                self.counters.lost_markers_capped_total += 1;
             }
         }
         self.lost_order.push_back(id.clone());
@@ -554,11 +570,21 @@ mod tests {
         let mut r = registry();
         r.record_lost(id("l1"), LostReason::RunnerRestarted);
         r.record_lost(id("l2"), LostReason::RunnerRestarted);
+        assert_eq!(
+            r.counters().lost_markers_capped_total,
+            0,
+            "within the cap nothing is given up"
+        );
         r.record_lost(id("l3"), LostReason::RunnerRestarted);
         assert_eq!(
             r.query(&id("l1")),
             QueryAnswer::Unknown,
             "oldest marker evicted"
+        );
+        assert_eq!(
+            r.counters().lost_markers_capped_total,
+            1,
+            "the Known-lost -> Unknown flip is a LOUD counted event (finding 7)"
         );
         assert_eq!(
             r.query(&id("l3")),
