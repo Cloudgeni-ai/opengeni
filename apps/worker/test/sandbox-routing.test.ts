@@ -26,16 +26,20 @@ import {
   createSandbox,
   createSession,
   createDb,
+  getSandbox,
+  readActiveSandbox,
   setActiveSandbox,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { buildManifest, subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
+import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
 import {
   wrapLazyTurnBoxWithRouting,
   wrapTurnBoxWithRouting,
   routingEnabled,
 } from "../src/sandbox-routing";
+import { reconcileActiveSandboxPointer } from "../src/activities/agent-turn";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -264,4 +268,316 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect((await proxy.exec({ cmd: "echo again" })).stdout).toBe("lazy-real");
     expect(provisions).toBe(1);
   });
+});
+
+describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", () => {
+  async function seedAcctWs(tag: string): Promise<{ accountId: string; workspaceId: string }> {
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values (${`acct-${tag}`}) returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, ${`ws-${tag}`}) returning id`;
+    return { accountId: a!.id, workspaceId: w!.id };
+  }
+
+  test("a stranded Modal-sibling pointer resets to HOME (null) + emits session.route.reconciled (Shapes 1/2)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("recon");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    // A first-class Modal sibling row (no group/lease/box) — the categorical strand.
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+    // Persist a stranded pointer directly (a legacy pre-gate pointer / FK orphan):
+    // the session points at the unestablishable sibling at epoch 1.
+    const stranded = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: sibling.id,
+      expectedEpoch: 0,
+    });
+    expect(stranded.swapped).toBe(true);
+    const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
+
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const result = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      pointer,
+      (id) => getSandbox(db, workspaceId, id),
+      async (evs) => {
+        events.push(...evs);
+      },
+    );
+
+    // Reset to HOME under the fence: pointer null, epoch bumped, record cleared.
+    expect(result.pointer?.activeSandboxId ?? null).toBeNull();
+    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch + 1);
+    expect(result.record).toBeNull();
+    // The DB reflects the reset (not just the in-memory return).
+    const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(persisted.activeSandboxId).toBeNull();
+    expect(persisted.activeEpoch).toBe(pointer.activeEpoch + 1);
+    // A VISIBLE typed event was emitted (never a silent downgrade), carrying the
+    // reason + epochs but NO target id.
+    expect(events).toHaveLength(1);
+    expect(events[0]!.type).toBe("session.route.reconciled");
+    expect(events[0]!.payload).toMatchObject({
+      reason: "unsupported_backend_context",
+      fromEpoch: pointer.activeEpoch,
+      toEpoch: pointer.activeEpoch + 1,
+    });
+    expect(JSON.stringify(events[0]!.payload)).not.toContain(sibling.id);
+  }, 60_000);
+
+  test("reconcile is epoch-fenced: a concurrent higher-epoch swap is NOT clobbered", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("fence");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+
+    // The turn LOADS a stranded modal-sibling pointer at epoch 1...
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: sibling.id,
+      expectedEpoch: 0,
+    });
+    const stalePointer = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(stalePointer.activeEpoch).toBe(1);
+
+    // ...but a CONCURRENT user swap moves the real pointer to the enrolled machine at a
+    // HIGHER epoch (2) before the reconcile CAS runs.
+    const concurrent = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: stalePointer.activeEpoch,
+    });
+    expect(concurrent.swapped).toBe(true);
+    expect(concurrent.pointer!.activeEpoch).toBe(2);
+
+    const events: Array<{ type: string }> = [];
+    const result = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      stalePointer,
+      (id) => getSandbox(db, workspaceId, id),
+      async (evs) => {
+        events.push(...evs);
+      },
+    );
+
+    // The stale reset LOST the fence: the user's machine swap survives untouched.
+    expect(result.pointer?.activeSandboxId).toBe(machine.id);
+    expect(result.pointer!.activeEpoch).toBe(2);
+    expect(result.record?.id).toBe(machine.id);
+    // No reconcile event (nothing was reset); the DB still points at the machine.
+    expect(events).toHaveLength(0);
+    const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(persisted.activeSandboxId).toBe(machine.id);
+    expect(persisted.activeEpoch).toBe(2);
+  }, 60_000);
+
+  // FAIL-OPEN on a transient lookup failure (issue #341 review / Bugbot): a throwing
+  // record lookup must NEVER be read as "row absent" and clear a (possibly healthy)
+  // user-chosen pointer. The SAME stranded pointer that reconciles cleanly when the
+  // lookup succeeds must be left UNTOUCHED (no CAS, no event) when the lookup throws.
+  test("a transient record-lookup failure never mutates the pointer (fail-open to pre-reconcile behavior)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("transient");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    // A stranded Modal-sibling pointer that WOULD reconcile if the lookup succeeded.
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: sibling.id,
+      expectedEpoch: 0,
+    });
+    const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(pointer.activeSandboxId).toBe(sibling.id);
+
+    const events: Array<{ type: string }> = [];
+    let lookups = 0;
+    const result = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      pointer,
+      // A transient DB blip: the lookup THROWS (recovered by the time the CAS would run).
+      async () => {
+        lookups += 1;
+        throw new Error("transient db lookup failure");
+      },
+      async (evs) => {
+        events.push(...evs);
+      },
+    );
+
+    // Fail open: no reconciliation happened. The pointer is UNTOUCHED (still the sibling
+    // at the same epoch), record null (→ machinePrimary:false, group box), no event.
+    expect(lookups).toBe(1);
+    expect(result.pointer?.activeSandboxId).toBe(sibling.id);
+    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch);
+    expect(result.record).toBeNull();
+    expect(events).toHaveLength(0);
+    // Crucially the DB pointer/epoch never moved — no CAS ran on the transient failure.
+    const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(persisted.activeSandboxId).toBe(sibling.id);
+    expect(persisted.activeEpoch).toBe(pointer.activeEpoch);
+
+    // Sanity: the SAME pointer DOES reconcile once the lookup succeeds (proves the throw
+    // — not some other condition — is what suppressed the reset).
+    const events2: Array<{ type: string }> = [];
+    const recovered = await reconcileActiveSandboxPointer(
+      db,
+      { accountId, workspaceId, sessionId: session.id },
+      pointer,
+      (id) => getSandbox(db, workspaceId, id),
+      async (evs) => {
+        events2.push(...evs);
+      },
+    );
+    expect(recovered.pointer?.activeSandboxId ?? null).toBeNull();
+    expect(events2).toHaveLength(1);
+    expect(events2[0]!.type).toBe("session.route.reconciled");
+  }, 60_000);
+
+  // BEHAVIORAL "pointer untouched" (issue #341 invariant A / Shape 1): a rejected
+  // Modal-sibling swap must not move the pointer, proven by ROUTING — the next op
+  // still lands on the pre-swap backend, not by DB inspection alone.
+  test("a rejected sibling swap leaves the pointer untouched: the next op still routes to the pre-swap backend", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("reject-untouched");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const enrollment = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: `ed25519:${crypto.randomUUID()}`,
+      exposure: "whole-machine",
+      hasDisplay: true,
+      allowScreenControl: true,
+      os: "linux",
+      arch: "x86_64",
+    });
+    const machine = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "laptop",
+      enrollmentId: enrollment.id,
+    });
+    const sibling = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "sibling",
+    });
+    const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
+
+    // Pre-swap: pin the session to the machine (the pre-swap backend the ops route to).
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: machine.id,
+      expectedEpoch: 0,
+    });
+    const before = (await readActiveSandbox(db, workspaceId, session.id))!;
+
+    const established = wrapTurnBoxWithRouting(
+      { db, settings, bus },
+      { workspaceId, sessionId: session.id },
+      fakeGroupBox("group-box-marker"),
+    );
+    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    // The op currently routes to the machine (the pre-swap backend).
+    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+
+    // Attempt to swap onto the Modal sibling → REJECTED before the CAS.
+    const ctx: FleetContext = {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      sessionBackend: "modal",
+      sessionGroupId: session.sandboxGroupId,
+    };
+    const rejected = await swapActiveSandbox({ db, settings, bus }, ctx, sibling.id);
+    expect(rejected.swapped).toBe(false);
+    expect(rejected.code).toBe("unsupported_backend_context");
+
+    // The pointer never moved: the next op STILL routes to the pre-swap machine, and
+    // the persisted pointer/epoch are unchanged.
+    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+    const after = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(after.activeSandboxId).toBe(machine.id);
+    expect(after.activeEpoch).toBe(before.activeEpoch);
+  }, 60_000);
 });

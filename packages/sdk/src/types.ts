@@ -517,6 +517,9 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.box.terminated",
   "sandbox.box.snapshot",
   "sandbox.env.drift",
+  // Active-sandbox pointer reconcile (issue #341; announce-only; mirror of contracts
+  // SessionEventType — the contract-parity test asserts sorted equality).
+  "session.route.reconciled",
   // Workbench v2 turn-end workspace capture (announce-only; mirror of contracts
   // SessionEventType — the contract-parity test asserts sorted equality).
   "workspace.revision.captured",
@@ -2479,6 +2482,14 @@ export type SwapActiveSandboxResponse = {
   activeSandboxId: string | null;
   activeEpoch: number;
   reason?: string;
+  // Typed rejection discriminant (issue #341); present only when swapped is false.
+  // Mirror of the `@opengeni/contracts` SwapActiveSandboxResponse.code enum.
+  code?:
+    | "stale_pointer"
+    | "offline_enrollment"
+    | "unsupported_backend_context"
+    | "transient_establishment"
+    | "concurrent_swap";
 };
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────

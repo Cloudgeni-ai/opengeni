@@ -63,6 +63,16 @@ export type RoutingWiringIds = {
    * swap target is built fresh).
    */
   pinnedSelfhosted?: { sandboxId: string; epoch: number };
+  /**
+   * Whether the turn's `defaultBackend` IS the session's home (so the null pointer may
+   * resolve to it). Defaults to TRUE (omitted). Set explicitly FALSE on a machine-primary
+   * turn of a Modal-HOME session (pinned to a machine, no Modal group box established this
+   * turn): the routing resolver's null branch then throws a typed `home_unavailable_this_turn`
+   * error on a mid-turn clear-to-null instead of silently serving the pinned machine — the
+   * detach's pointer commit stands and takes effect next turn. A genuine machine-HOME turn
+   * (home IS the machine) passes true.
+   */
+  defaultIsHome?: boolean;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -181,6 +191,12 @@ export function wrapTurnBoxWithRouting(
     // unresolvable (the swap tool validates liveness, so this only triggers if a
     // session points at a sibling modal box the turn cannot resume here) and the
     // op surfaces unresolvable — never a silent wrong-box landing.
+    //
+    // For a machine-primary turn of a Modal-HOME session (pinned to a machine, no
+    // group box established this turn), a mid-turn clear-to-null must NOT fall back to
+    // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
+    // `home_unavailable_this_turn` instead. Forward the explicit boolean (including false).
+    ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
   });
 
   const proxy = new RoutingSandboxSession({

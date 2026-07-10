@@ -3105,6 +3105,15 @@ export const SessionEventType = z.enum([
   "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
   "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
   "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
+  // Active-sandbox pointer reconcile (issue #341 invariant B). Turn start found the
+  // persisted (active_sandbox_id, active_epoch) pointing at a target the turn cannot
+  // establish — a deleted/absent sandbox, a Modal sibling with no establisher, or a
+  // selfhosted sandbox with no enrollment — and reset it to the session HOME under
+  // the epoch fence instead of routing every op into the dead target. A VISIBLE,
+  // never-silent downgrade: payload carries the typed reason + from/to epoch, never a
+  // target id or command content. Announce-only; hits the timeline projection default
+  // (no rendered item) like the other sandbox.* diagnostics.
+  "session.route.reconciled",
   // Workbench v2 turn-end workspace capture (dossier §10.1). ANNOUNCE-ONLY: a new
   // capture revision was persisted at turn end; the client refetches the latest
   // capture. It carries metadata only (revision/turnId/capturedAt/leaseEpoch/stats),
@@ -4494,6 +4503,19 @@ export const SwapActiveSandboxResponse = z.object({
   activeSandboxId: z.string().nullable(),
   activeEpoch: z.number().int(),
   reason: z.string().optional(),
+  // Typed rejection discriminant (issue #341). Present only when swapped is false,
+  // so a client distinguishes a deleted/absent target from an unaddressable
+  // enrollment from a backend the turn cannot establish from a lost epoch race —
+  // without parsing the human reason string.
+  code: z
+    .enum([
+      "stale_pointer",
+      "offline_enrollment",
+      "unsupported_backend_context",
+      "transient_establishment",
+      "concurrent_swap",
+    ])
+    .optional(),
 });
 export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
 

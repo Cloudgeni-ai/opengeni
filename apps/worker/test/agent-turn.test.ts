@@ -18,6 +18,7 @@ import {
   isLazySandboxProvisionRetryable,
   isWorkerShutdownCancellation,
   modelUsageSourceKey,
+  pointerReconcileReason,
   resolveActiveSandboxBackend,
   shouldStartOnTurnRecording,
   WORKER_SHUTDOWN_RESUME_TEXT,
@@ -504,6 +505,36 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     expect(backend).toBe("selfhosted");
     expect(pointerReads).toBe(1);
     expect(kindReads).toBe(1);
+  });
+});
+
+describe("turn-start pointer reconcile classification (issue #341 invariant B)", () => {
+  test("an absent sandbox row (deleted target) → stale_pointer", () => {
+    expect(pointerReconcileReason(null)).toBe("stale_pointer");
+  });
+
+  test("a non-group Modal sibling → unsupported_backend_context (Shape 1)", () => {
+    expect(pointerReconcileReason({ kind: "modal", enrollmentId: null })).toBe(
+      "unsupported_backend_context",
+    );
+  });
+
+  test("an unknown backend kind → unsupported_backend_context", () => {
+    expect(pointerReconcileReason({ kind: "daytona", enrollmentId: null })).toBe(
+      "unsupported_backend_context",
+    );
+  });
+
+  test("a selfhosted sandbox with no enrollment id → offline_enrollment", () => {
+    expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: null })).toBe(
+      "offline_enrollment",
+    );
+  });
+
+  test("an enrolled machine is LEFT IN PLACE (null) even if momentarily offline — never reconciled", () => {
+    // The user's explicit machine target is not abandoned for a transient control-
+    // plane blip; the machine may recover mid-turn and surfaces agent_offline lazily.
+    expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: "enroll-1" })).toBeNull();
   });
 });
 
