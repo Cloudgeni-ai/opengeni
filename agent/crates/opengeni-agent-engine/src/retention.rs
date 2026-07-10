@@ -94,6 +94,25 @@ pub enum RetentionError {
     },
 }
 
+/// Flat per-frame bookkeeping cost charged to the retention ledger on top of
+/// the payload: the on-disk record header (13 bytes), the in-memory spool
+/// index entry (~40 bytes), and deque/Frame overhead in memory mode. Charging
+/// it makes ZERO-PAYLOAD frames (Progress) cost something real — a
+/// long-detached quiet op ticking Progress forever grows the spool and its
+/// index, and a purely payload-denominated budget would never notice
+/// (design-review finding 1, 2026-07-10). Retention budgets are
+/// record-denominated; the flow layer's credit window stays
+/// PAYLOAD-denominated ([`RetentionLog::payload_bytes_in_range`]) — two
+/// deliberately different quantities.
+pub const RECORD_OVERHEAD_BYTES: u64 = 64;
+
+/// The retention-ledger cost of one frame: payload + flat record overhead.
+fn record_cost(body: &FrameBody) -> u64 {
+    u64::try_from(body.payload_len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(RECORD_OVERHEAD_BYTES)
+}
+
 /// Where the retained frames physically live.
 enum Mode {
     /// All retained frames are in memory, oldest-first.
@@ -162,7 +181,7 @@ impl RetentionLog {
     /// terminal for the op.
     pub fn append(&mut self, body: FrameBody) -> Result<u64, RetentionError> {
         let seq = self.next_seq;
-        let len = u64::try_from(body.payload_len()).unwrap_or(u64::MAX);
+        let len = record_cost(&body);
 
         // Would this frame push memory past its caps? Spill FIRST so ordering
         // stays strict (all retained frames move to disk before any newer one).
@@ -219,7 +238,7 @@ impl RetentionLog {
                     if front.seq > acked_seq {
                         break;
                     }
-                    self.retained_bytes -= u64::try_from(front.body.payload_len()).unwrap_or(0);
+                    self.retained_bytes -= record_cost(&front.body);
                     frames.pop_front();
                 }
             }
@@ -313,7 +332,10 @@ impl RetentionLog {
         self.next_seq - 1
     }
 
-    /// Payload bytes currently retained (memory or spool).
+    /// RECORD-cost bytes currently retained (payload + per-frame overhead,
+    /// memory or spool) — the quantity the retention budgets bound. For the
+    /// flow layer's payload-denominated credit accounting use
+    /// [`RetentionLog::payload_bytes_in_range`].
     #[must_use]
     pub fn retained_bytes(&self) -> u64 {
         self.retained_bytes
@@ -498,14 +520,16 @@ impl Spool {
     }
 
     /// Frees every indexed frame with `seq <= acked_seq`; deletes segment
-    /// files whose every record is freed. Returns freed payload bytes.
+    /// files whose every record is freed. Returns freed RECORD-cost bytes
+    /// (payload + [`RECORD_OVERHEAD_BYTES`] per frame) — the same denomination
+    /// `append` charged, so the ledger balances.
     fn free_through(&mut self, acked_seq: u64) -> u64 {
         let mut freed = 0u64;
         while let Some(front) = self.index.front() {
             if front.seq > acked_seq {
                 break;
             }
-            freed += front.payload_len;
+            freed += front.payload_len + RECORD_OVERHEAD_BYTES;
             let seg = front.segment;
             self.index.pop_front();
             let segment_still_referenced =
@@ -673,18 +697,20 @@ mod tests {
     fn cumulative_ack_frees_and_is_monotonic() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = log_in(&dir, RetentionConfig::default());
+        // Record cost = payload + flat overhead (zero-payload frames are not free).
+        let cost = 4 + RECORD_OVERHEAD_BYTES;
         for _ in 0..5 {
             log.append(data(b"xxxx")).unwrap();
         }
-        assert_eq!(log.retained_bytes(), 20);
+        assert_eq!(log.retained_bytes(), 5 * cost);
         log.ack(3);
         assert_eq!(log.floor(), 3);
-        assert_eq!(log.retained_bytes(), 8);
+        assert_eq!(log.retained_bytes(), 2 * cost);
         // Lower / repeated acks are no-ops (repetition-healing, monotonic).
         log.ack(2);
         log.ack(3);
         assert_eq!(log.floor(), 3);
-        assert_eq!(log.retained_bytes(), 8);
+        assert_eq!(log.retained_bytes(), 2 * cost);
         // Replay below the floor is a typed error.
         let err = log.replay(1).unwrap_err();
         assert!(matches!(
@@ -706,8 +732,15 @@ mod tests {
     #[test]
     fn spills_to_spool_at_memory_byte_cap_and_replays_identically() {
         let dir = tempfile::tempdir().unwrap();
-        let mut log = log_in(&dir, small_config());
-        // 3 × 24 bytes = 72 > 64 cap → third append spills.
+        // Two records fit the byte cap; the third spills (record-cost sized).
+        let two_records = 2 * (24 + RECORD_OVERHEAD_BYTES);
+        let mut log = log_in(
+            &dir,
+            RetentionConfig {
+                memory_max_bytes: usize::try_from(two_records).unwrap(),
+                ..small_config()
+            },
+        );
         let payload = [7u8; 24];
         log.append(data(&payload)).unwrap();
         log.append(data(&payload)).unwrap();
@@ -725,7 +758,14 @@ mod tests {
     #[test]
     fn spills_at_frame_count_cap_even_when_bytes_are_tiny() {
         let dir = tempfile::tempdir().unwrap();
-        let mut log = log_in(&dir, small_config());
+        // Byte cap far above 5 progress records so ONLY the frame cap binds.
+        let mut log = log_in(
+            &dir,
+            RetentionConfig {
+                memory_max_bytes: 4096,
+                ..small_config()
+            },
+        );
         for _ in 0..4 {
             log.append(FrameBody::Progress).unwrap();
         }
@@ -741,13 +781,13 @@ mod tests {
         let mut log = log_in(
             &dir,
             RetentionConfig {
-                spool_max_bytes: 100,
+                spool_max_bytes: 2 * (40 + RECORD_OVERHEAD_BYTES) + 10,
                 ..small_config()
             },
         );
         let payload = [1u8; 40];
         log.append(data(&payload)).unwrap();
-        log.append(data(&payload)).unwrap(); // 80 bytes, spilled by now
+        log.append(data(&payload)).unwrap(); // two record-costs, spilled by now
         let err = log.append(data(&payload)).unwrap_err();
         assert!(
             matches!(err, RetentionError::Overflow { .. }),
@@ -761,6 +801,7 @@ mod tests {
         let mut log = log_in(
             &dir,
             RetentionConfig {
+                memory_max_bytes: usize::try_from(40 + RECORD_OVERHEAD_BYTES + 10).unwrap(),
                 spool_max_bytes: 0,
                 ..small_config()
             },

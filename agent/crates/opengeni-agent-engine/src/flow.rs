@@ -161,14 +161,23 @@ impl CreditFlow {
     /// Applies a cumulative ack from `generation`: replaces the window with
     /// the absolute `credit_bytes` grant and releases `freed_sent_bytes`
     /// (computed by the caller against retention BEFORE freeing — see module
-    /// docs). Stale generations are ignored.
+    /// docs).
+    ///
+    /// ONLY the exact current attach generation applies (design-review ruling
+    /// 2026-07-10, supersedes the earlier reject-below-only rule): a STALE
+    /// generation is a zombie whose acks say nothing about what the live
+    /// consumer holds, and a FUTURE generation that never attached is a
+    /// protocol violation or hostile probe — accepting either could grant a
+    /// window (or, at the caller, free retention / honor a final ack) on
+    /// behalf of a consumer that does not exist. The caller must gate EVERY
+    /// ack side effect — retention floor, final-ack honoring — on `Applied`.
     pub fn on_ack(
         &mut self,
         generation: u64,
         credit_bytes: u64,
         freed_sent_bytes: u64,
     ) -> AckOutcome {
-        if generation < self.attach_gen {
+        if generation != self.attach_gen {
             return AckOutcome::StaleGeneration {
                 current: self.attach_gen,
             };
