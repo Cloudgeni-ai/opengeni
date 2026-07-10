@@ -20,8 +20,8 @@
 //!   no randomness — callers pass `now_ms`, tests own time.
 //!
 //! Modules:
-//! * [`admission`] — class-aware job admission with a bounded fair wait
-//!   queue and a host-pressure gate.
+//! * [`admission`] — fair start-ordering + derived circuit breakers (NOT a
+//!   throughput governor; see LIMITS-DOCTRINE.md).
 //! * [`retention`] — the seq-addressed retention log (memory ring → disk
 //!   spool) that backs replay-after-reattach.
 //! * [`flow`] — the credit window (send-side flow control + attach-generation
@@ -33,6 +33,44 @@ pub mod admission;
 pub mod flow;
 pub mod registry;
 pub mod retention;
+
+/// Measured host capacity, sampled by the integration layer (the engine
+/// receives measurements, never takes them — it stays pure). Budgets and
+/// breakers are derived from these as fractions (doctrine rule R: they scale
+/// with the machine; absolute constants are only legal as floors), e.g.
+/// [`admission::AdmissionConfig::derive`].
+///
+/// A field the sampler cannot measure should carry a generous honest guess,
+/// not zero — derivations clamp to floors, so overstating capacity is safer
+/// than accidentally constraining a healthy host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapacity {
+    /// Bytes of memory available without swapping (MemAvailable).
+    pub mem_available_bytes: u64,
+    /// Free disk bytes at the spool directory's filesystem.
+    pub disk_free_bytes: u64,
+    /// File descriptors this process may still open (rlimit minus in use).
+    pub fd_headroom: u64,
+    /// Processes/threads that may still be spawned (pids.max / RLIMIT_NPROC
+    /// headroom).
+    pub pid_headroom: u64,
+    /// Logical CPUs.
+    pub nproc: u64,
+}
+
+impl Default for HostCapacity {
+    /// A modest contemporary host. Used when the sampler has nothing better;
+    /// real wiring always samples.
+    fn default() -> Self {
+        Self {
+            mem_available_bytes: 8 * 1024 * 1024 * 1024,
+            disk_free_bytes: 64 * 1024 * 1024 * 1024,
+            fd_headroom: 65_536,
+            pid_headroom: 30_000,
+            nproc: 8,
+        }
+    }
+}
 
 /// The durable operation identity — minted ABOVE the transport at the semantic
 /// layer (`{tool_call_id}:{ordinal}`, see PROTOCOL.md ruling B1) and stable

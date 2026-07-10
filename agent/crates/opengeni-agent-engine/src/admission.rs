@@ -1,30 +1,44 @@
-//! Class-aware job admission with a bounded fair wait queue.
+//! Job admission: fair start-ordering + derived circuit breakers. NOT a
+//! throughput governor.
 //!
-//! Replaces the flat 8-permit semaphore (the DRAINING-storm ceiling). Rules
-//! (DESIGN.md §Admission, PROTOCOL.md §Admission):
+//! Doctrine (LIMITS-DOCTRINE.md, supersedes the earlier fixed-cap design):
+//! the runner holds **no concurrency policy**. It admits everything it is
+//! asked to run; the swarm/server owns pacing, informed by the capacity
+//! telemetry the runner reports upward ([`AdmissionState::snapshot`] feeds
+//! the heartbeat). Physical protection is the kernel's job (per-op cgroup
+//! leaves, OOM scoring) — counting ops was always a proxy, and proxies don't
+//! ship as policy. What remains here:
 //!
 //! * **Liveness never enters admission** — ping/hello are answered inline by
 //!   the transport layer and are invisible here.
-//! * Two classes: **Light** (stat/list/mkdir/move/remove/pty-control — cheap,
-//!   latency-sensitive) and **Heavy** (exec, large fs transfers, git — long,
-//!   resource-owning). Each has its own running cap.
-//! * A **bounded wait queue** absorbs bursts before typed backpressure: a job
-//!   that cannot run immediately queues (up to a per-class depth and a wait
-//!   deadline) instead of instantly failing. This converts the old
-//!   instant-DRAINING cliff into short queueing.
-//! * **Per-origin fairness**: queued jobs are promoted round-robin across
-//!   origin ids (session ids), so one chatty session cannot starve nine quiet
-//!   ones no matter how fast it submits.
-//! * **Host-pressure gate**: the integration layer samples PSI/free-memory and
-//!   passes `host_pressured`; while pressured, HEAVY admissions are refused
-//!   typed (light ops still flow — they are what diagnosis is made of).
+//! * Two classes, **Light** (stat/list/mkdir/move/remove/pty-control) and
+//!   **Heavy** (exec, large fs transfers, git), kept for *telemetry shape and
+//!   fairness domains*, not for caps.
+//! * **Per-origin fairness as start ordering**: when anything IS waiting
+//!   (breaker saturation only), queued jobs promote round-robin across origin
+//!   ids (workspace+session), so one chatty session cannot starve the rest.
+//!   Ordering, never denial.
+//! * **Circuit breakers, not caps**: `max_running`/`max_queued` default to
+//!   `None` (unbounded) and, when set via [`AdmissionConfig::derive`], come
+//!   from measured host headroom (fds, pids) at orders of magnitude above
+//!   sane load. A breaker trip is LOUD (typed refusal naming the breaker) and
+//!   means a pathology (fork-bomb-shaped bug), never legitimate load shaping.
+//! * **No queue-wait deadline by default**: a queued job waits until its
+//!   caller cancels — patience belongs to the caller (C in the taxonomy).
+//!   `queue_wait_max_ms` exists as an optional breaker for tests/constrained
+//!   deployments only.
+//! * **No pressure-based refusal**: host pressure (PSI, memory headroom) is
+//!   REPORTED upward in heartbeats and acted on by the server, which can
+//!   pace, shed, or restart the machine — the brain is in the cloud and the
+//!   state of record is server-side.
 //!
 //! Everything is pure and clock-injected: the integration layer owns timers
-//! (it calls [`AdmissionState::expire`] on a tick) and the PSI probe.
+//! (it calls [`AdmissionState::expire`] on a tick — a no-op under default
+//! config) and samples [`crate::HostCapacity`] for `derive`.
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::OpId;
+use crate::{HostCapacity, OpId};
 
 /// Which admission class a job belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,53 +49,82 @@ pub enum JobClass {
     Heavy,
 }
 
-/// Per-class bounds.
-#[derive(Debug, Clone)]
+/// Per-class breakers. `None` everywhere (the default) = unbounded: admit
+/// immediately, always. `Some` values are circuit breakers — set them from
+/// measured capacity ([`AdmissionConfig::derive`]) or explicitly in tests,
+/// never as ambient policy constants.
+#[derive(Debug, Clone, Default)]
 pub struct ClassLimits {
-    /// Max jobs of this class running concurrently.
-    pub max_running: usize,
-    /// Max jobs of this class waiting in the queue.
-    pub max_queued: usize,
-    /// How long a queued job may wait before it is rejected typed.
-    pub queue_wait_max_ms: u64,
+    /// Breaker on concurrently-running jobs of this class.
+    pub max_running: Option<usize>,
+    /// Breaker on jobs of this class waiting in the queue.
+    pub max_queued: Option<usize>,
+    /// Optional breaker on queue wait. `None` = a queued job waits until its
+    /// caller cancels it (the default: patience is the caller's).
+    pub queue_wait_max_ms: Option<u64>,
 }
 
-/// Admission configuration.
-#[derive(Debug, Clone)]
+/// Admission configuration. The default is **fully unbounded** — capable, not
+/// constrained. Use [`AdmissionConfig::derive`] to install headroom-derived
+/// breakers at wiring time.
+#[derive(Debug, Clone, Default)]
 pub struct AdmissionConfig {
-    /// Bounds for light ops.
+    /// Breakers for light ops.
     pub light: ClassLimits,
-    /// Bounds for heavy ops.
+    /// Breakers for heavy ops.
     pub heavy: ClassLimits,
 }
 
-impl Default for AdmissionConfig {
-    fn default() -> Self {
+/// Floor under every derived breaker: a misread /proc or a bizarre rlimit
+/// must never constrain a normal host. Absolute constants are only legal as
+/// floors (doctrine rule R).
+const DERIVED_BREAKER_FLOOR: usize = 256;
+
+/// Breaker on total queued entries per class when derived. Entries are ~100
+/// bytes; 100k of them is ~10MiB — far above any sane backlog, cheap enough
+/// to hold.
+const DERIVED_QUEUE_BREAKER: usize = 100_000;
+
+impl AdmissionConfig {
+    /// Derives breaker values from measured host capacity. The numbers scale
+    /// with the machine: a supercomputer gets tens of thousands of concurrent
+    /// ops, a starved VPS degrades loudly instead of silently.
+    ///
+    /// Derivation: a heavy op holds ~4 fds (three pipes + anchor) and at
+    /// least one pid; a light op holds a transient fd or two and no child.
+    /// The breakers claim at most a quarter of the available fd headroom
+    /// (heavy) or half (light, cheaper per-op), and half the pid headroom.
+    #[must_use]
+    pub fn derive(capacity: &HostCapacity) -> Self {
+        let fd = usize::try_from(capacity.fd_headroom).unwrap_or(usize::MAX);
+        let pid = usize::try_from(capacity.pid_headroom).unwrap_or(usize::MAX);
+        let heavy_running = (fd / 8).min(pid / 2).max(DERIVED_BREAKER_FLOOR);
+        let light_running = (fd / 2).max(DERIVED_BREAKER_FLOOR);
         Self {
             light: ClassLimits {
-                max_running: 64,
-                max_queued: 128,
-                queue_wait_max_ms: 5_000,
+                max_running: Some(light_running),
+                max_queued: Some(DERIVED_QUEUE_BREAKER),
+                queue_wait_max_ms: None,
             },
             heavy: ClassLimits {
-                max_running: 16,
-                max_queued: 32,
-                queue_wait_max_ms: 10_000,
+                max_running: Some(heavy_running),
+                max_queued: Some(DERIVED_QUEUE_BREAKER),
+                queue_wait_max_ms: None,
             },
         }
     }
 }
 
-/// Why an admission was refused. Every variant maps to a typed retryable
-/// DRAINING response whose `backpressure` detail names the exhausted budget.
+/// Why an admission was refused. Refusals only happen when a circuit breaker
+/// trips — each maps to a typed retryable response whose `backpressure`
+/// detail names the tripped breaker, and each is telemetry-worthy (a trip
+/// means pathology, not load).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusalReason {
-    /// The class's wait queue is full.
+    /// The class's queued-entries breaker tripped.
     QueueFull,
-    /// The job waited past the class's queue deadline.
+    /// The job waited past the class's optional queue-wait breaker.
     WaitDeadline,
-    /// The host is under memory/PSI pressure (heavy jobs only).
-    HostPressure,
 }
 
 /// Outcome of an admission request.
@@ -92,8 +135,23 @@ pub enum AdmissionOutcome {
     /// Queued; the caller waits. Promotion arrives via the values returned
     /// from [`AdmissionState::release`] / [`AdmissionState::expire`].
     Queued,
-    /// Refused typed.
+    /// A breaker tripped. Typed, loud, telemetry-worthy.
     Refused(RefusalReason),
+}
+
+/// Point-in-time counts for the heartbeat's capacity telemetry — the upward
+/// report the server paces against (FAILURE-VISIBILITY.md, out-of-band
+/// plane). The impure half samples this every heartbeat tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionSnapshot {
+    /// Running light ops.
+    pub light_running: usize,
+    /// Queued light ops (only ever non-zero once a breaker saturates).
+    pub light_queued: usize,
+    /// Running heavy ops.
+    pub heavy_running: usize,
+    /// Queued heavy ops.
+    pub heavy_queued: usize,
 }
 
 /// A queued job awaiting promotion. (Class and origin live in the queue
@@ -117,9 +175,6 @@ pub struct AdmissionState {
     /// Round-robin ring of origin keys per class (an origin appears once
     /// while it has waiters).
     rings: HashMap<JobClass, VecDeque<String>>,
-    /// Whether the host is currently pressured (heavy gate). Updated by the
-    /// integration layer from its PSI probe.
-    host_pressured: bool,
     queued_total: HashMap<JobClass, usize>,
 }
 
@@ -133,17 +188,13 @@ impl AdmissionState {
             running_heavy: 0,
             queues: HashMap::new(),
             rings: HashMap::new(),
-            host_pressured: false,
             queued_total: HashMap::new(),
         }
     }
 
-    /// Updates the host-pressure gate (sampled by the integration layer).
-    pub fn set_host_pressured(&mut self, pressured: bool) {
-        self.host_pressured = pressured;
-    }
-
-    /// Requests admission for `op` of `class` from `origin`.
+    /// Requests admission for `op` of `class` from `origin`. Under the
+    /// default (unbounded) config this always returns `Admitted` — queueing
+    /// and refusal exist only behind tripped breakers.
     pub fn request(
         &mut self,
         op: &OpId,
@@ -151,19 +202,17 @@ impl AdmissionState {
         origin: &str,
         now_ms: u64,
     ) -> AdmissionOutcome {
-        if class == JobClass::Heavy && self.host_pressured {
-            return AdmissionOutcome::Refused(RefusalReason::HostPressure);
-        }
-        let limits = self.limits(class);
         let has_waiters = self.queued(class) > 0;
-        if self.running(class) < limits.max_running && !has_waiters {
+        if self.below_running_breaker(class) && !has_waiters {
             // Fast path only when nobody is queued — otherwise a fresh arrival
             // would jump ahead of promoted waiters and break fairness.
             *self.running_mut(class) += 1;
             return AdmissionOutcome::Admitted;
         }
-        if self.queued(class) >= limits.max_queued {
-            return AdmissionOutcome::Refused(RefusalReason::QueueFull);
+        if let Some(max_queued) = self.limits(class).max_queued {
+            if self.queued(class) >= max_queued {
+                return AdmissionOutcome::Refused(RefusalReason::QueueFull);
+            }
         }
         let key = (class, origin.to_string());
         let queue = self.queues.entry(key).or_default();
@@ -189,12 +238,16 @@ impl AdmissionState {
         self.promote(class)
     }
 
-    /// Rejects queued jobs whose wait exceeded the class deadline. Returns
-    /// (op, reason) pairs for the caller to fail typed. Call on a timer tick.
+    /// Rejects queued jobs whose wait exceeded the class's optional
+    /// queue-wait breaker. Returns (op, reason) pairs for the caller to fail
+    /// typed. A no-op for classes with `queue_wait_max_ms: None` (the
+    /// default — queued jobs wait until their caller cancels).
     pub fn expire(&mut self, now_ms: u64) -> Vec<(OpId, RefusalReason)> {
         let mut expired = Vec::new();
         for class in [JobClass::Light, JobClass::Heavy] {
-            let deadline = self.limits(class).queue_wait_max_ms;
+            let Some(deadline) = self.limits(class).queue_wait_max_ms else {
+                continue;
+            };
             let keys: Vec<(JobClass, String)> = self
                 .queues
                 .keys()
@@ -224,16 +277,25 @@ impl AdmissionState {
         expired
     }
 
+    /// Capacity telemetry for the heartbeat (the upward report the server
+    /// paces against).
+    #[must_use]
+    pub fn snapshot(&self) -> AdmissionSnapshot {
+        AdmissionSnapshot {
+            light_running: self.running(JobClass::Light),
+            light_queued: self.queued(JobClass::Light),
+            heavy_running: self.running(JobClass::Heavy),
+            heavy_queued: self.queued(JobClass::Heavy),
+        }
+    }
+
     /// Promotes waiters into free capacity for `class`, round-robin across
-    /// origins. Heavy promotions honor the host-pressure gate.
+    /// origins.
     fn promote(&mut self, class: JobClass) -> Vec<OpId> {
         let mut promoted = Vec::new();
         loop {
-            if self.running(class) >= self.limits(class).max_running {
+            if !self.below_running_breaker(class) {
                 break;
-            }
-            if class == JobClass::Heavy && self.host_pressured {
-                break; // waiters stay queued until pressure clears or deadline
             }
             let Some(ring) = self.rings.get_mut(&class) else {
                 break;
@@ -279,6 +341,12 @@ impl AdmissionState {
         self.queued_total.get(&class).copied().unwrap_or(0)
     }
 
+    fn below_running_breaker(&self, class: JobClass) -> bool {
+        self.limits(class)
+            .max_running
+            .is_none_or(|max| self.running(class) < max)
+    }
+
     fn running_mut(&mut self, class: JobClass) -> &mut usize {
         match class {
             JobClass::Light => &mut self.running_light,
@@ -298,17 +366,20 @@ impl AdmissionState {
 mod tests {
     use super::*;
 
+    /// Explicit tiny breakers: exercises the breaker/queue/fairness machinery.
+    /// Real deployments run unbounded or `derive`d — these values are test
+    /// instrumentation, not recommendations.
     fn tiny() -> AdmissionState {
         AdmissionState::new(AdmissionConfig {
             light: ClassLimits {
-                max_running: 2,
-                max_queued: 2,
-                queue_wait_max_ms: 100,
+                max_running: Some(2),
+                max_queued: Some(2),
+                queue_wait_max_ms: Some(100),
             },
             heavy: ClassLimits {
-                max_running: 1,
-                max_queued: 3,
-                queue_wait_max_ms: 200,
+                max_running: Some(1),
+                max_queued: Some(3),
+                queue_wait_max_ms: Some(200),
             },
         })
     }
@@ -318,7 +389,65 @@ mod tests {
     }
 
     #[test]
-    fn admits_up_to_cap_then_queues_then_refuses() {
+    fn default_config_admits_everything_immediately() {
+        // CAPABLE, NOT CONSTRAINED: the default admission has no numbers in
+        // it at all — 10k concurrent heavy ops admit without a single queue
+        // or refusal. (E12's in-process half.)
+        let mut a = AdmissionState::new(AdmissionConfig::default());
+        for i in 0..10_000 {
+            assert_eq!(
+                a.request(&op(&format!("h{i}")), JobClass::Heavy, "s1", 0),
+                AdmissionOutcome::Admitted
+            );
+        }
+        assert_eq!(a.running(JobClass::Heavy), 10_000);
+        assert_eq!(a.queued(JobClass::Heavy), 0);
+        // And with no wait breaker configured, expire() can never reject.
+        assert!(a.expire(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn derived_breakers_scale_with_host_capacity() {
+        // Doubling the host doubles the breakers: no fixed ceiling anywhere
+        // below them (E12 scaling sanity, pure half).
+        let small = HostCapacity {
+            fd_headroom: 65_536,
+            pid_headroom: 30_000,
+            ..HostCapacity::default()
+        };
+        let big = HostCapacity {
+            fd_headroom: 131_072,
+            pid_headroom: 60_000,
+            ..HostCapacity::default()
+        };
+        let c_small = AdmissionConfig::derive(&small);
+        let c_big = AdmissionConfig::derive(&big);
+        let sr = c_small.heavy.max_running.unwrap();
+        let br = c_big.heavy.max_running.unwrap();
+        assert_eq!(br, sr * 2);
+        assert!(
+            sr >= 4_096,
+            "a normal host's breaker is far above sane load"
+        );
+        // Wait breakers never come from derivation — patience is the caller's.
+        assert_eq!(c_big.heavy.queue_wait_max_ms, None);
+        assert_eq!(c_big.light.queue_wait_max_ms, None);
+    }
+
+    #[test]
+    fn derived_breakers_respect_the_floor() {
+        let starved = HostCapacity {
+            fd_headroom: 64,
+            pid_headroom: 32,
+            ..HostCapacity::default()
+        };
+        let c = AdmissionConfig::derive(&starved);
+        assert_eq!(c.heavy.max_running, Some(DERIVED_BREAKER_FLOOR));
+        assert_eq!(c.light.max_running, Some(DERIVED_BREAKER_FLOOR));
+    }
+
+    #[test]
+    fn admits_up_to_breaker_then_queues_then_refuses() {
         let mut a = tiny();
         assert_eq!(
             a.request(&op("h1"), JobClass::Heavy, "s1", 0),
@@ -340,7 +469,7 @@ mod tests {
             a.request(&op("h5"), JobClass::Heavy, "s1", 0),
             AdmissionOutcome::Refused(RefusalReason::QueueFull)
         );
-        // Release promotes exactly one (cap 1).
+        // Release promotes exactly one (breaker 1).
         let promoted = a.release(JobClass::Heavy);
         assert_eq!(promoted, vec![op("h2")]);
         assert_eq!(a.queued(JobClass::Heavy), 2);
@@ -407,43 +536,30 @@ mod tests {
     }
 
     #[test]
-    fn wait_deadline_expires_typed() {
+    fn wait_breaker_expires_typed_only_when_configured() {
         let mut a = tiny();
         let _ = a.request(&op("h1"), JobClass::Heavy, "s1", 0);
         let _ = a.request(&op("h2"), JobClass::Heavy, "s1", 0);
-        let expired = a.expire(250); // heavy deadline 200ms
+        let expired = a.expire(250); // heavy wait breaker 200ms
         assert_eq!(expired, vec![(op("h2"), RefusalReason::WaitDeadline)]);
         assert_eq!(a.queued(JobClass::Heavy), 0);
     }
 
     #[test]
-    fn host_pressure_refuses_heavy_but_not_light() {
+    fn snapshot_reports_capacity_telemetry() {
         let mut a = tiny();
-        a.set_host_pressured(true);
-        assert_eq!(
-            a.request(&op("h1"), JobClass::Heavy, "s1", 0),
-            AdmissionOutcome::Refused(RefusalReason::HostPressure)
-        );
-        assert_eq!(
-            a.request(&op("l1"), JobClass::Light, "s1", 0),
-            AdmissionOutcome::Admitted
-        );
-        // Pressure also pauses heavy promotions until cleared.
-        a.set_host_pressured(false);
+        let _ = a.request(&op("h1"), JobClass::Heavy, "s1", 0);
         let _ = a.request(&op("h2"), JobClass::Heavy, "s1", 0);
+        let _ = a.request(&op("l1"), JobClass::Light, "s1", 0);
         assert_eq!(
-            a.request(&op("h3"), JobClass::Heavy, "s1", 0),
-            AdmissionOutcome::Queued
+            a.snapshot(),
+            AdmissionSnapshot {
+                light_running: 1,
+                light_queued: 0,
+                heavy_running: 1,
+                heavy_queued: 1,
+            }
         );
-        a.set_host_pressured(true);
-        assert_eq!(
-            a.release(JobClass::Heavy),
-            vec![],
-            "no heavy promotion under pressure"
-        );
-        a.set_host_pressured(false);
-        // A light release does not promote heavy; the next heavy event does.
-        assert_eq!(a.release(JobClass::Heavy), vec![op("h3")]);
     }
 
     #[test]
