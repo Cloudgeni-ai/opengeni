@@ -12328,6 +12328,42 @@ export type ActiveSandboxPointer = {
   workingDir: string | null;
 };
 
+// The INVERSE of readActiveSandbox: every session in a workspace whose ACTIVE
+// SANDBOX resolves to enrollment X AND that has a RUNNING TURN — i.e. "sessions
+// with an active op on machine X". This is the fan-out target set for the
+// machine-link session events (a machine's control link changing only concerns the
+// sessions actively using it; an idle-machine blip must never spam historical
+// sessions). ONE indexed lookup: the query drives from `sandboxes` via the partial
+// `sandboxes_enrollment_idx` (enrollment_id WHERE NOT NULL), joins `sessions` on
+// the active-sandbox pointer, and keeps only rows with a non-null active_turn_id (a
+// running turn). Deliberately a v1 OVER-APPROXIMATION — no per-op tracking table.
+export async function sessionsWithActiveOpOnEnrollment(
+  db: Database,
+  input: { workspaceId: string; enrollmentId: string },
+): Promise<Array<{ sessionId: string; activeTurnId: string }>> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        sessionId: schema.sessions.id,
+        activeTurnId: schema.sessions.activeTurnId,
+      })
+      .from(schema.sandboxes)
+      .innerJoin(schema.sessions, eq(schema.sessions.activeSandboxId, schema.sandboxes.id))
+      .where(
+        and(
+          eq(schema.sandboxes.workspaceId, input.workspaceId),
+          eq(schema.sandboxes.kind, "selfhosted"),
+          eq(schema.sandboxes.enrollmentId, input.enrollmentId),
+          isNotNull(schema.sessions.activeTurnId),
+        ),
+      );
+    // active_turn_id is non-null by the WHERE guard; the map narrows the type.
+    return rows.flatMap((row) =>
+      row.activeTurnId ? [{ sessionId: row.sessionId, activeTurnId: row.activeTurnId }] : [],
+    );
+  });
+}
+
 // Read the session's current pointer (the routing proxy re-reads this PER TOOL
 // CALL). NULL active_sandbox_id == "use the session's own group sandbox".
 export async function readActiveSandbox(

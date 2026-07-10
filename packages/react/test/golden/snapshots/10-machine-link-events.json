@@ -1,0 +1,66 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000001001",
+      "occurredAt": "2026-01-02T11:00:01.000Z",
+      "text": "Keep building on the connected machine.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000001006",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T11:00:06.000Z",
+      "text": "The machine restarted for a self-update and reconnected; the build continued.",
+      "streaming": false
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000001007-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T11:00:07.000Z",
+      "outcome": "complete",
+      "failureText": null
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000001001",
+        "occurredAt": "2026-01-02T11:00:01.000Z",
+        "text": "Keep building on the connected machine.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "agent-message",
+        "id": "00000000-0000-4000-8000-000000001006",
+        "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+        "occurredAt": "2026-01-02T11:00:06.000Z",
+        "text": "The machine restarted for a self-update and reconnected; the build continued.",
+        "streaming": false
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "agent-message": 1,
+      "turn-end": 1,
+      "user-message": 1
+    },
+    "groupKinds": {
+      "item": 2
+    },
+    "activityItemKinds": {},
+    "turnOutcomes": {}
+  }
+}

@@ -527,6 +527,11 @@ export const SESSION_EVENT_TYPES = [
   // contracts SessionEventType — the contract-parity test asserts sorted equality).
   "machine.op.failed",
   "machine.op.recovered",
+  // Connected Machine link-plane observability (announce-only, quiet; mirror of
+  // contracts SessionEventType — the contract-parity test asserts sorted equality).
+  "machine.link.lost",
+  "machine.link.restored",
+  "machine.runner.restarted",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];

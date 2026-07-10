@@ -3137,6 +3137,23 @@ export const SessionEventType = z.enum([
   // requires regenerating the golden snapshots (the golden-grammar gate).
   "machine.op.failed",
   "machine.op.recovered",
+  // Connected Machine (selfhosted) LINK-plane observability (failure-visibility
+  // doctrine). SESSION-scoped, ANNOUNCE-ONLY facts fanned out to the sessions that
+  // had an active op running on the machine when its control link changed — never
+  // to idle/historical sessions. Payloads carry ids / a typed reason / key-names
+  // only, NEVER command content.
+  //
+  // `machine.link.lost` — the machine announced a clean GoingOffline (its control
+  // link is going away) while a session had a running turn on it. `machine.link.
+  // restored` — a reconnect Hello re-established the link that was previously lost.
+  // `machine.runner.restarted` — the additional signal that the going-offline was
+  // a self-update restart specifically (link.lost also fires for it; this
+  // distinguishes a restart from a plain stop / host shutdown). All three hit the
+  // timeline projection's quiet default tier (no rendered item); adding a rendered
+  // item requires regenerating the golden snapshots (the golden-grammar gate).
+  "machine.link.lost",
+  "machine.link.restored",
+  "machine.runner.restarted",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 

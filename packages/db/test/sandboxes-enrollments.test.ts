@@ -19,6 +19,7 @@ import {
   readMachineMetricsLatestForWorkspace,
   readMachineMetricsSeries,
   revokeEnrollment,
+  sessionsWithActiveOpOnEnrollment,
   setActiveSandbox,
   setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
@@ -225,6 +226,90 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       enrollmentId: created.id,
     });
     expect(secondClear.cleared).toBe(false); // nothing to clear → no churn
+  }, 60_000);
+
+  test("sessionsWithActiveOpOnEnrollment: only active-sandbox + running-turn sessions for enrollment X", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollX = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:FANX",
+      hasDisplay: true,
+    });
+    const enrollY = await createEnrollment(db, {
+      accountId,
+      workspaceId,
+      pubkey: "ed25519:FANY",
+      hasDisplay: true,
+    });
+    const sandX = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "machine-x",
+      enrollmentId: enrollX.id,
+    });
+    const sandY = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "selfhosted",
+      name: "machine-y",
+      enrollmentId: enrollY.id,
+    });
+    const sandModal = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "group-box",
+    });
+
+    const mkSession = async () =>
+      await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "hi",
+        resources: [],
+        metadata: {},
+        model: "gpt",
+        sandboxBackend: "modal",
+      });
+    const point = async (sessionId: string, sandboxId: string) =>
+      await setActiveSandbox(db, {
+        accountId,
+        workspaceId,
+        sessionId,
+        targetSandboxId: sandboxId,
+        expectedEpoch: 0,
+      });
+    const setTurn = async (sessionId: string, turnId: string) =>
+      await admin`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
+
+    // INCLUDED: pointer → machine X's sandbox + a running turn.
+    const included = await mkSession();
+    await point(included.id, sandX.id);
+    const includedTurn = "cccccccc-0000-4000-8000-000000000001";
+    await setTurn(included.id, includedTurn);
+
+    // EXCLUDED: pointer → machine X but NO running turn (active_turn_id null).
+    const noTurn = await mkSession();
+    await point(noTurn.id, sandX.id);
+
+    // EXCLUDED: pointer → machine Y's sandbox (a different enrollment) + a turn.
+    const otherEnrollment = await mkSession();
+    await point(otherEnrollment.id, sandY.id);
+    await setTurn(otherEnrollment.id, "cccccccc-0000-4000-8000-000000000002");
+
+    // EXCLUDED: pointer → the Modal group box (kind != selfhosted) + a turn.
+    const modal = await mkSession();
+    await point(modal.id, sandModal.id);
+    await setTurn(modal.id, "cccccccc-0000-4000-8000-000000000003");
+
+    const rows = await sessionsWithActiveOpOnEnrollment(db, {
+      workspaceId,
+      enrollmentId: enrollX.id,
+    });
+    expect(rows).toEqual([{ sessionId: included.id, activeTurnId: includedTurn }]);
   }, 60_000);
 
   test("sandbox create: selfhosted requires enrollment, modal forbids it; get + list", async () => {

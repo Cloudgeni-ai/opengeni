@@ -31,16 +31,19 @@ import {
   clearEnrollmentWentOffline,
   getEnrollment,
   ingestMachineMetricsSample,
+  sessionsWithActiveOpOnEnrollment,
   setEnrollmentDisplayState,
   setEnrollmentWentOffline,
   touchEnrollmentLastSeen,
+  type AppendEventInput,
   type Database,
   type MachineMetricsSample,
 } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
+import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import {
   AgentEvent,
+  GoingOfflineReason,
   Hello,
   goingOfflineReasonToJSON,
   type MetricsSample,
@@ -150,15 +153,45 @@ export async function ingestHeartbeat(
 }
 
 /**
+ * Fan out one or more machine-LINK session events to the sessions that had an
+ * active op running on the machine when its control link changed (per
+ * `sessionsWithActiveOpOnEnrollment`) — the announce-only failure-visibility
+ * plane. Each session's events are stamped on its OWN active turn. No matching
+ * session ⇒ nothing is emitted (an idle-machine blip must never spam idle /
+ * historical sessions). Called best-effort inside the handlers' fail-soft blocks.
+ */
+async function fanOutMachineLinkEvents(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  enrollmentId: string,
+  build: (activeTurnId: string) => AppendEventInput[],
+): Promise<void> {
+  const sessions = await sessionsWithActiveOpOnEnrollment(db, { workspaceId, enrollmentId });
+  for (const session of sessions) {
+    await appendAndPublishEvents(
+      db,
+      bus,
+      workspaceId,
+      session.sessionId,
+      build(session.activeTurnId),
+    );
+  }
+}
+
+/**
  * Decode a raw `AgentEvent` payload + ingest it (the per-message handler). A
- * heartbeat carrying a metrics sample is ingested; a going-offline (or a
- * heartbeat without metrics) is a no-op. Decode failures are reported + swallowed.
+ * heartbeat carrying a metrics sample is ingested; a going-offline records the
+ * machine-plane marker + fans out the link-plane session events. Decode failures
+ * are reported + swallowed. `bus` (when present) enables the session-event
+ * fan-out; the live consumer always supplies it, pure unit tests may omit it.
  */
 export async function handleAgentEventPayload(
   db: Database,
   observability: Observability | undefined,
   payload: Uint8Array,
   subject: string,
+  bus?: EventBus,
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -201,6 +234,24 @@ export async function handleAgentEventPayload(
           enrollmentId: ids.agentId,
           reason,
         });
+        // Fan out the link-plane events to the sessions with an active op on this
+        // machine: machine.link.lost (its control link is going away) for every
+        // clean going-offline, PLUS machine.runner.restarted when the reason is a
+        // self-update restart specifically (link.lost fires for it too; this
+        // distinguishes a restart from a plain stop / host shutdown).
+        if (bus) {
+          const isSelfUpdate =
+            event.event.goingOffline.reason === GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE;
+          await fanOutMachineLinkEvents(db, bus, ids.workspaceId, ids.agentId, (activeTurnId) => {
+            const events: AppendEventInput[] = [
+              { type: "machine.link.lost", turnId: activeTurnId, payload: { reason } },
+            ];
+            if (isSelfUpdate) {
+              events.push({ type: "machine.runner.restarted", turnId: activeTurnId, payload: {} });
+            }
+            return events;
+          });
+        }
       }
     } catch (error) {
       observability?.warn?.("Failed to record a machine clean going-offline", {
@@ -242,7 +293,7 @@ export function startMetricsIngestion(deps: {
   observability?: Observability;
 }): () => void {
   return deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) =>
-    handleAgentEventPayload(deps.db, deps.observability, payload, subject),
+    handleAgentEventPayload(deps.db, deps.observability, payload, subject, deps.bus),
   );
 }
 
@@ -326,15 +377,19 @@ export async function refreshEnrollmentDisplay(
 }
 
 /**
- * Decode a raw `Hello` payload + refresh the enrollment's display cursor (the
- * per-message handler for the hello plane). Decode failures + write failures are
- * reported + swallowed — a display refresh must NEVER break the agent's connect.
+ * Decode a raw `Hello` payload + refresh the enrollment's display cursor + clear
+ * any pending clean going-offline marker and, when the reconnect actually cleared
+ * one, fan out machine.link.restored to the sessions with an active op on the
+ * machine (the per-message handler for the hello plane). Decode failures + write
+ * failures are reported + swallowed — a Hello must NEVER break the agent's connect.
+ * `bus` (when present) enables the link.restored fan-out.
  */
 export async function handleHelloPayload(
   db: Database,
   observability: Observability | undefined,
   payload: Uint8Array,
   subject: string,
+  bus?: EventBus,
 ): Promise<void> {
   const ids = parseAgentHelloSubject(subject);
   if (!ids) {
@@ -367,15 +422,23 @@ export async function handleHelloPayload(
   // marker no longer holds — clear it so the liveness derivation stops reading the
   // machine offline. Best-effort + fail-soft, and change-guarded in the DB (a
   // steady-state Hello with no marker writes nothing), so this never breaks the
-  // agent's connect and never churns.
+  // agent's connect and never churns. When a marker was ACTUALLY cleared (the
+  // machine had been reported link.lost), fan out machine.link.restored to the
+  // sessions with an active op on it — a restored only ever pairs a prior lost, so
+  // a routine connect Hello (no marker) emits nothing.
   try {
     const enrollment = await getEnrollment(db, ids.workspaceId, ids.agentId);
     if (enrollment) {
-      await clearEnrollmentWentOffline(db, {
+      const { cleared } = await clearEnrollmentWentOffline(db, {
         accountId: enrollment.accountId,
         workspaceId: ids.workspaceId,
         enrollmentId: ids.agentId,
       });
+      if (cleared && bus) {
+        await fanOutMachineLinkEvents(db, bus, ids.workspaceId, ids.agentId, (activeTurnId) => [
+          { type: "machine.link.restored", turnId: activeTurnId, payload: {} },
+        ]);
+      }
     }
   } catch (error) {
     observability?.warn?.("Failed to clear a machine going-offline marker on a Hello", {
@@ -397,6 +460,6 @@ export function startHelloIngestion(deps: {
   observability?: Observability;
 }): () => void {
   return deps.bus.subscribeAgentEvents(AGENT_HELLO_SUBJECT, (payload, subject) =>
-    handleHelloPayload(deps.db, deps.observability, payload, subject),
+    handleHelloPayload(deps.db, deps.observability, payload, subject, deps.bus),
   );
 }

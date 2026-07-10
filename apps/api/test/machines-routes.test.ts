@@ -11,6 +11,7 @@ import {
   ControlRequest,
   ControlResponse,
   GoingOfflineReason,
+  Hello,
 } from "@opengeni/agent-proto";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import {
@@ -20,13 +21,14 @@ import {
   createSession,
   listSandboxes,
   revokeEnrollment,
+  setActiveSandbox,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import { createApp } from "../src/app";
 import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
-import { startMetricsIngestion } from "../src/sandbox/metrics-ingestion";
+import { handleHelloPayload, startMetricsIngestion } from "../src/sandbox/metrics-ingestion";
 
 // Track started ingestion consumers so afterEach can unsubscribe them (each test
 // uses its own bus, but cleaning up keeps subscriptions from leaking).
@@ -565,5 +567,145 @@ describe("M10 flag gate + authz", () => {
 
     // No bearer at all → 401.
     expect((await onApp.request(`/v1/workspaces/${workspaceId}/machines`)).status).toBe(401);
+  }, 90_000);
+});
+
+describe("machine.link.* fan-out — link-plane session events on going-offline / reconnect", () => {
+  // Read the machine-link events a session accumulated (ordered), each with the
+  // turn they were stamped on.
+  async function machineLinkEvents(
+    sessionId: string,
+  ): Promise<Array<{ type: string; turn_id: string | null }>> {
+    return await admin<{ type: string; turn_id: string | null }[]>`
+      select type, turn_id from session_events
+      where session_id = ${sessionId}
+        and (type like 'machine.link.%' or type = 'machine.runner.restarted')
+      order by sequence`;
+  }
+
+  // Point a seeded session at its machine's sandbox with a running turn, so the
+  // fan-out query counts it as "a session with an active op on the machine".
+  async function makeActiveOp(
+    accountId: string,
+    workspaceId: string,
+    sessionId: string,
+    sandboxId: string,
+    turnId: string,
+  ): Promise<void> {
+    await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId,
+      targetSandboxId: sandboxId,
+      expectedEpoch: 0,
+    });
+    await admin`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
+  }
+
+  function helloBytes(agentId: string, workspaceId: string): Uint8Array {
+    return Hello.encode(
+      Hello.fromPartial({ agentId, workspaceId, capabilities: { desktop: true } }),
+    ).finish();
+  }
+
+  test("a self-update GoingOffline fans out link.lost + runner.restarted to the active-op session, on its running turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox, bus } = await seed();
+    const turnId = "dddddddd-0000-4000-8000-000000000001";
+    await makeActiveOp(accountId, workspaceId, session.id, sandbox.id, turnId);
+    appFor(bus); // starts the metrics-ingestion consumer
+
+    await emitGoingOffline(
+      bus,
+      workspaceId,
+      enrollment.id,
+      GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE,
+    );
+
+    const events = await machineLinkEvents(session.id);
+    expect(events.map((e) => e.type)).toEqual(["machine.link.lost", "machine.runner.restarted"]);
+    // Both are stamped on the session's OWN running turn.
+    expect(events.every((e) => e.turn_id === turnId)).toBe(true);
+  }, 90_000);
+
+  test("a plain (non-update) GoingOffline fans out link.lost ONLY (no runner.restarted)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox, bus } = await seed();
+    const turnId = "dddddddd-0000-4000-8000-000000000002";
+    await makeActiveOp(accountId, workspaceId, session.id, sandbox.id, turnId);
+    appFor(bus);
+
+    await emitGoingOffline(
+      bus,
+      workspaceId,
+      enrollment.id,
+      GoingOfflineReason.GOING_OFFLINE_REASON_HOST_SHUTDOWN,
+    );
+
+    expect((await machineLinkEvents(session.id)).map((e) => e.type)).toEqual(["machine.link.lost"]);
+  }, 90_000);
+
+  test("a reconnect Hello after a lost fans out link.restored; a second Hello (marker already cleared) emits nothing more", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, enrollment, sandbox, bus } = await seed();
+    const turnId = "dddddddd-0000-4000-8000-000000000003";
+    await makeActiveOp(accountId, workspaceId, session.id, sandbox.id, turnId);
+    appFor(bus);
+
+    // Lose the link first (sets the marker + emits link.lost).
+    await emitGoingOffline(
+      bus,
+      workspaceId,
+      enrollment.id,
+      GoingOfflineReason.GOING_OFFLINE_REASON_USER_STOP,
+    );
+
+    // Reconnect: the Hello clears the marker → emits link.restored on the turn.
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloBytes(enrollment.id, workspaceId),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+      bus,
+    );
+    const afterFirst = await machineLinkEvents(session.id);
+    const restored = afterFirst.filter((e) => e.type === "machine.link.restored");
+    expect(restored).toHaveLength(1);
+    expect(restored[0]!.turn_id).toBe(turnId);
+
+    // A second Hello finds no marker to clear → no further restored (a restored only
+    // ever pairs a prior lost).
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloBytes(enrollment.id, workspaceId),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+      bus,
+    );
+    const afterSecond = await machineLinkEvents(session.id);
+    expect(afterSecond.filter((e) => e.type === "machine.link.restored")).toHaveLength(1);
+  }, 90_000);
+
+  test("no session with an active op on the machine ⇒ a GoingOffline emits NO session events (idle blip stays silent)", async () => {
+    if (!available) return;
+    // seed() creates a session but does NOT point it at the machine / give it a
+    // running turn, so the fan-out query matches nothing.
+    const { workspaceId, session, enrollment, bus } = await seed();
+    appFor(bus);
+
+    await emitGoingOffline(
+      bus,
+      workspaceId,
+      enrollment.id,
+      GoingOfflineReason.GOING_OFFLINE_REASON_UPDATE,
+    );
+
+    expect(await machineLinkEvents(session.id)).toEqual([]);
+    // And nothing leaked onto any other session in the workspace either.
+    const [{ count }] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_events
+      where workspace_id = ${workspaceId}
+        and (type like 'machine.link.%' or type = 'machine.runner.restarted')`;
+    expect(count).toBe(0);
   }, 90_000);
 });
