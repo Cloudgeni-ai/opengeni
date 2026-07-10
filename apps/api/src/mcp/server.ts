@@ -652,22 +652,31 @@ export function isMachineChildNotificationTurn(turn: {
  * stopped (the runaway that made "stop" feel broken). A genuine user message
  * still redirects freely (it is not a child-notification turn), and the
  * human-driven API resume path (PATCH /goal) is unaffected.
+ *
+ * Classification is by CALLER IDENTITY — `callerTurnId` is the turn that minted
+ * this MCP token (signed into it by the worker at turn setup). We deliberately
+ * do NOT read the session's live `active_turn_id`: that pointer can flip to a
+ * different turn between reads (a machine turn ends and a human turn becomes
+ * active mid-check), which would misclassify the caller and, worst case, refuse
+ * a legitimate human `goal_set` — inverting the guard against the very human
+ * power it must preserve. A caller turn's source/metadata are immutable, so this
+ * read is race-free. No caller identity ⇒ fail OPEN (only a positively
+ * identified machine child-notification caller is refused).
  */
 export async function assertGoalReactivationAllowed(
   deps: ApiRouteDeps,
   workspaceId: string,
   sessionId: string,
+  callerTurnId: string | null,
 ): Promise<void> {
+  if (!callerTurnId) {
+    return;
+  }
   const goal = await getSessionGoal(deps.db, workspaceId, sessionId);
   if (!goal || goal.status !== "paused" || goal.pausedReason !== "user_interrupt") {
     return;
   }
-  const session = await getSession(deps.db, workspaceId, sessionId);
-  const activeTurnId = session?.activeTurnId ?? null;
-  if (!activeTurnId) {
-    return;
-  }
-  const turn = await getSessionTurn(deps.db, workspaceId, activeTurnId);
+  const turn = await getSessionTurn(deps.db, workspaceId, callerTurnId);
   if (turn && isMachineChildNotificationTurn(turn)) {
     throw new Error(
       "This session was paused by the user (stop). A worker-completion turn cannot resume or replace the goal — only the user can. Report your findings for the user and stop; do not call goal_set.",
@@ -695,7 +704,11 @@ function registerGoalTools(
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
       await requireSession(deps.db, grant.workspaceId, sessionId);
-      await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId);
+      const callerTurnId =
+        typeof grant.metadata?.["turnId"] === "string"
+          ? (grant.metadata["turnId"] as string)
+          : null;
+      await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
       const { goal, replaced } = await upsertSessionGoal(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,

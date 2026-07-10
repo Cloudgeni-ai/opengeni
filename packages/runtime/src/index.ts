@@ -1718,6 +1718,9 @@ export type PrepareToolsOptions = {
   // Worker-asserted session scope for first-party MCP calls; enables
   // session-scoped tools such as goal management on the API side.
   sessionId?: string;
+  // The calling turn's id, signed into the token so tools can classify the
+  // caller from its own identity instead of the session's live active pointer.
+  turnId?: string;
   subjectId?: string;
   subjectLabel?: string;
   // Overrides the fixed first-party MCP permission set for this session's
@@ -2197,6 +2200,7 @@ async function firstPartyMcpRequestInit(
       ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
       permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.turnId ? { turnId: options.turnId } : {}),
       exp: Math.floor(Date.now() / 1000) + 60 * 60,
     })}`;
   }

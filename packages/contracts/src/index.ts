@@ -628,6 +628,12 @@ export const DelegatedAccessTokenPayload = z.object({
   // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
   // agent-controlled); enables session-scoped tools such as goal management.
   sessionId: z.string().uuid().optional(),
+  // The turn making the call (the caller's identity), HMAC-signed by the worker
+  // at turn setup. Lets a tool classify WHO is calling from the token itself,
+  // instead of racily re-reading the session's live active_turn_id — e.g. the
+  // sacred-pause guard must know if the CALLER is a machine child-notification
+  // turn, and the active pointer can flip to another turn mid-check.
+  turnId: z.string().uuid().optional(),
   exp: z.number().int().positive(),
 });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;

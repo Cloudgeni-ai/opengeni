@@ -2105,6 +2105,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
+          // Sign the calling turn into the first-party token so tools classify
+          // the caller by its own identity (sacred-pause guard), not the racy
+          // live active pointer.
+          ...(turnId ? { turnId } : {}),
           subjectId: "worker:first-party-mcp",
           subjectLabel: "OpenGeni worker",
           resolveCredential,

@@ -7,9 +7,7 @@ import {
   createSession,
   enqueueSessionTurn,
   finishTurn,
-  getSessionEvent,
   listPendingSessionTurns,
-  listSessionEvents,
   setSessionChildNotificationsMode,
   wakeParentSessionForChildCompletion,
   createDb,
@@ -41,6 +39,17 @@ async function makeParent(accountId: string, workspaceId: string) {
     model: "gpt",
     sandboxBackend: "none",
   });
+}
+
+// Read an event's payload straight off the raw admin connection. Verification
+// reads MUST bypass the @opengeni/db package API: in the full-monorepo test run
+// another suite's unconditional `mock.module("@opengeni/db")` can leak a fixture
+// for getSessionEvent/listSessionEvents (opengeni#373), which would make these
+// assertions read empty payloads even though the fold wrote real rows.
+async function eventPayloadById(eventId: string): Promise<{ text?: string } | null> {
+  const [row] = await admin<{ payload: { text?: string } }[]>`
+    select payload from session_events where id = ${eventId}`;
+  return row?.payload ?? null;
 }
 
 function wakeInput(workspaceId: string, parentSessionId: string, childId: string) {
@@ -131,8 +140,7 @@ describe("wakeParentSessionForChildCompletion coalescing", () => {
     const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
     expect(pending.length).toBe(1);
     const digestTurn = pending[0]!;
-    const trigger = await getSessionEvent(db, workspaceId, digestTurn.triggerEventId);
-    const text = (trigger?.payload as { text?: string }).text ?? "";
+    const text = (await eventPayloadById(digestTurn.triggerEventId))?.text ?? "";
     expect(text).toContain("3 worker sessions you spawned reached a terminal state:");
     expect(text).toContain("child-1");
     expect(text).toContain("child-2");
@@ -155,11 +163,9 @@ describe("wakeParentSessionForChildCompletion coalescing", () => {
     }
     const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
     expect(pending.length).toBe(1);
-    const trigger = await getSessionEvent(db, workspaceId, pending[0]!.triggerEventId);
+    const text = (await eventPayloadById(pending[0]!.triggerEventId))?.text ?? "";
     // Single child => plain wake, no "N worker sessions" digest header.
-    expect((trigger?.payload as { text?: string }).text ?? "").not.toContain(
-      "worker sessions you spawned reached",
-    );
+    expect(text).not.toContain("worker sessions you spawned reached");
   });
 
   test("once the digest turn is claimed, the next child opens a fresh turn", async () => {
@@ -313,12 +319,14 @@ describe("child-completion suppression opt-in (lever 6)", () => {
     // No queued turn = no model run.
     const pending = await listPendingSessionTurns(db, workspaceId, parent.id);
     expect(pending.length).toBe(0);
-    // The completion is still visible as a card event in the timeline.
-    const events = await listSessionEvents(db, workspaceId, parent.id, {});
-    const card = events.find(
-      (e) => e.type === "user.message" && (e.payload as any)?.childCompletion,
-    );
-    expect(card).toBeDefined();
+    // The completion is still visible as a card event in the timeline (read via
+    // the raw admin connection so a leaked db mock cannot mask it).
+    const cards = await admin<{ id: string }[]>`
+      select id from session_events
+      where session_id = ${parent.id}
+        and type = 'user.message'
+        and payload ? 'childCompletion'`;
+    expect(cards.length).toBe(1);
   });
 
   test("passive mode stays idempotent per child episode", async () => {
