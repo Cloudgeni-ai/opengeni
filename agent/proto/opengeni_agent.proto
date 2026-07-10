@@ -613,6 +613,13 @@ message AdmissionTelemetry {
   // Jobs with a live mailbox (running + completed-retained awaiting final
   // ack) — the op-engine's routing-table size.
   uint64 live_ops = 5;
+  // Op frames dropped by the fire-and-forget publish path (bulk lane down or
+  // its channel full). Protocol-healed by replay; recorded so an undersized
+  // lane is visible before it matters (monotonic).
+  uint64 op_frames_dropped_total = 6;
+  // Completed ops evicted before their final ack (dropped results) — the
+  // registry's loud counter (monotonic).
+  uint64 evicted_unacked_total = 7;
 }
 
 message HeartbeatAck {

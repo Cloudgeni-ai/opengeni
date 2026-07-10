@@ -423,7 +423,16 @@ fn op_status(op_id: &str, answer: QueryAnswer, handles: Option<&OpHandles>) -> v
             }),
             None,
         ),
-        QueryAnswer::Unknown => (v1::OpState::Unspecified, None, None),
+        // Pre-journal rule (PROTOCOL §Op lifecycle): an id this runner does
+        // not know was lost to a restart (or its lost-marker aged out) — a
+        // compliant server only asks about ops it issued, so the honest typed
+        // answer is LOST{agent_restarted}, never a silent UNSPECIFIED. The
+        // PR-7 journal upgrades this to a precise answer.
+        QueryAnswer::Unknown => (
+            v1::OpState::Lost,
+            None,
+            Some(v1::OpLostReason::AgentRestarted),
+        ),
     };
     v1::OpStatus {
         op_id: op_id.to_string(),

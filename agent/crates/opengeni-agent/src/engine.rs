@@ -34,7 +34,7 @@ use opengeni_agent_engine::admission::{
     AdmissionConfig, AdmissionOutcome, AdmissionSnapshot, AdmissionState, JobClass, RefusalReason,
 };
 use opengeni_agent_engine::registry::{
-    BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig,
+    BeginOutcome, CancelOutcome, OpRegistry, QueryAnswer, RegistryConfig, RegistryCounters,
 };
 use opengeni_agent_engine::retention::RetentionConfig;
 use opengeni_agent_engine::{Frame, HostCapacity, OpId};
@@ -194,6 +194,11 @@ pub struct Engine {
     spool_reserved: Mutex<u64>,
     /// T-derived per-frame data size (from the negotiated max_payload).
     max_frame_bytes: AtomicUsize,
+    /// Op frames dropped by the fire-and-forget publish path (bulk lane down
+    /// or its channel full). Protocol-healed (gap-detect + replay), but per
+    /// FAILURE-VISIBILITY healed faults are RECORDED — this feeds the
+    /// heartbeat so an undersized lane is visible before it matters.
+    frames_dropped: AtomicU64,
     /// Monotonic clock base for the pure engine's injected `now_ms`.
     started: std::time::Instant,
 }
@@ -227,16 +232,37 @@ impl Engine {
         admission: AdmissionConfig,
     ) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&spool_root);
+        // Harness-only shrink knobs (ENGINE-SCENARIOS open question 2): loud
+        // when active, inert otherwise.
+        let overrides = crate::overrides::get();
+        let mut budgets = EngineBudgets::derive(&capacity);
+        if let Some(v) = overrides.retention_memory_max_bytes {
+            budgets.retention_per_op.memory_max_bytes = v;
+        }
+        if let Some(v) = overrides.retention_spool_max_bytes {
+            budgets.retention_per_op.spool_max_bytes = v;
+        }
+        let mut registry = RegistryConfig::default();
+        if let Some(v) = overrides.registry_max_completed {
+            registry.max_completed = v;
+        }
+        if let Some(v) = overrides.registry_completed_ttl_ms {
+            registry.completed_ttl_ms = v;
+        }
+        if let Some(v) = overrides.registry_tombstone_ttl_ms {
+            registry.tombstone_ttl_ms = v;
+        }
         Arc::new(Self {
-            registry: Mutex::new(OpRegistry::new(RegistryConfig::default())),
+            registry: Mutex::new(OpRegistry::new(registry)),
             admission: Mutex::new(AdmissionState::new(admission)),
             waiters: Mutex::new(HashMap::new()),
             routes: Mutex::new(HashMap::new()),
-            budgets: RwLock::new(EngineBudgets::derive(&capacity)),
+            budgets: RwLock::new(budgets),
             capacity: RwLock::new(capacity),
             spool_root,
             spool_reserved: Mutex::new(0),
             max_frame_bytes: AtomicUsize::new(FALLBACK_FRAME_BYTES),
+            frames_dropped: AtomicU64::new(0),
             started: std::time::Instant::now(),
         })
     }
@@ -253,7 +279,15 @@ impl Engine {
     /// derivation — they are pathology backstops, not load figures, and
     /// re-deriving them mid-flight would make refusals timing-dependent.)
     pub fn refresh_capacity(&self, capacity: HostCapacity) {
-        *self.budgets.write().expect("budgets lock") = EngineBudgets::derive(&capacity);
+        let overrides = crate::overrides::get();
+        let mut budgets = EngineBudgets::derive(&capacity);
+        if let Some(v) = overrides.retention_memory_max_bytes {
+            budgets.retention_per_op.memory_max_bytes = v;
+        }
+        if let Some(v) = overrides.retention_spool_max_bytes {
+            budgets.retention_per_op.spool_max_bytes = v;
+        }
+        *self.budgets.write().expect("budgets lock") = budgets;
         *self.capacity.write().expect("capacity lock") = capacity;
     }
 
@@ -536,6 +570,24 @@ impl Engine {
     #[must_use]
     pub fn live_ops(&self) -> usize {
         self.routes.lock().expect("routes lock").len()
+    }
+
+    /// Records one dropped op frame (fire-and-forget lane down/full). The drop
+    /// is protocol-healed by replay; the COUNT is the out-of-band record.
+    pub fn note_frame_dropped(&self) {
+        self.frames_dropped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Total op frames dropped by the publish path since start (monotonic).
+    #[must_use]
+    pub fn frames_dropped_total(&self) -> u64 {
+        self.frames_dropped.load(Ordering::Relaxed)
+    }
+
+    /// The registry's loud counters (evictions of un-final-acked results).
+    #[must_use]
+    pub fn registry_counters(&self) -> RegistryCounters {
+        self.registry.lock().expect("registry lock").counters()
     }
 
     /// Broadcasts `Detach` to every live job — a link lost its connection.

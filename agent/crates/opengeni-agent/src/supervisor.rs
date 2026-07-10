@@ -202,7 +202,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         agent_version: impl Into<String>,
     ) -> Self {
         let spool_root = std::env::temp_dir().join(format!("opengeni-runner-{}", creds.agent_id));
-        let capacity = crate::capacity::sample(&spool_root);
+        let capacity = sampled_capacity(&spool_root);
         let engine = Engine::new(spool_root, capacity);
         Self {
             platform,
@@ -223,7 +223,7 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// [`run`](Self::run); jobs never span the swap.
     #[must_use]
     pub fn with_spool_root(mut self, spool_root: std::path::PathBuf) -> Self {
-        let capacity = crate::capacity::sample(&spool_root);
+        let capacity = sampled_capacity(&spool_root);
         self.engine = Engine::new(spool_root, capacity);
         self
     }
@@ -375,11 +375,14 @@ impl<P: Platform + 'static> Supervisor<P> {
         };
         let (bulk_tx, mut bulk_rx) =
             tokio::sync::mpsc::channel::<(String, Vec<u8>)>(BULK_CHANNEL_DEPTH);
+        let publisher_engine = self.engine.clone();
         let publisher = tokio::spawn(async move {
             while let Some((subject, bytes)) = bulk_rx.recv().await {
                 if let Err(error) = bulk_client.publish(subject, bytes.into()).await {
                     // Fire-and-forget: a lost frame is healed by gap-detect +
-                    // OpAttach replay; never a reason to fail the op.
+                    // OpAttach replay; never a reason to fail the op — but the
+                    // drop is RECORDED (FAILURE-VISIBILITY healed-fault rule).
+                    publisher_engine.note_frame_dropped();
                     warn!(%error, "op frame publish failed (replay heals)");
                 }
             }
@@ -675,11 +678,17 @@ impl<P: Platform + 'static> Supervisor<P> {
         let (request_epoch, held_epoch) = (request.epoch, ctx.epoch);
         let subject = link.creds.op_subject(&request_id);
         let bulk = link.bulk_tx.clone();
+        let sink_engine = self.engine.clone();
         let sink: crate::ops::FrameSink = Arc::new(move |bytes: Vec<u8>| {
-            if let Some(tx) = bulk.read().expect("bulk lock").as_ref() {
-                if tx.try_send((subject.clone(), bytes)).is_err() {
-                    debug!("bulk lane full/closed; op frame dropped (replay heals)");
-                }
+            let delivered = match bulk.read().expect("bulk lock").as_ref() {
+                Some(tx) => tx.try_send((subject.clone(), bytes)).is_ok(),
+                None => false,
+            };
+            if !delivered {
+                // Protocol-healed (gap-detect + OpAttach replay), but RECORDED:
+                // a rising counter means the bulk lane is down or undersized.
+                sink_engine.note_frame_dropped();
+                debug!("bulk lane full/closed; op frame dropped (replay heals)");
             }
         });
         rpc_tasks.spawn(async move {
@@ -884,6 +893,8 @@ impl<P: Platform + 'static> Supervisor<P> {
                     heavy_running: admission.heavy_running as u64,
                     heavy_queued: admission.heavy_queued as u64,
                     live_ops: self.engine.live_ops() as u64,
+                    op_frames_dropped_total: self.engine.frames_dropped_total(),
+                    evicted_unacked_total: self.engine.registry_counters().evicted_unacked_total,
                 }),
             })),
         };
@@ -962,11 +973,28 @@ fn classify(request: &ControlRequest) -> Route {
     }
 }
 
+/// Samples host capacity, applying the harness-only injected figures
+/// (E12 scaling probes) when the test-overrides env is active.
+fn sampled_capacity(spool_root: &std::path::Path) -> opengeni_agent_engine::HostCapacity {
+    let mut capacity = crate::capacity::sample(spool_root);
+    let overrides = crate::overrides::get();
+    if let Some(v) = overrides.capacity_mem_bytes {
+        capacity.mem_available_bytes = v;
+    }
+    if let Some(v) = overrides.capacity_disk_bytes {
+        capacity.disk_free_bytes = v;
+    }
+    capacity
+}
+
 /// The engine's periodic housekeeping, for the run's lifetime: registry GC +
 /// queue-wait expiry every tick; a fresh host-capacity sample (budgets track
 /// the host — rule R's "periodically refreshed") on the slower cadence.
 async fn housekeeping_loop(engine: Arc<Engine>) {
-    let mut ticker = tokio::time::interval(HOUSEKEEPING_TICK);
+    let tick = crate::overrides::get()
+        .housekeeping_tick_ms
+        .map_or(HOUSEKEEPING_TICK, Duration::from_millis);
+    let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_sample = Instant::now();
     loop {

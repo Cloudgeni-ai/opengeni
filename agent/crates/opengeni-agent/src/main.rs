@@ -45,6 +45,7 @@ mod job;
 mod legacy;
 mod metrics;
 mod ops;
+mod overrides;
 mod service;
 mod supervisor;
 mod uninstall;

@@ -1358,6 +1358,17 @@ export interface AdmissionTelemetry {
    * ack) — the op-engine's routing-table size.
    */
   liveOps: string;
+  /**
+   * Op frames dropped by the fire-and-forget publish path (bulk lane down or
+   * its channel full). Protocol-healed by replay; recorded so an undersized
+   * lane is visible before it matters (monotonic).
+   */
+  opFramesDroppedTotal: string;
+  /**
+   * Completed ops evicted before their final ack (dropped results) — the
+   * registry's loud counter (monotonic).
+   */
+  evictedUnackedTotal: string;
 }
 
 export interface HeartbeatAck {
@@ -6950,7 +6961,15 @@ export const HostCapacitySample: MessageFns<HostCapacitySample> = {
 };
 
 function createBaseAdmissionTelemetry(): AdmissionTelemetry {
-  return { lightRunning: "0", lightQueued: "0", heavyRunning: "0", heavyQueued: "0", liveOps: "0" };
+  return {
+    lightRunning: "0",
+    lightQueued: "0",
+    heavyRunning: "0",
+    heavyQueued: "0",
+    liveOps: "0",
+    opFramesDroppedTotal: "0",
+    evictedUnackedTotal: "0",
+  };
 }
 
 export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
@@ -6969,6 +6988,12 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     }
     if (message.liveOps !== "0") {
       writer.uint32(40).uint64(message.liveOps);
+    }
+    if (message.opFramesDroppedTotal !== "0") {
+      writer.uint32(48).uint64(message.opFramesDroppedTotal);
+    }
+    if (message.evictedUnackedTotal !== "0") {
+      writer.uint32(56).uint64(message.evictedUnackedTotal);
     }
     return writer;
   },
@@ -7020,6 +7045,22 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
           message.liveOps = reader.uint64().toString();
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.opFramesDroppedTotal = reader.uint64().toString();
+          continue;
+        }
+        case 7: {
+          if (tag !== 56) {
+            break;
+          }
+
+          message.evictedUnackedTotal = reader.uint64().toString();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7056,6 +7097,16 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
         : isSet(object.live_ops)
         ? globalThis.String(object.live_ops)
         : "0",
+      opFramesDroppedTotal: isSet(object.opFramesDroppedTotal)
+        ? globalThis.String(object.opFramesDroppedTotal)
+        : isSet(object.op_frames_dropped_total)
+        ? globalThis.String(object.op_frames_dropped_total)
+        : "0",
+      evictedUnackedTotal: isSet(object.evictedUnackedTotal)
+        ? globalThis.String(object.evictedUnackedTotal)
+        : isSet(object.evicted_unacked_total)
+        ? globalThis.String(object.evicted_unacked_total)
+        : "0",
     };
   },
 
@@ -7076,6 +7127,12 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     if (message.liveOps !== "0") {
       obj.liveOps = message.liveOps;
     }
+    if (message.opFramesDroppedTotal !== "0") {
+      obj.opFramesDroppedTotal = message.opFramesDroppedTotal;
+    }
+    if (message.evictedUnackedTotal !== "0") {
+      obj.evictedUnackedTotal = message.evictedUnackedTotal;
+    }
     return obj;
   },
 
@@ -7089,6 +7146,8 @@ export const AdmissionTelemetry: MessageFns<AdmissionTelemetry> = {
     message.heavyRunning = object.heavyRunning ?? "0";
     message.heavyQueued = object.heavyQueued ?? "0";
     message.liveOps = object.liveOps ?? "0";
+    message.opFramesDroppedTotal = object.opFramesDroppedTotal ?? "0";
+    message.evictedUnackedTotal = object.evictedUnackedTotal ?? "0";
     return message;
   },
 };
