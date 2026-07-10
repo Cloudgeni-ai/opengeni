@@ -110,6 +110,26 @@ export function renderSelfhostedFault(error: SelfhostedControlError): string {
   const detail = error.detail;
 
   if (error.payloadTooLarge || error.code === ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE) {
+    // The STREAMING retention-ceiling overflow (op-stream OP_OVERFLOW) is a
+    // different truth than the legacy reply-size wall: the machine STOPPED the
+    // command at the ceiling (it did not run to completion), and none of its
+    // output was returned. Same correct next action, honest distinct fields.
+    if (detail.failure_code === "OP_OVERFLOW") {
+      const retained = detail.retained_bytes
+        ? `after retaining ${detail.retained_bytes} bytes of output`
+        : "when its output exceeded what the machine can retain for delivery";
+      return assemble(error, {
+        headline: "the command produced more output than the machine link can deliver",
+        happened: `the machine stopped the command ${retained} — its output-retention ceiling was reached`,
+        layer:
+          "the machine link's output-retention ceiling — the command was terminated at the ceiling, not by its own logic",
+        preserved:
+          "no output was returned, and the command did NOT run to completion — any side effects up to the stop point may have applied.",
+        tryNext:
+          "re-run with the output bounded: redirect to a file (`> /tmp/out.log 2>&1`) then read it " +
+          "back in ranges/chunks, or slice it with `head -c` / `tail -c` / `head` / `tail`.",
+      });
+    }
     const sizes =
       detail.encoded_bytes && detail.max_payload
         ? `its ${detail.encoded_bytes}-byte reply exceeded the machine link's ${detail.max_payload}-byte per-message limit`

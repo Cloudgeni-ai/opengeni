@@ -180,6 +180,55 @@ describe("op-stream exec (fake runner)", () => {
     expect(failed?.faultClass).toBe("payload_too_large");
   });
 
+  test("OP_OVERFLOW renders the four FAILURE-VISIBILITY fields with the termination truth", async () => {
+    const { runner, session } = buildRig();
+    runner.script("call_render:0", {
+      frames: [],
+      exit: {
+        failureCode: "OP_OVERFLOW",
+        failureDetail: { retained_bytes: "268435456" },
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const error = await runWithToolCallCorrelation("call_render", () =>
+      session.exec({ cmd: "yes" }).then(
+        () => null,
+        (e: unknown) => e,
+      ),
+    );
+    const { renderSelfhostedFault } = await import("../src/sandbox/selfhosted/fault-rendering");
+    const { SelfhostedControlError } = await import("../src/sandbox/selfhosted/control-rpc");
+    const rendered = renderSelfhostedFault(error as InstanceType<typeof SelfhostedControlError>);
+    // The doctrine's four mandatory fields, with the OVERFLOW truth: the
+    // command was STOPPED at the retention ceiling (it did not complete), and
+    // the recovery is to bound the output — never a silent truncation.
+    expect(rendered).toContain("What happened:");
+    expect(rendered).toContain("Which layer:");
+    expect(rendered).toContain("What was preserved:");
+    expect(rendered).toContain("What to try:");
+    expect(rendered).toContain("268435456");
+    expect(rendered).toContain("did NOT run to completion");
+    expect(rendered).toContain("/tmp/out.log");
+  });
+
+  test("parallel tool calls keep their correlation contexts separated (ALS)", async () => {
+    const { runWithToolCallCorrelation, nextDurableOpId } =
+      await import("../src/sandbox/op-correlation");
+    // Two overlapping tool invocations mint interleaved ids concurrently; each
+    // async chain must see ONLY its own call id and its own ordinal sequence.
+    const minted: Record<string, string[]> = { a: [], b: [] };
+    const run = (key: "a" | "b", callId: string) =>
+      runWithToolCallCorrelation(callId, async () => {
+        for (let i = 0; i < 3; i += 1) {
+          await Bun.sleep(Math.random() * 5);
+          minted[key].push(nextDurableOpId() as string);
+        }
+      });
+    await Promise.all([run("a", "call_par_a"), run("b", "call_par_b")]);
+    expect(minted.a).toEqual(["call_par_a:0", "call_par_a:1", "call_par_a:2"]);
+    expect(minted.b).toEqual(["call_par_b:0", "call_par_b:1", "call_par_b:2"]);
+  });
+
   test("a lost (evicted) op fails typed, mentioning the eviction", async () => {
     const { runner, session } = buildRig();
     runner.script("call_lost:0", { frames: [] });

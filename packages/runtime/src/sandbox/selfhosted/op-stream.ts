@@ -783,7 +783,10 @@ function runnerFailureToControlError(exit: OpExit): SelfhostedControlError {
       reason: null,
       retryable: false,
       payloadTooLarge: true,
-      detail: exit.failureDetail,
+      // failure_code lets the fault renderer distinguish the retention-ceiling
+      // overflow (command TERMINATED at the ceiling) from the legacy reply-size
+      // wall (command ran to completion) — the four fields must tell the truth.
+      detail: { ...exit.failureDetail, failure_code: exit.failureCode },
     });
   }
   return new SelfhostedControlError({
