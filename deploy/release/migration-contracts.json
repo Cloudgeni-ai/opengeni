@@ -30,5 +30,13 @@
     "previousReaderCompatible": true,
     "previousWriterCompatible": true,
     "rollbackMode": "code-only"
+  },
+  {
+    "migration": "0053_codex_credential_leases.sql",
+    "phase": "expand",
+    "previousCodeCompatible": true,
+    "previousReaderCompatible": true,
+    "previousWriterCompatible": true,
+    "rollbackMode": "code-only"
   }
 ]
