@@ -25,6 +25,11 @@ export function startTestMcpServer(
     forbiddenTools?: string[];
     unauthorizedAuthenticateHeader?: string;
     forbiddenAuthenticateHeader?: string;
+    // JSON-RPC methods that get a 401 even when auth headers are satisfied. Lets a
+    // test connect successfully (its `initialize` handshake passes) and then fail
+    // a later request such as `tools/list`, reproducing a credential that is valid
+    // at connect but rejected at run time.
+    unauthorizedForMethods?: string[];
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
@@ -63,6 +68,17 @@ export function startTestMcpServer(
           });
         }
       }
+      if (await matchesJsonRpcMethod(request, options.unauthorizedForMethods ?? [])) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            ...(options.unauthorizedAuthenticateHeader
+              ? { "www-authenticate": options.unauthorizedAuthenticateHeader }
+              : {}),
+          },
+        });
+      }
       const forbiddenTool = await forbiddenToolName(request, options.forbiddenTools ?? []);
       if (forbiddenTool) {
         return new Response(JSON.stringify({ error: "insufficient_scope", tool: forbiddenTool }), {
@@ -91,6 +107,18 @@ export function startTestMcpServer(
     calls,
     close: () => server.stop(true),
   };
+}
+
+async function matchesJsonRpcMethod(request: Request, methods: string[]): Promise<boolean> {
+  if (methods.length === 0 || request.method !== "POST") {
+    return false;
+  }
+  try {
+    const body = (await request.clone().json()) as { method?: unknown };
+    return typeof body.method === "string" && methods.includes(body.method);
+  } catch {
+    return false;
+  }
 }
 
 async function forbiddenToolName(

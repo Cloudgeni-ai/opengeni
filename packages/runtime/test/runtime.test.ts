@@ -2924,6 +2924,142 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("best-effort server whose tools/list throws at RUN time does not fail an unrelated turn", async () => {
+    // Regression for the prod incident where a session turn hard-failed with
+    // "Streamable HTTP error: Error POSTing to endpoint: authentication required"
+    // because an OPTIONAL connection-broker-backed MCP server had an expired
+    // credential. The server connects fine (its `initialize` handshake resolves a
+    // still-valid credential), so the connect-time best-effort isolation lets it
+    // through — but the credential is gone by the time the SDK's run-time
+    // getAllMcpTools calls tools/list, which throws OUTSIDE the connect guard. The
+    // invariant: that best-effort server drops to zero tools (with its
+    // tool.auth_needed preserved) while a healthy sibling's tools survive and the
+    // turn proceeds. Pre-fix, getAllMcpTools rethrows and the whole turn dies.
+    const connectionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    // The broker resolves a valid credential during connect (initialize), then the
+    // credential expires: any resolve AFTER connect returns auth_needed(expired),
+    // exactly reproducing "valid at connect, gone at tools/list".
+    let connected = false;
+    const expired = startTestMcpServer();
+    const healthy = startTestMcpServer();
+    const authNeeded: unknown[] = [];
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "cap-expired",
+              name: "Expired-credential capability MCP",
+              url: expired.url,
+              connectionRef: {
+                connectionId,
+                providerDomain: "api.integrations-example.com",
+                kind: "oauth2",
+                subjectScope: "workspace",
+              },
+              cacheToolsList: false,
+            },
+            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "cap-expired" },
+          { kind: "mcp", id: "docs" },
+        ],
+        {
+          workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          resolveCredential: async (): Promise<ResolveConnectionCredentialResult> =>
+            connected
+              ? {
+                  status: "auth_needed",
+                  reason: "expired",
+                  providerDomain: "api.integrations-example.com",
+                  connectionId,
+                }
+              : {
+                  status: "ok",
+                  connectionId,
+                  headers: { authorization: "Bearer valid-at-connect" },
+                },
+          onAuthNeeded: (payload) => {
+            authNeeded.push(payload);
+          },
+        },
+      );
+      // Connect succeeded for both servers; the credential expires only now.
+      connected = true;
+      try {
+        // Both connected, so both are handed to the runner.
+        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual([
+          "cap-expired",
+          "docs",
+        ]);
+        // Drive the exact code path the agent runner uses. Pre-fix this REJECTS
+        // (the expired server's tools/list 401 throws out of getAllMcpTools).
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        const toolNames = tools.map((tool) => tool.name);
+        // The healthy sibling's tools survive; the expired server contributes none.
+        expect(toolNames).toContain("docs__search_documents");
+        expect(toolNames.some((name) => name.startsWith("cap-expired__"))).toBe(false);
+        // The actionable signal is NOT silenced by the degrade.
+        expect(authNeeded).toContainEqual(
+          expect.objectContaining({
+            serverId: "cap-expired",
+            reason: "expired",
+            providerDomain: "api.integrations-example.com",
+            connectionId,
+          }),
+        );
+      } finally {
+        await prepared.close();
+      }
+      // The drop is observable in the log.
+      const warned = warnings.some((args) =>
+        args.some((arg) => typeof arg === "string" && arg.includes("cap-expired")),
+      );
+      expect(warned).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      expired.close();
+      healthy.close();
+    }
+  });
+
+  test("REQUIRED server whose tools/list throws at RUN time still fails the turn", async () => {
+    // The fail-loud default is unchanged for explicitly-requested servers (no
+    // `optional` flag, no connectionRef => not best-effort): a run-time tools/list
+    // failure must propagate. The server connects (its `initialize` handshake is
+    // accepted) but rejects `tools/list` with a 401, so the throw surfaces from
+    // getAllMcpTools exactly like the best-effort case — only here it is NOT
+    // contained, because the caller depends on this server.
+    const strict = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "docs-strict", name: "Document Search", url: strict.url, cacheToolsList: false },
+          ],
+        }),
+        [{ kind: "mcp", id: "docs-strict" }],
+      );
+      try {
+        // Connect succeeded, so the server is handed to the runner.
+        expect(prepared.mcpServers).toHaveLength(1);
+        // The run-time tools/list 401 must propagate (fail-loud), not degrade.
+        await expect(getAllMcpTools({ mcpServers: prepared.mcpServers })).rejects.toThrow();
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      strict.close();
+    }
+  });
+
   test("does not bleed the permission-scoped first-party tools-list across sessions", async () => {
     // The Agents SDK caches tools/list in a process-global map keyed by MCP
     // server name. The built-in `opengeni` server has the same name for every
