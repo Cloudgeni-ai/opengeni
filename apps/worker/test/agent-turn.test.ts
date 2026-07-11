@@ -9,6 +9,7 @@ import {
   agentRunFailurePayload,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
+  claimModelUsageSourceKey,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createTurnSandboxProvisioner,
@@ -354,6 +355,14 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     expect(
       modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }),
     ).toBe("aggregate");
+  });
+
+  test("publishes one durable effect when the SDK repeats a response completion frame", () => {
+    const seen = new Set<string>();
+    expect(claimModelUsageSourceKey(seen, "resp_release_sentinel")).toBe(true);
+    expect(claimModelUsageSourceKey(seen, "resp_release_sentinel")).toBe(false);
+    expect(claimModelUsageSourceKey(seen, "activity-2:response-1")).toBe(true);
+    expect([...seen]).toEqual(["resp_release_sentinel", "activity-2:response-1"]);
   });
 });
 
