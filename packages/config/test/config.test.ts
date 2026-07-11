@@ -1088,6 +1088,60 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   });
 });
 
+describe("managed release identity", () => {
+  test("parses strict all-or-none digest and schema metadata", () => {
+    const digest = (value: string) => `sha256:${value.repeat(64)}`;
+    const settings = withEnv(
+      {
+        OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON: JSON.stringify({
+          api: digest("a"),
+          worker: digest("b"),
+          web: digest("c"),
+          relay: digest("d"),
+        }),
+        OPENGENI_RELEASE_SCHEMA_JSON: JSON.stringify({
+          migrationSetSha256: digest("e"),
+          contractsSha256: digest("f"),
+          migrations: ["0048_example.sql", "0049_next.sql"],
+        }),
+      },
+      () => getSettings(),
+    );
+    expect(settings.deploymentImageDigests?.api).toBe(digest("a"));
+    expect(settings.releaseSchema?.migrations).toEqual(["0048_example.sql", "0049_next.sql"]);
+
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON: JSON.stringify({
+            api: digest("a"),
+            worker: digest("b"),
+            web: digest("c"),
+          }),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must be set together");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON: JSON.stringify({
+            api: digest("a"),
+            worker: digest("b"),
+            web: "latest",
+          }),
+          OPENGENI_RELEASE_SCHEMA_JSON: JSON.stringify({
+            migrationSetSha256: digest("e"),
+            contractsSha256: digest("f"),
+            migrations: ["0049_next.sql"],
+          }),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow();
+  });
+});
+
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
   const original = process.env;
   process.env = { ...env };

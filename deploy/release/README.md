@@ -16,6 +16,8 @@ last-known-good source revision:
   "migration": "0049_example.sql",
   "phase": "expand",
   "previousCodeCompatible": true,
+  "previousReaderCompatible": true,
+  "previousWriterCompatible": true,
   "rollbackMode": "code-only"
 }
 ```

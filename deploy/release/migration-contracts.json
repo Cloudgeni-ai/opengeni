@@ -3,6 +3,32 @@
     "migration": "0049_enrollment_went_offline.sql",
     "phase": "expand",
     "previousCodeCompatible": true,
+    "previousReaderCompatible": true,
+    "previousWriterCompatible": true,
+    "rollbackMode": "code-only"
+  },
+  {
+    "migration": "0050_enrollment_op_stream.sql",
+    "phase": "expand",
+    "previousCodeCompatible": true,
+    "previousReaderCompatible": true,
+    "previousWriterCompatible": true,
+    "rollbackMode": "code-only"
+  },
+  {
+    "migration": "0051_codex_pin_source.sql",
+    "phase": "expand",
+    "previousCodeCompatible": true,
+    "previousReaderCompatible": true,
+    "previousWriterCompatible": true,
+    "rollbackMode": "code-only"
+  },
+  {
+    "migration": "0052_file_upload_cleanup.sql",
+    "phase": "expand",
+    "previousCodeCompatible": true,
+    "previousReaderCompatible": true,
+    "previousWriterCompatible": true,
     "rollbackMode": "code-only"
   }
 ]

@@ -23,7 +23,7 @@ import { NativeConnection, Worker } from "@temporalio/worker";
 import { ensureModalRegistryImage } from "@opengeni/runtime";
 import { createActivities, type ActivityDependencies } from "./activities";
 import type { SignalCodexCapacityWorkflow, WakeSessionWorkflowSignal } from "./activities/types";
-import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
+import { dbReadyCheck, natsReadyCheck, schemaReadyCheck, startWorkerHttpServer } from "./http";
 import { observabilityEventLogger } from "./observability-metrics";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
@@ -331,6 +331,7 @@ export async function startWorker() {
         db: dbReadyCheck(dbClient.db),
         nats: natsReadyCheck(bus),
         temporal: signaler.check,
+        schema: schemaReadyCheck(dbClient.db, settings.releaseSchema),
       },
     });
     // Register the ONE global reaper Schedule (no-op when sandboxOwnershipEnabled

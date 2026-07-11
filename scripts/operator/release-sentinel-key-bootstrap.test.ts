@@ -28,6 +28,7 @@ describe("release sentinel key bootstrap", () => {
       "workspace:read",
       "sessions:create",
       "sessions:read",
+      "sessions:control",
       "terminal:attach",
     ]);
     expect(result.token).toMatch(/^ogk_[0-9a-f]{64}$/);

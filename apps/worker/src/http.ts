@@ -3,12 +3,16 @@ import { dbSql, type Database } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 
-export type ReadinessCheckName = "db" | "nats" | "temporal";
-export type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | void>;
+export type ReadinessCheckName = "db" | "nats" | "temporal" | "schema";
+export type ReadinessCheckDetails = Record<string, string> | void;
+export type ReadinessChecks = Record<
+  ReadinessCheckName,
+  () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails
+>;
 
 export type ReadinessResult = {
   ok: boolean;
-  checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+  checks: Record<ReadinessCheckName, { ok: boolean; error?: string } & Record<string, unknown>>;
 };
 
 export function startWorkerHttpServer(input: {
@@ -32,6 +36,16 @@ export function startWorkerHttpServer(input: {
           service: settings.serviceName,
           environment: settings.environment,
           deploymentRevision: settings.deploymentRevision,
+          ...(settings.deploymentImageDigests
+            ? {
+                images: Object.fromEntries(
+                  Object.entries(settings.deploymentImageDigests).map(([name, digest]) => [
+                    name,
+                    { digest },
+                  ]),
+                ),
+              }
+            : {}),
           ok: true,
         });
       }
@@ -55,19 +69,21 @@ export async function runReadinessChecks(
   timeoutMs = 2_000,
 ): Promise<ReadinessResult> {
   const entries = await Promise.all(
-    (Object.entries(checks) as Array<[ReadinessCheckName, () => Promise<void> | void]>).map(
-      async ([name, check]) => {
-        try {
-          await withTimeout(Promise.resolve().then(check), timeoutMs);
-          return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            { ok: false, error: error instanceof Error ? error.message : String(error) },
-          ] as const;
-        }
-      },
-    ),
+    (
+      Object.entries(checks) as Array<
+        [ReadinessCheckName, () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails]
+      >
+    ).map(async ([name, check]) => {
+      try {
+        const details = await withTimeout(Promise.resolve().then(check), timeoutMs);
+        return [name, { ok: true, ...(details ?? {}) }] as const;
+      } catch (error) {
+        return [
+          name,
+          { ok: false, error: error instanceof Error ? error.message : String(error) },
+        ] as const;
+      }
+    }),
   );
   const result = Object.fromEntries(entries) as ReadinessResult["checks"];
   return {
@@ -87,6 +103,28 @@ export function natsReadyCheck(bus: EventBus): () => void {
     if (bus.isConnected && !bus.isConnected()) {
       throw new Error("NATS is not connected");
     }
+  };
+}
+
+export function schemaReadyCheck(
+  db: Database,
+  expected: Settings["releaseSchema"],
+): () => Promise<Record<string, string> | void> {
+  return async () => {
+    if (!expected) return;
+    const rows = (await db.execute(
+      dbSql`select name from schema_migrations order by name`,
+    )) as unknown as Array<{ name?: unknown }>;
+    const applied = rows
+      .map((row) => row.name)
+      .filter((name): name is string => typeof name === "string");
+    if (JSON.stringify(applied) !== JSON.stringify(expected.migrations)) {
+      throw new Error("applied migration names do not match the reviewed release schema");
+    }
+    return {
+      migrationSetSha256: expected.migrationSetSha256,
+      contractsSha256: expected.contractsSha256,
+    };
   };
 }
 

@@ -9,6 +9,7 @@ export const releaseSentinelPermissions: Permission[] = [
   "workspace:read",
   "sessions:create",
   "sessions:read",
+  "sessions:control",
   "terminal:attach",
 ];
 

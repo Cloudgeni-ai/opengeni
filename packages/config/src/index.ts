@@ -14,6 +14,8 @@ import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
+const releaseDigest = /^sha256:[0-9a-f]{64}$/;
+const migrationName = /^[0-9][A-Za-z0-9_.-]*\.sql$/;
 const EnvBoolean = z.preprocess((value) => {
   if (typeof value !== "string") {
     return value;
@@ -117,6 +119,38 @@ const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
   deploymentRevision: z.string().default("dev"),
+  // Provider-neutral release identity. Managed operators set these in one
+  // pod-template mutation; local/source installs omit them. Strict parsing
+  // prevents a workload from advertising a partial or mutable identity.
+  deploymentImageDigests: z
+    .object({
+      api: z.string().regex(releaseDigest),
+      worker: z.string().regex(releaseDigest),
+      web: z.string().regex(releaseDigest),
+      relay: z.string().regex(releaseDigest).optional(),
+    })
+    .strict()
+    .optional(),
+  releaseSchema: z
+    .object({
+      migrationSetSha256: z.string().regex(releaseDigest),
+      contractsSha256: z.string().regex(releaseDigest),
+      migrations: z.array(z.string().regex(migrationName)).min(1),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      const sorted = [...value.migrations].sort();
+      if (
+        new Set(sorted).size !== sorted.length ||
+        JSON.stringify(sorted) !== JSON.stringify(value.migrations)
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "release schema migrations must be unique and sorted",
+        });
+      }
+    })
+    .optional(),
   // The release-train version baked into official images (OPENGENI_SERVER_VERSION).
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
@@ -983,6 +1017,16 @@ function optional(name: string): string | undefined {
   return value && value.trim().length > 0 ? value : undefined;
 }
 
+function optionalJson(name: string): unknown {
+  const raw = optional(name);
+  if (raw === undefined) return undefined;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error(`${name} must be valid JSON`);
+  }
+}
+
 export function getSettings(): Settings {
   const raw = {
     serviceName: optional("OPENGENI_SERVICE_NAME"),
@@ -991,6 +1035,8 @@ export function getSettings(): Settings {
       optional("OPENGENI_DEPLOYMENT_REVISION") ??
       optional("SOURCE_VERSION") ??
       optional("GITHUB_SHA"),
+    deploymentImageDigests: optionalJson("OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON"),
+    releaseSchema: optionalJson("OPENGENI_RELEASE_SCHEMA_JSON"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
@@ -2206,6 +2252,11 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
 }
 
 function validateSettings(settings: Settings): void {
+  if (Boolean(settings.deploymentImageDigests) !== Boolean(settings.releaseSchema)) {
+    throw new Error(
+      "OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON and OPENGENI_RELEASE_SCHEMA_JSON must be set together",
+    );
+  }
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
     throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   }

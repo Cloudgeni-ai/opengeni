@@ -105,6 +105,21 @@ destructive migrations are separate maintenance operations after production
 evidence for the replacement path; never roll schema backward as a side effect
 of workload rollback. See `deploy/release/README.md`.
 
+An external operator may project its reviewed, immutable release identity into
+the API and worker with both of these variables (they are all-or-none):
+
+- `OPENGENI_DEPLOYMENT_IMAGE_DIGESTS_JSON`: exact `sha256:` digests for
+  `api`, `worker`, `web`, and the optional enabled `relay`;
+- `OPENGENI_RELEASE_SCHEMA_JSON`: the sorted applied migration names plus the
+  exact migration-set and cumulative-contract `sha256:` digests.
+
+When configured, `/healthz` exposes the non-secret component digest map and
+`/readyz` verifies the live `schema_migrations` names before exposing the two
+reviewed schema digests. Source/local installs may omit both variables. A
+managed release must inject them atomically with the image/revision mutation;
+partial or malformed identity fails process startup rather than advertising a
+release that the workload cannot prove.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
