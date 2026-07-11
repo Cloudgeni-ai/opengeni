@@ -35,6 +35,7 @@ describe("release sentinel read-only audit", () => {
       historyToolOutputCount: 1,
       matchedHistoryToolEffectCount: 1,
       authoritativeToolEffectCount: 1,
+      authoritativeHistoryEffectCount: 1,
       authoritativeHistoryItemCount: 1,
       duplicateHistoryEffectCount: 0,
       duplicateModelSourceCount: 0,
@@ -57,6 +58,17 @@ describe("release sentinel read-only audit", () => {
     expect(result.duplicateModelSourceCount).toBeGreaterThan(0);
     expect(result.duplicateHistoryEffectCount).toBeGreaterThan(0);
     expect(result.staleAttemptEffectCount).toBeGreaterThan(0);
+  });
+
+  it("keeps the operation-bound trigger separate from the authoritative history pair", async () => {
+    const deps = fixture();
+    const history = await deps.listHistory(workspaceId, sessionId);
+    history.push({ position: 3, item: { type: "message", role: "user", content: "unrelated" } });
+    deps.listHistory = async () => history;
+    const result = await auditReleaseSentinel(deps, { workspaceId, sessionId, clientEventId });
+    expect(result.authoritativeHistoryEffectCount).toBe(1);
+    expect(result.authoritativeHistoryItemCount).toBe(1);
+    expect(result.ok).toBe(true);
   });
 
   it("rejects non-canonical tenant/session/event scope", () => {

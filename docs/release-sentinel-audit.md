@@ -47,11 +47,13 @@ The result fails unless it finds:
   output completed only after resume;
 - exactly one `exec_command` creation and one matching tool output/side effect
   across those attempts;
-- exactly one original sentinel user-history item;
-- exactly one matching history tool-call/output pair for the same call ID;
-- at least one model-usage effect, with a non-empty idempotency `sourceKey` on
-  every effect, and no duplicate history call IDs, model-usage source keys, or
-  tool-output IDs;
+- exactly one operation-bound original sentinel user-history trigger item;
+- exactly one authoritative history effect, defined as one matching
+  tool-call/output pair for the same call ID (the trigger item is counted
+  separately and is not itself the history effect);
+- at least one uniquely source-keyed model-usage effect, with a non-empty
+  idempotency `sourceKey` on every effect, and no duplicate history call IDs,
+  model-usage source keys, or tool-output IDs;
 - no model/tool/message effects after the logical turn completed.
 
 This command proves the durable database half of a release sentinel. The

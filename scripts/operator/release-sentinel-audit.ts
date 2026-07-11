@@ -53,6 +53,7 @@ export interface ReleaseSentinelAuditResult {
   historyToolOutputCount: number;
   matchedHistoryToolEffectCount: number;
   authoritativeToolEffectCount: number;
+  authoritativeHistoryEffectCount: number;
   authoritativeHistoryItemCount: number;
   duplicateHistoryEffectCount: number;
   duplicateModelSourceCount: number;
@@ -137,8 +138,8 @@ export async function auditReleaseSentinel(
     .map((entry) => historyCallId(entry.item))
     .filter((value): value is string => Boolean(value));
   const historyEffectKeys = history.flatMap((entry) => historyEffectKey(entry.item));
-  const authoritativeHistoryItemCount = history.filter(
-    (entry) => isUserMessage(entry.item) && JSON.stringify(entry.item).includes(operationKey),
+  const authoritativeHistoryItemCount = history.filter((entry) =>
+    isOperationBoundTrigger(entry.item, operationKey),
   ).length;
   const starts = turnEvents.filter((event) => event.type === "turn.started");
   const preemptions = turnEvents.filter((event) => event.type === "turn.preempted");
@@ -206,6 +207,7 @@ export async function auditReleaseSentinel(
     historyToolOutputCount: historyOutputs.length,
     matchedHistoryToolEffectCount: intersectionCount(historyCalls, historyOutputs),
     authoritativeToolEffectCount: toolEffects.length,
+    authoritativeHistoryEffectCount: intersectionCount(historyCalls, historyOutputs),
     authoritativeHistoryItemCount,
     duplicateHistoryEffectCount: duplicateCount(historyEffectKeys),
     duplicateModelSourceCount: duplicateCount(modelSources),
@@ -242,6 +244,7 @@ export async function auditReleaseSentinel(
     result.historyToolCallCount === 1 &&
     result.historyToolOutputCount === 1 &&
     result.matchedHistoryToolEffectCount === 1 &&
+    result.authoritativeHistoryEffectCount === 1 &&
     result.authoritativeToolEffectCount === 1 &&
     result.authoritativeHistoryItemCount === 1 &&
     result.duplicateHistoryEffectCount === 0 &&
@@ -347,6 +350,10 @@ function historyCallId(item: Record<string, unknown>): string | null {
 
 function isUserMessage(item: Record<string, unknown>): boolean {
   return item.type === "message" && item.role === "user";
+}
+
+function isOperationBoundTrigger(item: Record<string, unknown>, operationKey: string): boolean {
+  return isUserMessage(item) && JSON.stringify(item).includes(operationKey);
 }
 
 function duplicateCount(values: string[]): number {

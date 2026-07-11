@@ -4,7 +4,7 @@ import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 
 export type ReadinessCheckName = "db" | "nats" | "temporal" | "schema";
-export type ReadinessCheckDetails = Record<string, string> | void;
+export type ReadinessCheckDetails = Record<string, unknown> | void;
 export type ReadinessChecks = Record<
   ReadinessCheckName,
   () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails
@@ -109,7 +109,7 @@ export function natsReadyCheck(bus: EventBus): () => void {
 export function schemaReadyCheck(
   db: Database,
   expected: Settings["releaseSchema"],
-): () => Promise<Record<string, string> | void> {
+): () => Promise<Record<string, unknown> | void> {
   return async () => {
     if (!expected) return;
     const rows = (await db.execute(
@@ -122,6 +122,7 @@ export function schemaReadyCheck(
       throw new Error("applied migration names do not match the reviewed release schema");
     }
     return {
+      migrations: expected.migrations,
       migrationSetSha256: expected.migrationSetSha256,
       contractsSha256: expected.contractsSha256,
     };

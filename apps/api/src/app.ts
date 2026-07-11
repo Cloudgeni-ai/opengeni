@@ -368,7 +368,7 @@ export function httpStatusForError(error: unknown): number {
 }
 
 type ReadinessCheckName = "db" | "nats" | "temporal" | "schema";
-type ReadinessCheckDetails = Record<string, string> | void;
+type ReadinessCheckDetails = Record<string, unknown> | void;
 type ReadinessChecks = Record<
   ReadinessCheckName,
   () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails
@@ -409,6 +409,7 @@ function readinessChecks(deps: AppDependencies): ReadinessChecks {
           throw new Error("applied migration names do not match the reviewed release schema");
         }
         return {
+          migrations: expected.migrations,
           migrationSetSha256: expected.migrationSetSha256,
           contractsSha256: expected.contractsSha256,
         };
