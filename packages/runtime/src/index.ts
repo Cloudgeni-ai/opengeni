@@ -2463,17 +2463,26 @@ class PrefixedMcpServer implements MCPServer {
       }
       // Best-effort isolation. The SDK's run-time getAllMcpTools calls listTools
       // OUTSIDE the connect-time connectMcpServers({ strict: false }) guard, so a
-      // best-effort server whose tools/list throws here (most often an
+      // best-effort server whose tools/list throws here — for ANY reason (an
       // expired/failed connection credential surfacing as a StreamableHTTP
-      // "authentication required" 401) would otherwise take down an unrelated
-      // turn. Drop this server's tools for the turn instead; the actionable
-      // tool.auth_needed signal was already published by the connection-broker
-      // fetch before the throw, so degrading here does not silence it.
+      // "authentication required" 401, a provider 5xx, a network blip) — would
+      // otherwise take down an unrelated turn. Drop this server's tools for the
+      // turn instead. An auth failure additionally published tool.auth_needed via
+      // the connection-broker fetch before the throw (so that actionable signal
+      // is preserved), but a non-auth failure has NO such signal — the structured
+      // warn below is its only visibility, so a chronically-dead optional
+      // integration surfaces in logs/metrics rather than being silently swallowed.
+      // Warn once per degraded server per turn (instances are per-turn), so a
+      // re-list across model turns does not spam the log.
       if (!this.loggedListToolsFailure) {
         this.loggedListToolsFailure = true;
         console.warn(
-          `[mcp] best-effort server "${this.name}" failed to list tools; dropping its tools for this turn`,
-          error instanceof Error ? error.message : error,
+          "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
+          {
+            serverId: this.name,
+            errorClass: error instanceof Error ? error.constructor.name : typeof error,
+            message: error instanceof Error ? error.message : String(error),
+          },
         );
       }
       return [];

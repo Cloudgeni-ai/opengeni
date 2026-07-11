@@ -3018,14 +3018,80 @@ describe("runtime event normalization", () => {
       } finally {
         await prepared.close();
       }
-      // The drop is observable in the log.
+      // The drop is observable in the log as a structured warn carrying the
+      // server id and the error class (failure-visibility doctrine).
       const warned = warnings.some((args) =>
-        args.some((arg) => typeof arg === "string" && arg.includes("cap-expired")),
+        args.some(
+          (arg) =>
+            typeof arg === "object" &&
+            arg !== null &&
+            (arg as { serverId?: unknown }).serverId === "cap-expired" &&
+            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+        ),
       );
       expect(warned).toBe(true);
     } finally {
       console.warn = originalWarn;
       expired.close();
+      healthy.close();
+    }
+  });
+
+  test("best-effort server whose tools/list throws a NON-auth error also degrades, not just auth", async () => {
+    // Rider on the auth fix: the invariant is generic — an OPTIONAL server that is
+    // unavailable for ANY reason (here a provider 500, no connectionRef, so no
+    // auth machinery is involved at all) must never fail an unrelated turn. This
+    // guards against the fix silently narrowing to auth-only. The degrade has NO
+    // tool.auth_needed to lean on, so the structured warn is the only visibility.
+    const brokenOptional = startTestMcpServer({ serverErrorForMethods: ["tools/list"] });
+    const healthy = startTestMcpServer();
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "flaky",
+              name: "Flaky optional MCP",
+              url: brokenOptional.url,
+              cacheToolsList: false,
+            },
+            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "flaky", optional: true },
+          { kind: "mcp", id: "docs" },
+        ],
+      );
+      try {
+        // The optional server connects (initialize is fine); only tools/list 500s.
+        expect(prepared.mcpServers.map((server) => server.name).sort()).toEqual(["docs", "flaky"]);
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        const toolNames = tools.map((tool) => tool.name);
+        expect(toolNames).toContain("docs__search_documents");
+        expect(toolNames.some((name) => name.startsWith("flaky__"))).toBe(false);
+      } finally {
+        await prepared.close();
+      }
+      // The non-auth degrade is observable: server id + a real error class.
+      const warned = warnings.some((args) =>
+        args.some(
+          (arg) =>
+            typeof arg === "object" &&
+            arg !== null &&
+            (arg as { serverId?: unknown }).serverId === "flaky" &&
+            typeof (arg as { errorClass?: unknown }).errorClass === "string",
+        ),
+      );
+      expect(warned).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      brokenOptional.close();
       healthy.close();
     }
   });
