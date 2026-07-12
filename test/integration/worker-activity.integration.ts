@@ -3373,6 +3373,118 @@ describe("worker activities integration", () => {
     );
   });
 
+  test("legacy enqueue and claim cannot revive a cancelled targeted session", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "legacy cancellation fence target",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "legacy cancellation fence task",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "legacy prompt", resources: [], tools: [], metadata: {} },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+
+    const [physicalTask] = await dbClient.db.execute<{ reusable_session_id: string | null }>(
+      dbSql`select reusable_session_id::text from scheduled_tasks where id = ${task.id}`,
+    );
+    expect(physicalTask?.reusable_session_id).toBe(target.id);
+    const sessionCountBeforeCancel = (await listSessions(dbClient.db, grant.workspaceId, 100))
+      .length;
+
+    // Seed one queued row while the target is live.  This is the row an old
+    // worker would claim after it had already read reusable_session_id.
+    const queuedTurnId = crypto.randomUUID();
+    await withRlsContext(
+      dbClient.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      (db) =>
+        db.execute(dbSql`
+          insert into session_turns (
+            id, account_id, workspace_id, session_id, trigger_event_id,
+            temporal_workflow_id, status, source, position, prompt, resources,
+            tools, model, reasoning_effort, sandbox_backend, metadata
+          ) values (
+            ${queuedTurnId}, ${grant.accountId}, ${grant.workspaceId}, ${target.id},
+            ${crypto.randomUUID()}, ${`session-${target.id}`}, 'queued',
+            'scheduled_task', 1, 'legacy prompt', '[]'::jsonb, '[]'::jsonb,
+            'scripted-model', 'medium', 'none', ${JSON.stringify({ scheduledTaskId: task.id })}::jsonb
+          )
+        `),
+    );
+
+    // Cancellation wins before the legacy worker's enqueue/claim sequence.
+    // The database fence drains the pre-existing queued row and clears the
+    // active pointer as part of the same cancellation statement.
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled", null);
+
+    const legacyInsert = () =>
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) =>
+          db.execute(dbSql`
+            insert into session_turns (
+              id, account_id, workspace_id, session_id, trigger_event_id,
+              temporal_workflow_id, status, source, position, prompt, resources,
+              tools, model, reasoning_effort, sandbox_backend, metadata
+            ) values (
+              ${crypto.randomUUID()}, ${grant.accountId}, ${grant.workspaceId}, ${target.id},
+              ${crypto.randomUUID()}, ${`session-${target.id}`}, 'queued',
+              'scheduled_task', 2, 'legacy prompt 2', '[]'::jsonb, '[]'::jsonb,
+              'scripted-model', 'medium', 'none', ${JSON.stringify({ scheduledTaskId: task.id })}::jsonb
+            )
+          `),
+      );
+    await expect(legacyInsert()).rejects.toThrow(/cancelled|live turn/i);
+
+    // This is the old claim shape: first promote the queued row, then stamp
+    // the session running. Both writes are fenced; neither can revive the
+    // cancelled thread even if a stale worker already holds its task snapshot.
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) =>
+          db.execute(
+            dbSql`update session_turns set status = 'running', started_at = now() where id = ${queuedTurnId}`,
+          ),
+      ),
+    ).rejects.toThrow(/cancelled|live turn/i);
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) =>
+          db.execute(
+            dbSql`update sessions set status = 'running', active_turn_id = ${queuedTurnId} where id = ${target.id}`,
+          ),
+      ),
+    ).rejects.toThrow(/terminal|cancelled/i);
+
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, target.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ id: queuedTurnId, status: "cancelled" });
+    expect((await getSession(dbClient.db, grant.workspaceId, target.id))?.status).toBe("cancelled");
+    expect((await getSession(dbClient.db, grant.workspaceId, target.id))?.activeTurnId).toBeNull();
+    expect((await listSessions(dbClient.db, grant.workspaceId, 100)).length).toBe(
+      sessionCountBeforeCancel,
+    );
+    expect(
+      (await requireScheduledTask(dbClient.db, grant.workspaceId, task.id)).targetSessionId,
+    ).toBe(target.id);
+  });
+
   test("rejects a stale target snapshot before appending to the old session", async () => {
     const grant = await testGrant(dbClient.db);
     const oldTarget = await createOwnedSession(dbClient.db, grant, {

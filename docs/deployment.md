@@ -278,7 +278,11 @@ capability for validated edits. Wait for the migration job to complete before
 considering the release healthy; then allow the normal API/worker rolling
 replacement to drain. A failed migration or a rejected legacy write is a
 fail-closed rollout signal, not permission to remove the fence or fall back to
-task-owned session creation.
+task-owned session creation. The cancellation write fence in the following
+migration also makes `cancelled` terminal at the database boundary: legacy
+enqueue/claim order cannot create or revive a live turn, and a cancellation
+that wins drains any already-queued turn before commit. Keep this migration
+applied before allowing old workers to consume targeted tasks.
 
 The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
