@@ -238,6 +238,22 @@ describe("runRigSetupHook (M3)", () => {
     expect(events.at(-1)!.type).toBe("rig.setup.failed");
   });
 
+  test("coreutils timeout exit 124 → failed with the rig timeout classification", async () => {
+    const events: Array<{ type: string; payload: any }> = [];
+    const { session } = fakeSession({ status: 124, output: "" });
+    await expect(
+      runRigSetupHook(session as any, {
+        environment: {},
+        rigSetup: rigSetup({ timeoutMs: 2_000 }),
+        onRuntimeEvent: (event) => {
+          events.push(event as any);
+        },
+      }),
+    ).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
+    expect(events.at(-1)!.type).toBe("rig.setup.failed");
+    expect(events.at(-1)!.payload.error).toContain("rig setup timeout");
+  });
+
   test("passes a yield budget above the in-box hard timeout", async () => {
     const { session, calls } = fakeSession({ status: 0, output: "" });
     await runRigSetupHook(session as any, {

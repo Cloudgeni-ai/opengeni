@@ -5220,7 +5220,11 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    const reason = stillRunning
+    // coreutils `timeout` reports 124 when its deadline expires. Providers may
+    // instead return a still-running session handle, so both representations
+    // are the same rig-timeout failure class. Other nonzero codes stay exact.
+    const timedOut = stillRunning || exitCode === 124;
+    const reason = timedOut
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
