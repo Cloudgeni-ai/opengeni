@@ -52,6 +52,7 @@
     "image:build:web": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t opengeni-web:local .",
     "build:packages": "bun scripts/build-publishable-packages.ts",
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
+    "check:release-publisher": "bun scripts/check-single-release-publisher.ts",
     "changeset:version": "changeset version",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",

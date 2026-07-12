@@ -13,7 +13,8 @@ The one intentional exception is the publish step: `bun run release:publish`
 `npm publish` for the actual registry push. That's deliberate — `bun publish` cannot emit npm
 provenance attestations, so the release workflow (`.github/workflows/release.yml`) sets up Node
 and the npm registry for that one step only. Don't "fix" this to use bun; provenance is the reason
-it exists.
+it exists. That workflow is intentionally npm/version-only: runtime image and Helm chart
+publication is owned by the external SHA/digest-fenced operator, never by the app repository.
 
 ## Typecheck: tsgo
 

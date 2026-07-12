@@ -35,3 +35,17 @@ can never make its migration disappear from compatibility review.
 
 This metadata is an assertion that must be backed by mixed old/new-worker and
 migration tests. It does not make an incompatible migration safe.
+
+## Single runtime publisher
+
+The app repository's `.github/workflows/release.yml` is changesets/npm-only.
+It must never push the Helm chart or API, worker, web, or relay images: a
+sequential legacy publisher can expose a partial public set after cancellation
+or one failed image push, outside the durable release ledger. The external
+operator must accept one complete SHA/digest/provenance set, pass staging, and
+promote that identical accepted set without rebuilding. CI enforces this
+boundary with `scripts/check-single-release-publisher.ts` and one regression
+for the chart plus every runtime image. Public GHCR chart/image publication is
+therefore intentionally disabled until the external operator owns a reviewed
+complete-set publication step after digest acceptance; npm publication and the
+independent signed Rust-agent GitHub Release channel remain available.
