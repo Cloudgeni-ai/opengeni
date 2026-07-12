@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
+
+import ts from "typescript";
 
 import {
   createWorkspaceGraph,
@@ -82,6 +84,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/core",
     "@opengeni/db",
     "@opengeni/events",
+    "@opengeni/react",
     "@opengeni/runtime",
     "@opengeni/storage",
   ],
@@ -100,9 +103,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/integration/selfhosted-control-transport.integration.ts": [
     "@opengeni/agent-proto",
+    "@opengeni/events",
     "@opengeni/runtime",
+    "@opengeni/testing",
   ],
   "test/integration/worker-activity.integration.ts": [
+    "@opengeni/api-router",
     "@opengeni/worker-bundle",
     "@opengeni/core",
     "@opengeni/db",
@@ -110,6 +116,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/runtime",
   ],
   "test/integration/worker-restart.integration.ts": [
+    "@opengeni/api-router",
     "@opengeni/worker-bundle",
     "@opengeni/db",
     "@opengeni/events",
@@ -159,6 +166,50 @@ const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
   [TEMPORAL_WORKFLOW_TEST_HELPER]: TEMPORAL_WORKFLOW_INTEGRATION_TESTS,
 };
 
+function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set<string> {
+  const source = readFileSync(path, "utf8");
+  const imports = ts
+    .preProcessFile(source, true, true)
+    .importedFiles.map(({ fileName }) => fileName);
+  const workspaceNames = new Set(graph.packages.map((pkg) => pkg.name));
+  const dependencies = new Set<string>();
+  for (const specifier of imports) {
+    if (specifier.startsWith("@opengeni/")) {
+      const name = specifier.split("/").slice(0, 2).join("/");
+      if (!workspaceNames.has(name)) {
+        throw new Error(`${path} imports unknown workspace dependency ${name}`);
+      }
+      dependencies.add(name);
+      continue;
+    }
+    if (!specifier.startsWith(".")) continue;
+    const resolved = normalizeRepositoryPath(
+      relative(process.cwd(), resolve(dirname(path), specifier)),
+    );
+    const pkg = workspaceForPath(graph, resolved);
+    if (pkg) dependencies.add(pkg.name);
+  }
+  return dependencies;
+}
+
+function rootTestDependencies(graph: WorkspaceGraph, path: string): string[] | null {
+  const declared = ROOT_TEST_DEPENDENCIES[path];
+  if (!declared) return null;
+  return [...new Set([...declared, ...importedWorkspaceDependencies(graph, path)])].sort();
+}
+
+function normalizeRepositoryPath(path: string): string {
+  return path.split(sep).join("/");
+}
+
+export function assertRootTestDependencyMapComplete(graph = createWorkspaceGraph()): void {
+  for (const path of Object.keys(ROOT_TEST_DEPENDENCIES)) {
+    if (!existsSync(path))
+      throw new Error(`root test dependency mapping references missing file: ${path}`);
+    rootTestDependencies(graph, path);
+  }
+}
+
 function matchesAny(path: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(path));
 }
@@ -199,6 +250,7 @@ export function createImpactPlan(
 ): ImpactPlan {
   assertTestTierMapComplete();
   const graph = createWorkspaceGraph();
+  assertRootTestDependencyMapComplete(graph);
   const base = options.base ?? null;
   const head = options.head ?? null;
   const changedFiles = [...new Set(changedInput.map((path) => path.trim()).filter(Boolean))].sort();
@@ -276,7 +328,7 @@ export function createImpactPlan(
     const helperDependents = ROOT_TEST_HELPER_DEPENDENTS[path];
     if (helperDependents) {
       for (const dependent of helperDependents) {
-        const dependencies = ROOT_TEST_DEPENDENCIES[dependent];
+        const dependencies = rootTestDependencies(graph, dependent);
         if (!dependencies) {
           reasons.push({
             path,
@@ -293,9 +345,10 @@ export function createImpactPlan(
       });
       continue;
     }
-    if (ROOT_TEST_DEPENDENCIES[path]) {
+    const dependencies = rootTestDependencies(graph, path);
+    if (dependencies) {
       changedTests.add(path);
-      for (const name of ROOT_TEST_DEPENDENCIES[path]) direct.add(name);
+      for (const name of dependencies) direct.add(name);
       reasons.push({ path, reason: "explicit root integration/e2e dependency rule" });
       continue;
     }
@@ -319,7 +372,7 @@ export function createImpactPlan(
       if (changedTests.has(path)) return true;
       const pkg = workspaceForPath(graph, path);
       if (pkg) return affected.has(pkg.name);
-      const dependencies = ROOT_TEST_DEPENDENCIES[path];
+      const dependencies = rootTestDependencies(graph, path);
       if (!dependencies) return true; // Missing rule is conservative, never a skip.
       return dependencies.some((name) => affected.has(name));
     });

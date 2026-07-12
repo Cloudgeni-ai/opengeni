@@ -88,6 +88,37 @@ describe("memory-aware test concurrency", () => {
     });
   });
 
+  test.each([0, 512 * 1024])(
+    "a sub-MiB memory.high fence of %i bytes stays paired with cgroup usage",
+    (high) => {
+      const files = new Map<string, string>([
+        ["/sys/fs/cgroup/memory.max", String(8192 * MIB)],
+        ["/sys/fs/cgroup/memory.high", String(high)],
+        ["/sys/fs/cgroup/memory.current", String(4096 * MIB)],
+      ]);
+      const memory = detectedMemoryState({
+        hostTotalBytes: 16 * 1024 * MIB,
+        hostFreeBytes: 8 * 1024 * MIB,
+        readFile: (path) => files.get(path) ?? null,
+      });
+      expect(memory).toEqual({
+        limitBytes: MIB,
+        usageBytes: 4096 * MIB,
+        usageKnown: true,
+        source: "cgroup-v2-limit+usage",
+      });
+      expect(
+        computeTestConcurrencyBudget({
+          memoryLimitBytes: memory.limitBytes,
+          memoryUsageBytes: memory.usageBytes,
+          memoryUsageKnown: memory.usageKnown,
+          cpuSlots: 16,
+          requestedMax: 8,
+        }).concurrency,
+      ).toBe(1);
+    },
+  );
+
   test("an unlimited cgroup never mixes its usage with the host memory domain", () => {
     const files = new Map<string, string>([
       ["/sys/fs/cgroup/memory.max", "max"],

@@ -13,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { WorkspacePackage } from "../publishable-workspaces";
 
@@ -33,6 +33,30 @@ function normalizePath(path: string): string {
 
 function sha256(contents: string | Buffer): string {
   return createHash("sha256").update(contents).digest("hex");
+}
+
+function repositoryInputPath(root: string, path: string): string {
+  const resolvedRoot = resolve(root);
+  const resolvedPath = resolve(path);
+  const relativePath = relative(resolvedRoot, resolvedPath);
+  if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    throw new Error(`cache input is outside the repository: ${path}`);
+  }
+  let current = resolvedRoot;
+  for (const component of relativePath.split(sep).filter(Boolean)) {
+    current = join(current, component);
+    if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+      throw new Error(`cache inputs may not contain symlink components: ${current}`);
+    }
+  }
+  if (!existsSync(resolvedPath)) throw new Error(`cache input does not exist: ${path}`);
+  const realRoot = realpathSync(resolvedRoot);
+  const realPath = realpathSync(resolvedPath);
+  const realRelative = relative(realRoot, realPath);
+  if (realRelative === ".." || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) {
+    throw new Error(`cache input resolves outside the repository: ${path}`);
+  }
+  return normalizePath(relativePath);
 }
 
 function walkFiles(directory: string, output: string[]): void {
@@ -77,7 +101,11 @@ function walkInputFiles(directory: string, output: string[]): void {
 
 function hashFiles(root: string, paths: readonly string[]): string {
   const files: string[] = [];
-  for (const path of paths) walkInputFiles(join(root, path), files);
+  for (const path of paths) {
+    const absolute = join(root, path);
+    repositoryInputPath(root, absolute);
+    walkInputFiles(absolute, files);
+  }
   files.sort((a, b) => a.localeCompare(b));
   const hash = createHash("sha256");
   for (const path of files) {
@@ -91,31 +119,41 @@ function hashFiles(root: string, paths: readonly string[]): string {
   return hash.digest("hex");
 }
 
-function bunConfigurationInputs(root: string): string[] {
-  const configPath = join(root, "bunfig.toml");
-  if (!existsSync(configPath)) return [];
-  const parsed = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+function bunConfigurationInputs(root: string, directories: readonly string[]): string[] {
   const references = new Set<string>();
-  const pending: unknown[] = [parsed];
-  while (pending.length > 0) {
-    const value = pending.pop();
-    if (Array.isArray(value)) {
-      pending.push(...value);
-      continue;
+  for (const directory of directories) {
+    const configPath = join(directory, "bunfig.toml");
+    if (!existsSync(configPath)) continue;
+    repositoryInputPath(root, configPath);
+    const parsed = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+    const pending: unknown[] = [parsed];
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (Array.isArray(value)) {
+        pending.push(...value);
+        continue;
+      }
+      if (value && typeof value === "object") {
+        pending.push(...Object.values(value));
+        continue;
+      }
+      if (typeof value !== "string") continue;
+      if (
+        isAbsolute(value) ||
+        value.startsWith("file:") ||
+        /^[A-Za-z]:[\\/]/.test(value) ||
+        value.startsWith("\\\\")
+      ) {
+        throw new Error(`bunfig.toml cache inputs must be repository-relative: ${value}`);
+      }
+      if (!value.startsWith("./") && !value.startsWith("../")) continue;
+      const absolute = resolve(directory, value);
+      const relativePath = normalizePath(relative(root, absolute));
+      if (relativePath === ".." || relativePath.startsWith("../")) {
+        throw new Error(`bunfig.toml references a cache input outside the repository: ${value}`);
+      }
+      if (existsSync(absolute)) references.add(repositoryInputPath(root, absolute));
     }
-    if (value && typeof value === "object") {
-      pending.push(...Object.values(value));
-      continue;
-    }
-    if (typeof value !== "string" || (!value.startsWith("./") && !value.startsWith("../"))) {
-      continue;
-    }
-    const absolute = resolve(root, value);
-    const relativePath = normalizePath(relative(root, absolute));
-    if (relativePath === ".." || relativePath.startsWith("../")) {
-      throw new Error(`bunfig.toml references a cache input outside the repository: ${value}`);
-    }
-    if (existsSync(absolute)) references.add(relativePath);
   }
   return [...references].sort();
 }
@@ -143,7 +181,7 @@ export function packageBuildFingerprint(options: {
     "scripts/publishable-workspaces.ts",
     "scripts/ci/content-cache.ts",
     "scripts/ci/workspace.ts",
-    ...bunConfigurationInputs(root),
+    ...bunConfigurationInputs(root, [root, join(root, pkg.dir)]),
   ].filter((path) => existsSync(join(root, path)));
   const dependencies = [...dependencyFingerprints.entries()].sort(([a], [b]) => a.localeCompare(b));
   const toolchain = options.toolchain ?? {

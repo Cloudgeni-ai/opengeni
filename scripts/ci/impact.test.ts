@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  assertRootTestDependencyMapComplete,
   createImpactPlan,
   parseGitNameStatus,
   TEMPORAL_WORKFLOW_INTEGRATION_TESTS,
@@ -61,6 +62,32 @@ describe("fail-closed change impact", () => {
     expect(plan.mode).toBe("focused");
     expect(plan.buildPackages).toContain("@opengeni/react");
     expect(plan.buildPackages).toContain("@opengeni/sdk");
+  });
+
+  test("root-test import dependencies cannot drift below focused selection", () => {
+    expect(() => assertRootTestDependencyMapComplete()).not.toThrow();
+    for (const [changed, selected] of [
+      ["packages/react/src/index.ts", ["test/integration/api.integration.ts"]],
+      [
+        "packages/events/src/index.ts",
+        ["test/integration/selfhosted-control-transport.integration.ts"],
+      ],
+      [
+        "packages/testing/src/index.ts",
+        ["test/integration/selfhosted-control-transport.integration.ts"],
+      ],
+      [
+        "apps/api/src/index.ts",
+        [
+          "test/integration/worker-activity.integration.ts",
+          "test/integration/worker-restart.integration.ts",
+        ],
+      ],
+    ] as const) {
+      expect(createImpactPlan([changed]).integrationTests).toEqual(
+        expect.arrayContaining(selected),
+      );
+    }
   });
 
   test("a deleted package test cannot silently remove package coverage", () => {
@@ -152,9 +179,11 @@ describe("fail-closed change impact", () => {
       );
     }
     expect(ci).not.toContain("*.cache-to=type=gha,scope=opengeni-workloads");
-    expect(ci.match(/^\s+path: node_modules$/gm)).toHaveLength(8);
-    expect(ci.match(/dependencies-v3-/g)).toHaveLength(8);
-    expect(ci.match(/~\/\.bun\/install\/cache/g)).toHaveLength(1);
+    expect(ci).not.toContain("path: node_modules");
+    expect(ci).not.toContain("dependencies-v3-");
+    expect(ci.match(/~\/\.bun\/install\/cache/g)).toHaveLength(8);
+    expect(ci.match(/bun-store-v1-/g)).toHaveLength(8);
+    expect(ci.match(/rm -rf node_modules/g)).toHaveLength(8);
     expect(ci.match(/bun install --frozen-lockfile/g)).toHaveLength(8);
     expect(ci).toContain("key: bun-store-v1-");
     expect(() => Bun.YAML.parse(readFileSync(".github/workflows/ci.yml", "utf8"))).not.toThrow();

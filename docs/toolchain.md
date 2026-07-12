@@ -75,8 +75,9 @@ Temporal/NATS/object-storage and browser/Docker gates locally. Use
 and manually dispatched GitHub CI always use that same full mapping regardless
 of the diff.
 
-Change impact is derived from workspace manifests plus explicit root integration
-and E2E dependencies. Unknown paths, missing changed-file input, CI/toolchain,
+Change impact is derived from workspace manifests, TypeScript-parsed direct
+workspace imports in root integration/E2E files, and explicit dependencies for
+indirect runtime coupling. Unknown paths, missing changed-file input, CI/toolchain,
 lockfile, generated agent protocol, migrations, deployment, image, and build-map
 changes select the full gate. Renames and copies fence both old and new paths.
 Every plan explains why each path ran or why analysis failed closed.
@@ -120,13 +121,13 @@ digest-pinned. The worker copies Docker CLI and its plugins from a separately
 digest-pinned official image rather than installing a floating apt package.
 Per-target GHA cache scopes prevent API/worker/web cache exports from replacing
 one another, while the shared Dockerfile graph still reuses common layers.
-CI restores the exact lockfile/manifests-fenced `node_modules` tree into each
-downstream job and keeps Bun's equivalent global package store only in the one
-install/verification job; it does not transfer both ~1 GiB copies into every
-shard. The frozen install still verifies the restored exact tree before the
-cache is made available to dependent jobs, and each downstream job performs a
-warm frozen verification so a stale or damaged restore is repaired/fails closed
-instead of being trusted. That verification is a no-op on a valid tree.
+CI caches only Bun's content-addressed global package store; executable
+`node_modules` trees are never restored from Actions cache. Every job removes
+any ambient tree and performs a frozen clean install from the shared store, so
+dependency bytes tampered in one job cannot become trusted input in another.
+The store avoids repeated network/package downloads while the clean install
+keeps lockfile, manifest, patch, platform, and Bun-version validation at every
+execution boundary.
 The remote cache snapshot keeps at most two immutable fingerprints per package,
 so restore-forward-save cannot grow every per-SHA cache without bound. The
 publish-closure guard is validation-only: selected builds produce outputs once,

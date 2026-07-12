@@ -33,7 +33,7 @@ function finiteByteLimit(value: string): number | null {
   if (!trimmed || trimmed === "max") return null;
   const parsed = Number(trimmed);
   // Linux v1 commonly reports a huge page-aligned sentinel for "unlimited".
-  if (!Number.isSafeInteger(parsed) || parsed < MIB || parsed >= 2 ** 60) return null;
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed >= 2 ** 60) return null;
   return parsed;
 }
 

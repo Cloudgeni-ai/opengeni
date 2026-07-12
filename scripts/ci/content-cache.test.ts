@@ -188,6 +188,57 @@ describe("content-addressed package build cache", () => {
     expect(after).not.toBe(before);
   });
 
+  test("package-local Bun config references are repository-relative fingerprint inputs", () => {
+    const { root, pkg } = fixture();
+    const shared = join(root, "shared-preload.ts");
+    writeFileSync(shared, "export const preload = 1;\n");
+    writeFileSync(join(root, pkg.dir, "bunfig.toml"), 'preload = ["../../shared-preload.ts"]\n');
+    const before = packageBuildFingerprint({
+      root,
+      pkg,
+      dependencyFingerprints: new Map(),
+      toolchain,
+    });
+    writeFileSync(shared, "export const preload = 2;\n");
+    expect(
+      packageBuildFingerprint({
+        root,
+        pkg,
+        dependencyFingerprints: new Map(),
+        toolchain,
+      }),
+    ).not.toBe(before);
+
+    for (const preload of [shared, `file://${shared}`]) {
+      writeFileSync(join(root, pkg.dir, "bunfig.toml"), `preload = [${JSON.stringify(preload)}]\n`);
+      expect(() =>
+        packageBuildFingerprint({
+          root,
+          pkg,
+          dependencyFingerprints: new Map(),
+          toolchain,
+        }),
+      ).toThrow("must be repository-relative");
+    }
+  });
+
+  test("a Bun input reached through a symlinked parent is rejected before reading it", () => {
+    if (process.platform === "win32") return;
+    const { root, pkg } = fixture();
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-build-cache-outside-"));
+    writeFileSync(join(outside, "input.ts"), "export const external = true;\n");
+    symlinkSync(outside, join(root, "linked"), "dir");
+    writeFileSync(join(root, "bunfig.toml"), 'preload = ["./linked/input.ts"]\n');
+    expect(() =>
+      packageBuildFingerprint({
+        root,
+        pkg,
+        dependencyFingerprints: new Map(),
+        toolchain,
+      }),
+    ).toThrow("symlink components");
+  });
+
   test("verified outputs restore exactly and tampering becomes a miss", () => {
     const { root, cacheRoot, pkg } = fixture();
     const fingerprint = packageBuildFingerprint({

@@ -84,19 +84,16 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Restore reusable Bun package store
+        id: bun-store-cache
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
           key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
 
-      - name: Restore exact dependency tree
-        id: dependency-cache
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+      - name: Remove any pre-existing dependency tree
+        run: rm -rf node_modules
 
-      - name: Verify dependency tree once for all jobs
+      - name: Install exact dependency tree
         run: >-
           bun scripts/ci/profile-command.ts
           --name dependencies
@@ -107,12 +104,12 @@ jobs:
       - name: Record dependency cache outcome
         if: always()
         env:
-          DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+          BUN_STORE_CACHE_HIT: ${{ steps.bun-store-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           [ -f ci-profile/dependencies.json ] || exit 0
-          jq --arg hit "$DEPENDENCY_CACHE_HIT" \
-            '.cache = {kind:"dependencies", hit:($hit == "true"), verifiedByFrozenInstall:true}' \
+          jq --arg hit "$BUN_STORE_CACHE_HIT" \
+            '.cache = {kind:"bun-package-store", hit:($hit == "true"), cleanInstall:true}' \
             ci-profile/dependencies.json > ci-profile/dependencies.json.tmp
           mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
 
@@ -145,11 +142,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -181,11 +180,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -230,11 +231,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -272,11 +275,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -314,11 +319,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -379,11 +386,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: actions/cache@v4
         with:
           path: .cache/opengeni/build-packages
@@ -440,11 +449,13 @@ jobs:
           bun-version-file: .bun-version
       - uses: actions/cache/restore@v4
         with:
-          path: node_modules
-          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
           fail-on-cache-miss: true
-      - name: Verify restored dependency tree
-        run: bun install --frozen-lockfile
+      - name: Install a clean dependency tree
+        run: |
+          rm -rf node_modules
+          bun install --frozen-lockfile
       - uses: azure/setup-helm@v5
       - uses: hashicorp/setup-terraform@v4
       - name: Validate deployment profiles
