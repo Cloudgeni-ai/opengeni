@@ -56,6 +56,7 @@ import {
   withCodexCapacityMutation,
   setSessionPin,
   SessionPinVersionConflictError,
+  SessionListAccessError,
   SessionListCursorError,
   decodeSessionListCursor,
   revokeViewer,
@@ -134,6 +135,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
       });
     } catch (error) {
+      if (error instanceof SessionListAccessError) {
+        throw new HTTPException(403, { message: error.message });
+      }
       if (error instanceof SessionListCursorError) {
         throw new HTTPException(400, { message: error.message });
       }

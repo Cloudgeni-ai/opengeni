@@ -10544,6 +10544,13 @@ export class SessionListCursorError extends Error {
   }
 }
 
+export class SessionListAccessError extends Error {
+  constructor(message = "workspace access denied") {
+    super(message);
+    this.name = "SessionListAccessError";
+  }
+}
+
 type SessionPinRow = Pick<
   typeof schema.sessionPins.$inferSelect,
   "pinned" | "pinnedAt" | "version"
@@ -10673,6 +10680,26 @@ export async function listSessionsForSubject(
     workspaceId,
     options.subjectId,
     async (tx) => {
+      // Authorization is resolved before this helper by the API, but that
+      // grant can be stale by the time this transaction starts. Lock the live
+      // membership before touching snapshots so removal and listing serialize:
+      // listing first lets removal clean its committed snapshot, while removal
+      // first makes listing observe the missing membership and do no writes.
+      const [membership] = await tx
+        .select({ id: schema.workspaceMemberships.id })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.workspaceId, workspaceId),
+            eq(schema.workspaceMemberships.subjectId, options.subjectId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!membership) {
+        throw new SessionListAccessError();
+      }
+
       const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
       const parentFilter = sessionParentFilter(options.parentSessionId);
       const searchFilter = sessionSearchFilter(options.search);

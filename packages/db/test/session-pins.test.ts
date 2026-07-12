@@ -6,9 +6,11 @@ import {
   createSession,
   decodeSessionListCursor,
   getSessionForSubject,
+  getWorkspaceGrant,
   grantWorkspaceAccess,
   listSessionsForSubject,
   removeWorkspaceMember,
+  SessionListAccessError,
   SessionPinVersionConflictError,
   setSessionPin,
   withWorkspaceRls,
@@ -43,6 +45,39 @@ async function session(input: { accountId: string; workspaceId: string; message:
     model: "test-model",
     sandboxBackend: "none",
   });
+}
+
+async function grantMember(
+  workspace: { accountId: string; workspaceId: string },
+  subjectId: string,
+): Promise<void> {
+  await grantWorkspaceAccess(db, {
+    ...workspace,
+    subjectId,
+    permissions: ["sessions:read"],
+  });
+}
+
+async function waitForAdvisoryWait(
+  connection: postgres.Sql,
+  classId: number,
+  objectId: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ waiting: boolean }[]>`
+      select exists (
+        select 1
+        from pg_locks
+        where locktype = 'advisory'
+          and classid = ${classId}
+          and objid = ${objectId}
+          and not granted
+      ) as waiting`;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for advisory lock ${classId}/${objectId}`);
 }
 
 beforeAll(async () => {
@@ -102,6 +137,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const workspace = await freshWorkspace();
     const target = await session({ ...workspace, message: "pin target" });
     const subject = "user:one";
+    await grantMember(workspace, subject);
     const beforeUpdatedAt = target.updatedAt;
 
     const absentUnpin = await setSessionPin(db, {
@@ -222,6 +258,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("isolates member pins, uses stable order, filters pins, and never duplicates normal pages", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    await grantMember(workspace, "user:one");
+    await grantMember(workspace, "user:two");
     const older = await session({ ...workspace, message: "ordinary older" });
     const pinnedFirst = await session({ ...workspace, message: "find pinned first" });
     const pinnedSecond = await session({ ...workspace, message: "find pinned second" });
@@ -311,6 +349,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("keeps a session that moves above the cursor in its snapshot continuation", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    await grantMember(workspace, "user:snapshot");
     const oldest = await session({ ...workspace, message: "snapshot oldest" });
     const middle = await session({ ...workspace, message: "snapshot middle" });
     const newest = await session({ ...workspace, message: "snapshot newest" });
@@ -353,6 +392,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("treats percent, underscore, and backslash as literal search text", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    await grantMember(workspace, "user:literals");
     const percent = await session({ ...workspace, message: "literal 100% complete" });
     const underscore = await session({ ...workspace, message: "literal under_score" });
     const backslash = await session({ ...workspace, message: String.raw`literal back\slash` });
@@ -462,6 +502,299 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       foreignWorkspace: 1,
       targetOrphans: 0,
     });
+  }, 60_000);
+
+  test("serializes stale authorized listing and removal in both lock orderings", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const foreign = await freshWorkspace();
+    const staleSubject = "user:stale-list";
+    const lockedSubject = "user:locked-list";
+    const retainedSubject = "user:retained-list";
+
+    await grantMember(workspace, staleSubject);
+    await grantMember(workspace, lockedSubject);
+    await grantMember(workspace, retainedSubject);
+    await grantMember(foreign, lockedSubject);
+
+    const staleTarget = await session({ ...workspace, message: "stale list first" });
+    await session({ ...workspace, message: "stale list second" });
+    await session({ ...workspace, message: "locked list first" });
+    const lockedTarget = await session({ ...workspace, message: "locked list second" });
+    await session({ ...workspace, message: "locked list third" });
+    await session({ ...workspace, message: "retained list first" });
+    await session({ ...workspace, message: "retained list second" });
+    await session({ ...foreign, message: "foreign list first" });
+    await session({ ...foreign, message: "foreign list second" });
+
+    // Ordering A: the API already obtained a grant, then removal commits before
+    // the listing transaction starts. The live membership check must reject
+    // before expiry cleanup or snapshot insertion.
+    expect(await getWorkspaceGrant(db, staleSubject, workspace.workspaceId)).not.toBeNull();
+    const stalePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: staleSubject,
+      limit: 1,
+    });
+    expect(stalePage.nextCursor).toBeTruthy();
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: staleSubject,
+      sessionId: staleTarget.id,
+      pinned: true,
+    });
+    expect(await removeWorkspaceMember(db, workspace.workspaceId, staleSubject)).toBe(true);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId: staleSubject,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+    const [staleCounts] = await admin<
+      { memberships: number; pins: number; snapshots: number; orphans: number }[]
+    >`
+      select
+        (select count(*)::int from workspace_memberships
+          where workspace_id = ${workspace.workspaceId} and subject_id = ${staleSubject}) as memberships,
+        (select count(*)::int from session_pins
+          where workspace_id = ${workspace.workspaceId} and subject_id = ${staleSubject}) as pins,
+        (select count(*)::int from session_list_snapshots
+          where workspace_id = ${workspace.workspaceId} and subject_id = ${staleSubject}) as snapshots,
+        (select count(*)::int
+          from session_list_snapshots snapshot
+          left join workspace_memberships membership
+            on membership.workspace_id = snapshot.workspace_id
+           and membership.subject_id = snapshot.subject_id
+          where snapshot.workspace_id = ${workspace.workspaceId}
+            and membership.id is null) as orphans`;
+    expect(staleCounts).toEqual({ memberships: 0, pins: 0, snapshots: 0, orphans: 0 });
+
+    const barrier = postgres(shared.adminUrl, { max: 1 });
+    const barrierClass = 81326026;
+    const listingLock = 1;
+    const removalLock = 2;
+    const triggerFunction = "ope26_test_lock_barrier";
+    const snapshotTrigger = "ope26_test_snapshot_lock_barrier";
+    const membershipTrigger = "ope26_test_membership_lock_barrier";
+    const listingClient = createDb(shared.appUrl, { max: 1 });
+    const removalClient = createDb(shared.appUrl, { max: 1 });
+    let listingPromise: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
+    let removalPromise: Promise<boolean> | null = null;
+    try {
+      // Ordering B uses a native database barrier: the snapshot INSERT trigger
+      // blocks after the listing has locked membership; the DELETE trigger then
+      // blocks after removal has waited, cleaned the snapshot, and locked the
+      // membership row for deletion.
+      await barrier.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          if tg_argv[0] = 'snapshot' then
+            perform pg_advisory_xact_lock(${barrierClass}, ${listingLock});
+          else
+            perform pg_advisory_xact_lock(${barrierClass}, ${removalLock});
+          end if;
+          return case when tg_op = 'DELETE' then old else new end;
+        end
+        $$;
+        create trigger ${snapshotTrigger}
+          before insert on session_list_snapshots
+          for each row execute function ${triggerFunction}('snapshot');
+        create trigger ${membershipTrigger}
+          before delete on workspace_memberships
+          for each row when (
+            old.workspace_id = '${workspace.workspaceId}'::uuid
+            and old.subject_id = '${lockedSubject}'
+          ) execute function ${triggerFunction}('membership');
+      `);
+      await barrier`select pg_advisory_lock(${barrierClass}, ${listingLock})`;
+      await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
+
+      await setSessionPin(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId: lockedSubject,
+        sessionId: lockedTarget.id,
+        pinned: true,
+      });
+
+      listingPromise = listSessionsForSubject(listingClient.db, workspace.workspaceId, {
+        subjectId: lockedSubject,
+        limit: 1,
+      });
+      await waitForAdvisoryWait(admin, barrierClass, listingLock);
+
+      let removalSettled = false;
+      removalPromise = removeWorkspaceMember(
+        removalClient.db,
+        workspace.workspaceId,
+        lockedSubject,
+      ).then((removed) => {
+        removalSettled = true;
+        return removed;
+      });
+
+      await barrier`select pg_advisory_unlock(${barrierClass}, ${listingLock})`;
+      const listed = await listingPromise;
+      expect(listed.nextCursor).toBeTruthy();
+      await waitForAdvisoryWait(admin, barrierClass, removalLock);
+      expect(removalSettled).toBe(false);
+
+      await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
+      expect(await removalPromise).toBe(true);
+
+      const retained = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId: retainedSubject,
+        limit: 1,
+      });
+      const foreignPage = await listSessionsForSubject(db, foreign.workspaceId, {
+        subjectId: lockedSubject,
+        limit: 1,
+      });
+      expect(retained.nextCursor).toBeTruthy();
+      expect(foreignPage.nextCursor).toBeTruthy();
+
+      const [counts] = await admin<
+        {
+          removedMemberships: number;
+          removedPins: number;
+          removedSnapshots: number;
+          retainedSnapshots: number;
+          foreignSnapshots: number;
+          targetOrphans: number;
+        }[]
+      >`
+        select
+          (select count(*)::int from workspace_memberships
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${lockedSubject}) as "removedMemberships",
+          (select count(*)::int from session_pins
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${lockedSubject}) as "removedPins",
+          (select count(*)::int from session_list_snapshots
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${lockedSubject}) as "removedSnapshots",
+          (select count(*)::int from session_list_snapshots
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${retainedSubject}) as "retainedSnapshots",
+          (select count(*)::int from session_list_snapshots
+            where workspace_id = ${foreign.workspaceId} and subject_id = ${lockedSubject}) as "foreignSnapshots",
+          (select count(*)::int
+            from session_list_snapshots snapshot
+            left join workspace_memberships membership
+              on membership.workspace_id = snapshot.workspace_id
+             and membership.subject_id = snapshot.subject_id
+            where snapshot.workspace_id = ${workspace.workspaceId}
+              and membership.id is null) as "targetOrphans"`;
+      expect(counts).toEqual({
+        removedMemberships: 0,
+        removedPins: 0,
+        removedSnapshots: 0,
+        retainedSnapshots: 1,
+        foreignSnapshots: 1,
+        targetOrphans: 0,
+      });
+    } finally {
+      await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
+      await barrier
+        .unsafe(`
+        drop trigger if exists ${snapshotTrigger} on session_list_snapshots;
+        drop trigger if exists ${membershipTrigger} on workspace_memberships;
+        drop function if exists ${triggerFunction}();
+      `)
+        .catch(() => undefined);
+      await barrier.end().catch(() => undefined);
+      await Promise.allSettled([listingPromise, removalPromise].filter(Boolean));
+      await listingClient.close().catch(() => undefined);
+      await removalClient.close().catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("rejects a paused authorized listing after removal wins the membership lock", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:removal-first";
+    await grantMember(workspace, subjectId);
+    const target = await session({ ...workspace, message: "removal-first target" });
+    await session({ ...workspace, message: "removal-first overflow" });
+
+    const existing = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    expect(existing.nextCursor).toBeTruthy();
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: target.id,
+      pinned: true,
+    });
+    expect(await getWorkspaceGrant(db, subjectId, workspace.workspaceId)).not.toBeNull();
+
+    const barrier = postgres(shared.adminUrl, { max: 1 });
+    const removalClient = createDb(shared.appUrl, { max: 1 });
+    const barrierClass = 81326027;
+    const removalLock = 1;
+    const triggerFunction = "ope26_test_removal_first_barrier";
+    const triggerName = "ope26_test_removal_first_membership_barrier";
+    let removalPromise: Promise<boolean> | null = null;
+    try {
+      await barrier.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          perform pg_advisory_xact_lock(${barrierClass}, ${removalLock});
+          return old;
+        end
+        $$;
+        create trigger ${triggerName}
+          before delete on workspace_memberships
+          for each row when (
+            old.workspace_id = '${workspace.workspaceId}'::uuid
+            and old.subject_id = '${subjectId}'
+          ) execute function ${triggerFunction}();
+      `);
+      await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
+
+      removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
+      await waitForAdvisoryWait(admin, barrierClass, removalLock);
+
+      // The stale authorization is intentionally held while removal owns the
+      // membership lock. Release the native barrier, wait for removal to
+      // commit, then resume listing and prove it cannot write a new snapshot.
+      await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
+      expect(await removalPromise).toBe(true);
+      await expect(
+        listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId,
+          limit: 1,
+        }),
+      ).rejects.toBeInstanceOf(SessionListAccessError);
+
+      const [counts] = await admin<
+        { memberships: number; pins: number; snapshots: number; orphans: number }[]
+      >`
+        select
+          (select count(*)::int from workspace_memberships
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}) as memberships,
+          (select count(*)::int from session_pins
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}) as pins,
+          (select count(*)::int from session_list_snapshots
+            where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}) as snapshots,
+          (select count(*)::int
+            from session_list_snapshots snapshot
+            left join workspace_memberships membership
+              on membership.workspace_id = snapshot.workspace_id
+             and membership.subject_id = snapshot.subject_id
+            where snapshot.workspace_id = ${workspace.workspaceId}
+              and membership.id is null) as orphans`;
+      expect(counts).toEqual({ memberships: 0, pins: 0, snapshots: 0, orphans: 0 });
+    } finally {
+      await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
+      await barrier
+        .unsafe(`
+        drop trigger if exists ${triggerName} on workspace_memberships;
+        drop function if exists ${triggerFunction}();
+      `)
+        .catch(() => undefined);
+      await barrier.end().catch(() => undefined);
+      await Promise.allSettled([removalPromise].filter(Boolean));
+      await removalClient.close().catch(() => undefined);
+    }
   }, 60_000);
 
   test("returns no cross-workspace target and cascades a deleted session's pins", async () => {
