@@ -9402,6 +9402,81 @@ export type CodexRotationSettings = {
   rotationStrategy: string; // P1: 'most_remaining' (unused)
 };
 
+/**
+ * Per-workspace model/provider availability policy. NULL fields = unrestricted
+ * (identical to no row — the default for every workspace). Non-null
+ * allowedProviders is a strict allowlist over resolved provider identities;
+ * non-null allowedModels an additional exact model-id allowlist. Consumers:
+ * the API model choke points (fail 422) and the worker's post-resolution gate
+ * (a blocked provider never reaches a model call and never silently remaps).
+ */
+export type WorkspaceModelPolicy = {
+  allowedProviders: string[] | null;
+  allowedModels: string[] | null;
+};
+
+/** The per-workspace model policy row (null when none exists = unrestricted). */
+export async function getWorkspaceModelPolicy(
+  db: Database,
+  workspaceId: string,
+): Promise<WorkspaceModelPolicy | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        allowedProviders: schema.workspaceModelPolicies.allowedProviders,
+        allowedModels: schema.workspaceModelPolicies.allowedModels,
+      })
+      .from(schema.workspaceModelPolicies)
+      .where(eq(schema.workspaceModelPolicies.workspaceId, workspaceId))
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Create or replace the workspace's model policy. Passing null for a field
+ * clears that restriction; a policy of {null, null} is kept as an explicit
+ * "unrestricted" row (delete is not needed for correctness — it reads the same
+ * as no row).
+ */
+export async function upsertWorkspaceModelPolicy(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    allowedProviders: string[] | null;
+    allowedModels: string[] | null;
+  },
+): Promise<WorkspaceModelPolicy> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .insert(schema.workspaceModelPolicies)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          allowedProviders: input.allowedProviders,
+          allowedModels: input.allowedModels,
+        })
+        .onConflictDoUpdate({
+          target: [schema.workspaceModelPolicies.workspaceId],
+          set: {
+            allowedProviders: input.allowedProviders,
+            allowedModels: input.allowedModels,
+            updatedAt: new Date(),
+          },
+        })
+        .returning({
+          allowedProviders: schema.workspaceModelPolicies.allowedProviders,
+          allowedModels: schema.workspaceModelPolicies.allowedModels,
+        });
+      return row!;
+    },
+  );
+}
+
 /** The per-workspace rotation/active-pointer row (null when none exists yet). */
 export async function getCodexRotationSettings(
   db: Database,

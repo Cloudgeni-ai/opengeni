@@ -398,6 +398,38 @@ export const codexRotationSettings = pgTable(
   }),
 );
 
+// Per-workspace model/provider availability policy — the HARD blocker deciding
+// which providers/models may serve a turn in this workspace AT ALL. NULL columns
+// mean unrestricted (today's behavior for every workspace without a row). A
+// non-null allowed_providers is a strict allowlist over provider identities
+// (the same identities the model router resolves to, with the built-in
+// OpenAI/Azure client — including the legacy resolveTurnModel-null fallback —
+// mapped to one well-known id); a non-null allowed_models is an additional
+// exact-model-id allowlist. Enforced at the API model-choke points (422) and,
+// authoritatively, in the worker immediately after turn model resolution: a
+// blocked resolution NEVER reaches a model call and NEVER silently remaps.
+// This exists so a codex-subscription workspace can be fail-closed to codex —
+// a turn can wait/fail loud, but can never fall through to the paid built-in.
+export const workspaceModelPolicies = pgTable(
+  "workspace_model_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    allowedProviders: text("allowed_providers").array(),
+    allowedModels: text("allowed_models").array(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: uniqueIndex("workspace_model_policies_workspace_idx").on(table.workspaceId),
+  }),
+);
+
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
 // UPDATE, so concurrent replicas in the SAME workspace see one another's
