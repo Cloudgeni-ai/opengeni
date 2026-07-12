@@ -2207,6 +2207,40 @@ function isAuthNeededMcpError(error: unknown): boolean {
   return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
 }
 
+// Model-facing text for a best-effort server whose tool call failed for a
+// non-auth reason (transport 401/403 that never became the broker's JSON-RPC
+// short-circuit, a provider 5xx, a network blip). The copy is LOOP-SAFE: it
+// tells the model the tool is dead for the REST OF THIS TURN and to NOT retry
+// it, so a model that would otherwise burn the turn re-calling the same broken
+// optional tool moves on instead. Only the safe error surface (JS error class +
+// numeric HTTP status) is interpolated — NEVER the raw error message/response
+// body, which for a broker 401/403 can echo request URLs/headers/credentials.
+function mcpToolUnavailableMessage(reason: string): string {
+  return `This tool is unavailable for the rest of this turn (${reason}). Do not retry it — continue without it or use another approach.`;
+}
+
+// The only error detail safe to surface to the model or the logs: the JS error
+// constructor name and, when present, a numeric HTTP status. A StreamableHTTP
+// transport error carries the raw response BODY in its `.message` (a broker
+// 401/403 body can echo request detail), so `.message` is never included; the
+// numeric `.code`/`.status` (e.g. 401) is safe and useful.
+function safeMcpErrorFields(error: unknown): { errorClass: string; status?: number } {
+  const errorClass = error instanceof Error ? error.constructor.name : typeof error;
+  const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
+  const status = typeof raw === "number" ? raw : undefined;
+  if (status === undefined) {
+    const altRaw = (error as { status?: unknown } | null)?.status;
+    return typeof altRaw === "number" ? { errorClass, status: altRaw } : { errorClass };
+  }
+  return { errorClass, status };
+}
+
+// Compose the safe model/log reason string ("StreamableHTTPError 401", or just
+// the class when no numeric status is available). Never carries the raw body.
+function mcpErrorReason(fields: { errorClass: string; status?: number }): string {
+  return fields.status === undefined ? fields.errorClass : `${fields.errorClass} ${fields.status}`;
+}
+
 async function mcpServerRequestInit(
   settings: Settings,
   config: Settings["mcpServers"][number],
@@ -2478,11 +2512,9 @@ class PrefixedMcpServer implements MCPServer {
         this.loggedListToolsFailure = true;
         console.warn(
           "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          {
-            serverId: this.name,
-            errorClass: error instanceof Error ? error.constructor.name : typeof error,
-            message: error instanceof Error ? error.message : String(error),
-          },
+          // Safe surface only (class + numeric status), never the raw error
+          // message/response body — a broker 401/403 body can echo request detail.
+          { serverId: this.name, ...safeMcpErrorFields(error) },
         );
       }
       return [];
@@ -2508,8 +2540,33 @@ class PrefixedMcpServer implements MCPServer {
       // JSON-RPC error (an inline isError result would be stripped by the SDK
       // shim). Surface it to the model as a failed-but-recoverable tool result
       // instead of failing the turn; the timeline chip was already published.
+      // This applies to ANY server — an auth-needed is recoverable once the user
+      // re-links, so even a required tool degrades gracefully here.
       if (isAuthNeededMcpError(error)) {
         return { isError: true, content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }] };
+      }
+      // Best-effort INVOCATION isolation (sibling to the listTools guard). When
+      // the model calls a best-effort server's tool and the call throws for ANY
+      // other reason — a raw transport 401/403 that never became the broker's
+      // JSON-RPC short-circuit (e.g. a codex_apps bearer that expired mid-turn,
+      // or a 403 with no insufficient_scope challenge), a provider 5xx, or a
+      // network blip — the whole turn would otherwise die. Return a tool-error
+      // RESULT the model sees instead, so it adapts (tries another approach,
+      // tells the user) and the turn survives. Required servers keep the
+      // fail-loud default: the caller depends on them, so their tool failure
+      // still fails the turn. For auth cases the actionable tool.auth_needed was
+      // already published upstream by the connection-broker fetch before the
+      // throw, so degrading here never silences it.
+      if (this.bestEffort) {
+        const fields = safeMcpErrorFields(error);
+        console.warn(
+          "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
+          { serverId: this.name, toolName: unprefixed, ...fields },
+        );
+        return {
+          isError: true,
+          content: [{ type: "text", text: mcpToolUnavailableMessage(mcpErrorReason(fields)) }],
+        };
       }
       throw error;
     }

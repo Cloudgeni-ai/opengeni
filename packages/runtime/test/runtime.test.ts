@@ -2499,7 +2499,7 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("leaves brokered 403 responses without insufficient_scope challenge as normal tool errors", async () => {
+  test("brokered 403 without insufficient_scope challenge degrades to a tool error, never auth-needed", async () => {
     const connectionId = "56565656-5656-4565-8565-565656565656";
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer scoped-token" },
@@ -2539,9 +2539,15 @@ describe("runtime event normalization", () => {
     );
     try {
       await prepared.mcpServers[0]!.listTools();
-      await expect(
-        prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", { query: "scope" }),
-      ).rejects.toThrow(/403|forbidden|insufficient_scope/i);
+      // A 403 with no insufficient_scope challenge is NOT an auth-needed (no
+      // connection link posted). The server is best-effort (connectionRef), so
+      // invocation isolation degrades the tool-call failure to an isError result
+      // the model sees rather than throwing out of the turn — and it must still
+      // NOT be misclassified as an auth-needed.
+      const result = await prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", {
+        query: "scope",
+      });
+      expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
@@ -3123,6 +3129,243 @@ describe("runtime event normalization", () => {
       }
     } finally {
       strict.close();
+    }
+  });
+
+  test("best-effort tool INVOCATION auth failure returns a tool error, preserves auth_needed, sibling intact", async () => {
+    // Bar (1): the model calls a best-effort server's tool and it needs auth. The
+    // broker publishes tool.auth_needed and short-circuits the call to the JSON-RPC
+    // auth-needed error, which callTool surfaces as an isError result (recoverable)
+    // — the turn survives, the actionable signal is preserved, and a healthy
+    // sibling's tools stay callable.
+    const connectionId = "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1";
+    const capMcp = startTestMcpServer();
+    const healthy = startTestMcpServer();
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "cap",
+            name: "Capability MCP",
+            url: capMcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "api.integrations-example.com",
+              kind: "oauth2",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+          { id: "docs", name: "Docs", url: healthy.url, cacheToolsList: false },
+        ],
+      }),
+      [
+        { kind: "mcp", id: "cap" },
+        { kind: "mcp", id: "docs" },
+      ],
+      {
+        workspaceId: "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2",
+        // Valid for connect/list (no toolName), auth_needed at tool-call time.
+        resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> =>
+          input.toolName
+            ? {
+                status: "auth_needed",
+                reason: "expired",
+                providerDomain: "api.integrations-example.com",
+                connectionId,
+                authorizationUrl: "https://api.integrations-example.com/oauth/start",
+              }
+            : { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } },
+        onAuthNeeded: (payload) => {
+          authNeeded.push(payload);
+        },
+      },
+    );
+    try {
+      const cap = prepared.mcpServers.find((s) => s.name === "cap")!;
+      const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+      await cap.listTools();
+      const result = await cap.callTool("cap__search_documents", { query: "x" });
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "cap",
+          toolName: "search_documents",
+          reason: "expired",
+        }),
+      );
+      // The healthy sibling remains fully usable in the same turn.
+      const ok = await docs.callTool("docs__search_documents", { query: "y" });
+      expect(JSON.stringify(ok)).toContain("found document for y");
+    } finally {
+      await prepared.close();
+      capMcp.close();
+      healthy.close();
+    }
+  });
+
+  test("best-effort tool INVOCATION raw 401 (not auth-needed) degrades to a loop-safe tool error", async () => {
+    // The prod case: a best-effort server's tool call throws a raw transport 401
+    // that never became the broker's JSON-RPC short-circuit (e.g. a codex_apps
+    // bearer expired mid-turn). callTool must return a tool-error RESULT the model
+    // sees — with LOOP-SAFE copy (do-not-retry) and only the safe error surface
+    // (class + status), never the raw response body — rather than throw.
+    const flaky = startTestMcpServer({ unauthorizedForMethods: ["tools/call"] });
+    const healthy = startTestMcpServer();
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false },
+            { id: "docs", name: "Docs", url: healthy.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "flaky", optional: true },
+          { kind: "mcp", id: "docs" },
+        ],
+      );
+      try {
+        const flakySrv = prepared.mcpServers.find((s) => s.name === "flaky")!;
+        const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
+        await flakySrv.listTools(); // fine — only tools/call 401s
+        const result = await flakySrv.callTool("flaky__search_documents", { query: "x" });
+        expect(result).toMatchObject({ isError: true });
+        const text = JSON.stringify(result);
+        // Loop-safety: the copy must steer the model away from re-calling it.
+        expect(text).toMatch(/do not retry/i);
+        // Safe surface only: class (+ status), NEVER the raw 401 body.
+        expect(text).toContain("StreamableHTTPError");
+        expect(text).not.toContain("unauthorized");
+        // Sibling unaffected.
+        const ok = await docs.callTool("docs__search_documents", { query: "y" });
+        expect(JSON.stringify(ok)).toContain("found document for y");
+      } finally {
+        await prepared.close();
+      }
+      // Structured warn carries the safe fields, and never the raw body.
+      const warned = warnings.find((args) =>
+        args.some(
+          (a) =>
+            typeof a === "object" &&
+            a !== null &&
+            (a as { serverId?: unknown }).serverId === "flaky",
+        ),
+      );
+      expect(warned).toBeDefined();
+      const payload = warned!.find((a) => typeof a === "object" && a !== null) as Record<
+        string,
+        unknown
+      >;
+      expect(payload).toMatchObject({
+        serverId: "flaky",
+        toolName: "search_documents",
+        errorClass: "StreamableHTTPError",
+        status: 401,
+      });
+      expect(JSON.stringify(payload)).not.toContain("unauthorized");
+    } finally {
+      console.warn = originalWarn;
+      flaky.close();
+      healthy.close();
+    }
+  });
+
+  test("best-effort tool INVOCATION non-auth error (500) also degrades, not just auth", async () => {
+    // Generality: an optional server that is simply down (provider 5xx, no auth
+    // machinery) must degrade at invocation the same way.
+    const flaky = startTestMcpServer({ serverErrorForMethods: ["tools/call"] });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [{ id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false }],
+        }),
+        [{ kind: "mcp", id: "flaky", optional: true }],
+      );
+      try {
+        const flakySrv = prepared.mcpServers[0]!;
+        await flakySrv.listTools(); // fine — only tools/call 500s
+        const result = await flakySrv.callTool("flaky__search_documents", { query: "x" });
+        expect(result).toMatchObject({ isError: true });
+        expect(JSON.stringify(result)).toMatch(/do not retry/i);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      flaky.close();
+    }
+  });
+
+  test("REQUIRED server tool INVOCATION failure still throws (fail-loud)", async () => {
+    // The fail-loud default is unchanged for a required server (no optional flag,
+    // no connectionRef): its tool-call failure must propagate, not degrade.
+    const strict = startTestMcpServer({ serverErrorForMethods: ["tools/call"] });
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [{ id: "docs-strict", name: "Docs", url: strict.url, cacheToolsList: false }],
+        }),
+        [{ kind: "mcp", id: "docs-strict" }],
+      );
+      try {
+        await prepared.mcpServers[0]!.listTools(); // fine — only tools/call 500s
+        await expect(
+          prepared.mcpServers[0]!.callTool("docs-strict__search_documents", { query: "x" }),
+        ).rejects.toThrow();
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      strict.close();
+    }
+  });
+
+  test("RE-LIST: best-effort tools/list failure degrades on EVERY re-list, sibling survives (Path-2 lock)", async () => {
+    // #379 fixed listTools degrade; this locks the fact that the SDK's per-step
+    // RE-LIST (getAllMcpTools called again mid-turn on the SAME PrefixedMcpServer
+    // instances) is covered too — the guard is on the instance method, so every
+    // re-list degrades a best-effort failure while the sibling's tools survive.
+    const flaky = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    const healthy = startTestMcpServer();
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            { id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false },
+            { id: "docs", name: "Docs", url: healthy.url, cacheToolsList: false },
+          ],
+        }),
+        [
+          { kind: "mcp", id: "flaky", optional: true },
+          { kind: "mcp", id: "docs" },
+        ],
+      );
+      try {
+        // Two successive resolutions model two model steps' re-lists.
+        for (let i = 0; i < 2; i++) {
+          const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+          const names = tools.map((t) => t.name);
+          expect(names).toContain("docs__search_documents");
+          expect(names.some((n) => n.startsWith("flaky__"))).toBe(false);
+        }
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      flaky.close();
+      healthy.close();
     }
   });
 
