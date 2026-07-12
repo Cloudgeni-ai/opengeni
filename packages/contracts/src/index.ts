@@ -2329,6 +2329,9 @@ export const ScheduledTask = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
   reusableSessionId: z.string().uuid().nullable(),
+  // Caller-selected existing session. reusableSessionId remains the internal
+  // task-owned session pointer for the default reusable_session behavior.
+  targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -2366,11 +2369,20 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   agentConfig: ScheduledTaskAgentConfig,
   status: ScheduledTaskStatus.default("active"),
+  targetSessionId: z.string().uuid().nullable().optional(),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
   // The rig each run binds to (M3); its active version is resolved per fire.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+}).superRefine((value, ctx) => {
+  if (value.targetSessionId && value.runMode !== "reusable_session") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=reusable_session",
+    });
+  }
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
@@ -2381,12 +2393,25 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),
+  targetSessionId: z.string().uuid().nullable().optional(),
   variableSetId: z.string().uuid().nullable().optional(),
   environmentId: z.string().uuid().nullable().optional(),
   // The rig each run binds to (M3); null clears it. Its active version is
   // resolved per fire, so an update takes effect on the next dispatch.
   rigId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, ctx) => {
+  if (
+    value.targetSessionId &&
+    value.runMode !== undefined &&
+    value.runMode !== "reusable_session"
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=reusable_session",
+    });
+  }
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 

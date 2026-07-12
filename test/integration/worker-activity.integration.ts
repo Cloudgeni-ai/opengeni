@@ -10,6 +10,7 @@ import {
 import type { ObjectStorage } from "../../packages/storage/src/index";
 import {
   appendSessionEvents,
+  appendSessionEventsWithLockedSessionUpdate,
   appendSessionEventsAndUpdateSession,
   appendSessionHistoryItems,
   bootstrapWorkspace,
@@ -42,6 +43,7 @@ import {
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
+  ScheduledTaskConflictError,
   requireScheduledTask,
   saveRunState,
   setSessionStatus,
@@ -3021,6 +3023,191 @@ describe("worker activities integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
+  });
+
+  test("dispatches a targeted reusable task into the exact existing session", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "existing thread",
+      resources: [],
+      tools: [],
+      metadata: { source: "existing" },
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "targeted reusable",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "continue the existing thread",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    const beforeSessions = await listSessions(dbClient.db, grant.workspaceId, 100);
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    const second = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "manual",
+    });
+
+    expect(first).toMatchObject({ action: "signal", sessionId: target.id });
+    expect(second).toMatchObject({ action: "signal", sessionId: target.id });
+    const afterSessions = await listSessions(dbClient.db, grant.workspaceId, 100);
+    expect(afterSessions.map((session) => session.id)).toEqual(
+      beforeSessions.map((session) => session.id),
+    );
+    const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    expect(stored.targetSessionId).toBe(target.id);
+    // The legacy pointer remains null: this task never created a task-owned
+    // session, so clearing/deleting the target retains the normal null fallback.
+    expect(stored.reusableSessionId).toBeNull();
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 50);
+    expect(events.filter((event) => event.type === "user.message")).toHaveLength(2);
+    expect(
+      events.filter((event) => event.type === "user.message").map((event) => event.payload),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "continue the existing thread", scheduledTaskId: task.id }),
+      ]),
+    );
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs).toHaveLength(2);
+    expect(runs.every((run) => run.sessionId === target.id && run.status === "dispatched")).toBe(
+      true,
+    );
+  });
+
+  test("fails closed when a targeted session is cancelled before dispatch", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "cancel before scheduled fire",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "cancelled targeted reusable",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "must not append",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    const beforeEvents = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 50);
+    await setSessionStatus(dbClient.db, grant.workspaceId, target.id, "cancelled", null);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "nope" }]) }),
+    });
+
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow(/cancelled/i);
+
+    const afterEvents = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 50);
+    expect(afterEvents.length).toBe(beforeEvents.length);
+    expect(afterEvents.filter((event) => event.type === "user.message")).toHaveLength(0);
+    expect(afterEvents.filter((event) => event.type === "turn.queued")).toHaveLength(0);
+    expect((await getSession(dbClient.db, grant.workspaceId, target.id))?.status).toBe("cancelled");
+    expect((await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id))[0]?.status).toBe(
+      "failed",
+    );
+  });
+
+  test("rejects a stale target snapshot before appending to the old session", async () => {
+    const grant = await testGrant(dbClient.db);
+    const oldTarget = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "old target",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const newTarget = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "new target",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "retarget race",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "must not land on the old target",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      targetSessionId: oldTarget.id,
+      metadata: {},
+    });
+    const staleTask = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      targetSessionId: newTarget.id,
+    });
+
+    await expect(
+      appendSessionEventsWithLockedSessionUpdate(
+        dbClient.db,
+        grant.workspaceId,
+        oldTarget.id,
+        () => ({ events: [{ type: "user.message", payload: { text: "stale" } }] }),
+        {
+          scheduledTask: {
+            taskId: task.id,
+            expectedTask: staleTask,
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(ScheduledTaskConflictError);
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, oldTarget.id, 0, 50)).filter(
+        (event) => event.type === "user.message",
+      ),
+    ).toHaveLength(0);
   });
 
   test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {

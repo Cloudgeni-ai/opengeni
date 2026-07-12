@@ -8,6 +8,7 @@ import {
   getRig,
   getVariableSet,
   isCodexBilledTurn,
+  lockScheduledTaskForDispatch,
   recordUsageEvent,
   requireScheduledTask,
   requireSession,
@@ -15,12 +16,12 @@ import {
   sumUsageQuantity,
   updateScheduledTask,
   updateScheduledTaskRun,
-  upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
+  assertScheduledTaskTargetCompatible,
   mergeResourceRefs,
   mergeToolRefs,
   scheduledUserMessagePayload,
@@ -40,6 +41,12 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
+      // Take the task row lock before quota/run side effects. A concurrent
+      // update that already committed must win over this fire; an update that
+      // starts later is naturally ordered after this fire and applies next
+      // time. Targeted fires take the same snapshot check again while holding
+      // the target session lock below, closing the whole read-to-append gap.
+      await lockScheduledTaskForDispatch(db, input.workspaceId, task.id, task);
       // The scheduled task's model can be codex/<slug>; resolve it here so the
       // admission gate can skip the credit/cost gates for a codex-billed run
       // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
@@ -78,12 +85,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       let result: DispatchScheduledTaskRunResult;
       try {
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
-        const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
+        const taskSandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
         // Every dispatch carries the first-party MCP server (set_session_title,
         // goal tools, and the permission-gated tools), matching the API path.
         const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
-        if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
+        const targetSessionId = task.targetSessionId;
+        const reusableSessionId = targetSessionId ?? task.reusableSessionId;
+        if (task.runMode === "new_session_per_run" || !reusableSessionId) {
           // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
           // an attached variableSet must still exist here; fail closed if not.
           const variableSet = task.variableSetId
@@ -121,7 +130,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               scheduledTaskRunId: run.id,
             },
             model,
-            sandboxBackend,
+            sandboxBackend: taskSandboxBackend,
             variableSetId: task.variableSetId ?? null,
             rigId: frozenRigId,
             rigVersionId: frozenRigVersionId,
@@ -200,7 +209,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             tools: taskTools,
             model,
             reasoningEffort,
-            sandboxBackend,
+            sandboxBackend: taskSandboxBackend,
             metadata: {
               scheduledTaskId: task.id,
               scheduledTaskRunId: run.id,
@@ -227,7 +236,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             workflowId,
           };
         } else {
-          const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          const session = await requireSession(db, task.workspaceId, reusableSessionId);
           // A user-cancelled (terminal) reusable session must not be revived and
           // re-billed on the next fire. Early check avoids the pre-lock goal
           // upsert side-effect; the locked-callback check below is the
@@ -236,34 +245,42 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           // Defensive backstop for the API-level 409: a reusable session keeps
           // its creation-time attachment, so a diverged task attachment must
           // fail the run instead of silently running with the wrong secrets.
-          if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
+          if (targetSessionId) {
+            assertScheduledTaskTargetCompatible(session, task);
+          } else if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
             throw new Error(
               "scheduled task variableSet attachment does not match its reusable session",
             );
           }
-          // A recurring "maintain X" task re-establishes its objective on every
-          // fire: replace the goal text, reactivate it, and reset the counters.
-          const reusableGoal = goalSpec
-            ? await upsertSessionGoal(db, {
-                accountId: task.accountId,
-                workspaceId: task.workspaceId,
-                sessionId: session.id,
-                text: goalSpec.text,
-                successCriteria: goalSpec.successCriteria ?? null,
-                maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-                createdBy: "scheduled_task",
-              })
-            : null;
           const events = await appendSessionEventsWithLockedSessionUpdate(
             db,
             task.workspaceId,
             session.id,
-            (locked) => {
+            async (locked, lockedUpdate) => {
               // Authoritative guard under the FOR UPDATE row lock: re-check the
               // current status to close the TOCTOU between the early read and the
               // lock (a cancel could land in between). Throwing aborts the whole
               // append+update transaction, so no user.message is persisted.
               assertReusableSessionRevivable(locked.status);
+              if (targetSessionId) {
+                assertScheduledTaskTargetCompatible(locked, task);
+              }
+              // A recurring "maintain X" task re-establishes its objective on
+              // every fire. Do this only after the locked status/attachment
+              // checks and in the same transaction as the user.message, so a
+              // cancellation or target edit cannot leave a goal mutation
+              // behind without a scheduled prompt.
+              const reusableGoal = goalSpec
+                ? await lockedUpdate.upsertSessionGoal({
+                    accountId: task.accountId,
+                    workspaceId: task.workspaceId,
+                    sessionId: session.id,
+                    text: goalSpec.text,
+                    successCriteria: goalSpec.successCriteria ?? null,
+                    maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                    createdBy: "scheduled_task",
+                  })
+                : null;
               return {
                 events: [
                   ...(reusableGoal
@@ -300,6 +317,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 },
               };
             },
+            {
+              scheduledTask: {
+                taskId: task.id,
+                expectedTask: task,
+                lockGoal: Boolean(goalSpec),
+              },
+            },
           );
           await bus.publish(task.workspaceId, session.id, events);
           const trigger = events.find((event) => event.type === "user.message");
@@ -318,7 +342,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             tools: taskTools,
             model,
             reasoningEffort,
-            sandboxBackend,
+            // A caller-selected target owns the immutable compute route. The
+            // legacy task-owned path intentionally keeps its historical
+            // task/deployment backend resolution above.
+            sandboxBackend: targetSessionId ? session.sandboxBackend : taskSandboxBackend,
             metadata: {
               scheduledTaskId: task.id,
               scheduledTaskRunId: run.id,

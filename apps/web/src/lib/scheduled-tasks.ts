@@ -18,6 +18,7 @@ export type ScheduledTaskFormState = {
   timeZone: string;
   runMode: ScheduledTask["runMode"];
   overlapPolicy: ScheduledTask["overlapPolicy"];
+  targetSessionId: string | null;
   includeOpenGeniTool: boolean;
   resources: ResourceRef[];
 };
@@ -36,6 +37,7 @@ export function newScheduledTaskFormState(
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
+    targetSessionId: null,
     includeOpenGeniTool,
     resources,
   };
@@ -65,6 +67,7 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
     prompt: task.agentConfig.prompt,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    targetSessionId: task.targetSessionId,
   };
 }
 

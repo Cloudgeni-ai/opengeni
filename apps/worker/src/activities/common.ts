@@ -1,4 +1,10 @@
-import type { ResourceRef, SessionStatus, ToolRef } from "@opengeni/contracts";
+import type {
+  ResourceRef,
+  ScheduledTask,
+  Session,
+  SessionStatus,
+  ToolRef,
+} from "@opengeni/contracts";
 
 export {
   mergeResourceRefs,
@@ -19,6 +25,25 @@ export {
 export function assertReusableSessionRevivable(status: SessionStatus): void {
   if (status === "cancelled") {
     throw new Error("reusable session is cancelled; refusing to revive on scheduled fire");
+  }
+}
+
+/** Re-check targeted-session attachment invariants at fire time. */
+export function assertScheduledTaskTargetCompatible(
+  session: Session,
+  task: Pick<ScheduledTask, "variableSetId" | "rigId" | "agentConfig">,
+): void {
+  if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
+    throw new Error("scheduled task variableSet attachment does not match its target session");
+  }
+  if (task.rigId && task.rigId !== session.rigId) {
+    throw new Error("scheduled task rig does not match its target session");
+  }
+  if (
+    task.agentConfig.sandboxBackend !== undefined &&
+    task.agentConfig.sandboxBackend !== session.sandboxBackend
+  ) {
+    throw new Error("scheduled task sandbox backend does not match its target session");
   }
 }
 

@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionStatus } from "@opengeni/contracts";
-import { assertReusableSessionRevivable } from "../src/activities/common";
+import {
+  assertReusableSessionRevivable,
+  assertScheduledTaskTargetCompatible,
+} from "../src/activities/common";
 
 describe("reusable session revival guard (cancelled-resurrection)", () => {
   test("refuses to revive a cancelled (terminal) reusable session", () => {
@@ -39,5 +42,49 @@ describe("reusable session revival guard (cancelled-resurrection)", () => {
       }
     });
     expect(rejected).toEqual(["cancelled"]);
+  });
+});
+
+describe("scheduled target attachment guard", () => {
+  const session = (patch: Record<string, unknown> = {}) =>
+    ({
+      id: "session",
+      status: "idle",
+      sandboxBackend: "none",
+      variableSetId: null,
+      rigId: null,
+      ...patch,
+    }) as never;
+  const task = (patch: Record<string, unknown> = {}) =>
+    ({
+      variableSetId: null,
+      rigId: null,
+      agentConfig: { sandboxBackend: undefined },
+      ...patch,
+    }) as never;
+
+  test("accepts matching null attachments and target route", () => {
+    expect(() => assertScheduledTaskTargetCompatible(session(), task())).not.toThrow();
+  });
+
+  test("rejects a variable-set mismatch, including null versus attached", () => {
+    expect(() =>
+      assertScheduledTaskTargetCompatible(
+        session({ variableSetId: "00000000-0000-4000-8000-000000000001" }),
+        task(),
+      ),
+    ).toThrow(/variableSet/);
+  });
+
+  test("rejects rig and sandbox route mismatches", () => {
+    expect(() =>
+      assertScheduledTaskTargetCompatible(session({ rigId: "rig" }), task({ rigId: "other-rig" })),
+    ).toThrow(/rig/);
+    expect(() =>
+      assertScheduledTaskTargetCompatible(
+        session({ sandboxBackend: "docker" }),
+        task({ agentConfig: { sandboxBackend: "modal" } }),
+      ),
+    ).toThrow(/sandbox backend/);
   });
 });

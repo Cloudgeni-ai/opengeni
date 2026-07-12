@@ -46,6 +46,8 @@ A rig-bound turn's system instructions carry a non-bypassable doctrine block (co
 
 A session's rig binding resolves at create as: the explicit `rigId` on the create payload if given, else the workspace's `default_rig_id` (`workspaces.default_rig_id`), else rig-less. An explicit unknown/inactive `rigId` is a caller error (422). A stale workspace-default (deleted rig, or one somehow left with no active version) degrades silently to rig-less rather than failing the create. There is currently no API or web-console surface to set `default_rig_id` — it is a schema column consumed by session creation with no write path yet.
 
+A scheduled task with `targetSessionId` does not resolve a new active rig version: the target session's frozen `rig_version_id` remains authoritative for every fire. If the task also supplies `rigId`, it must name the target session's rig; a different rig is rejected before the task is stored or updated.
+
 ## Permissions
 
 | Permission | Grants |

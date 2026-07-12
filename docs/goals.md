@@ -113,6 +113,10 @@ the goal with the session; reusable-session runs re-arm it on every fire
 (replace text, reactivate, reset counters) — a recurring "maintain X" task
 re-establishes its objective each time.
 
+When a reusable task targets an existing session, the same per-fire goal
+replacement applies to that target. Without `agentConfig.goal`, the scheduled
+prompt preserves the target's existing goal state rather than clearing it.
+
 ## Agent tool access
 
 The goal tools are session-scoped first-party MCP tools. The worker signs the

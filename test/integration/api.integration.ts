@@ -32,6 +32,7 @@ import {
   listSessionTurns,
   listSessionMcpServersForRun,
   listUsageEvents,
+  ScheduledTaskConflictError,
   recordStripeWebhookEvent,
   recordUsageEvent,
   requireFile,
@@ -2678,6 +2679,100 @@ describe("API component integration", () => {
     expect(
       ((await listed.json()) as Array<{ id: string }>).some((item) => item.id === task.id),
     ).toBe(true);
+  });
+
+  test("creates, updates, and clears an authorized existing-session target", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initialMessage: "keep this thread" }),
+    });
+    expect(sessionResponse.status).toBe(202);
+    const targetSessionId = ((await sessionResponse.json()) as { id: string }).id;
+
+    const invalidMode = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "invalid target mode",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        targetSessionId,
+        agentConfig: { prompt: "must reject" },
+      }),
+    });
+    expect(invalidMode.status).toBe(400);
+
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "targeted thread",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: { prompt: "continue this thread" },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const task = (await created.json()) as {
+      id: string;
+      targetSessionId: string | null;
+      reusableSessionId: string | null;
+    };
+    expect(task.targetSessionId).toBe(targetSessionId);
+    expect(task.reusableSessionId).toBeNull();
+
+    const invalidUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runMode: "new_session_per_run" }),
+      },
+    );
+    expect(invalidUpdate.status).toBe(422);
+
+    const cleared = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetSessionId: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(
+      ((await cleared.json()) as { targetSessionId: string | null }).targetSessionId,
+    ).toBeNull();
+
+    const retargeted = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetSessionId }),
+      },
+    );
+    expect(retargeted.status).toBe(200);
+    expect(((await retargeted.json()) as { targetSessionId: string | null }).targetSessionId).toBe(
+      targetSessionId,
+    );
+
+    const staleSnapshot = await getScheduledTask(dbClient.db, workspaceId, task.id);
+    expect(staleSnapshot).not.toBeNull();
+    await updateScheduledTask(dbClient.db, workspaceId, task.id, { name: "changed elsewhere" });
+    await expect(
+      updateScheduledTask(dbClient.db, workspaceId, task.id, {
+        targetSessionId: null,
+        expectedCurrent: staleSnapshot!,
+      }),
+    ).rejects.toBeInstanceOf(ScheduledTaskConflictError);
   });
 
   test("a retried manual trigger (same triggerId) charges once and starts one run", async () => {

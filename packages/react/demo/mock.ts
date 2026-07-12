@@ -1797,6 +1797,7 @@ function scheduledTask(
     overlapPolicy: "skip",
     agentConfig: { prompt, resources: [], tools: [], metadata: {} },
     reusableSessionId: null,
+    targetSessionId: null,
     variableSetId: null,
     environmentId: null,
     rigId: null,

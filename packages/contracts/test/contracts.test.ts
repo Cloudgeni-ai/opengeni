@@ -24,6 +24,7 @@ import {
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
+  UpdateScheduledTaskRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -297,6 +298,49 @@ describe("contracts", () => {
     });
     expect(payload.schedule.type).toBe("calendar");
     expect(payload.agentConfig.tools[0]?.id).toBe("opengeni");
+  });
+
+  test("accepts an existing reusable-session target and rejects it for new sessions", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      CreateScheduledTaskRequest.parse({
+        name: "targeted",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: { prompt: "Continue the thread" },
+      }).targetSessionId,
+    ).toBe(targetSessionId);
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        name: "invalid-target",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        targetSessionId,
+        agentConfig: { prompt: "Continue the thread" },
+      }),
+    ).toThrow(/targetSessionId requires runMode=reusable_session/);
+    expect(
+      CreateScheduledTaskRequest.parse({
+        name: "default-new-session",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        targetSessionId: null,
+        agentConfig: { prompt: "Create a fresh thread" },
+      }).targetSessionId,
+    ).toBeNull();
+    expect(() =>
+      UpdateScheduledTaskRequest.parse({
+        runMode: "new_session_per_run",
+        targetSessionId,
+      }),
+    ).toThrow(/targetSessionId requires runMode=reusable_session/);
+    expect(
+      UpdateScheduledTaskRequest.parse({
+        targetSessionId,
+        runMode: "reusable_session",
+      }).targetSessionId,
+    ).toBe(targetSessionId);
   });
 
   test("accepts pack enable and marketing daily analysis defaults", () => {

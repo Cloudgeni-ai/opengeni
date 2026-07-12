@@ -53,6 +53,7 @@ import {
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
+  newScheduledTaskFormState,
   scheduleFromFormState,
   summarizeLastRun,
 } from "./lib/scheduled-tasks";
@@ -1056,6 +1057,16 @@ describe("capability catalog helpers", () => {
 });
 
 describe("scheduled task form helpers", () => {
+  test("hydrates an existing target and keeps the task-owned default nullable", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      formStateFromScheduledTask(
+        scheduledTask({ type: "interval", everySeconds: 60 }, { targetSessionId }),
+      ).targetSessionId,
+    ).toBe(targetSessionId);
+    expect(newScheduledTaskFormState(false, []).targetSessionId).toBeNull();
+  });
+
   test("hydrates and serializes once schedules", () => {
     const task = scheduledTask({
       type: "once",
@@ -1357,6 +1368,7 @@ function scheduledTask(
     overlapPolicy: "allow_concurrent",
     agentConfig: scheduledTaskAgentConfig(),
     reusableSessionId: null,
+    targetSessionId: null,
     rigId: null,
     variableSetId: null,
     environmentId: null,

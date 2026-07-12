@@ -41,8 +41,9 @@ import {
   summarizeLastRun,
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import type { ScheduledTask, ScheduledTaskRun, Session } from "@/types";
 
 export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -138,6 +139,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
         overlapPolicy: form.overlapPolicy,
+        targetSessionId:
+          form.runMode === "reusable_session" ? (form.targetSessionId ?? null) : null,
         agentConfig: agentConfigFromFormState(form, undefined, {
           resources: context.currentResources,
           model: context.model,
@@ -168,6 +171,8 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
         overlapPolicy: form.overlapPolicy,
+        targetSessionId:
+          form.runMode === "reusable_session" ? (form.targetSessionId ?? null) : null,
         agentConfig: agentConfigFromFormState(form, task),
       });
       setEditingTaskId(null);
@@ -519,6 +524,45 @@ function ScheduledTaskForm(props: {
 }) {
   const context = useAppContext();
   const [form, setForm] = useState(props.initialState);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const canTargetSessions =
+    hasWorkspacePermission(context.accessContext, props.workspaceId, "sessions:read") &&
+    hasWorkspacePermission(context.accessContext, props.workspaceId, "sessions:control");
+  const targetSessionControlId = `target-session-${props.submitLabel.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`;
+  useEffect(() => {
+    if (!canTargetSessions) {
+      return;
+    }
+    let cancelled = false;
+    setSessionsLoading(true);
+    setSessionsError(null);
+    void context.client
+      .listSessions(props.workspaceId, {
+        limit: 100,
+        ...(sessionSearch.trim() ? { search: sessionSearch.trim() } : {}),
+      })
+      .then((next) => {
+        if (!cancelled) {
+          setSessions(next);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setSessionsError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSessionsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [canTargetSessions, context.client, props.workspaceId, sessionSearch]);
   const update = <K extends keyof ScheduledTaskFormState>(
     key: K,
     value: ScheduledTaskFormState[K],
@@ -625,6 +669,64 @@ function ScheduledTaskForm(props: {
               </Select>
             </div>
           </div>
+          {canTargetSessions ? (
+            <div className="grid gap-1.5">
+              <Label htmlFor={targetSessionControlId}>Existing session (optional)</Label>
+              <Input
+                value={sessionSearch}
+                onChange={(event) => setSessionSearch(event.target.value)}
+                placeholder="Search sessions by title or message"
+                aria-label="Search existing sessions"
+                disabled={props.busy || form.runMode !== "reusable_session"}
+              />
+              <select
+                id={targetSessionControlId}
+                value={form.targetSessionId ?? ""}
+                onChange={(event) => update("targetSessionId", event.target.value || null)}
+                disabled={props.busy || form.runMode !== "reusable_session"}
+                aria-describedby={`${targetSessionControlId}-help`}
+                className="min-h-10 rounded-md border border-border bg-bg px-3 text-sm"
+              >
+                <option value="">Create a task-owned session on first run</option>
+                {form.targetSessionId &&
+                !sessions.some((session) => session.id === form.targetSessionId) ? (
+                  <option value={form.targetSessionId}>Selected session unavailable</option>
+                ) : null}
+                {sessions
+                  .filter((session) => session.status !== "cancelled")
+                  .filter((session) => {
+                    const query = sessionSearch.trim().toLowerCase();
+                    return (
+                      !query ||
+                      (session.title ?? "").toLowerCase().includes(query) ||
+                      session.initialMessage.toLowerCase().includes(query) ||
+                      session.id.toLowerCase().includes(query)
+                    );
+                  })
+                  .map((session) => (
+                    <option key={session.id} value={session.id}>
+                      {(session.title || session.initialMessage.slice(0, 72) || session.id) +
+                        ` · ${session.status}`}
+                    </option>
+                  ))}
+              </select>
+              <p id={`${targetSessionControlId}-help`} className="text-2xs text-fg-subtle">
+                Reuse one session keeps its history, title, goal, frozen rig, and sandbox route.
+                Leave this empty to keep the task-owned default.
+              </p>
+              {form.runMode !== "reusable_session" ? (
+                <p className="text-2xs text-fg-subtle">
+                  Choose “Reuse one session” before selecting an existing session.
+                </p>
+              ) : null}
+              {sessionsLoading ? (
+                <p className="text-2xs text-fg-subtle">Loading sessions…</p>
+              ) : null}
+              {sessionsError ? (
+                <Notice tone="failed">Couldn’t load existing sessions: {sessionsError}</Notice>
+              ) : null}
+            </div>
+          ) : null}
           <label className="flex items-center gap-2 text-xs text-fg-muted">
             <input
               type="checkbox"

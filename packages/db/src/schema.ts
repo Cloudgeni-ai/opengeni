@@ -1889,6 +1889,12 @@ export const scheduledTasks = pgTable(
     reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, {
       onDelete: "set null",
     }),
+    // A caller-selected existing session. This is deliberately separate from
+    // reusableSessionId, which is populated lazily for the legacy
+    // task-owned reusable_session path.
+    targetSessionId: uuid("target_session_id").references(() => sessions.id, {
+      onDelete: "set null",
+    }),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "restrict",
     }),
@@ -1909,6 +1915,10 @@ export const scheduledTasks = pgTable(
     variableSet: index("scheduled_tasks_variable_set_idx").on(
       table.workspaceId,
       table.variableSetId,
+    ),
+    targetSession: index("scheduled_tasks_target_session_idx").on(
+      table.workspaceId,
+      table.targetSessionId,
     ),
   }),
 );

@@ -34,6 +34,7 @@ import {
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireFile,
   requireScheduledTask,
+  ScheduledTaskConflictError,
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
@@ -409,6 +410,7 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -452,6 +454,7 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
+          targetSessionId: z4.string().uuid().nullable().optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -474,7 +477,15 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(raw),
         });
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        let task;
+        try {
+          task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        } catch (error) {
+          if (error instanceof ScheduledTaskConflictError) {
+            throw new Error(error.message, { cause: error });
+          }
+          throw error;
+        }
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,

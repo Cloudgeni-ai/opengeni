@@ -7,9 +7,11 @@ import {
   deleteScheduledTask,
   listScheduledTaskRuns,
   listScheduledTasks,
+  ScheduledTaskConflictError,
   updateScheduledTask,
 } from "@opengeni/db";
 import type { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -80,7 +82,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       payload,
       toolsProvided: scheduledTaskToolsProvided(rawPayload),
     });
-    const task = await updateScheduledTask(db, workspaceId, taskId, update);
+    let task;
+    try {
+      task = await updateScheduledTask(db, workspaceId, taskId, update);
+    } catch (error) {
+      if (error instanceof ScheduledTaskConflictError) {
+        throw new HTTPException(409, { message: error.message });
+      }
+      throw error;
+    }
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
