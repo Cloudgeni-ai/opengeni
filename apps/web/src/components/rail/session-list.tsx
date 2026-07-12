@@ -74,7 +74,10 @@ export function SessionList() {
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns page one; additional pages are appended and deduplicated.
   // A filter change starts a fresh cursor chain rather than mixing snapshots.
-  const paginationKey = sessionPageKey(rail.workspaceId, search);
+  // The server cursor carries the first page's short-lived snapshot identity.
+  // If a poll replaces that snapshot, any continuation loaded from the old
+  // activity order is stale even when workspace/search are unchanged.
+  const paginationKey = `${sessionPageKey(rail.workspaceId, search)}\u0000${nextCursor ?? "complete"}`;
   const paginationIdentity = useRef({ key: paginationKey, generation: 0 });
   paginationIdentity.current = advanceSessionPageIdentity(
     paginationIdentity.current,

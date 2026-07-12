@@ -10494,8 +10494,10 @@ export type ListSessionsOptions = {
 };
 
 export type SessionListCursor = {
-  updatedAt: Date;
-  id: string;
+  snapshotId: string;
+  offset: number;
+  parentSessionFilter: string;
+  search: string | null;
 };
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions & {
@@ -10508,6 +10510,13 @@ export class SessionPinVersionConflictError extends Error {
   constructor(readonly current: Pick<Session, "pinned" | "pinnedAt" | "pinVersion">) {
     super("session pin version conflict");
     this.name = "SessionPinVersionConflictError";
+  }
+}
+
+export class SessionListCursorError extends Error {
+  constructor(message = "session list cursor is invalid or expired") {
+    super(message);
+    this.name = "SessionListCursorError";
   }
 }
 
@@ -10557,10 +10566,31 @@ function sessionFilters(
   return filters;
 }
 
-/** Opaque, URL-safe cursor encoding for the ordinary `updated_at, id` ordering. */
+const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function sessionParentFilter(parentSessionId: string | null | undefined): string {
+  return parentSessionId === undefined
+    ? "all"
+    : parentSessionId === null
+      ? "null"
+      : parentSessionId;
+}
+
+function sessionSearchFilter(search: string | undefined): string | null {
+  const trimmed = search?.trim();
+  return trimmed ? trimmed : null;
+}
+
+/** Opaque, URL-safe cursor encoding for a server-owned activity snapshot. */
 export function encodeSessionListCursor(cursor: SessionListCursor): string {
   return Buffer.from(
-    JSON.stringify({ updatedAt: cursor.updatedAt.toISOString(), id: cursor.id }),
+    JSON.stringify({
+      snapshotId: cursor.snapshotId,
+      offset: cursor.offset,
+      parentSessionFilter: cursor.parentSessionFilter,
+      search: cursor.search,
+    }),
   ).toString("base64url");
 }
 
@@ -10568,19 +10598,33 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
 export function decodeSessionListCursor(value: string): SessionListCursor | null {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
-      updatedAt?: unknown;
-      id?: unknown;
+      snapshotId?: unknown;
+      offset?: unknown;
+      parentSessionFilter?: unknown;
+      search?: unknown;
     };
-    const updatedAt = typeof parsed.updatedAt === "string" ? new Date(parsed.updatedAt) : null;
+    const parentSessionFilter = parsed.parentSessionFilter;
+    const search = parsed.search;
+    const offset = parsed.offset;
     if (
-      !updatedAt ||
-      Number.isNaN(updatedAt.getTime()) ||
-      typeof parsed.id !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+      typeof parsed.snapshotId !== "string" ||
+      !UUID_PATTERN.test(parsed.snapshotId) ||
+      typeof offset !== "number" ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      (parentSessionFilter !== "all" &&
+        parentSessionFilter !== "null" &&
+        (typeof parentSessionFilter !== "string" || !UUID_PATTERN.test(parentSessionFilter))) ||
+      (search !== null && (typeof search !== "string" || search.length > 200))
     ) {
       return null;
     }
-    return { updatedAt, id: parsed.id };
+    return {
+      snapshotId: parsed.snapshotId,
+      offset,
+      parentSessionFilter: parentSessionFilter as string,
+      search: search as string | null,
+    };
   } catch {
     return null;
   }
@@ -10588,21 +10632,122 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
 
 /**
  * Server-authoritative member-specific page. Pinned rows are returned separately
- * and omitted from ordinary cursor pages, so list pagination cannot duplicate a
- * session. Both sections share parent/search predicates.
+ * and omitted from ordinary pages, so list pagination cannot duplicate a
+ * session. The first page materializes the complete ordinary activity order in
+ * a short-lived, subject-scoped snapshot; continuation cursors carry only that
+ * snapshot id and offset, while the page joins live session rows for current
+ * lifecycle/title data.
  */
 export async function listSessionsForSubject(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
-  const limit = options.limit ?? 50;
+  const limit = Math.max(1, options.limit ?? 50);
   return await withWorkspaceSubjectRls(
     db,
     workspaceId,
     options.subjectId,
     async (tx) => {
       const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
+      const parentFilter = sessionParentFilter(options.parentSessionId);
+      const searchFilter = sessionSearchFilter(options.search);
+      const now = new Date();
+      await tx
+        .delete(schema.sessionListSnapshots)
+        .where(lt(schema.sessionListSnapshots.expiresAt, now));
+
+      let pageIds: string[];
+      let nextCursor: string | null = null;
+      if (options.cursor) {
+        const cursor = options.cursor;
+        if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
+          throw new SessionListCursorError("session list cursor does not match its filters");
+        }
+        const [snapshot] = await tx
+          .select()
+          .from(schema.sessionListSnapshots)
+          .where(
+            and(
+              eq(schema.sessionListSnapshots.id, cursor.snapshotId),
+              eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+              eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+            ),
+          )
+          .limit(1);
+        if (!snapshot || snapshot.expiresAt.getTime() <= now.getTime()) {
+          throw new SessionListCursorError();
+        }
+        if (
+          snapshot.parentSessionFilter !== parentFilter ||
+          (snapshot.search ?? null) !== searchFilter ||
+          cursor.offset > snapshot.ordinarySessionIds.length
+        ) {
+          throw new SessionListCursorError();
+        }
+        pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
+        const nextOffset = cursor.offset + pageIds.length;
+        if (nextOffset < snapshot.ordinarySessionIds.length) {
+          nextCursor = encodeSessionListCursor({
+            snapshotId: snapshot.id,
+            offset: nextOffset,
+            parentSessionFilter: snapshot.parentSessionFilter,
+            search: snapshot.search ?? null,
+          });
+        }
+      } else {
+        const ordinaryIdRows = await tx
+          .select({ id: schema.sessions.id })
+          .from(schema.sessions)
+          .leftJoin(
+            schema.sessionPins,
+            and(
+              eq(schema.sessionPins.workspaceId, workspaceId),
+              eq(schema.sessionPins.subjectId, options.subjectId),
+              eq(schema.sessionPins.sessionId, schema.sessions.id),
+            ),
+          )
+          .where(
+            and(
+              ...filters,
+              or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+            ),
+          )
+          .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id));
+        const ordinaryIds = ordinaryIdRows.map((row) => row.id);
+        pageIds = ordinaryIds.slice(0, limit);
+        if (ordinaryIds.length > limit) {
+          const [workspace] = await tx
+            .select({ accountId: schema.workspaces.accountId })
+            .from(schema.workspaces)
+            .where(eq(schema.workspaces.id, workspaceId))
+            .limit(1);
+          if (!workspace) {
+            throw new SessionListCursorError();
+          }
+          const [snapshot] = await tx
+            .insert(schema.sessionListSnapshots)
+            .values({
+              accountId: workspace.accountId,
+              workspaceId,
+              subjectId: options.subjectId,
+              parentSessionFilter: parentFilter,
+              search: searchFilter,
+              ordinarySessionIds: ordinaryIds,
+              expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
+            })
+            .returning();
+          if (!snapshot) {
+            throw new SessionListCursorError();
+          }
+          nextCursor = encodeSessionListCursor({
+            snapshotId: snapshot.id,
+            offset: limit,
+            parentSessionFilter: parentFilter,
+            search: searchFilter,
+          });
+        }
+      }
       const pinnedRows = await tx
         .select({ session: schema.sessions, pin: schema.sessionPins })
         .from(schema.sessionPins)
@@ -10616,42 +10761,37 @@ export async function listSessionsForSubject(
           ),
         )
         .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id));
-      const cursorFilter = options.cursor
-        ? or(
-            lt(schema.sessions.updatedAt, options.cursor.updatedAt),
-            and(
-              eq(schema.sessions.updatedAt, options.cursor.updatedAt),
-              lt(schema.sessions.id, options.cursor.id),
-            ),
-          )
-        : undefined;
-      const ordinaryRows = await tx
-        .select({ session: schema.sessions, pin: schema.sessionPins })
-        .from(schema.sessions)
-        .leftJoin(
-          schema.sessionPins,
-          and(
-            eq(schema.sessionPins.workspaceId, workspaceId),
-            eq(schema.sessionPins.subjectId, options.subjectId),
-            eq(schema.sessionPins.sessionId, schema.sessions.id),
-          ),
-        )
-        .where(
-          and(
-            ...filters,
-            or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
-            ...(cursorFilter ? [cursorFilter] : []),
-          ),
-        )
-        .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
-        .limit(limit + 1);
-      const pageRows = ordinaryRows.slice(0, limit);
+      const ordinaryRows =
+        pageIds.length === 0
+          ? []
+          : await tx
+              .select({ session: schema.sessions, pin: schema.sessionPins })
+              .from(schema.sessions)
+              .leftJoin(
+                schema.sessionPins,
+                and(
+                  eq(schema.sessionPins.workspaceId, workspaceId),
+                  eq(schema.sessionPins.subjectId, options.subjectId),
+                  eq(schema.sessionPins.sessionId, schema.sessions.id),
+                ),
+              )
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, workspaceId),
+                  inArray(schema.sessions.id, pageIds),
+                  or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+                ),
+              );
+      const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
+      const pageRows = pageIds.flatMap((id) => {
+        const row = ordinaryById.get(id);
+        return row ? [row] : [];
+      });
       const ids = [
         ...pinnedRows.map((row) => row.session.id),
         ...pageRows.map((row) => row.session.id),
       ];
       const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
-      const tail = pageRows.at(-1)?.session;
       return {
         pinned: pinnedRows.map((row) =>
           mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
@@ -10659,13 +10799,10 @@ export async function listSessionsForSubject(
         sessions: pageRows.map((row) =>
           mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
         ),
-        nextCursor:
-          ordinaryRows.length > limit && tail
-            ? encodeSessionListCursor({ updatedAt: tail.updatedAt, id: tail.id })
-            : null,
+        nextCursor,
       };
     },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
+    { isolationLevel: "repeatable read" },
   );
 }
 

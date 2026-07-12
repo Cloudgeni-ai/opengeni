@@ -56,6 +56,7 @@ import {
   withCodexCapacityMutation,
   setSessionPin,
   SessionPinVersionConflictError,
+  SessionListCursorError,
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatus,
@@ -123,13 +124,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
-    const page = await listSessionsForSubject(db, workspaceId, {
-      subjectId: grant.subjectId,
-      limit: boundedLimit(query.limit),
-      ...(query.cursor ? { cursor: query.cursor } : {}),
-      ...(query.search ? { search: query.search } : {}),
-      ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
-    });
+    let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
+    try {
+      page = await listSessionsForSubject(db, workspaceId, {
+        subjectId: grant.subjectId,
+        limit: boundedLimit(query.limit),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
+        ...(query.search ? { search: query.search } : {}),
+        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+      });
+    } catch (error) {
+      if (error instanceof SessionListCursorError) {
+        throw new HTTPException(400, { message: error.message });
+      }
+      throw error;
+    }
     if (pageView) {
       return c.json(page);
     }

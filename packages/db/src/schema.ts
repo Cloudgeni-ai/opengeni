@@ -645,6 +645,54 @@ export const sessionPins = pgTable(
   }),
 );
 
+// A short-lived server-owned continuation snapshot for the pin-aware session
+// list. The ordinary list is ordered by mutable activity, so a cursor cannot
+// safely replay that order from updated_at alone across HTTP requests. The
+// snapshot stores the already-ordered ordinary ids; the list query still joins
+// live session rows for current lifecycle/title data and expires snapshots
+// opportunistically.
+export const sessionListSnapshots = pgTable(
+  "session_list_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    parentSessionFilter: text("parent_session_filter").notNull().default("all"),
+    search: text("search"),
+    ordinarySessionIds: uuid("ordinary_session_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_list_snapshots_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    subjectNonempty: check(
+      "session_list_snapshots_subject_nonempty",
+      sql`length(btrim(${table.subjectId})) > 0`,
+    ),
+    parentFilterValid: check(
+      "session_list_snapshots_parent_filter_valid",
+      sql`${table.parentSessionFilter} = 'all' or ${table.parentSessionFilter} = 'null' or ${table.parentSessionFilter} ~ '^[0-9a-fA-F-]{36}$'`,
+    ),
+    searchLength: check(
+      "session_list_snapshots_search_length",
+      sql`${table.search} is null or length(${table.search}) <= 200`,
+    ),
+    workspaceExpiry: index("session_list_snapshots_workspace_expiry_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.expiresAt,
+    ),
+  }),
+);
+
 export const sessionMcpServers = pgTable(
   "session_mcp_servers",
   {

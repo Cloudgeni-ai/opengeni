@@ -6,6 +6,7 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
 const migrationName = "0054_session_pins.sql";
+const snapshotMigrationName = "0055_session_list_snapshots.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let available = true;
@@ -76,14 +77,19 @@ describe("0054 session pin migration (real PostgreSQL)", () => {
     const [state] = await admin<
       {
         applied: boolean;
+        snapshotApplied: boolean;
         indexValid: boolean;
         rowSecurity: boolean;
         forceRowSecurity: boolean;
+        snapshotRowSecurity: boolean;
+        snapshotForceRowSecurity: boolean;
       }[]
     >`
       select
         (select count(*) = 1 from schema_migrations
           where name = ${migrationName}) as applied,
+        (select count(*) = 1 from schema_migrations
+          where name = ${snapshotMigrationName}) as "snapshotApplied",
         coalesce((
           select i.indisvalid
           from pg_index i
@@ -91,14 +97,21 @@ describe("0054 session pin migration (real PostgreSQL)", () => {
           where c.relname = 'sessions_workspace_id_idx'
         ), false) as "indexValid",
         c.relrowsecurity as "rowSecurity",
-        c.relforcerowsecurity as "forceRowSecurity"
+        c.relforcerowsecurity as "forceRowSecurity",
+        snapshot.relrowsecurity as "snapshotRowSecurity",
+        snapshot.relforcerowsecurity as "snapshotForceRowSecurity"
       from pg_class c
-      where c.oid = 'session_pins'::regclass`;
+      cross join pg_class snapshot
+      where c.oid = 'session_pins'::regclass
+        and snapshot.oid = 'session_list_snapshots'::regclass`;
     expect(state).toEqual({
       applied: true,
+      snapshotApplied: true,
       indexValid: true,
       rowSecurity: true,
       forceRowSecurity: true,
+      snapshotRowSecurity: true,
+      snapshotForceRowSecurity: true,
     });
   }, 30_000);
 });

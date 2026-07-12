@@ -79,6 +79,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       from pg_class
       where oid = 'session_pins'::regclass`;
     expect(table).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+    const [snapshotTable] = await admin<
+      { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+    >`
+      select relrowsecurity, relforcerowsecurity
+      from pg_class
+      where oid = 'session_list_snapshots'::regclass`;
+    expect(snapshotTable).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
     const isolation = await withWorkspaceSubjectRls(
       db,
       (await freshWorkspace()).workspaceId,
@@ -293,9 +300,54 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       workspace.workspaceId,
       "user:two",
       async (scoped) =>
-        await scoped.execute(sql`select id from session_pins where subject_id = 'user:one'`),
+        await scoped.execute(sql`
+          select id from session_pins where subject_id = 'user:one'
+          union all
+          select id from session_list_snapshots where subject_id = 'user:one'`),
     );
     expect(sameWorkspaceOtherSubject).toEqual([]);
+  }, 60_000);
+
+  test("keeps a session that moves above the cursor in its snapshot continuation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const oldest = await session({ ...workspace, message: "snapshot oldest" });
+    const middle = await session({ ...workspace, message: "snapshot middle" });
+    const newest = await session({ ...workspace, message: "snapshot newest" });
+    await admin`
+      update sessions
+      set updated_at = now() - interval '3 minutes'
+      where id = ${oldest.id}`;
+    await admin`
+      update sessions
+      set updated_at = now() - interval '2 minutes'
+      where id = ${middle.id}`;
+    await admin`
+      update sessions
+      set updated_at = now() - interval '1 minute'
+      where id = ${newest.id}`;
+
+    const firstPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: "user:snapshot",
+      limit: 1,
+    });
+    expect(firstPage.sessions.map((row) => row.id)).toEqual([newest.id]);
+    const cursor = decodeSessionListCursor(firstPage.nextCursor!);
+    expect(cursor).toMatchObject({ offset: 1, search: null, parentSessionFilter: "all" });
+
+    // This is the race the old updated_at cursor could lose: the row was below
+    // page one, then became newer than page one's tail before page two.
+    await admin`
+      update sessions set updated_at = now() + interval '1 minute' where id = ${middle.id}`;
+
+    const secondPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: "user:snapshot",
+      limit: 1,
+      cursor: cursor!,
+    });
+    expect(secondPage.sessions.map((row) => row.id)).toEqual([middle.id]);
+    expect(secondPage.sessions.map((row) => row.id)).not.toContain(newest.id);
+    expect(secondPage.nextCursor).toBeTruthy();
   }, 60_000);
 
   test("treats percent, underscore, and backslash as literal search text", async () => {
