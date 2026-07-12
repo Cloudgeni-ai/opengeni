@@ -94,6 +94,8 @@ async function templateDbName(): Promise<string> {
 const STATE_DIR = join(tmpdir(), "opengeni-shared-pg");
 const LOCK_DIR = join(STATE_DIR, "lock");
 const REFCOUNT_FILE = join(STATE_DIR, "refcount");
+const SHARED_POSTGRES_STARTUP_ATTEMPTS = 3;
+const SHARED_POSTGRES_STARTUP_RETRY_DELAY_MS = 250;
 
 export type SharedTestDatabase = {
   /** Superuser connection scoped to this file's own database (bypasses RLS). */
@@ -124,6 +126,29 @@ async function dockerOk(args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Retry only the shared PostgreSQL container's bounded startup boundary. Test
+ * files must not retry their own assertions or migrations: a persistent Docker
+ * or database failure still returns false (and the CI real-DB gate fails
+ * closed), while a short daemon/image startup race gets three deterministic
+ * chances to recover.
+ */
+export async function retrySharedPostgresStartup(
+  attempt: () => Promise<boolean>,
+  options: { sleep?: (delayMs: number) => Promise<void> } = {},
+): Promise<boolean> {
+  const sleep = options.sleep ?? Bun.sleep;
+  for (let number = 1; number <= SHARED_POSTGRES_STARTUP_ATTEMPTS; number += 1) {
+    if (await attempt().catch(() => false)) {
+      return true;
+    }
+    if (number < SHARED_POSTGRES_STARTUP_ATTEMPTS) {
+      await sleep(number * SHARED_POSTGRES_STARTUP_RETRY_DELAY_MS);
+    }
+  }
+  return false;
 }
 
 /** A cooperative cross-process lock via atomic mkdir, with stale-lock breaking. */
@@ -285,13 +310,10 @@ async function ensureTemplateBuilt(): Promise<void> {
  */
 async function ensureContainerAndAcquire(): Promise<boolean> {
   return withLock(async () => {
-    if (!(await containerRunning())) {
+    const wasRunning = await containerRunning();
+    if (!wasRunning) {
       // Clear any stale refcount left over from a previous crashed run.
       await writeRefcount(0);
-      // Remove a stopped leftover of the same name, then start fresh. NOT --rm:
-      // the container must survive across the many test-file processes that
-      // share it; the last file out removes it explicitly.
-      await dockerOk(["rm", "-f", CONTAINER]);
       // ONE container is shared by every DB/API/worker integration test FILE in
       // the parallel `bun test` run. Each file opens its own connection pool (the
       // createDb pool + a superuser admin pool), so dozens of files together can
@@ -301,26 +323,37 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      const started = await dockerOk([
-        "run",
-        "-d",
-        "-e",
-        `POSTGRES_PASSWORD=${PASSWORD}`,
-        "-p",
-        `${PORT}:5432`,
-        "--name",
-        CONTAINER,
-        IMAGE,
-        "-c",
-        "max_connections=1000",
-        "-c",
-        "shared_buffers=256MB",
-      ]);
+      // Remove a stopped leftover before each bounded attempt. NOT --rm: the
+      // container must survive across the many test-file processes that share
+      // it; the last file out removes it explicitly.
+      const started = await retrySharedPostgresStartup(async () => {
+        await dockerOk(["rm", "-f", CONTAINER]);
+        return dockerOk([
+          "run",
+          "-d",
+          "-e",
+          `POSTGRES_PASSWORD=${PASSWORD}`,
+          "-p",
+          `${PORT}:5432`,
+          "--name",
+          CONTAINER,
+          IMAGE,
+          "-c",
+          "max_connections=1000",
+          "-c",
+          "shared_buffers=256MB",
+        ]);
+      });
       if (!started) {
         return false; // docker unavailable
       }
-      try {
-        await waitForReady(`${ADMIN_BASE_URL}/postgres`);
+    }
+    try {
+      // Probe on every acquire, including an existing shared container, so a
+      // transient daemon/container reconnect is absorbed at this service
+      // boundary rather than surfacing as a misleading migration/test error.
+      await waitForReady(`${ADMIN_BASE_URL}/postgres`);
+      if (!wasRunning) {
         // Provision the cluster-global login role once (per-database GRANTs are
         // applied later, per file, after that file's migrations run).
         const admin = postgres(`${ADMIN_BASE_URL}/postgres`, { max: 1 });
@@ -334,10 +367,10 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         } finally {
           await admin.end().catch(() => undefined);
         }
-      } catch (err) {
-        await dockerOk(["rm", "-f", CONTAINER]);
-        throw err;
       }
+    } catch (err) {
+      if (!wasRunning) await dockerOk(["rm", "-f", CONTAINER]);
+      throw err;
     }
     // Build the once-per-container migrated template (idempotent; self-heals a
     // crashed partial). Inside the lock so exactly one process pays the

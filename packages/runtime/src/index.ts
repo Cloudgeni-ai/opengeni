@@ -5096,8 +5096,11 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
  *      coreutils `timeout` (NOT `bash -e` — the script opts into `set -e`
  *      itself if it wants), then captures the exit code and `touch`es the marker
  *      ONLY on success (exit 0) so a failed/timed-out setup re-runs next turn.
- * The heredoc delimiter is quoted, so the script content is executed verbatim
- * with no host-side expansion.
+ * The script is transported as one rigorously shell-quoted printf argument, so
+ * every character is written verbatim with no delimiter collision or host-side
+ * expansion. Setup output is captured while the script runs: successful user
+ * output cannot counterfeit the wrapper-owned skip sentinel, while failed setup
+ * still reports its diagnostics.
  */
 export function rigSetupScriptCommand(
   script: string,
@@ -5127,12 +5130,12 @@ export function rigSetupScriptCommand(
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if [ -f "$__OG_RIG_MARKER" ]; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '__OG_RIG_SCRIPT="$(mktemp)"',
-    "cat > \"$__OG_RIG_SCRIPT\" <<'__OPENGENI_RIG_SETUP_SCRIPT_EOF__'",
-    script,
-    "__OPENGENI_RIG_SETUP_SCRIPT_EOF__",
-    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT"',
+    `    printf '%s' ${shellQuote(script)} > "$__OG_RIG_SCRIPT"`,
+    '    __OG_RIG_OUTPUT="$(mktemp)"',
+    '    timeout -k 5s "${__OG_RIG_TIMEOUT_SECS}s" bash "$__OG_RIG_SCRIPT" >"$__OG_RIG_OUTPUT" 2>&1',
     "__OG_RIG_RC=$?",
-    '    rm -f "$__OG_RIG_SCRIPT"',
+    '    if [ "$__OG_RIG_RC" -ne 0 ]; then cat "$__OG_RIG_OUTPUT" >&2 || true; fi',
+    '    rm -f "$__OG_RIG_SCRIPT" "$__OG_RIG_OUTPUT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then touch "$__OG_RIG_MARKER"; fi',
     '    exit "$__OG_RIG_RC"',
     "  fi",
@@ -5206,13 +5209,9 @@ export async function runRigSetupHook(
     );
   }
   const output = sandboxCommandOutput(result);
-  // Marker present → the guard skipped the script. Distinct terminal signal.
-  if (output.includes(RIG_SETUP_SKIPPED_SENTINEL)) {
-    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
-    return;
-  }
-  // Ran → classify. A "still running" result means the script outlived the rig
-  // timeout; any nonzero/absent exit code is a setup failure. Both fail closed.
+  // Classify execution status before interpreting any output. A failed or
+  // still-running command must never turn into a skip merely because the user
+  // script echoed the wrapper's sentinel.
   const stillRunning = sandboxCommandStillRunning(result);
   const exitCode = sandboxCommandExitCode(result);
   if (stillRunning || exitCode === null || exitCode !== 0) {
@@ -5220,15 +5219,13 @@ export async function runRigSetupHook(
       output.length > RIG_SETUP_OUTPUT_TAIL_LIMIT
         ? output.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT)
         : output;
-    // coreutils `timeout` reports 124 when its deadline expires. Providers may
-    // instead return a still-running session handle, so both representations
-    // are the same rig-timeout failure class. Other nonzero codes stay exact.
-    const timedOut = stillRunning || exitCode === 124;
-    const reason = timedOut
+    const reason = stillRunning
       ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
-        : `exited with code ${exitCode}`;
+        : exitCode === 124
+          ? "timed out or exited with code 124"
+          : `exited with code ${exitCode}`;
     const failure = new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
@@ -5237,6 +5234,13 @@ export async function runRigSetupHook(
       payload: { ...payload, error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) },
     });
     throw failure;
+  }
+  // The wrapper's skip branch emits exactly this one line. Accept the
+  // transport-normalized no-newline form as well, but reject any prefix,
+  // suffix, or user-script output so only an authentic wrapper result skips.
+  if (output === RIG_SETUP_SKIPPED_SENTINEL || output === `${RIG_SETUP_SKIPPED_SENTINEL}\n`) {
+    await context.onRuntimeEvent?.({ type: "rig.setup.skipped", payload });
+    return;
   }
   await context.onRuntimeEvent?.({
     type: "rig.setup.completed",

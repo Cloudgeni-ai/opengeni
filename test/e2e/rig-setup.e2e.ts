@@ -171,7 +171,7 @@ describe("real Docker rig-setup e2e", () => {
 
     const failed = rigSetupEvents(events).find((e) => e.type === "rig.setup.failed");
     expect(failed).toBeDefined();
-    expect(failed?.payload.error).toContain("rig setup timeout");
+    expect(failed?.payload.error).toContain("timed out or exited with code 124");
   }, 300_000);
 });
 
