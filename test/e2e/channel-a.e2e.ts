@@ -143,22 +143,30 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
   }, 60_000);
 
   test("git status + diff on a staged change parse into structured hunks", async () => {
-    // Build a repo with a staged modification via terminal exec + fs.write.
-    await channelA("/terminal/exec", {
+    // Build a repo with a staged modification via terminal exec + fs.write. Create
+    // the cwd explicitly: terminal execution reports a process exit in its body, so
+    // an HTTP 200 alone does not prove that `git init` ran.
+    const init = await channelA("/terminal/exec", {
       command:
-        "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false",
-      cwd: "repo",
+        "mkdir -p repo && git -C repo init -q && git -C repo config user.email t@t.io && git -C repo config user.name t && git -C repo config commit.gpgsign false",
+      cwd: "",
     });
+    expect(init.status).toBe(200);
+    expect(((await init.json()) as { exitCode: number }).exitCode).toBe(0);
     await channelA("/fs/write", { path: "repo/code.txt", content: "alpha\nbeta\ngamma\n" });
-    await channelA("/terminal/exec", {
+    const commit = await channelA("/terminal/exec", {
       command: "git add code.txt && git commit -q -m base",
       cwd: "repo",
     });
+    expect(commit.status).toBe(200);
+    expect(((await commit.json()) as { exitCode: number }).exitCode).toBe(0);
     await channelA("/fs/write", {
       path: "repo/code.txt",
       content: "alpha\nbeta CHANGED\ngamma\ndelta\n",
     });
-    await channelA("/terminal/exec", { command: "git add code.txt", cwd: "repo" });
+    const stage = await channelA("/terminal/exec", { command: "git add code.txt", cwd: "repo" });
+    expect(stage.status).toBe(200);
+    expect(((await stage.json()) as { exitCode: number }).exitCode).toBe(0);
 
     const status = await channelA("/git/status", { path: "repo" });
     expect(status.status).toBe(200);

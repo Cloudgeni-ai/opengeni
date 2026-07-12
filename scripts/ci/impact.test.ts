@@ -126,6 +126,12 @@ describe("fail-closed change impact", () => {
     expect(ci).toContain("bun-version-file: .bun-version");
     expect(desktop).toContain("bun-version-file: .bun-version");
     expect(`${ci}\n${desktop}`).not.toContain("bun-version: latest");
+    expect(ci).not.toContain("~/.cache/ms-playwright");
+    expect(desktop).not.toContain("actions/cache");
+    expect(desktop).not.toContain("~/.bun/install/cache");
+    expect(desktop).toContain("BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store");
+    expect(desktop).toContain('rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"');
+    expect(desktop).toContain("bun install --frozen-lockfile --backend=copyfile");
     expect(dockerfile).toMatch(
       new RegExp(
         `^FROM oven/bun:${version.replaceAll(".", "\\.")}@sha256:[0-9a-f]{64} AS dependencies`,
@@ -134,14 +140,29 @@ describe("fail-closed change impact", () => {
     );
   });
 
-  test("the immutable NATS auth-callout gate fails fast when its server exits", () => {
+  test("the immutable NATS auth-callout gate runs on stock Docker CI and fails fast", () => {
     const integration = readFileSync(
       "test/integration/selfhosted-auth-callout.integration.ts",
       "utf8",
     );
+    expect(integration).toContain('process.env.OPENGENI_TEST_REQUIRE_DOCKER === "1"');
+    expect(integration).toMatch(/nats:2\.10\.29-alpine@sha256:[0-9a-f]{64}/);
+    expect(integration).toContain('"--network",\n          "host"');
+    expect(integration).toContain('Bun.spawn(["docker", "rm", "--force", name]');
+    expect(integration).toContain('["nix", "run", "nixpkgs#nats-server"');
     expect(integration).toContain(
       "while (Date.now() < deadline) {\n    if (proc.exitCode !== null) break;",
     );
+  });
+
+  test("Channel-A creates its git fixture before using it and checks process exits", () => {
+    const e2e = readFileSync("test/e2e/channel-a.e2e.ts", "utf8");
+    expect(e2e).toContain("mkdir -p repo && git -C repo init -q");
+    for (const result of ["init", "commit", "stage"]) {
+      expect(e2e).toContain(
+        `expect(((await ${result}.json()) as { exitCode: number }).exitCode).toBe(0);`,
+      );
+    }
   });
 
   test("workload images use one shared bake graph and one dependency install layer", () => {

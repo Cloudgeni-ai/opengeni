@@ -318,11 +318,6 @@ jobs:
           jq . <<<"$selection"
           echo "needs_browser=$(jq -r .needsBrowser <<<"$selection")" >> "$GITHUB_OUTPUT"
           echo "needs_ope26_session_pins=$(jq -r .needsOpe26SessionPins <<<"$selection")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        if: steps.e2e-selection.outputs.needs_browser == 'true'
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
       - name: Install Chromium runtime
         if: steps.e2e-selection.outputs.needs_browser == 'true'
         run: bunx playwright install --with-deps chromium
