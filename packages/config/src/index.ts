@@ -1283,8 +1283,14 @@ export function resolveProviderApiKey(
   return undefined;
 }
 
-/** The built-in provider's stable id: "openai" on the OpenAI platform, "azure" on Azure. */
-function builtinProviderId(settings: Pick<Settings, "openaiProvider">): string {
+/**
+ * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
+ * on Azure. Exported because the workspace model-policy gate must attribute
+ * the legacy resolveTurnModel-null fallback (which routes to this built-in
+ * client) to the SAME identity the router uses — otherwise a policy blocking
+ * the built-in could be bypassed through the null-resolution path.
+ */
+export function builtinProviderId(settings: Pick<Settings, "openaiProvider">): string {
   return settings.openaiProvider === "azure" ? "azure" : "openai";
 }
 

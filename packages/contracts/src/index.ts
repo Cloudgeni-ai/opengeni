@@ -4709,3 +4709,39 @@ export type HealthResponse = {
   variableSet: string;
   ok: boolean;
 };
+
+/**
+ * Per-workspace model/provider availability policy (see @opengeni/db
+ * workspace_model_policies). NULL fields = unrestricted; a non-null
+ * allowedProviders is a strict allowlist over RESOLVED provider identities
+ * (the built-in OpenAI/Azure client's id — "openai"/"azure" — including the
+ * legacy null-resolution fallback; "codex-subscription" for the ChatGPT/Codex
+ * overlay; registry providers by their declared ids); a non-null allowedModels
+ * is an additional exact-model-id allowlist. Pure and shared so the API edge
+ * (422) and the worker's authoritative post-resolution gate (fail-loud
+ * turn.failed, never a silent remap) can never disagree on semantics.
+ */
+export type WorkspaceModelPolicyContract = {
+  allowedProviders: string[] | null;
+  allowedModels: string[] | null;
+};
+
+export type WorkspaceModelPolicyVerdict =
+  | { allowed: true }
+  | { allowed: false; reason: "provider" | "model" };
+
+export function evaluateWorkspaceModelPolicy(
+  policy: WorkspaceModelPolicyContract | null | undefined,
+  candidate: { providerId: string; modelId: string },
+): WorkspaceModelPolicyVerdict {
+  if (!policy) {
+    return { allowed: true };
+  }
+  if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
+    return { allowed: false, reason: "provider" };
+  }
+  if (policy.allowedModels !== null && !policy.allowedModels.includes(candidate.modelId)) {
+    return { allowed: false, reason: "model" };
+  }
+  return { allowed: true };
+}

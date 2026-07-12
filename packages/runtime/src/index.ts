@@ -677,6 +677,27 @@ export class CodexSubscriptionUnavailableError extends Error {
   }
 }
 
+/**
+ * The workspace's model policy blocks the provider/model this turn resolved
+ * to. Thrown at the worker's post-resolution gate INSTEAD of running the turn
+ * on the blocked provider — a policy-restricted workspace (e.g. fail-closed to
+ * the Codex subscription) must never silently remap to, or fall through to,
+ * the paid built-in client. Like CodexSubscriptionUnavailableError the message
+ * is user-actionable and surfaces verbatim as a non-retryable turn.failed.
+ */
+export class WorkspaceModelPolicyBlockedError extends Error {
+  constructor(modelName: string, providerId: string, reason: "provider" | "model") {
+    super(
+      reason === "provider"
+        ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
+          `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
+        : `Model "${modelName}" is not in this workspace's allowed models. ` +
+          `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
+    );
+    this.name = "WorkspaceModelPolicyBlockedError";
+  }
+}
+
 export function configureOpenAI(settings: Settings): void {
   setOpenAIResponsesTransport(settings.openaiResponsesTransport);
   setTracingDisabled(settings.disableOpenaiTracing || !settings.observabilityOtlpEndpoint);
