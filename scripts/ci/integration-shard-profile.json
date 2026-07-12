@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "tier": "integration",
+  "units": "milliseconds",
+  "source": {
+    "runId": 29196353760,
+    "method": "shard-observed totals allocated conservatively from explicit waits and test behavior",
+    "observedCriticalShardMs": 318000
+  },
+  "environment": {
+    "platform": "linux",
+    "architecture": "x64",
+    "bunVersion": "1.3.14",
+    "bunVersionFileSha256": "56b0485099b6c5427d3b68c042fd05b632d5e52e924c5064473389812227164c",
+    "serviceImagesPath": "packages/testing/src/service-images.ts",
+    "serviceImagesSha256": "10325492ee77ee9ba92fca240600522e852bd3371b74975ee71605e14ed3cf81"
+  },
+  "entries": {
+    "test/integration/api.integration.ts": {
+      "sha256": "9ed621eb1eaa6b4fba8c994d68c603595cd1bdbca252d5e2d6a334050232e7a3",
+      "planningWeight": 85000
+    },
+    "test/integration/db.integration.ts": {
+      "sha256": "07649d0975dd5cb6a3c073afccc3ac710fe092a5f120bd4b84d71d7ce57f45ab",
+      "planningWeight": 16000
+    },
+    "test/integration/file-upload.integration.ts": {
+      "sha256": "8413dd3e0c79f15ebc99184b32c64e5a043ceb8c655a4f215c3c67367eb0961e",
+      "planningWeight": 10000
+    },
+    "test/integration/nats.integration.ts": {
+      "sha256": "f3acc5556aac02518313f2746f98b8b2a02ff0788229075c41b337ecdf57617e",
+      "planningWeight": 3000
+    },
+    "test/integration/selfhosted-auth-callout.integration.ts": {
+      "sha256": "0886d48d7d27025b1c064a09fb76ce4aa7155410eb294f5bf4b849c070251839",
+      "planningWeight": 10000
+    },
+    "test/integration/selfhosted-control-transport.integration.ts": {
+      "sha256": "b742218d7727e36b2d7cbad660c85b66663ec29d293c0319ddc650afc0348027",
+      "planningWeight": 7000
+    },
+    "test/integration/temporal-workflow-activities.integration.ts": {
+      "sha256": "2f51603611f2063bcbc45ccb9221f9bbef4cb4fe6fc03725b59156972b411654",
+      "planningWeight": 5000
+    },
+    "test/integration/temporal-workflow-capacity.integration.ts": {
+      "sha256": "87cde0670e7e07d28e03347f0da44641242085b8b0a39833c126ef5e268e7572",
+      "planningWeight": 8000
+    },
+    "test/integration/temporal-workflow-continuity.integration.ts": {
+      "sha256": "755cb8e860c56d53a6a877a007d497730bc55c9b7545c50ae74b14dedad4fbd7",
+      "planningWeight": 7000
+    },
+    "test/integration/temporal-workflow-dispatch.integration.ts": {
+      "sha256": "51948aa48b3e220ffda621483f036467bd3d0f37edb5bd6c7ea461d11fe07fc3",
+      "planningWeight": 5000
+    },
+    "test/integration/temporal-workflow-interrupt.integration.ts": {
+      "sha256": "00b98f352c82d86e43f71a3feb1e0890e4357f28f9876799dd59b6c24211e443",
+      "planningWeight": 5000
+    },
+    "test/integration/temporal-workflow-worker-death.integration.ts": {
+      "sha256": "469d6f8f71ccff480f30a7e2f87ec6fcf15ab66e31bdb1fa102abdccab80825a",
+      "planningWeight": 65000
+    },
+    "test/integration/worker-activity.integration.ts": {
+      "sha256": "30335cf57ee0b3affe055b021528c3425f6abcf3a989918ad334d8295f53226e",
+      "planningWeight": 61000
+    },
+    "test/integration/worker-restart.integration.ts": {
+      "sha256": "5a965dbd0bfc6ca05a0a0a13663d795c4dc1dfd70637305fa3326824d90b896a",
+      "planningWeight": 240000
+    },
+    "test/integration/workspace-isolation.integration.ts": {
+      "sha256": "f377930e5a49ed1b4fb0cbc73d773c72cd514caface914398137394f1d4398ba",
+      "planningWeight": 8000
+    }
+  }
+}

@@ -77,8 +77,14 @@ describe("rigSetupScriptCommand (M3)", () => {
       "22222222-2222-4222-8222-222222222222",
       600_000,
     );
-    expect(command).toContain("mkdir -p '/var/opengeni'");
-    expect(command).toContain("/var/opengeni/rig-setup-22222222-2222-4222-8222-222222222222.done");
+    expect(command).toContain(
+      '__OG_RIG_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/opengeni-rig-setup-$(id -u)"',
+    );
+    expect(command).toContain(
+      `__OG_RIG_MARKER="$__OG_RIG_ROOT"/'rig-setup-22222222-2222-4222-8222-222222222222.done'`,
+    );
+    expect(command).toContain('case "$__OG_RIG_ROOT" in /*)');
+    expect(command).toContain('if [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]');
     // Skip path prints the sentinel and exits 0 without running the script.
     expect(command).toContain("__OPENGENI_RIG_SETUP_SKIPPED__");
     // The script is hard-killed by coreutils timeout (NOT bash -e), and the
@@ -89,6 +95,33 @@ describe("rigSetupScriptCommand (M3)", () => {
     expect(command).toContain('if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then');
     // The user script rides a quoted heredoc so it is executed verbatim.
     expect(command).toContain("echo hi");
+  });
+
+  test("the default marker root uses the caller-owned runtime directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opengeni-rig-unprivileged-"));
+    try {
+      const versionId = "22222222-2222-4222-8222-222222222222";
+      const proc = Bun.spawn(
+        ["bash", "-lc", rigSetupScriptCommand("printf ok", versionId, 10_000)],
+        {
+          env: { ...process.env, XDG_RUNTIME_DIR: root, TMPDIR: root },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      expect(await proc.exited).toBe(0);
+      expect(
+        existsSync(
+          join(
+            root,
+            `opengeni-rig-setup-${process.getuid?.() ?? 0}`,
+            `rig-setup-${versionId}.done`,
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("hard timeout kills setup and leaves the marker absent", async () => {

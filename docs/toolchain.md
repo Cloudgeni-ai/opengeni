@@ -97,6 +97,16 @@ non-discoverable typed helper whose changes map fail-closed to all six entries.
 This preserves isolated workers and real Temporal behavior while allowing the
 hosted-runner planner's hard six-shard ceiling to distribute the former
 monolithic critical path without unbounded fan-out.
+Integration shards use the versioned planning weights in
+`scripts/ci/integration-shard-profile.json`. The complete discovered file set,
+every file's SHA-256, Bun pin, platform/architecture, required-service image
+manifest, schema, and units must match before any weight is used; a missing,
+added, changed, or malformed fence rejects the entire profile and falls back to
+deterministic source-byte LPT rather than mixing stale and fresh data. Every
+integration and E2E shard always uploads a per-file JSON profile,
+initialized before the first child and atomically updated after each file, so
+success, failure, and cancellation evidence can replace conservative planning
+weights with measured p95 values in a reviewed follow-up.
 Only an E2E shard that actually owns a browser entry installs Playwright's
 Chromium runtime; Docker/sandbox-only shards do not repeat that apt/browser
 setup. Selected React and web changes still run their demo/application builds

@@ -138,7 +138,11 @@ describe("lazy provisioning synthetic manifest", () => {
     });
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
-    expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+    expect(
+      execCmds.some((cmd) =>
+        cmd.includes(`__OG_RIG_MARKER="$__OG_RIG_ROOT"/'rig-setup-ver-9.done'`),
+      ),
+    ).toBe(true);
   });
 
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability

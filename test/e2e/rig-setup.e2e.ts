@@ -113,7 +113,7 @@ describe("real Docker rig-setup e2e", () => {
   }
 
   test("first turn runs the setup (started+completed), second warm turn SKIPS via the marker", async () => {
-    const rigId = await seedRig("proof-rig", "echo ok > /var/opengeni/proof && touch /tmp/x");
+    const rigId = await seedRig("proof-rig", "echo ok > /tmp/opengeni-rig-proof && touch /tmp/x");
     const sessionId = await createRigSession(rigId, "hello");
     const firstEvents = await waitForTerminal(sessionId);
 

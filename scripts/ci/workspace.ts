@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
@@ -18,6 +19,14 @@ export type WorkspaceGraph = {
 export const UNIT_TEST_PATTERN = /(?:^|\/)\S+\.test\.tsx?$/;
 export const INTEGRATION_TEST_PATTERN = /(?:^|\/)\S+\.integration\.ts$/;
 export const E2E_TEST_PATTERN = /(?:^|\/)\S+\.e2e\.ts$/;
+export const INTEGRATION_SHARD_PROFILE = "scripts/ci/integration-shard-profile.json";
+
+export type ShardWeightResolution = {
+  mode: "profile" | "source-bytes";
+  weights: ReadonlyMap<string, number> | null;
+  reason: string;
+  profileSha256: string | null;
+};
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/integration/workspace-capture.integration.ts":
@@ -170,26 +179,115 @@ export function deterministicShards(
   root: string,
   files: readonly string[],
   count: number,
+  weights?: ReadonlyMap<string, number>,
 ): string[][] {
   if (!Number.isSafeInteger(count) || count < 1) throw new Error("shard count must be >= 1");
-  const shards = Array.from({ length: count }, () => ({ bytes: 0, files: [] as string[] }));
+  const shards = Array.from({ length: count }, () => ({ weight: 0, files: [] as string[] }));
   const weighted = [...new Set(files)].map((path) => ({
     path,
-    bytes: existsSync(join(root, path)) ? statSync(join(root, path)).size : 0,
+    weight:
+      weights?.get(path) ?? (existsSync(join(root, path)) ? statSync(join(root, path)).size : 0),
   }));
-  weighted.sort((a, b) => b.bytes - a.bytes || a.path.localeCompare(b.path));
+  weighted.sort((a, b) => b.weight - a.weight || a.path.localeCompare(b.path));
   for (const item of weighted) {
     const target = shards.reduce((best, shard, index) => {
       const bestShard = shards[best];
       if (!bestShard) return index;
-      return shard.bytes < bestShard.bytes ? index : best;
+      return shard.weight < bestShard.weight ? index : best;
     }, 0);
     const shard = shards[target];
     if (!shard) throw new Error(`missing deterministic shard ${target}`);
     shard.files.push(item.path);
-    shard.bytes += item.bytes;
+    shard.weight += item.weight;
   }
   return shards.map((shard) => shard.files.sort());
+}
+
+export function integrationShardWeights(
+  root = process.cwd(),
+  profilePath = join(root, INTEGRATION_SHARD_PROFILE),
+): ShardWeightResolution {
+  try {
+    const bytes = readFileSync(profilePath);
+    const parsed = JSON.parse(bytes.toString("utf8")) as {
+      schemaVersion?: unknown;
+      tier?: unknown;
+      units?: unknown;
+      environment?: {
+        platform?: unknown;
+        architecture?: unknown;
+        bunVersion?: unknown;
+        bunVersionFileSha256?: unknown;
+        serviceImagesPath?: unknown;
+        serviceImagesSha256?: unknown;
+      };
+      entries?: Record<string, { sha256?: unknown; planningWeight?: unknown }>;
+    };
+    if (
+      parsed.schemaVersion !== 1 ||
+      parsed.tier !== "integration" ||
+      parsed.units !== "milliseconds"
+    ) {
+      throw new Error("unsupported schema, tier, or units");
+    }
+    const environment = parsed.environment;
+    if (
+      !environment ||
+      environment.platform !== process.platform ||
+      environment.architecture !== process.arch ||
+      environment.bunVersion !== Bun.version ||
+      typeof environment.bunVersionFileSha256 !== "string" ||
+      typeof environment.serviceImagesPath !== "string" ||
+      typeof environment.serviceImagesSha256 !== "string"
+    ) {
+      throw new Error("profile environment or toolchain does not match this runner");
+    }
+    const hashFile = (path: string): string =>
+      createHash("sha256")
+        .update(readFileSync(join(root, path)))
+        .digest("hex");
+    if (hashFile(".bun-version") !== environment.bunVersionFileSha256) {
+      throw new Error("profile Bun version file fence is stale");
+    }
+    if (hashFile(environment.serviceImagesPath) !== environment.serviceImagesSha256) {
+      throw new Error("profile service-image fence is stale");
+    }
+    if (!parsed.entries || Array.isArray(parsed.entries))
+      throw new Error("entries must be an object");
+    const discovered = discoverTestFiles(root).integration;
+    const paths = Object.keys(parsed.entries).sort();
+    if (JSON.stringify(paths) !== JSON.stringify(discovered)) {
+      throw new Error("profile file set does not exactly match discovered integration tests");
+    }
+    const weights = new Map<string, number>();
+    for (const path of paths) {
+      const entry = parsed.entries[path];
+      if (!entry || typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) {
+        throw new Error(`invalid content hash for ${path}`);
+      }
+      if (!Number.isSafeInteger(entry.planningWeight) || Number(entry.planningWeight) < 1) {
+        throw new Error(`invalid planning weight for ${path}`);
+      }
+      const actual = createHash("sha256")
+        .update(readFileSync(join(root, path)))
+        .digest("hex");
+      if (actual !== entry.sha256) throw new Error(`stale content hash for ${path}`);
+      weights.set(path, Number(entry.planningWeight));
+    }
+    return {
+      mode: "profile",
+      weights,
+      reason: "content-fenced integration planning profile",
+      profileSha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+  } catch (error) {
+    return {
+      mode: "source-bytes",
+      weights: null,
+      reason: error instanceof Error ? error.message : String(error),
+      profileSha256: null,
+    };
+  }
 }
 
 export function deterministicFileBatches(files: readonly string[], batchSize: number): string[][] {

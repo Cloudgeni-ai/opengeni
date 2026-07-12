@@ -4461,7 +4461,7 @@ export type SandboxLifecycleHookContext = {
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
-// (/var/opengeni/rig-setup-<versionId>.done); `timeoutMs` is the rig-specific
+// (under a UID-scoped runtime directory); `timeoutMs` is the rig-specific
 // budget (settings.rigSetupTimeoutMs), NOT the 120s lifecycle default; `rigName`
 // is for human-readable events/errors only.
 export type RigSetupDescriptor = {
@@ -5086,7 +5086,8 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 /**
  * The rig-setup command (M3). One idempotent bash program:
- *   1. `mkdir -p /var/opengeni` and, if the per-version marker already exists,
+ *   1. create a UID-scoped directory below XDG_RUNTIME_DIR/TMPDIR (or use the
+ *      explicit test root) and, if the per-version marker already exists,
  *      print the SKIP sentinel and exit 0 (a warm box re-running the hook).
  *   2. otherwise atomically claim a per-version lock directory. A loser waits
  *      for the winner's marker, then skips; if the winner fails and releases the
@@ -5102,15 +5103,21 @@ export function rigSetupScriptCommand(
   script: string,
   versionId: string,
   timeoutMs = 600_000,
-  markerRoot = "/var/opengeni",
+  markerRoot?: string,
 ): string {
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
-  const marker = `${markerRoot.replace(/\/+$/, "")}/rig-setup-${versionId}.done`;
+  const markerName = `rig-setup-${versionId}.done`;
   return [
     "set -u",
-    `mkdir -p ${shellQuote(markerRoot)}`,
-    `__OG_RIG_MARKER=${shellQuote(marker)}`,
+    "umask 077",
+    markerRoot
+      ? `__OG_RIG_ROOT=${shellQuote(markerRoot.replace(/\/+$/, ""))}`
+      : '__OG_RIG_ROOT="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/opengeni-rig-setup-$(id -u)"',
+    'case "$__OG_RIG_ROOT" in /*) ;; *) printf \'%s\\n\' "rig setup marker root must be absolute: $__OG_RIG_ROOT" >&2; exit 73 ;; esac',
+    'mkdir -p "$__OG_RIG_ROOT"',
+    'if [ ! -d "$__OG_RIG_ROOT" ] || [ ! -w "$__OG_RIG_ROOT" ]; then printf \'%s\\n\' "rig setup marker root is not a writable directory: $__OG_RIG_ROOT" >&2; exit 73; fi',
+    `__OG_RIG_MARKER="$__OG_RIG_ROOT"/${shellQuote(markerName)}`,
     '__OG_RIG_LOCK="$__OG_RIG_MARKER.lock"',
     `__OG_RIG_TIMEOUT_SECS=${timeoutSecs}`,
     `__OG_RIG_LOCK_WAIT_SECS=${lockWaitSecs}`,

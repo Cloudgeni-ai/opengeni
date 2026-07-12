@@ -278,12 +278,15 @@ jobs:
           --timeout-seconds 1800
           -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier integration
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          --file-profile ci-profile/integration-${{ matrix.number }}-files.json
       - name: Upload integration resource profile
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-profile-integration-${{ matrix.number }}
-          path: ci-profile/integration-${{ matrix.number }}.json
+          path: |
+            ci-profile/integration-${{ matrix.number }}.json
+            ci-profile/integration-${{ matrix.number }}-files.json
           if-no-files-found: error
           retention-days: 14
 
@@ -329,6 +332,7 @@ jobs:
           --timeout-seconds 2400
           -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+          --file-profile ci-profile/e2e-${{ matrix.number }}-files.json
       - name: Upload OPE-26 session pin visual evidence
         if: ${{ always() && steps.e2e-selection.outputs.needs_ope26_session_pins == 'true' }}
         uses: actions/upload-artifact@v4
@@ -346,7 +350,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ci-profile-e2e-${{ matrix.number }}
-          path: ci-profile/e2e-${{ matrix.number }}.json
+          path: |
+            ci-profile/e2e-${{ matrix.number }}.json
+            ci-profile/e2e-${{ matrix.number }}-files.json
           if-no-files-found: error
           retention-days: 14
 

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +18,7 @@ import {
   deterministicShards,
   discoverTestFiles,
   fileUsesProcessGlobalTestState,
+  integrationShardWeights,
   typecheckProjects,
 } from "./workspace";
 import { sanitizedTestEnvironment } from "./run-unit-shard";
@@ -332,6 +334,12 @@ describe("fail-closed change impact", () => {
     expect(ci).toContain("needs_ope26_session_pins=$(jq -r .needsOpe26SessionPins");
     expect(ci).toContain("Upload OPE-26 session pin visual evidence");
     expect(ci).toContain("/tmp/ope26-session-pin-mobile-dark.png");
+    expect(ci).toContain("--file-profile ci-profile/integration-${{ matrix.number }}-files.json");
+    expect(ci).toContain("--file-profile ci-profile/e2e-${{ matrix.number }}-files.json");
+    expect(serviceRunner).toContain('execution.status = "running"');
+    expect(serviceRunner).toContain(
+      "if (fileProfilePath) writeProfile(fileProfilePath, fileProfile)",
+    );
     expect(ci).toContain(
       "integration_matrix=$(matrix \"$(jq '.integrationTests | length' impact-plan.json)\" 6)",
     );
@@ -367,9 +375,110 @@ describe("fail-closed change impact", () => {
     expect(explicitBunTestPath("test/e2e/example.e2e.ts")).toBe("./test/e2e/example.e2e.ts");
     expect(explicitBunTestPath("./already-explicit.test.ts")).toBe("./already-explicit.test.ts");
   });
+
+  test("real-service runners reject stale, missing-map, and escaping plan entries before spawn", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-stale-service-plan-"));
+    const plan = join(root, "impact-plan.json");
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        schemaVersion: 1,
+        integrationTests: ["../../outside.integration.ts"],
+        e2eTests: [],
+      }),
+    );
+    const result = spawnSync(
+      "bun",
+      [
+        "scripts/ci/run-test-shard.ts",
+        "--plan",
+        plan,
+        "--tier",
+        "integration",
+        "--shard",
+        "0",
+        "--shards",
+        "1",
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    );
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("impact plan contains unknown integration tests");
+  });
 });
 
 describe("deterministic sharding and isolation", () => {
+  test("content-fenced timings separate the observed recovery-heavy critical path", () => {
+    const integration = discoverTestFiles().integration;
+    const profile = integrationShardWeights();
+    expect(profile.mode).toBe("profile");
+    expect(profile.weights?.size).toBe(integration.length);
+    const shards = deterministicShards(process.cwd(), integration, 6, profile.weights ?? undefined);
+    const restartShard = shards.findIndex((files) =>
+      files.includes("test/integration/worker-restart.integration.ts"),
+    );
+    const deathShard = shards.findIndex((files) =>
+      files.includes("test/integration/temporal-workflow-worker-death.integration.ts"),
+    );
+    expect(restartShard).not.toBe(deathShard);
+    expect(shards[restartShard]).toEqual(["test/integration/worker-restart.integration.ts"]);
+    const shardWeights = shards.map((files) =>
+      files.reduce((total, path) => total + (profile.weights?.get(path) ?? 0), 0),
+    );
+    expect(Math.max(...shardWeights)).toBe(240_000);
+  });
+
+  test("a stale or incomplete timing profile is rejected as a whole", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-shard-profile-"));
+    mkdirSync(join(root, "test/integration"), { recursive: true });
+    mkdirSync(join(root, "packages/testing/src"), { recursive: true });
+    writeFileSync(join(root, "test/integration/a.integration.ts"), "test('a', () => {})\n");
+    writeFileSync(join(root, ".bun-version"), `${Bun.version}\n`);
+    writeFileSync(join(root, "packages/testing/src/service-images.ts"), "export {};\n");
+    const digest = (path: string): string =>
+      createHash("sha256").update(readFileSync(path)).digest("hex");
+    const environment = {
+      platform: process.platform,
+      architecture: process.arch,
+      bunVersion: Bun.version,
+      bunVersionFileSha256: digest(join(root, ".bun-version")),
+      serviceImagesPath: "packages/testing/src/service-images.ts",
+      serviceImagesSha256: digest(join(root, "packages/testing/src/service-images.ts")),
+    };
+    const profilePath = join(root, "profile.json");
+    writeFileSync(
+      profilePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        tier: "integration",
+        units: "milliseconds",
+        environment,
+        entries: {
+          "test/integration/a.integration.ts": { sha256: "0".repeat(64), planningWeight: 10 },
+        },
+      }),
+    );
+    const stale = integrationShardWeights(root, profilePath);
+    expect(stale.mode).toBe("source-bytes");
+    expect(stale.weights).toBeNull();
+    expect(stale.reason).toContain("stale content hash");
+
+    writeFileSync(
+      profilePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        tier: "integration",
+        units: "milliseconds",
+        environment,
+        entries: {},
+      }),
+    );
+    const incomplete = integrationShardWeights(root, profilePath);
+    expect(incomplete.mode).toBe("source-bytes");
+    expect(incomplete.weights).toBeNull();
+    expect(incomplete.reason).toContain("does not exactly match");
+  });
+
   test("Temporal split projection is exhaustive with a bounded six-shard critical weight", () => {
     const integration = discoverTestFiles().integration;
     const shards = deterministicShards(process.cwd(), integration, 6);
