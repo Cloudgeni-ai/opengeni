@@ -77,7 +77,11 @@ async function main(): Promise<void> {
   const selected = deterministicShards(process.cwd(), plan.unitTests, count)[index] ?? [];
   const batch = selected.filter((path) => !fileUsesProcessGlobalTestState(process.cwd(), path));
   const isolated = selected.filter((path) => fileUsesProcessGlobalTestState(process.cwd(), path));
-  const configuredBatchSize = Number(process.env.OPENGENI_TEST_FILES_PER_PROCESS ?? "16");
+  // One file per Bun process is the measured safe default: larger batches keep
+  // process-global test state and heap pages alive across files and raise the
+  // full-suite cgroup peak substantially. Measured larger runners may opt into
+  // a higher, still deterministic batch size explicitly.
+  const configuredBatchSize = Number(process.env.OPENGENI_TEST_FILES_PER_PROCESS ?? "1");
   for (const files of deterministicFileBatches(batch, configuredBatchSize)) {
     const batchStatus = await run(files, false);
     if (batchStatus !== 0) process.exit(batchStatus);

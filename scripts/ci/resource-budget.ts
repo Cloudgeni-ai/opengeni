@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { availableParallelism, totalmem } from "node:os";
+import { availableParallelism, freemem, totalmem } from "node:os";
 
 const MIB = 1024 * 1024;
 const DEFAULT_MEMORY_PER_TEST_MIB = 512;
@@ -37,13 +37,28 @@ function finiteByteLimit(value: string): number | null {
   return parsed;
 }
 
-export function detectedMemoryLimit(
+function finiteByteUsage(value: string): number | null {
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
+export type DetectedMemoryState = {
+  limitBytes: number;
+  usageBytes: number;
+  usageKnown: boolean;
+  source: string;
+};
+
+export function detectedMemoryState(
   options: {
     hostTotalBytes?: number;
+    hostFreeBytes?: number;
     readFile?: (path: string) => string | null;
   } = {},
-): { bytes: number; source: string } {
+): DetectedMemoryState {
   const hostTotalBytes = options.hostTotalBytes ?? totalmem();
+  const hostFreeBytes = options.hostFreeBytes ?? freemem();
   const readFile =
     options.readFile ??
     ((path: string): string | null => {
@@ -54,46 +69,54 @@ export function detectedMemoryLimit(
         return null;
       }
     });
-  const candidates: Array<{ path: string; label: string }> = [
-    { path: "/sys/fs/cgroup/memory.max", label: "cgroup-v2-max" },
-    { path: "/sys/fs/cgroup/memory.high", label: "cgroup-v2-high" },
-    {
-      path: "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-      label: "cgroup-v1-limit",
-    },
-  ];
-  let result = hostTotalBytes;
-  let source = "host-total";
-  for (const candidate of candidates) {
-    const raw = readFile(candidate.path);
-    const limit = raw === null ? null : finiteByteLimit(raw);
-    if (limit !== null && limit < result) {
-      result = limit;
-      source = candidate.label;
-    }
+  const v2Limits = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.high"]
+    .map((path) => readFile(path))
+    .flatMap((raw) => (raw === null ? [] : [finiteByteLimit(raw)]))
+    .filter((value): value is number => value !== null);
+  const v1Raw = readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+  const v1Limit = v1Raw === null ? null : finiteByteLimit(v1Raw);
+  const cgroups = [
+    ...(v2Limits.length > 0
+      ? [
+          {
+            limitBytes: Math.min(...v2Limits),
+            usagePath: "/sys/fs/cgroup/memory.current",
+            source: "cgroup-v2",
+          },
+        ]
+      : []),
+    ...(v1Limit === null
+      ? []
+      : [
+          {
+            limitBytes: v1Limit,
+            usagePath: "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+            source: "cgroup-v1",
+          },
+        ]),
+  ]
+    // A cgroup fence above physical host memory is not the effective domain.
+    .filter((candidate) => candidate.limitBytes < hostTotalBytes)
+    .sort((a, b) => a.limitBytes - b.limitBytes);
+  const cgroup = cgroups[0];
+  if (cgroup) {
+    const usageRaw = readFile(cgroup.usagePath);
+    const usageBytes = usageRaw === null ? null : finiteByteUsage(usageRaw);
+    return {
+      limitBytes: Math.max(MIB, cgroup.limitBytes),
+      usageBytes: usageBytes ?? cgroup.limitBytes,
+      usageKnown: usageBytes !== null,
+      source: `${cgroup.source}-${usageBytes === null ? "usage-unavailable" : "limit+usage"}`,
+    };
   }
-  return { bytes: Math.max(MIB, result), source };
-}
-
-export function detectedMemoryUsage(
-  readFile: (path: string) => string | null = (path): string | null => {
-    if (!existsSync(path)) return null;
-    try {
-      return readFileSync(path, "utf8");
-    } catch {
-      return null;
-    }
-  },
-): { bytes: number; source: string } {
-  for (const candidate of [
-    { path: "/sys/fs/cgroup/memory.current", label: "cgroup-v2-current" },
-    { path: "/sys/fs/cgroup/memory/memory.usage_in_bytes", label: "cgroup-v1-usage" },
-  ]) {
-    const raw = readFile(candidate.path);
-    const bytes = raw === null ? null : finiteByteLimit(raw);
-    if (bytes !== null) return { bytes, source: candidate.label };
-  }
-  return { bytes: 0, source: "usage-unavailable" };
+  const hostUsageKnown =
+    Number.isSafeInteger(hostFreeBytes) && hostFreeBytes >= 0 && hostFreeBytes <= hostTotalBytes;
+  return {
+    limitBytes: Math.max(MIB, hostTotalBytes),
+    usageBytes: hostUsageKnown ? hostTotalBytes - hostFreeBytes : hostTotalBytes,
+    usageKnown: hostUsageKnown,
+    source: hostUsageKnown ? "host-total+host-used" : "host-usage-unavailable",
+  };
 }
 
 export function computeTestConcurrencyBudget(options: {
@@ -152,12 +175,11 @@ export function computeTestConcurrencyBudget(options: {
 export function testConcurrencyBudget(
   environment: NodeJS.ProcessEnv = process.env,
 ): TestConcurrencyBudget {
-  const detected = detectedMemoryLimit();
-  const usage = detectedMemoryUsage();
+  const memory = detectedMemoryState();
   return computeTestConcurrencyBudget({
-    memoryLimitBytes: detected.bytes,
-    memoryUsageBytes: usage.bytes,
-    memoryUsageKnown: usage.source !== "usage-unavailable",
+    memoryLimitBytes: memory.limitBytes,
+    memoryUsageBytes: memory.usageBytes,
+    memoryUsageKnown: memory.usageKnown,
     cpuSlots: availableParallelism(),
     requestedMax: positiveInteger(
       environment.OPENGENI_TEST_MAX_CONCURRENCY,
@@ -169,7 +191,7 @@ export function testConcurrencyBudget(
       DEFAULT_MEMORY_PER_TEST_MIB,
       "OPENGENI_TEST_MEMORY_PER_WORKER_MB",
     ),
-    source: `${detected.source}+${usage.source}`,
+    source: memory.source,
   });
 }
 

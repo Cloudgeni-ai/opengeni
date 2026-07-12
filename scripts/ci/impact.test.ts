@@ -225,6 +225,7 @@ describe("fail-closed change impact", () => {
     const serviceRunner = readFileSync("scripts/ci/run-test-shard.ts", "utf8");
     expect(packageBuilder).toContain('NODE_OPTIONS = "--max-old-space-size=1536"');
     expect(unitRunner).toContain('"--parallel=1"');
+    expect(unitRunner).toContain('OPENGENI_TEST_FILES_PER_PROCESS ?? "1"');
     expect(serviceRunner).toContain('"--parallel=1"');
     expect(serviceRunner).toContain('env.OPENGENI_REQUIRE_REAL_DB = "1"');
     expect(serviceRunner).toContain('path.endsWith(".browser.e2e.ts")');

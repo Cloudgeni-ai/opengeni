@@ -91,6 +91,35 @@ function hashFiles(root: string, paths: readonly string[]): string {
   return hash.digest("hex");
 }
 
+function bunConfigurationInputs(root: string): string[] {
+  const configPath = join(root, "bunfig.toml");
+  if (!existsSync(configPath)) return [];
+  const parsed = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+  const references = new Set<string>();
+  const pending: unknown[] = [parsed];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (value && typeof value === "object") {
+      pending.push(...Object.values(value));
+      continue;
+    }
+    if (typeof value !== "string" || (!value.startsWith("./") && !value.startsWith("../"))) {
+      continue;
+    }
+    const absolute = resolve(root, value);
+    const relativePath = normalizePath(relative(root, absolute));
+    if (relativePath === ".." || relativePath.startsWith("../")) {
+      throw new Error(`bunfig.toml references a cache input outside the repository: ${value}`);
+    }
+    if (existsSync(absolute)) references.add(relativePath);
+  }
+  return [...references].sort();
+}
+
 export function packageBuildFingerprint(options: {
   root: string;
   pkg: WorkspacePackage;
@@ -104,13 +133,17 @@ export function packageBuildFingerprint(options: {
   const packageInputs = [pkg.dir];
   const rootInputs = [
     ".bun-version",
-    "package.json",
+    ".npmrc",
     "bun.lock",
+    "bunfig.toml",
+    "package.json",
+    "patches",
     "tsconfig.base.json",
     "scripts/build-publishable-packages.ts",
     "scripts/publishable-workspaces.ts",
     "scripts/ci/content-cache.ts",
     "scripts/ci/workspace.ts",
+    ...bunConfigurationInputs(root),
   ].filter((path) => existsSync(join(root, path)));
   const dependencies = [...dependencyFingerprints.entries()].sort(([a], [b]) => a.localeCompare(b));
   const toolchain = options.toolchain ?? {

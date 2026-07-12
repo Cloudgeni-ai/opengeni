@@ -387,9 +387,9 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .cache/opengeni/build-packages
-          key: package-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('bun.lock', 'package.json') }}-${{ github.sha }}
+          key: package-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('.npmrc', 'bunfig.toml', 'bun.lock', 'package.json', 'patches/**', 'tsconfig.base.json', 'scripts/build-publishable-packages.ts', 'scripts/publishable-workspaces.ts', 'scripts/ci/content-cache.ts', 'scripts/ci/workspace.ts') }}-${{ github.sha }}
           restore-keys: |
-            package-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('bun.lock', 'package.json') }}-
+            package-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('.npmrc', 'bunfig.toml', 'bun.lock', 'package.json', 'patches/**', 'tsconfig.base.json', 'scripts/build-publishable-packages.ts', 'scripts/publishable-workspaces.ts', 'scripts/ci/content-cache.ts', 'scripts/ci/workspace.ts') }}-
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan

@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { WorkspacePackage } from "../publishable-workspaces";
 import {
@@ -103,6 +103,34 @@ describe("content-addressed package build cache", () => {
     });
     expect(asset).not.toBe(graph);
 
+    let configured = asset;
+    for (const [path, contents] of [
+      [".npmrc", "registry=https://registry.npmjs.org/\n"],
+      ["bunfig.toml", 'preload = ["./build-preload.ts"]\n'],
+      ["build-preload.ts", "export const preload = 1;\n"],
+      ["patches/example.patch", "patch v1\n"],
+    ] as const) {
+      const absolute = join(root, path);
+      mkdirSync(dirname(absolute), { recursive: true });
+      writeFileSync(absolute, contents);
+      const next = packageBuildFingerprint({
+        root,
+        pkg,
+        dependencyFingerprints: new Map(),
+        toolchain,
+      });
+      expect(next).not.toBe(configured);
+      configured = next;
+    }
+    writeFileSync(join(root, "build-preload.ts"), "export const preload = 2;\n");
+    const changedPreload = packageBuildFingerprint({
+      root,
+      pkg,
+      dependencyFingerprints: new Map(),
+      toolchain,
+    });
+    expect(changedPreload).not.toBe(configured);
+
     mkdirSync(join(root, pkg.dir, "dist"), { recursive: true });
     writeFileSync(join(root, pkg.dir, "dist/ignored.js"), "old output\n");
     expect(
@@ -112,7 +140,7 @@ describe("content-addressed package build cache", () => {
         dependencyFingerprints: new Map(),
         toolchain,
       }),
-    ).toBe(asset);
+    ).toBe(changedPreload);
 
     chmodSync(join(root, pkg.dir, "assets/schema.json"), 0o755);
     expect(
@@ -122,7 +150,7 @@ describe("content-addressed package build cache", () => {
         dependencyFingerprints: new Map(),
         toolchain,
       }),
-    ).not.toBe(asset);
+    ).not.toBe(changedPreload);
   });
 
   test("an ignored/private workspace dependency fences publishable output", () => {

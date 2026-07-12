@@ -5,8 +5,7 @@ import { join } from "node:path";
 import {
   computeTestConcurrencyBudget,
   describeTestConcurrencyBudget,
-  detectedMemoryLimit,
-  detectedMemoryUsage,
+  detectedMemoryState,
 } from "./ci/resource-budget";
 import { typecheckProjects } from "./ci/workspace";
 
@@ -51,16 +50,15 @@ function resolveConcurrency(): number {
   if (!Number.isSafeInteger(memoryPerWorkerMib) || memoryPerWorkerMib < 256) {
     throw new Error("OPENGENI_TYPECHECK_MEMORY_PER_WORKER_MB must be an integer >= 256");
   }
-  const limit = detectedMemoryLimit();
-  const usage = detectedMemoryUsage();
+  const memory = detectedMemoryState();
   const budget = computeTestConcurrencyBudget({
-    memoryLimitBytes: limit.bytes,
-    memoryUsageBytes: usage.bytes,
-    memoryUsageKnown: usage.source !== "usage-unavailable",
+    memoryLimitBytes: memory.limitBytes,
+    memoryUsageBytes: memory.usageBytes,
+    memoryUsageKnown: memory.usageKnown,
     cpuSlots: availableParallelism(),
     requestedMax,
     memoryPerTestMib: memoryPerWorkerMib,
-    source: `${limit.source}+${usage.source}`,
+    source: memory.source,
   });
   process.stdout.write(`[typecheck] ${describeTestConcurrencyBudget(budget)}\n`);
   return Math.max(1, Math.min(budget.concurrency, projects.length));
