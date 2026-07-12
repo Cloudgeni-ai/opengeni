@@ -5,6 +5,7 @@ import postgres from "postgres";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeTempDir, removeTempDir, runCommand, waitFor } from "./process";
+import { TEST_SERVICE_IMAGES } from "./service-images";
 
 export type TestServices = {
   projectName: string;
@@ -288,7 +289,7 @@ function composeYaml(
 ): string {
   return `services:
   postgres:
-    image: pgvector/pgvector:pg17
+    image: ${TEST_SERVICE_IMAGES.pgvectorPg17}
     environment:
       POSTGRES_DB: opengeni
       POSTGRES_USER: opengeni
@@ -302,7 +303,7 @@ function composeYaml(
       retries: 40
 
   nats:
-    image: nats:2-alpine
+    image: ${TEST_SERVICE_IMAGES.nats}
     command: ["-m", "8222"]
     ports:
       - "127.0.0.1:${ports.nats}:4222"
@@ -311,7 +312,7 @@ function composeYaml(
 ${
   options.temporal
     ? `  temporal:
-    image: temporalio/auto-setup:1.28
+    image: ${TEST_SERVICE_IMAGES.temporal}
     environment:
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
@@ -339,7 +340,7 @@ ${
 ${
   options.objectStorage
     ? `  minio:
-    image: minio/minio:latest
+    image: ${TEST_SERVICE_IMAGES.minio}
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -354,7 +355,7 @@ ${
       retries: 40
 
   minio-init:
-    image: minio/mc:latest
+    image: ${TEST_SERVICE_IMAGES.minioClient}
     depends_on:
       minio:
         condition: service_healthy

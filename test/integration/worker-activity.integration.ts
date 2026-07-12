@@ -850,6 +850,7 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        contextCompactionThresholdRatio: 0.5,
       }),
       db: dbClient.db,
       bus,
@@ -969,6 +970,7 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        contextCompactionThresholdRatio: 0.5,
       }),
       db: dbClient.db,
       bus,
@@ -1045,6 +1047,7 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        contextCompactionThresholdRatio: 0.5,
       }),
       db: dbClient.db,
       bus,
@@ -1104,6 +1107,7 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
+        contextCompactionThresholdRatio: 0.5,
         mcpServers: [
           {
             id: "opengeni",
@@ -4265,7 +4269,12 @@ describe("worker activities integration", () => {
     expect(wakes).toHaveLength(2);
 
     const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
-    expect(managerTurns).toHaveLength(2);
+    // While the first digest is still queued, the next terminal episode folds
+    // into that not-yet-started turn instead of creating a duplicate model run.
+    expect(managerTurns).toHaveLength(1);
+    expect(
+      (managerTurns[0]?.metadata as { childSummaries?: unknown[] } | undefined)?.childSummaries,
+    ).toHaveLength(2);
   });
 
   test("waking the parent: a failed worker wakes the manager, and a parentless session never notifies", async () => {
@@ -4489,7 +4498,7 @@ describe("worker activities integration", () => {
       contextCompactionMode: "auto",
       contextWindowTokens: 1000,
       contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.5,
+      contextCompactionThresholdRatio: 0.5,
       contextKeepRecentTokens: 40,
     });
 
@@ -4629,7 +4638,7 @@ describe("worker activities integration", () => {
       contextCompactionMode: "auto",
       contextWindowTokens: 1000,
       contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.5,
+      contextCompactionThresholdRatio: 0.5,
       contextKeepRecentTokens: 40,
     });
 
@@ -4743,7 +4752,7 @@ describe("worker activities integration", () => {
         contextCompactionMode: "client",
         contextWindowTokens: 1000,
         contextReservedOutputTokens: 0,
-        contextCompactSoftFraction: 0.5,
+        contextCompactionThresholdRatio: 0.5,
         contextKeepRecentTokens: 30,
       }),
       { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
@@ -4818,7 +4827,7 @@ describe("worker activities integration", () => {
       contextCompactionMode: "client",
       contextWindowTokens: 10_000_000,
       contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.9,
+      contextCompactionThresholdRatio: 0.9,
       contextKeepRecentTokens: 20,
     });
     const scope = {

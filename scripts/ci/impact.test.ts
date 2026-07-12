@@ -155,6 +155,28 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("required test-service images use explicit versions and manifest-list digests", () => {
+    const imageMap = readFileSync("packages/testing/src/service-images.ts", "utf8");
+    const compose = readFileSync("packages/testing/src/compose.ts", "utf8");
+    const sharedPostgres = readFileSync("packages/testing/src/shared-pg.ts", "utf8");
+    const imageReferences = [...imageMap.matchAll(/^\s+\w+:\s*"([^"]+)",?$/gm)].map(
+      (match) => match[1]!,
+    );
+
+    expect(imageReferences).toHaveLength(6);
+    for (const reference of imageReferences) {
+      expect(reference).toMatch(/^[a-z0-9][a-z0-9./-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$/);
+      expect(reference).not.toMatch(/:latest@/);
+    }
+
+    const composeImageLines = compose.match(/^\s+image:\s+.*$/gm) ?? [];
+    expect(composeImageLines).toHaveLength(5);
+    for (const line of composeImageLines) {
+      expect(line).toContain("${TEST_SERVICE_IMAGES.");
+    }
+    expect(sharedPostgres).toContain("const IMAGE = TEST_SERVICE_IMAGES.pgvectorPg16;");
+  });
+
   test("Channel-A creates its git fixture before using it and checks process exits", () => {
     const e2e = readFileSync("test/e2e/channel-a.e2e.ts", "utf8");
     expect(e2e).toContain("mkdir -p repo && git -C repo init -q");
