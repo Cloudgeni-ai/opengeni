@@ -163,6 +163,14 @@ Image builds default to `linux/amd64`, matching the Azure AKS reference node poo
 
 For production Helm releases, pin API, worker, web, and migration images by digest as well as tag. The chart renders images as `repository:tag@sha256:...` when `image.digest` is set, which keeps tags readable while making the deployed artifact immutable.
 
+CI uses `docker/docker-bake.hcl` to build API, worker, and web from one shared
+BuildKit graph. The protected staging artifact builder may add the relay target
+and a content-addressed remote layer cache, but the OPE-25 release operator is
+the sole dispatcher: it must read back all pushed manifests and provenance,
+accept only the complete digest set, and promote the staging-proven set with
+`rebuild=false`. Partial layers from a failed or cancelled build are cache
+material only and never an accepted release artifact set.
+
 The sandbox image remains separate:
 
 ```bash

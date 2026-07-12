@@ -5,58 +5,348 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: Typecheck and unit tests
+  plan:
+    name: Explain change impact
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      unit_count: ${{ steps.plan.outputs.unit_count }}
+      integration_count: ${{ steps.plan.outputs.integration_count }}
+      e2e_count: ${{ steps.plan.outputs.e2e_count }}
+      build_count: ${{ steps.plan.outputs.build_count }}
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+      integration_matrix: ${{ steps.plan.outputs.integration_matrix }}
+      e2e_matrix: ${{ steps.plan.outputs.e2e_matrix }}
     steps:
-      - name: Check out repository
+      - name: Check out repository with comparison history
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Set up Bun
+      - name: Set up pinned Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
-      - name: Cache Bun dependencies
+      - name: Build fail-closed impact plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output impact-plan.json
+          else
+            # Main, scheduled, and manually requested CI are the mapping-drift
+            # safety net. They never trust change selection.
+            bun scripts/ci/impact.ts --full --output impact-plan.json
+          fi
+          jq . impact-plan.json
+          echo "mode=$(jq -r .mode impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "unit_count=$(jq '.unitTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "integration_count=$(jq '.integrationTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "e2e_count=$(jq '.e2eTests | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "build_count=$(jq '.buildPackages | length' impact-plan.json)" >> "$GITHUB_OUTPUT"
+          matrix() {
+            local selected="$1" maximum="$2" total
+            total="$selected"
+            if [ "$total" -gt "$maximum" ]; then total="$maximum"; fi
+            # A skipped job still needs a syntactically non-empty matrix. Its
+            # job-level count guard prevents this sentinel from running.
+            if [ "$total" -eq 0 ]; then total=1; fi
+            jq -cn --argjson total "$total" \
+              '[range(0; $total) | {index: ., number: (. + 1), total: $total}]'
+          }
+          echo "unit_matrix=$(matrix "$(jq '.unitTests | length' impact-plan.json)" 4)" >> "$GITHUB_OUTPUT"
+          echo "integration_matrix=$(matrix "$(jq '.integrationTests | length' impact-plan.json)" 3)" >> "$GITHUB_OUTPUT"
+          echo "e2e_matrix=$(matrix "$(jq '.e2eTests | length' impact-plan.json)" 3)" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Change-impact plan'
+            echo
+            echo '```json'
+            jq '{mode, changedFiles, affectedPackages, reasons, typecheckProjects, unitCount:(.unitTests|length), integrationTests, e2eTests, buildPackages}' impact-plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Restore reusable Bun package store
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
 
-      - name: Install dependencies
+      - name: Restore exact dependency tree
+        id: dependency-cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+
+      - name: Verify dependency tree once for all jobs
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name dependencies
+          --output ci-profile/dependencies.json
+          --timeout-seconds 600
+          -- bun install --frozen-lockfile
+
+      - name: Record dependency cache outcome
+        if: always()
+        env:
+          DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          [ -f ci-profile/dependencies.json ] || exit 0
+          jq --arg hit "$DEPENDENCY_CACHE_HIT" \
+            '.cache = {kind:"dependencies", hit:($hit == "true"), verifiedByFrozenInstall:true}' \
+            ci-profile/dependencies.json > ci-profile/dependencies.json.tmp
+          mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
+
+      - name: Upload exact impact plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-impact-plan
+          path: impact-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload dependency resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-dependencies
+          path: ci-profile/dependencies.json
+          if-no-files-found: error
+          retention-days: 14
+
+  typecheck:
+    name: Typecheck impacted projects
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
         run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Profile impacted typecheck
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name typecheck
+          --output ci-profile/typecheck.json
+          --timeout-seconds 600
+          -- bun scripts/ci/run-typecheck-plan.ts --plan impact-plan.json
+      - name: Upload typecheck resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-typecheck
+          path: ci-profile/typecheck.json
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Typecheck
-        run: bun run typecheck
+  guards:
+    name: Static, format, and documentation guards
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Run exactly the explained guards
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name guards
+          --output ci-profile/guards.json
+          --timeout-seconds 900
+          -- bun scripts/ci/run-guards-plan.ts --plan impact-plan.json --exclude publish-closure
+      - name: Impact map completeness and cache invariants
+        run: >-
+          bun test
+          scripts/ci/impact.test.ts
+          scripts/ci/content-cache.test.ts
+          scripts/ci/profile-command.test.ts
+          scripts/ci/resource-budget.test.ts
+          scripts/ci/summarize-profiles.test.ts
+      - name: Upload guard resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-guards
+          path: ci-profile/guards.json
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Lint
-        run: bun run lint
+  unit:
+    name: Unit shard ${{ matrix.number }}/${{ matrix.total }}
+    needs: plan
+    if: needs.plan.outputs.unit_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.unit_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Run deterministic memory-bounded shard
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name unit-${{ matrix.number }}
+          --output ci-profile/unit-${{ matrix.number }}.json
+          --timeout-seconds 1200
+          -- bun scripts/ci/run-unit-shard.ts --plan impact-plan.json
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+      - name: Upload unit resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-unit-${{ matrix.number }}
+          path: ci-profile/unit-${{ matrix.number }}.json
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Format check
-        run: bun run format:check
+  integration:
+    name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
+    needs: plan
+    if: needs.plan.outputs.integration_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.integration_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Run real PostgreSQL, pgvector, Temporal, NATS, and object-storage tests
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name integration-${{ matrix.number }}
+          --output ci-profile/integration-${{ matrix.number }}.json
+          --timeout-seconds 1800
+          -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier integration
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+      - name: Upload integration resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-integration-${{ matrix.number }}
+          path: ci-profile/integration-${{ matrix.number }}.json
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Test
-        env:
-          # OPE-26's per-subject FORCE-RLS/OCC suite is a required security gate.
-          # Never turn a missing Docker/PostgreSQL runner into green skipped tests.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-        run: bun test
-
-      - name: Install pinned Playwright Chromium runtime
+  e2e:
+    name: Browser/sandbox E2E shard ${{ matrix.number }}/${{ matrix.total }}
+    needs: plan
+    if: needs.plan.outputs.e2e_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.e2e_matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
+        run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Explain E2E shard prerequisites
+        id: e2e-selection
+        run: |
+          selection="$(bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e --shard ${{ matrix.index }} --shards ${{ matrix.total }} --list-json)"
+          jq . <<<"$selection"
+          echo "needs_browser=$(jq -r .needsBrowser <<<"$selection")" >> "$GITHUB_OUTPUT"
+          echo "needs_ope26_session_pins=$(jq -r .needsOpe26SessionPins <<<"$selection")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        if: steps.e2e-selection.outputs.needs_browser == 'true'
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bun.lock') }}
+      - name: Install Chromium runtime
+        if: steps.e2e-selection.outputs.needs_browser == 'true'
         run: bunx playwright install --with-deps chromium
-
-      - name: OPE-26 session pin browser acceptance
-        env:
-          # This browser gate must fail when its real PostgreSQL boundary is unavailable.
-          OPENGENI_REQUIRE_REAL_DB: "1"
-        run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
-
-      - name: Upload OPE-26 visual evidence
-        if: ${{ always() }}
+      - name: Run real browser or Docker sandbox E2E shard
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name e2e-${{ matrix.number }}
+          --output ci-profile/e2e-${{ matrix.number }}.json
+          --timeout-seconds 2400
+          -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
+          --shard ${{ matrix.index }} --shards ${{ matrix.total }}
+      - name: Upload OPE-26 session pin visual evidence
+        if: ${{ always() && steps.e2e-selection.outputs.needs_ope26_session_pins == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: ope26-session-pin-visual-evidence
@@ -67,144 +357,179 @@ jobs:
             /tmp/ope26-session-pin-desktop-dark.png
             /tmp/ope26-session-pin-mobile-light.png
             /tmp/ope26-session-pin-mobile-dark.png
+      - name: Upload E2E resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-e2e-${{ matrix.number }}
+          path: ci-profile/e2e-${{ matrix.number }}.json
+          if-no-files-found: error
+          retention-days: 14
 
-      # OPE-22 production regressions cross the activity/DB/event boundary and
-      # therefore are not discovered by the unit-test command above. Keep the
-      # gate narrowly scoped to the incident cases while running them against
-      # the existing real Postgres + NATS integration harness on GitHub's Docker-
-      # capable runner.
-      - name: OPE-22 recovery integration regressions
+  packages:
+    name: Publishable package closure
+    needs: plan
+    if: needs.plan.outputs.build_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
+        run: bun install --frozen-lockfile
+      - uses: actions/cache@v4
+        with:
+          path: .cache/opengeni/build-packages
+          key: package-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('bun.lock', 'package.json') }}-${{ github.sha }}
+          restore-keys: |
+            package-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}-${{ hashFiles('bun.lock', 'package.json') }}-
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-impact-plan
+      - name: Restore or build content-addressed package outputs
+        env:
+          OPENGENI_BUILD_CACHE_REPORT: ci-profile/package-cache.json
         run: >-
-          bun test --timeout 30000
-          --test-name-pattern
-          'a compaction-resumed turn may compact again|an MCP stream timeout after a successful tool output|requireShrink rejects a stale high provider signal'
-          ./test/integration/worker-activity.integration.ts
-
-      - name: Workspace auth/billing static guard
-        run: bun scripts/check-workspace-billing-static.ts
-
-      - name: Docs reference freshness guard
-        run: bun scripts/check-docs-refs.ts
-
-      - name: Build client packages (contracts + SDK + React)
-        run: bun run build:packages
-
+          bun scripts/ci/profile-command.ts
+          --name packages
+          --output ci-profile/packages.json
+          --timeout-seconds 1200
+          -- bun scripts/ci/run-build-plan.ts --plan impact-plan.json
       - name: Publish closure guard
-        run: bun scripts/publish-closure-guard.ts
-
-      - name: Build React demo harness
-        run: cd packages/react && bun run demo:build
+        run: |
+          args=()
+          if jq -e '.buildPackages | any(. == "@opengeni/sdk" or . == "@opengeni/react")' impact-plan.json >/dev/null; then
+            args+=(--require-client-dist)
+          fi
+          bun scripts/publish-closure-guard.ts "${args[@]}"
+      - name: Build React demo when the client surface is impacted
+        run: |
+          if jq -e '.affectedPackages | index("@opengeni/react")' impact-plan.json >/dev/null; then
+            bun run --cwd packages/react demo:build
+          else
+            echo "React is not impacted; demo build not selected"
+          fi
+      - name: Upload package-build resource profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-profile-packages
+          path: |
+            ci-profile/packages.json
+            ci-profile/package-cache.json
+          if-no-files-found: error
+          retention-days: 14
 
   deployment:
     name: Deployment artifacts
+    needs: plan
+    if: needs.plan.outputs.mode != 'docs'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
+          bun-version-file: .bun-version
+      - uses: actions/cache/restore@v4
         with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            bun-${{ runner.os }}-
-
-      - name: Install dependencies
+          path: node_modules
+          key: dependencies-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', 'bun.lock', 'bunfig.toml', '.npmrc', 'package.json', 'apps/*/package.json', 'packages/*/package.json', 'patches/**') }}
+          fail-on-cache-miss: true
+      - name: Verify restored dependency tree
         run: bun install --frozen-lockfile
-
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
-
+      - uses: azure/setup-helm@v5
+      - uses: hashicorp/setup-terraform@v4
       - name: Validate deployment profiles
         run: |
           bun run deployment:profiles
-          bun run deployment:preflight -- --profile azure-existing-services --json
-          bun run deployment:preflight -- --profile azure-managed --json
-          bun run deployment:preflight -- --profile aws-existing-services --json
-          bun run deployment:preflight -- --profile aws-managed --json
-          bun run deployment:preflight -- --profile gcp-existing-services --json
-          bun run deployment:preflight -- --profile gcp-managed --json
-          bun run deployment:preflight -- --profile preview-pr --json
-          bun run deployment:preflight -- --profile preview-branch --json
-
+          for profile in azure-existing-services azure-managed aws-existing-services aws-managed gcp-existing-services gcp-managed preview-pr preview-branch; do
+            bun run deployment:preflight -- --profile "$profile" --json
+          done
       - name: Validate Helm chart
         run: |
           ! grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni
           helm lint deploy/helm/opengeni
-          helm template opengeni deploy/helm/opengeni \
-            --namespace opengeni \
-            --set nats.enabled=true \
-            --set secret.create=true \
+          helm template opengeni deploy/helm/opengeni --namespace opengeni \
+            --set nats.enabled=true --set secret.create=true \
             --set secret.stringData.OPENGENI_DATABASE_URL=postgres://placeholder \
             --set secret.stringData.OPENGENI_TEMPORAL_HOST=temporal:7233 \
             --set secret.stringData.OPENGENI_OPENAI_API_KEY=placeholder \
             --set secret.stringData.OPENGENI_OBJECT_STORAGE_ENDPOINT=http://minio:9000 \
             >/tmp/opengeni-rendered.yaml
-          helm template opengeni-digest deploy/helm/opengeni \
-            --namespace opengeni \
+          helm template opengeni-digest deploy/helm/opengeni --namespace opengeni \
             --set global.imageRegistry=registry.example.com \
-            --set api.image.tag=ci \
-            --set api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-            --set worker.image.tag=ci \
-            --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-            --set web.image.tag=ci \
-            --set web.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-            --set migrations.image.tag=ci \
-            --set migrations.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set api.image.tag=ci --set api.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set worker.image.tag=ci --set worker.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            --set web.image.tag=ci --set web.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+            --set migrations.image.tag=ci --set migrations.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             >/tmp/opengeni-digest-rendered.yaml
-          helm template opengeni-azure deploy/helm/opengeni \
-            --namespace opengeni \
-            -f deploy/helm/opengeni/values.azure-managed.example.yaml \
-            >/tmp/opengeni-azure-rendered.yaml
-          helm template opengeni-azure-existing deploy/helm/opengeni \
-            --namespace opengeni \
-            -f deploy/helm/opengeni/values.azure-existing-services.example.yaml \
-            >/tmp/opengeni-azure-existing-rendered.yaml
-          helm template opengeni-aws deploy/helm/opengeni \
-            --namespace opengeni \
-            -f deploy/helm/opengeni/values.aws-managed.example.yaml \
-            >/tmp/opengeni-aws-rendered.yaml
-          helm template opengeni-gcp deploy/helm/opengeni \
-            --namespace opengeni \
-            -f deploy/helm/opengeni/values.gcp-managed.example.yaml \
-            >/tmp/opengeni-gcp-rendered.yaml
-
+          for values in deploy/helm/opengeni/values.azure-managed.example.yaml deploy/helm/opengeni/values.azure-existing-services.example.yaml deploy/helm/opengeni/values.aws-managed.example.yaml deploy/helm/opengeni/values.gcp-managed.example.yaml; do
+            helm template opengeni-provider deploy/helm/opengeni --namespace opengeni -f "$values" >/tmp/opengeni-provider-rendered.yaml
+          done
       - name: Validate Terraform
         run: |
-          terraform -chdir=deploy/terraform/azure fmt -check
-          terraform -chdir=deploy/terraform/azure init -backend=false
-          terraform -chdir=deploy/terraform/azure validate
-          terraform -chdir=deploy/terraform/aws fmt -check
-          terraform -chdir=deploy/terraform/aws init -backend=false
-          terraform -chdir=deploy/terraform/aws validate
-          terraform -chdir=deploy/terraform/gcp fmt -check
-          terraform -chdir=deploy/terraform/gcp init -backend=false
-          terraform -chdir=deploy/terraform/gcp validate
+          for provider in azure aws gcp; do
+            terraform -chdir="deploy/terraform/$provider" fmt -check
+            terraform -chdir="deploy/terraform/$provider" init -backend=false
+            terraform -chdir="deploy/terraform/$provider" validate
+          done
 
   images:
     name: Workload image builds
+    needs: plan
+    if: needs.plan.outputs.mode != 'docs'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - name: Build API, worker, and web from one shared graph
+        uses: docker/bake-action@v6
+        with:
+          files: docker/docker-bake.hcl
+          targets: workload-images
+          set: |
+            api.cache-from=type=gha,scope=opengeni-workload-api
+            api.cache-to=type=gha,scope=opengeni-workload-api,mode=max
+            worker.cache-from=type=gha,scope=opengeni-workload-worker
+            worker.cache-to=type=gha,scope=opengeni-workload-worker,mode=max
+            web.cache-from=type=gha,scope=opengeni-workload-web
+            web.cache-to=type=gha,scope=opengeni-workload-web,mode=max
+        env:
+          SOURCE_SHA: ${{ github.sha }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build API image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:ci .
-
-      - name: Build worker image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:ci .
-
-      - name: Build web image
-        run: docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web -t opengeni-web:ci .
+  required:
+    name: Typecheck and unit tests
+    if: always()
+    needs: [plan, typecheck, guards, unit, integration, e2e, packages, deployment, images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fail closed on any selected gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          UNIT_COUNT: ${{ needs.plan.outputs.unit_count }}
+          INTEGRATION_COUNT: ${{ needs.plan.outputs.integration_count }}
+          E2E_COUNT: ${{ needs.plan.outputs.e2e_count }}
+          BUILD_COUNT: ${{ needs.plan.outputs.build_count }}
+        run: |
+          set -euo pipefail
+          jq . <<<"$RESULTS"
+          jq -e \
+            --arg mode "$MODE" \
+            --argjson unit "$UNIT_COUNT" \
+            --argjson integration "$INTEGRATION_COUNT" \
+            --argjson e2e "$E2E_COUNT" \
+            --argjson build "$BUILD_COUNT" \
+            -f scripts/ci/required-results.jq \
+            <<<"$RESULTS"

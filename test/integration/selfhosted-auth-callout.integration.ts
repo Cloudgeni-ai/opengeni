@@ -183,6 +183,7 @@ authorization {
   const deadline = Date.now() + 60_000;
   let up = false;
   while (Date.now() < deadline) {
+    if (proc.exitCode !== null) break;
     try {
       const res = await fetch(`http://127.0.0.1:${port + 1}/healthz`);
       if (res.ok) {

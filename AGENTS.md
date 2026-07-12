@@ -153,6 +153,15 @@ bun run typecheck
 bun test
 ```
 
+For normal focused development, run `bun run check`: it explains the exact
+change-impact plan and executes the memory-bounded local fast path. Add
+`-- --services` for selected real-service/browser gates. Before handoff or when
+impact is uncertain, run `bun run check:full`; main, scheduled, and manual CI
+also force this full map as the selector-drift safety net. Dedicated desktop,
+provider-live, and Rust op-stream gates remain explicit and may not be replaced
+by skipped mock-only coverage. See `docs/toolchain.md` for cache, sharding,
+resource-budget, rename/generated/migration, and fail-closed rules.
+
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
 
 ## Deployment Work Notes

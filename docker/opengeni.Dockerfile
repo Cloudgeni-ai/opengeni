@@ -1,9 +1,14 @@
-FROM oven/bun:1.3.13 AS base
+FROM docker:29.6.1-cli@sha256:862099ada15c669000bef53aa4cb9d821262829f45b0dda2159ccb276443043b AS docker-cli
+
+FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS dependencies
 
 WORKDIR /app
 
-ARG OPENGENI_SERVER_VERSION
-ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+# OS packages are independent of the JavaScript lockfile. Keep this layer ahead
+# of dependency manifests so an ordinary package update never repeats apt work.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
@@ -26,18 +31,20 @@ COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
 
-RUN bun install --frozen-lockfile
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+  bun install --frozen-lockfile
+
+FROM dependencies AS source
+
+ARG OPENGENI_SERVER_VERSION
+ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 
 COPY --chown=bun:bun . .
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
-  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
 USER bun
 
-FROM base AS api
+FROM source AS api
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
 # the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
@@ -51,23 +58,18 @@ FROM base AS api
 EXPOSE 8000
 CMD ["bun", "run", "--cwd", "apps/api", "start"]
 
-FROM base AS worker
+FROM source AS worker
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
-# daemon socket. Install the client only; the daemon remains outside this image.
+# daemon socket. Copy the immutable official client and CLI plugins only; the
+# daemon remains outside this image and no floating apt repository participates
+# in a same-SHA rebuild.
 USER root
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
-  && install -m 0755 -d /etc/apt/keyrings \
-  && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-  && chmod a+r /etc/apt/keyrings/docker.asc \
-  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
-  && apt-get update \
-  && apt-get install -y --no-install-recommends docker-ce-cli \
-  && rm -rf /var/lib/apt/lists/*
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/docker/cli-plugins
 USER bun
 CMD ["bun", "run", "--cwd", "apps/worker", "start"]
 
-FROM base AS web-build
+FROM source AS web-build
 ARG OPENGENI_DEPLOYMENT_REVISION=dev
 ENV VITE_OPENGENI_DEPLOYMENT_REVISION=$OPENGENI_DEPLOYMENT_REVISION
 RUN bun run --cwd apps/web build

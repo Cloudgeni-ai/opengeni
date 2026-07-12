@@ -1,6 +1,7 @@
 .git
 .github
 .agent
+.cache
 .env
 .env.*
 !.env.example
@@ -14,6 +15,8 @@ agent/target
 dist
 build
 coverage
+ci-profile
+evidence
 htmlcov
 .coverage
 .turbo
