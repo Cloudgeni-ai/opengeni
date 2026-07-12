@@ -5,6 +5,14 @@ import type { ImpactPlan } from "./impact";
 import { describeTestConcurrencyBudget, testConcurrencyBudget } from "./resource-budget";
 import { deterministicShards } from "./workspace";
 
+export function explicitBunTestPath(path: string): string {
+  // Bun's explicit-file filter requires a relative-path marker for custom
+  // `.integration.ts` and `.e2e.ts` suffixes. A bare repository path is
+  // interpreted as a test-name/file-pattern filter and exits 1 without running
+  // the selected file. Impact plans contain repository-relative paths.
+  return path.startsWith("./") ? path : `./${path}`;
+}
+
 function environment(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
   for (const name of Object.keys(env)) {
@@ -67,7 +75,7 @@ async function main(): Promise<void> {
         "--parallel=1",
         "--isolate",
         `--max-concurrency=${budget.concurrency}`,
-        path,
+        explicitBunTestPath(path),
       ],
       {
         cwd: process.cwd(),
@@ -85,4 +93,4 @@ async function main(): Promise<void> {
   );
 }
 
-await main();
+if (import.meta.main) await main();

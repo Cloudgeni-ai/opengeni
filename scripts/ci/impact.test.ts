@@ -20,6 +20,7 @@ import {
   typecheckProjects,
 } from "./workspace";
 import { sanitizedTestEnvironment } from "./run-unit-shard";
+import { explicitBunTestPath } from "./run-test-shard";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes run only documentation guards", () => {
@@ -190,6 +191,8 @@ describe("fail-closed change impact", () => {
     expect(ci.match(/bun install --frozen-lockfile/g)).toHaveLength(8);
     expect(ci.match(/--backend=copyfile/g)).toHaveLength(8);
     expect(ci).toContain('kind:"fresh-bun-package-store"');
+    expect(ci).toContain("path: ${{ runner.temp }}/opengeni-impact-plan");
+    expect(ci).toContain("--plan ${{ runner.temp }}/opengeni-impact-plan/impact-plan.json");
     expect(ci.indexOf("Install exact dependency tree")).toBeLessThan(
       ci.indexOf("Build fail-closed impact plan"),
     );
@@ -303,6 +306,14 @@ describe("fail-closed change impact", () => {
       NODE_ENV: "test",
       OPENGENI_TEST_HERMETIC: "1",
     });
+  });
+
+  test("real-service runners mark custom-suffix test files as explicit paths", () => {
+    expect(explicitBunTestPath("test/integration/example.integration.ts")).toBe(
+      "./test/integration/example.integration.ts",
+    );
+    expect(explicitBunTestPath("test/e2e/example.e2e.ts")).toBe("./test/e2e/example.e2e.ts");
+    expect(explicitBunTestPath("./already-explicit.test.ts")).toBe("./already-explicit.test.ts");
   });
 });
 

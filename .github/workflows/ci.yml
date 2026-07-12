@@ -176,13 +176,16 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
+          path: ${{ runner.temp }}/opengeni-impact-plan
       - name: Run exactly the explained guards
         run: >-
           bun scripts/ci/profile-command.ts
           --name guards
           --output ci-profile/guards.json
           --timeout-seconds 900
-          -- bun scripts/ci/run-guards-plan.ts --plan impact-plan.json --exclude publish-closure
+          -- bun scripts/ci/run-guards-plan.ts
+          --plan ${{ runner.temp }}/opengeni-impact-plan/impact-plan.json
+          --exclude publish-closure
       - name: Impact map completeness and cache invariants
         run: >-
           bun test
