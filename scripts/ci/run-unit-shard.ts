@@ -9,13 +9,24 @@ import {
   fileUsesProcessGlobalTestState,
 } from "./workspace";
 
-function sanitizedTestEnvironment(): Record<string, string> {
-  const environment = { ...process.env } as Record<string, string>;
+export function sanitizedTestEnvironment(
+  source: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> {
+  const environment = Object.fromEntries(
+    Object.entries(source).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+  const requireRealDatabase = environment.OPENGENI_REQUIRE_REAL_DB === "1";
   for (const name of Object.keys(environment)) {
     if (name.startsWith("OPENGENI_")) delete environment[name];
   }
   environment.NODE_ENV = "test";
   environment.OPENGENI_TEST_HERMETIC = "1";
+  // CI sets this parent flag for the full unit shard because package-local
+  // PostgreSQL/FORCE-RLS tests use the unit filename convention. Preserve only
+  // the exact fail-closed boolean; all other ambient OpenGeni state stays
+  // scrubbed. Local focused checks remain infrastructure-free unless their
+  // caller deliberately requires the real database boundary.
+  if (requireRealDatabase) environment.OPENGENI_REQUIRE_REAL_DB = "1";
   return environment;
 }
 
@@ -95,4 +106,4 @@ async function main(): Promise<void> {
   );
 }
 
-await main();
+if (import.meta.main) await main();

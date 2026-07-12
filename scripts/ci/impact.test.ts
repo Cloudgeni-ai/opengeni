@@ -19,6 +19,7 @@ import {
   fileUsesProcessGlobalTestState,
   typecheckProjects,
 } from "./workspace";
+import { sanitizedTestEnvironment } from "./run-unit-shard";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes run only documentation guards", () => {
@@ -181,11 +182,14 @@ describe("fail-closed change impact", () => {
     expect(ci).not.toContain("*.cache-to=type=gha,scope=opengeni-workloads");
     expect(ci).not.toContain("path: node_modules");
     expect(ci).not.toContain("dependencies-v3-");
-    expect(ci.match(/~\/\.bun\/install\/cache/g)).toHaveLength(8);
-    expect(ci.match(/bun-store-v1-/g)).toHaveLength(8);
+    expect(ci).not.toContain("~/.bun/install/cache");
+    expect(ci).not.toContain("bun-store-v1-");
+    expect(ci).not.toContain("actions/cache/restore");
+    expect(ci.match(/BUN_INSTALL_CACHE_DIR:/g)).toHaveLength(8);
     expect(ci.match(/rm -rf node_modules/g)).toHaveLength(8);
     expect(ci.match(/bun install --frozen-lockfile/g)).toHaveLength(8);
-    expect(ci).toContain("key: bun-store-v1-");
+    expect(ci.match(/--backend=copyfile/g)).toHaveLength(8);
+    expect(ci).toContain('kind:"fresh-bun-package-store"');
     expect(ci.indexOf("Install exact dependency tree")).toBeLessThan(
       ci.indexOf("Build fail-closed impact plan"),
     );
@@ -258,11 +262,18 @@ describe("fail-closed change impact", () => {
     expect(packageBuilder).toContain('NODE_OPTIONS = "--max-old-space-size=1536"');
     expect(unitRunner).toContain('"--parallel=1"');
     expect(unitRunner).toContain('OPENGENI_TEST_FILES_PER_PROCESS ?? "1"');
+    expect(unitRunner).toContain(
+      'const requireRealDatabase = environment.OPENGENI_REQUIRE_REAL_DB === "1"',
+    );
+    expect(unitRunner).toContain(
+      'if (requireRealDatabase) environment.OPENGENI_REQUIRE_REAL_DB = "1"',
+    );
     expect(serviceRunner).toContain('"--parallel=1"');
     expect(serviceRunner).toContain('env.OPENGENI_REQUIRE_REAL_DB = "1"');
     expect(serviceRunner).toContain('path.endsWith(".browser.e2e.ts")');
     expect(serviceRunner).toContain("needsOpe26SessionPins: selected.includes(ope26SessionPins)");
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    expect(ci).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
     expect(ci).toContain("needs_ope26_session_pins=$(jq -r .needsOpe26SessionPins");
     expect(ci).toContain("Upload OPE-26 session pin visual evidence");
     expect(ci).toContain("/tmp/ope26-session-pin-mobile-dark.png");
@@ -271,6 +282,27 @@ describe("fail-closed change impact", () => {
     );
     expect(unitRunner).not.toMatch(/"--parallel",\s*"1"/);
     expect(serviceRunner).not.toMatch(/"--parallel",\s*"1"/);
+  });
+
+  test("unit runners preserve only the explicit real-database fail-closed flag", () => {
+    expect(
+      sanitizedTestEnvironment({
+        PATH: "/bin",
+        OPENGENI_REQUIRE_REAL_DB: "1",
+        OPENGENI_DATABASE_URL: "must-not-leak",
+        OPENGENI_TEST_FILES_PER_PROCESS: "99",
+      }),
+    ).toEqual({
+      PATH: "/bin",
+      NODE_ENV: "test",
+      OPENGENI_TEST_HERMETIC: "1",
+      OPENGENI_REQUIRE_REAL_DB: "1",
+    });
+    expect(sanitizedTestEnvironment({ PATH: "/bin", OPENGENI_REQUIRE_REAL_DB: "true" })).toEqual({
+      PATH: "/bin",
+      NODE_ENV: "test",
+      OPENGENI_TEST_HERMETIC: "1",
+    });
   });
 });
 

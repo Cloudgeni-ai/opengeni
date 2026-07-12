@@ -116,18 +116,20 @@ lock manifests, build scripts, transitive workspace dependency fingerprints,
 Bun/platform/architecture, and relevant build environment. Every restored file
 is manifest-, digest-, mode-, path-, and symlink-validated; corruption becomes a
 cache miss and rebuild, never a trusted output. `.bun-version` is the canonical
-Bun pin for local/CI/release, and the workload Docker base is version- and
-digest-pinned. The worker copies Docker CLI and its plugins from a separately
+Bun pin for local and CI; release-workflow pinning is OPE-25-owned and is not
+claimed by this fast path. The workload Docker base is version- and digest-pinned.
+The worker copies Docker CLI and its plugins from a separately
 digest-pinned official image rather than installing a floating apt package.
 Per-target GHA cache scopes prevent API/worker/web cache exports from replacing
 one another, while the shared Dockerfile graph still reuses common layers.
-CI caches only Bun's content-addressed global package store; executable
-`node_modules` trees are never restored from Actions cache. Every job removes
-any ambient tree and performs a frozen clean install from the shared store, so
-dependency bytes tampered in one job cannot become trusted input in another.
-The store avoids repeated network/package downloads while the clean install
-keeps lockfile, manifest, patch, platform, and Bun-version validation at every
-execution boundary.
+CI does not restore Bun's extracted package store or executable `node_modules`
+trees from Actions cache: Bun 1.3 does not revalidate extracted cache bytes
+against the lockfile and may hardlink them into an install. Every job removes
+both ambient locations, performs a frozen install into a fresh runner-local
+store, and uses the copyfile backend so later store mutation cannot rewrite the
+installed tree. Only digest-verified build outputs and non-executable browser
+downloads are reused across runs. This keeps dependency trust fail-closed even
+when it costs a small parallel network install in each isolated job.
 The remote cache snapshot keeps at most two immutable fingerprints per package,
 so restore-forward-save cannot grow every per-SHA cache without bound. The
 publish-closure guard is validation-only: selected builds produce outputs once,

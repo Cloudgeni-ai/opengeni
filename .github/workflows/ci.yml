@@ -41,23 +41,17 @@ jobs:
         with:
           bun-version-file: .bun-version
 
-      - name: Restore reusable Bun package store
-        id: bun-store-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-
-      - name: Remove any pre-existing dependency tree
-        run: rm -rf node_modules
-
       - name: Install exact dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: >-
           bun scripts/ci/profile-command.ts
           --name dependencies
           --output ci-profile/dependencies.json
           --timeout-seconds 600
-          -- bun install --frozen-lockfile
+          -- bash -euo pipefail -c
+          'rm -rf node_modules "$BUN_INSTALL_CACHE_DIR";
+          bun install --frozen-lockfile --backend=copyfile'
 
       - name: Build fail-closed impact plan
         id: plan
@@ -103,13 +97,11 @@ jobs:
 
       - name: Record dependency cache outcome
         if: always()
-        env:
-          BUN_STORE_CACHE_HIT: ${{ steps.bun-store-cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
           [ -f ci-profile/dependencies.json ] || exit 0
-          jq --arg hit "$BUN_STORE_CACHE_HIT" \
-            '.cache = {kind:"bun-package-store", hit:($hit == "true"), cleanInstall:true}' \
+          jq \
+            '.cache = {kind:"fresh-bun-package-store", hit:false, cleanInstall:true, backend:"copyfile"}' \
             ci-profile/dependencies.json > ci-profile/dependencies.json.tmp
           mv ci-profile/dependencies.json.tmp ci-profile/dependencies.json
 
@@ -140,15 +132,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -178,15 +167,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -229,19 +215,18 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
       - name: Run deterministic memory-bounded shard
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
         run: >-
           bun scripts/ci/profile-command.ts
           --name unit-${{ matrix.number }}
@@ -273,15 +258,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -317,15 +299,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/download-artifact@v4
         with:
           name: ci-impact-plan
@@ -384,15 +363,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: actions/cache@v4
         with:
           path: .cache/opengeni/build-packages
@@ -447,15 +423,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
-      - uses: actions/cache/restore@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-          fail-on-cache-miss: true
       - name: Install a clean dependency tree
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/opengeni-bun-store
         run: |
-          rm -rf node_modules
-          bun install --frozen-lockfile
+          rm -rf node_modules "$BUN_INSTALL_CACHE_DIR"
+          bun install --frozen-lockfile --backend=copyfile
       - uses: azure/setup-helm@v5
       - uses: hashicorp/setup-terraform@v4
       - name: Validate deployment profiles
