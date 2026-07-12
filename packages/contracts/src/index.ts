@@ -2329,8 +2329,8 @@ export const ScheduledTask = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
   reusableSessionId: z.string().uuid().nullable(),
-  // Caller-selected existing session. reusableSessionId remains the internal
-  // task-owned session pointer for the default reusable_session behavior.
+  // Caller-selected existing session. reusableSessionId remains semantic
+  // task-owned state; the DB may physically mirror this target for old workers.
   targetSessionId: z.string().uuid().nullable().default(null),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
@@ -2383,6 +2383,13 @@ export const CreateScheduledTaskRequest = withVariableSetIdAlias({
       message: "targetSessionId requires runMode=reusable_session",
     });
   }
+  if (value.targetSessionId && value.agentConfig.goal) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with targetSessionId",
+    });
+  }
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
@@ -2410,6 +2417,13 @@ export const UpdateScheduledTaskRequest = withVariableSetIdAlias({
       code: z.ZodIssueCode.custom,
       path: ["targetSessionId"],
       message: "targetSessionId requires runMode=reusable_session",
+    });
+  }
+  if (value.targetSessionId && value.agentConfig?.goal) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with targetSessionId",
     });
   }
 });

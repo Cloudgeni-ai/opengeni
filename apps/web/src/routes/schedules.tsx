@@ -65,6 +65,9 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some(
     (server) => server.id === "opengeni",
   );
+  const canTargetSessions =
+    hasWorkspacePermission(context.accessContext, workspaceId, "sessions:read") &&
+    hasWorkspacePermission(context.accessContext, workspaceId, "sessions:control");
   // Honest list state: the initial fetch renders as loading and a failed load
   // as an error with retry — never as the "No scheduled tasks." empty state.
   const tasksView = listViewState({ loading, error: loadError, count: tasks.length });
@@ -171,8 +174,12 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         schedule: scheduleFromFormState(form),
         runMode: form.runMode,
         overlapPolicy: form.overlapPolicy,
-        targetSessionId:
-          form.runMode === "reusable_session" ? (form.targetSessionId ?? null) : null,
+        ...(canTargetSessions
+          ? {
+              targetSessionId:
+                form.runMode === "reusable_session" ? (form.targetSessionId ?? null) : null,
+            }
+          : {}),
         agentConfig: agentConfigFromFormState(form, task),
       });
       setEditingTaskId(null);
@@ -711,8 +718,9 @@ function ScheduledTaskForm(props: {
                   ))}
               </select>
               <p id={`${targetSessionControlId}-help`} className="text-2xs text-fg-subtle">
-                Reuse one session keeps its history, title, goal, frozen rig, and sandbox route.
-                Leave this empty to keep the task-owned default.
+                An existing thread keeps its history, title, frozen rig, sandbox route, and current
+                goal. Scheduled-task goals are not accepted for targeted threads. Leave this empty
+                to keep the task-owned reusable-session default.
               </p>
               {form.runMode !== "reusable_session" ? (
                 <p className="text-2xs text-fg-subtle">

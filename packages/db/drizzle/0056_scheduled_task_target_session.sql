@@ -8,7 +8,7 @@ BEGIN
   ) THEN
     ALTER TABLE "scheduled_tasks"
       ADD CONSTRAINT "scheduled_tasks_target_session_id_fk"
-      FOREIGN KEY ("target_session_id") REFERENCES "sessions"("id") ON DELETE SET NULL;
+      FOREIGN KEY ("target_session_id") REFERENCES "sessions"("id") ON DELETE RESTRICT;
   END IF;
 END $$;
 

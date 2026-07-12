@@ -1893,7 +1893,10 @@ export const scheduledTasks = pgTable(
     // reusableSessionId, which is populated lazily for the legacy
     // task-owned reusable_session path.
     targetSessionId: uuid("target_session_id").references(() => sessions.id, {
-      onDelete: "set null",
+      // A target is a durable routing contract. Deleting the session must
+      // fail clearly rather than nulling the target and silently creating a
+      // task-owned fallback on the next fire.
+      onDelete: "restrict",
     }),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "restrict",

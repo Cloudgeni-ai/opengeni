@@ -1157,6 +1157,23 @@ describe("scheduled task form helpers", () => {
     });
   });
 
+  test("preserves hidden goal configuration during unrelated edits", () => {
+    const task = scheduledTask(
+      { type: "interval", everySeconds: 60 },
+      {
+        targetSessionId: "00000000-0000-4000-8000-000000000001",
+        agentConfig: {
+          ...scheduledTaskAgentConfig(),
+          goal: { text: "Keep the existing objective" },
+        },
+      },
+    );
+    const form = { ...formStateFromScheduledTask(task), prompt: "updated prompt" };
+    expect(agentConfigFromFormState(form, task).goal).toEqual({
+      text: "Keep the existing objective",
+    });
+  });
+
   test("uses form resources in saved agent config while preserving model settings", () => {
     const task = scheduledTask(
       { type: "interval", everySeconds: 60 },

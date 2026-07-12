@@ -341,6 +341,24 @@ describe("contracts", () => {
         runMode: "reusable_session",
       }).targetSessionId,
     ).toBe(targetSessionId);
+    expect(() =>
+      CreateScheduledTaskRequest.parse({
+        name: "targeted-goal",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: {
+          prompt: "Continue the thread",
+          goal: { text: "replace the existing goal" },
+        },
+      }),
+    ).toThrow(/agentConfig\.goal cannot be used with targetSessionId/);
+    expect(() =>
+      UpdateScheduledTaskRequest.parse({
+        targetSessionId,
+        agentConfig: { prompt: "Continue the thread", goal: { text: "replace" } },
+      }),
+    ).toThrow(/agentConfig\.goal cannot be used with targetSessionId/);
   });
 
   test("accepts pack enable and marketing daily analysis defaults", () => {

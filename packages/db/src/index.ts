@@ -5009,7 +5009,48 @@ export async function createScheduledTask(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const [row] = await scopedDb.insert(schema.scheduledTasks).values(input).returning();
+      let agentConfig = input.agentConfig;
+      if (input.targetSessionId) {
+        const [target] = await scopedDb
+          .select({ sandboxBackend: schema.sessions.sandboxBackend })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.targetSessionId),
+            ),
+          )
+          .limit(1);
+        if (!target) {
+          throw new Error(`target session not found: ${input.targetSessionId}`);
+        }
+        if (
+          input.agentConfig.sandboxBackend !== undefined &&
+          input.agentConfig.sandboxBackend !== target.sandboxBackend
+        ) {
+          throw new Error("scheduled task sandbox backend does not match its target session");
+        }
+        // The legacy worker routes reusable turns from agentConfig alone. Stamp
+        // the target's immutable route even for direct DB callers so a mixed
+        // rollout cannot fall back to the deployment default.
+        agentConfig = {
+          ...input.agentConfig,
+          sandboxBackend: target.sandboxBackend as SandboxBackend,
+        };
+      }
+      // Old workers do not know target_session_id. Mirror an explicit target
+      // into their legacy reusable-session pointer so a mixed-version rollout
+      // routes to the chosen thread instead of creating a task-owned fallback.
+      const [row] = await scopedDb
+        .insert(schema.scheduledTasks)
+        .values({
+          ...input,
+          agentConfig,
+          ...(input.targetSessionId
+            ? { reusableSessionId: input.targetSessionId }
+            : { reusableSessionId: null }),
+        })
+        .returning();
       if (!row) {
         throw new Error("Failed to create scheduled task");
       }
@@ -5032,8 +5073,7 @@ export async function updateScheduledTask(
       ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
       ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
       ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-      ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
-      ...(input.reusableSessionId !== undefined
+      ...(input.reusableSessionId !== undefined && input.targetSessionId === undefined
         ? { reusableSessionId: input.reusableSessionId }
         : {}),
       ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
@@ -5041,10 +5081,30 @@ export async function updateScheduledTask(
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       updatedAt: new Date(),
     };
-    const updateRow = async (tx: Database) =>
+    const updateRow = async (
+      tx: Database,
+      currentRow?: typeof schema.scheduledTasks.$inferSelect,
+    ) =>
       await tx
         .update(schema.scheduledTasks)
-        .set(update)
+        .set({
+          ...update,
+          ...(input.targetSessionId !== undefined
+            ? {
+                targetSessionId: input.targetSessionId,
+                // Keep the legacy worker route in lockstep with a target. An
+                // explicit null is a no-op when the row is already untargeted:
+                // preserve its task-owned reusable session instead of
+                // orphaning it. A real target clear returns to the legacy
+                // task-owned path with a null pointer.
+                ...(input.targetSessionId !== null
+                  ? { reusableSessionId: input.targetSessionId }
+                  : currentRow?.targetSessionId !== null
+                    ? { reusableSessionId: null }
+                    : {}),
+              }
+            : {}),
+        })
         .where(
           and(
             eq(schema.scheduledTasks.workspaceId, workspaceId),
@@ -5054,7 +5114,7 @@ export async function updateScheduledTask(
         .returning();
 
     const expectedCurrent = input.expectedCurrent;
-    if (!expectedCurrent) {
+    if (!expectedCurrent && input.targetSessionId === undefined) {
       const [row] = await updateRow(scopedDb);
       if (!row) {
         throw new Error(`Scheduled task not found: ${taskId}`);
@@ -5077,10 +5137,10 @@ export async function updateScheduledTask(
       if (!currentRow) {
         throw new Error(`Scheduled task not found: ${taskId}`);
       }
-      if (!scheduledTaskRowMatches(currentRow, expectedCurrent)) {
+      if (expectedCurrent && !scheduledTaskRowMatches(currentRow, expectedCurrent)) {
         throw new ScheduledTaskConflictError(taskId);
       }
-      const [row] = await updateRow(tx as unknown as Database);
+      const [row] = await updateRow(tx as unknown as Database, currentRow);
       if (!row) {
         throw new Error(`Scheduled task not found: ${taskId}`);
       }
@@ -17224,6 +17284,23 @@ export async function enqueueSessionTurn(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const [session] = await tx
+          .select({ status: schema.sessions.status })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) {
+          throw new Error(`Session not found: ${input.sessionId}`);
+        }
+        if (session.status === "cancelled") {
+          throw new Error("cannot enqueue a turn for a cancelled session");
+        }
         const position = await positionForEnqueue(tx as unknown as Database, input);
         const [row] = await tx
           .insert(schema.sessionTurns)
@@ -17269,7 +17346,7 @@ export async function claimNextQueuedTurn(
         // taking a queued turn first can deadlock with a settlement that owns
         // the session and is waiting for the same turn.
         const [session] = await tx
-          .select({ id: schema.sessions.id })
+          .select({ id: schema.sessions.id, status: schema.sessions.status })
           .from(schema.sessions)
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
@@ -17277,6 +17354,23 @@ export async function claimNextQueuedTurn(
           .for("update")
           .limit(1);
         if (!session) {
+          return null;
+        }
+        if (session.status === "cancelled") {
+          // A cancellation that won after a dispatch commit must not leave a
+          // queued turn claimable by a workflow that was already waking. The
+          // normal interrupt path drains these rows and emits its summary;
+          // this is a lock-protected defense-in-depth drain for stale wakes.
+          await tx
+            .update(schema.sessionTurns)
+            .set({ status: "cancelled", finishedAt: new Date(), updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, workspaceId),
+                eq(schema.sessionTurns.sessionId, sessionId),
+                eq(schema.sessionTurns.status, "queued"),
+              ),
+            );
           return null;
         }
         const rows = await tx.execute(sql<{ id: string }>`
@@ -18727,7 +18821,22 @@ export type LockedScheduledTaskSessionUpdate = {
   lockGoal?: boolean;
 };
 
-export async function appendSessionEventsWithLockedSessionUpdate(
+/**
+ * The immutable turn fields needed when a caller already holds the session
+ * row lock. The helper supplies tenant/session/trigger ids from the locked
+ * rows, so a queued turn cannot be inserted for a different session.
+ */
+export type LockedSessionTurnInput = Omit<
+  EnqueueSessionTurnInput,
+  "accountId" | "workspaceId" | "sessionId" | "triggerEventId"
+>;
+
+type LockedSessionUpdateTransactionResult = {
+  events: SessionEvent[];
+  turn: SessionTurn | null;
+};
+
+async function runLockedSessionUpdateTransaction(
   db: Database,
   workspaceId: string,
   sessionId: string,
@@ -18735,13 +18844,15 @@ export async function appendSessionEventsWithLockedSessionUpdate(
     session: Session,
     context: LockedSessionUpdateContext,
   ) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
-  options: { scheduledTask?: LockedScheduledTaskSessionUpdate } = {},
-): Promise<SessionEvent[]> {
+  options: { scheduledTask?: LockedScheduledTaskSessionUpdate },
+  enqueueInput?: LockedSessionTurnInput,
+): Promise<LockedSessionUpdateTransactionResult> {
   return await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
         if (options.scheduledTask) {
           const [scheduledTaskRow] = await tx
             .select()
@@ -18761,9 +18872,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             throw new ScheduledTaskConflictError(options.scheduledTask.taskId);
           }
           if (options.scheduledTask.lockGoal) {
-            // `clearSessionGoal` and the goal status mutations take the goal
-            // lock before the session lock. Preserve that order here while
-            // still keeping the scheduled goal replacement in this transaction.
+            // Goal mutation paths use goal -> session lock order. Preserve it
+            // while keeping scheduled goal replacement in this transaction.
             await tx
               .select({ id: schema.sessionGoals.id })
               .from(schema.sessionGoals)
@@ -18788,6 +18898,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
+        if (enqueueInput && sessionRow.status === "cancelled") {
+          throw new Error("reusable session is cancelled; refusing to enqueue scheduled fire");
+        }
         const built = await build(mapSession(sessionRow), {
           updateSessionMcpServerCredentials: async (updates) =>
             await updateSessionMcpServerCredentialsInTransaction(tx, {
@@ -18809,12 +18922,15 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
             return rows.map(mapSessionTurn);
           },
-          upsertSessionGoal: async (input) =>
-            await upsertSessionGoalInTransaction(tx as unknown as Database, input),
+          upsertSessionGoal: async (input) => await upsertSessionGoalInTransaction(tx, input),
         });
         if (built.events.length === 0) {
-          return [];
+          if (enqueueInput) {
+            throw new Error("scheduled turn requires a durable user.message event");
+          }
+          return { events: [], turn: null };
         }
+
         let sequence = sessionRow.lastSequence;
         const now = new Date();
         const values = built.events.map((input) => ({
@@ -18831,6 +18947,66 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           occurredAt: input.occurredAt ?? now,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        let turn: SessionTurn | null = null;
+        if (enqueueInput) {
+          const trigger = inserted.find((event) => event.type === "user.message");
+          if (!trigger) {
+            throw new Error("scheduled turn requires a durable user.message trigger");
+          }
+          const fullInput: EnqueueSessionTurnInput = {
+            ...enqueueInput,
+            accountId: sessionRow.accountId,
+            workspaceId,
+            sessionId,
+            triggerEventId: trigger.id,
+          };
+          const position = await positionForEnqueue(tx, fullInput);
+          const [turnRow] = await tx
+            .insert(schema.sessionTurns)
+            .values({
+              accountId: sessionRow.accountId,
+              workspaceId,
+              sessionId,
+              triggerEventId: trigger.id,
+              temporalWorkflowId: enqueueInput.temporalWorkflowId,
+              status: "queued",
+              source: enqueueInput.source,
+              position,
+              prompt: enqueueInput.prompt,
+              resources: enqueueInput.resources,
+              tools: enqueueInput.tools,
+              model: enqueueInput.model,
+              reasoningEffort: enqueueInput.reasoningEffort,
+              sandboxBackend: enqueueInput.sandboxBackend,
+              metadata: enqueueInput.metadata,
+            })
+            .returning();
+          if (!turnRow) {
+            throw new Error("Failed to enqueue scheduled session turn");
+          }
+          turn = mapSessionTurn(turnRow);
+          const [turnQueued] = await tx
+            .insert(schema.sessionEvents)
+            .values({
+              accountId: sessionRow.accountId,
+              workspaceId,
+              sessionId,
+              sequence: ++sequence,
+              type: "turn.queued",
+              turnId: turnRow.id,
+              payload: {
+                turnId: turnRow.id,
+                triggerEventId: trigger.id,
+                source: turnRow.source,
+              },
+              occurredAt: now,
+            })
+            .returning();
+          if (!turnQueued) {
+            throw new Error("Failed to append scheduled turn.queued event");
+          }
+          inserted.push(turnQueued);
+        }
         const update = built.update ?? {};
         await tx
           .update(schema.sessions)
@@ -18847,9 +19023,61 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
-        return inserted.map(mapEvent);
+        return { events: inserted.map(mapEvent), turn };
       }),
   );
+}
+
+export async function appendSessionEventsWithLockedSessionUpdate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  build: (
+    session: Session,
+    context: LockedSessionUpdateContext,
+  ) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
+  options: { scheduledTask?: LockedScheduledTaskSessionUpdate } = {},
+): Promise<SessionEvent[]> {
+  const result = await runLockedSessionUpdateTransaction(
+    db,
+    workspaceId,
+    sessionId,
+    build,
+    options,
+  );
+  return result.events;
+}
+
+/**
+ * Atomically append a scheduled user message, any goal/session mutations, the
+ * queued turn, and its `turn.queued` event. The task, goal, and session locks
+ * are held until every durable write commits, so cancellation can linearize
+ * either before the dispatch (zero writes) or after it (and then drain the
+ * committed queued turn) but never between the message and queue insert.
+ */
+export async function appendScheduledTaskEventsAndEnqueueTurn(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  build: (
+    session: Session,
+    context: LockedSessionUpdateContext,
+  ) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
+  enqueueInput: LockedSessionTurnInput,
+  options: { scheduledTask?: LockedScheduledTaskSessionUpdate } = {},
+): Promise<{ events: SessionEvent[]; turn: SessionTurn }> {
+  const result = await runLockedSessionUpdateTransaction(
+    db,
+    workspaceId,
+    sessionId,
+    build,
+    options,
+    enqueueInput,
+  );
+  if (!result.turn) {
+    throw new Error("scheduled dispatch did not create a queued turn");
+  }
+  return { events: result.events, turn: result.turn };
 }
 
 export function sessionSubject(workspaceId: string, sessionId: string): string {
@@ -19125,6 +19353,12 @@ function scheduledTaskRowMatches(
   row: typeof schema.scheduledTasks.$inferSelect,
   expected: ScheduledTask,
 ): boolean {
+  // Targeted tasks mirror target_session_id into reusable_session_id for old
+  // workers. The public/task-domain mapper hides that compatibility value, so
+  // compare the physical row against the normalized semantic expectation.
+  const expectedReusableSessionId = expected.targetSessionId
+    ? expected.targetSessionId
+    : expected.reusableSessionId;
   return (
     row.name === expected.name &&
     row.status === expected.status &&
@@ -19133,7 +19367,7 @@ function scheduledTaskRowMatches(
     row.runMode === expected.runMode &&
     row.overlapPolicy === expected.overlapPolicy &&
     scheduledTaskJsonMatches(row.agentConfig, expected.agentConfig) &&
-    scheduledTaskNullableMatches(row.reusableSessionId, expected.reusableSessionId) &&
+    scheduledTaskNullableMatches(row.reusableSessionId, expectedReusableSessionId) &&
     scheduledTaskNullableMatches(row.targetSessionId, expected.targetSessionId) &&
     scheduledTaskNullableMatches(row.variableSetId, expected.variableSetId) &&
     scheduledTaskNullableMatches(row.rigId, expected.rigId) &&
@@ -19153,7 +19387,9 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     runMode: row.runMode as ScheduledTaskRunMode,
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
-    reusableSessionId: row.reusableSessionId,
+    // A targeted task's legacy pointer is a rolling-deploy compatibility
+    // mirror, not a second user-visible target or a task-owned session.
+    reusableSessionId: row.targetSessionId ? null : row.reusableSessionId,
     targetSessionId: row.targetSessionId ?? null,
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,

@@ -1,5 +1,5 @@
 import {
-  appendSessionEventsWithLockedSessionUpdate,
+  appendScheduledTaskEventsAndEnqueueTurn,
   createScheduledTaskRun,
   createSession,
   createSessionGoal,
@@ -47,6 +47,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       // time. Targeted fires take the same snapshot check again while holding
       // the target session lock below, closing the whole read-to-append gap.
       await lockScheduledTaskForDispatch(db, input.workspaceId, task.id, task);
+      if (task.targetSessionId && task.status !== "active") {
+        throw new Error("targeted scheduled task is paused; refusing a manual or stale fire");
+      }
       // The scheduled task's model can be codex/<slug>; resolve it here so the
       // admission gate can skip the credit/cost gates for a codex-billed run
       // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
@@ -247,12 +250,17 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           // fail the run instead of silently running with the wrong secrets.
           if (targetSessionId) {
             assertScheduledTaskTargetCompatible(session, task);
+            if (goalSpec) {
+              throw new Error(
+                "scheduled tasks targeting an existing session cannot replace its goal",
+              );
+            }
           } else if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
             throw new Error(
               "scheduled task variableSet attachment does not match its reusable session",
             );
           }
-          const events = await appendSessionEventsWithLockedSessionUpdate(
+          const { events } = await appendScheduledTaskEventsAndEnqueueTurn(
             db,
             task.workspaceId,
             session.id,
@@ -264,7 +272,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               assertReusableSessionRevivable(locked.status);
               if (targetSessionId) {
                 assertScheduledTaskTargetCompatible(locked, task);
+                if (goalSpec) {
+                  throw new Error(
+                    "scheduled tasks targeting an existing session cannot replace its goal",
+                  );
+                }
               }
+              const shouldQueueSession = locked.status === "idle" || locked.status === "failed";
               // A recurring "maintain X" task re-establishes its objective on
               // every fire. Do this only after the locked status/attachment
               // checks and in the same transaction as the user.message, so a
@@ -310,12 +324,38 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                       run.id,
                     ),
                   },
+                  ...(shouldQueueSession
+                    ? [
+                        {
+                          type: "session.status.changed" as const,
+                          payload: { status: "queued", reason: "scheduled_task" },
+                        },
+                      ]
+                    : []),
                 ],
                 update: {
                   resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
                   tools: mergeToolRefs(locked.tools, taskTools),
+                  ...(shouldQueueSession ? { status: "queued" as const, activeTurnId: null } : {}),
                 },
               };
+            },
+            {
+              temporalWorkflowId: workflowIdForSession(session.id),
+              source: "scheduled_task",
+              prompt: task.agentConfig.prompt,
+              resources: task.agentConfig.resources,
+              tools: taskTools,
+              model,
+              reasoningEffort,
+              // A caller-selected target owns the immutable compute route. The
+              // legacy task-owned path intentionally keeps its historical
+              // task/deployment backend resolution above.
+              sandboxBackend: targetSessionId ? session.sandboxBackend : taskSandboxBackend,
+              metadata: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+              },
             },
             {
               scheduledTask: {
@@ -330,34 +370,6 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           if (!trigger) {
             throw new Error("failed to append scheduled task trigger event");
           }
-          const turn = await enqueueSessionTurn(db, {
-            accountId: task.accountId,
-            workspaceId: task.workspaceId,
-            sessionId: session.id,
-            triggerEventId: trigger.id,
-            temporalWorkflowId: workflowIdForSession(session.id),
-            source: "scheduled_task",
-            prompt: task.agentConfig.prompt,
-            resources: task.agentConfig.resources,
-            tools: taskTools,
-            model,
-            reasoningEffort,
-            // A caller-selected target owns the immutable compute route. The
-            // legacy task-owned path intentionally keeps its historical
-            // task/deployment backend resolution above.
-            sandboxBackend: targetSessionId ? session.sandboxBackend : taskSandboxBackend,
-            metadata: {
-              scheduledTaskId: task.id,
-              scheduledTaskRunId: run.id,
-            },
-          });
-          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
-            {
-              type: "turn.queued",
-              turnId: turn.id,
-              payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
-            },
-          ]);
           await updateScheduledTaskRun(db, task.workspaceId, run.id, {
             status: "dispatched",
             sessionId: session.id,

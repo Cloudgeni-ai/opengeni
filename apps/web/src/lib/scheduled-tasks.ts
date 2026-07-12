@@ -106,6 +106,11 @@ export function agentConfigFromFormState(
     ...(existingTask?.agentConfig.sandboxBackend
       ? { sandboxBackend: existingTask.agentConfig.sandboxBackend }
       : {}),
+    // The form has no goal editor, but unrelated edits must not silently
+    // erase hidden task configuration. Targeted tasks with a goal are rejected
+    // by the contract/domain policy; preserving it here keeps old data honest
+    // and lets the API return that explicit correction instead of clearing it.
+    ...(existingTask?.agentConfig.goal ? { goal: existingTask.agentConfig.goal } : {}),
   };
 }
 

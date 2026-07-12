@@ -10,10 +10,13 @@ import {
 import type { ObjectStorage } from "../../packages/storage/src/index";
 import {
   appendSessionEvents,
+  appendScheduledTaskEventsAndEnqueueTurn,
   appendSessionEventsWithLockedSessionUpdate,
   appendSessionEventsAndUpdateSession,
   appendSessionHistoryItems,
   bootstrapWorkspace,
+  cancelQueuedSessionTurns,
+  claimNextQueuedTurn,
   completeFileUpload,
   applyCreditLedgerEntry,
   countTurnSessionHistoryItems,
@@ -24,6 +27,7 @@ import {
   createSession,
   createSessionGoal,
   createWorkspaceEnvironment,
+  dbSql,
   encryptEnvironmentValue,
   enablePackInstallation,
   enqueueSessionTurn,
@@ -49,6 +53,7 @@ import {
   setSessionStatus,
   sumUsageQuantity,
   updateScheduledTask,
+  withRlsContext,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -3078,9 +3083,37 @@ describe("worker activities integration", () => {
     );
     const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
     expect(stored.targetSessionId).toBe(target.id);
-    // The legacy pointer remains null: this task never created a task-owned
-    // session, so clearing/deleting the target retains the normal null fallback.
+    // The public mapper keeps the legacy pointer semantic-null, while the
+    // physical column mirrors the target for old workers during rollout.
     expect(stored.reusableSessionId).toBeNull();
+    const [legacyRow] = await dbClient.db.execute<{
+      run_mode: string;
+      reusable_session_id: string | null;
+      agent_config: { sandboxBackend?: string };
+    }>(dbSql`
+      select run_mode, reusable_session_id::text, agent_config
+      from scheduled_tasks
+      where id = ${task.id}
+    `);
+    expect(legacyRow).toMatchObject({
+      run_mode: "reusable_session",
+      reusable_session_id: target.id,
+    });
+    expect(legacyRow?.agent_config).toMatchObject({ sandboxBackend: "none" });
+    // This is the exact read/branch used by a worker from before
+    // target_session_id existed. The migrated compatibility mirror therefore
+    // makes an old and a new worker select the same existing thread rather
+    // than letting the old worker create a task-owned fallback.
+    const legacyWorkerSessionId =
+      legacyRow?.run_mode === "reusable_session" ? legacyRow.reusable_session_id : null;
+    expect(legacyWorkerSessionId).toBe(target.id);
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) => db.execute(dbSql`delete from sessions where id = ${target.id}`),
+      ),
+    ).rejects.toThrow(/scheduled_tasks_target_session_id_fk|foreign key/i);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 50);
     expect(events.filter((event) => event.type === "user.message")).toHaveLength(2);
     expect(
@@ -3095,6 +3128,11 @@ describe("worker activities integration", () => {
     expect(runs.every((run) => run.sessionId === target.id && run.status === "dispatched")).toBe(
       true,
     );
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 50)).filter(
+        (event) => event.type === "turn.queued",
+      ),
+    ).toHaveLength(2);
   });
 
   test("fails closed when a targeted session is cancelled before dispatch", async () => {
@@ -3147,6 +3185,156 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, target.id))?.status).toBe("cancelled");
     expect((await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id))[0]?.status).toBe(
       "failed",
+    );
+  });
+
+  test("atomically linearizes scheduled dispatch against cancellation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const target = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "barrier target",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "barrier target task",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "barrier prompt", resources: [], tools: [], metadata: {} },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+    let release!: () => void;
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const dispatch = appendScheduledTaskEventsAndEnqueueTurn(
+      dbClient.db,
+      grant.workspaceId,
+      target.id,
+      async (locked) => {
+        expect(locked.status).toBe("idle");
+        signalEntered();
+        await hold;
+        return {
+          events: [{ type: "user.message" as const, payload: { text: "barrier prompt" } }],
+          update: { status: "queued" as const, activeTurnId: null },
+        };
+      },
+      {
+        temporalWorkflowId: `session-${target.id}`,
+        source: "scheduled_task",
+        prompt: "barrier prompt",
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: { scheduledTaskId: task.id },
+      },
+      { scheduledTask: { taskId: task.id, expectedTask: task } },
+    );
+    // The helper has the session lock while its build callback waits. This
+    // cancellation therefore cannot commit between user.message and turn.
+    await entered;
+    const cancellation = setSessionStatus(
+      dbClient.db,
+      grant.workspaceId,
+      target.id,
+      "cancelled",
+      null,
+    );
+    release();
+    const committed = await dispatch;
+    await cancellation;
+    await cancelQueuedSessionTurns(dbClient.db, grant.workspaceId, target.id);
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, target.id);
+    expect(committed.events.map((event) => event.type)).toEqual(["user.message", "turn.queued"]);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.status).toBe("cancelled");
+    expect((await getSession(dbClient.db, grant.workspaceId, target.id))?.status).toBe("cancelled");
+    await expect(
+      claimNextQueuedTurn(dbClient.db, grant.workspaceId, target.id, `session-${target.id}`),
+    ).resolves.toBeNull();
+    await expect(
+      enqueueSessionTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: target.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: `session-${target.id}`,
+        source: "scheduled_task",
+        prompt: "must not enqueue",
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        sandboxBackend: "none",
+        metadata: {},
+      }),
+    ).rejects.toThrow(/cancelled/i);
+
+    const cancelledTarget = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "cancelled before lock",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const cancelledTask = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "cancelled before lock task",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "must not write", resources: [], tools: [], metadata: {} },
+      targetSessionId: cancelledTarget.id,
+      metadata: {},
+    });
+    await setSessionStatus(dbClient.db, grant.workspaceId, cancelledTarget.id, "cancelled", null);
+    const beforeEvents = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      cancelledTarget.id,
+      0,
+      50,
+    );
+    await expect(
+      appendScheduledTaskEventsAndEnqueueTurn(
+        dbClient.db,
+        grant.workspaceId,
+        cancelledTarget.id,
+        () => ({ events: [{ type: "user.message", payload: { text: "must not write" } }] }),
+        {
+          temporalWorkflowId: `session-${cancelledTarget.id}`,
+          source: "scheduled_task",
+          prompt: "must not write",
+          resources: [],
+          tools: [],
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          sandboxBackend: "none",
+          metadata: { scheduledTaskId: cancelledTask.id },
+        },
+        { scheduledTask: { taskId: cancelledTask.id, expectedTask: cancelledTask } },
+      ),
+    ).rejects.toThrow(/cancelled/i);
+    expect(
+      await listSessionEvents(dbClient.db, grant.workspaceId, cancelledTarget.id, 0, 50),
+    ).toHaveLength(beforeEvents.length);
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, cancelledTarget.id)).toHaveLength(
+      0,
     );
   });
 

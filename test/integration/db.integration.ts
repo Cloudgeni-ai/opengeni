@@ -630,6 +630,58 @@ describe("DB integration", () => {
     expect(runs[0]?.error).toBe("no worker");
   });
 
+  test("preserves a task-owned reusable pointer on an already-null target no-op", async () => {
+    const grant = await testGrant(dbClient.db);
+    const ownedSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "owned reusable thread",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createScheduledTask(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "reusable pointer no-op",
+      status: "active",
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      reusableSessionId: ownedSession.id,
+    });
+
+    const unchanged = await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      targetSessionId: null,
+    });
+    expect(unchanged.targetSessionId).toBeNull();
+    expect(unchanged.reusableSessionId).toBe(ownedSession.id);
+    expect(
+      (await listScheduledTasks(dbClient.db, grant.workspaceId)).find((row) => row.id === task.id),
+    ).toMatchObject({ reusableSessionId: ownedSession.id, targetSessionId: null });
+
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (scopedDb) =>
+          scopedDb.execute(
+            dbSql`
+              update scheduled_tasks
+              set target_session_id = ${ownedSession.id}, reusable_session_id = null
+              where id = ${task.id}
+            `,
+          ),
+      ),
+    ).rejects.toThrow(/scheduled_tasks_target_legacy_route_ck|check constraint/i);
+  });
+
   test("session goal lifecycle: set, revise, complete, replace", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
