@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
   CapabilityCatalogResponse,
+  evaluateWorkspaceModelPolicy,
   CapabilityPack,
   ClientConfig,
   ClientModel,
@@ -629,5 +630,63 @@ describe("cleared run-state sentinel", () => {
       false,
     );
     expect(isClearedRunStateBlob("null")).toBe(false);
+  });
+});
+
+describe("evaluateWorkspaceModelPolicy", () => {
+  test("no policy allows everything", () => {
+    expect(
+      evaluateWorkspaceModelPolicy(null, { providerId: "azure", modelId: "gpt-5.6-sol" }),
+    ).toEqual({ allowed: true });
+  });
+
+  test("null fields are unrestricted", () => {
+    expect(
+      evaluateWorkspaceModelPolicy(
+        { allowedProviders: null, allowedModels: null },
+        { providerId: "azure", modelId: "gpt-5.6-sol" },
+      ),
+    ).toEqual({ allowed: true });
+  });
+
+  test("provider allowlist blocks a non-listed provider (the codex-only posture)", () => {
+    const policy = { allowedProviders: ["codex-subscription"], allowedModels: null };
+    expect(
+      evaluateWorkspaceModelPolicy(policy, { providerId: "azure", modelId: "gpt-5.6-sol" }),
+    ).toEqual({ allowed: false, reason: "provider" });
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-sol",
+      }),
+    ).toEqual({ allowed: true });
+  });
+
+  test("model allowlist is an ADDITIONAL restriction on top of providers", () => {
+    const policy = {
+      allowedProviders: ["codex-subscription"],
+      allowedModels: ["codex/gpt-5.6-sol"],
+    };
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-luna",
+      }),
+    ).toEqual({ allowed: false, reason: "model" });
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-sol",
+      }),
+    ).toEqual({ allowed: true });
+  });
+
+  test("empty arrays are an explicit total block, not unrestricted", () => {
+    expect(
+      evaluateWorkspaceModelPolicy(
+        { allowedProviders: [], allowedModels: null },
+        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol" },
+      ),
+    ).toEqual({ allowed: false, reason: "provider" });
   });
 });

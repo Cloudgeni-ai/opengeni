@@ -588,6 +588,16 @@ export const SetWorkspaceDefaultRigRequest = z.object({
 });
 export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRigRequest>;
 
+// PUT body for the workspace model policy (full replace, not a merge). null (or
+// omitted) = unrestricted for that dimension; an EMPTY array is a valid,
+// explicit total block. Entries are provider ids / exact model ids as the
+// router resolves them (see evaluateWorkspaceModelPolicy).
+export const UpdateWorkspaceModelPolicyRequest = z.object({
+  allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
+  allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+});
+export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
+
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
   subjectId: z.string().min(1),

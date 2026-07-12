@@ -7,6 +7,7 @@ import {
   defaultModelPricing,
   getSettings,
   parseModelProvidersJson,
+  policyProviderIdForModel,
   resolveModelProvider,
   resolveProviderApiKey,
 } from "../src";
@@ -647,3 +648,45 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
     process.env = original;
   }
 }
+
+describe("policyProviderIdForModel", () => {
+  // The attribution the workspace model policy evaluates MUST agree with the
+  // real router on every path — especially the two that historically leaked:
+  // a codex/ id evaluated against BASE settings (no overlay injected), and an
+  // UNKNOWN id (the legacy resolveTurnModel-null fallback → built-in client).
+  test("codex/ id attributes to codex-subscription even on BASE settings", () => {
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    // No codex provider is injected here — attribution is by prefix, mirroring
+    // the router's guarantee that a codex/ id NEVER routes to the built-in.
+    expect(policyProviderIdForModel(settings, "codex/gpt-5.6-sol")).toBe("codex-subscription");
+  });
+
+  test("registry model attributes to its registry provider", () => {
+    const settings = withEnv(
+      { OPENGENI_OPENAI_API_KEY: "sk-test", OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry },
+      () => getSettings(),
+    );
+    expect(policyProviderIdForModel(settings, "accounts/fireworks/models/glm-5p2")).toBe(
+      "fireworks",
+    );
+  });
+
+  test("configured bare model attributes to the built-in id", () => {
+    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    expect(policyProviderIdForModel(settings, settings.openaiModel)).toBe("openai");
+  });
+
+  test("UNKNOWN model id attributes to the built-in (legacy null-resolution fallback)", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_PROVIDER: "azure",
+        OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1",
+        OPENGENI_AZURE_OPENAI_API_KEY: "azure-test",
+      },
+      () => getSettings(),
+    );
+    // An id the router cannot resolve falls back to the built-in client, so a
+    // policy blocking the built-in must see the built-in's identity here.
+    expect(policyProviderIdForModel(settings, "totally-unknown-model")).toBe("azure");
+  });
+});

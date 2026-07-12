@@ -2294,7 +2294,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelId: turn.model,
           });
           if (!verdict.allowed) {
-            throw new WorkspaceModelPolicyBlockedError(turn.model, effectiveProviderId, verdict.reason);
+            throw new WorkspaceModelPolicyBlockedError(
+              turn.model,
+              effectiveProviderId,
+              verdict.reason,
+            );
           }
         }
       }

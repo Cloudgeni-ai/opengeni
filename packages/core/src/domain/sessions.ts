@@ -1,9 +1,5 @@
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
-import {
-  configuredAllowedModels,
-  policyProviderIdForModel,
-  type Settings,
-} from "@opengeni/config";
+import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
   evaluateWorkspaceModelPolicy,

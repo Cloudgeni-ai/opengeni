@@ -690,9 +690,9 @@ export class WorkspaceModelPolicyBlockedError extends Error {
     super(
       reason === "provider"
         ? `Model "${modelName}" is not available in this workspace: its provider ("${providerId}") is not in the workspace's allowed providers. ` +
-          `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
+            `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`
         : `Model "${modelName}" is not in this workspace's allowed models. ` +
-          `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
+            `Pick an allowed model, or ask a workspace admin to change the workspace model policy.`,
     );
     this.name = "WorkspaceModelPolicyBlockedError";
   }
