@@ -3107,6 +3107,41 @@ describe("worker activities integration", () => {
     const legacyWorkerSessionId =
       legacyRow?.run_mode === "reusable_session" ? legacyRow.reusable_session_id : null;
     expect(legacyWorkerSessionId).toBe(target.id);
+    // A worker/API from before target_session_id existed can still read the
+    // compatibility mirror, but it must not be able to change the immutable
+    // route or inject a task goal that the old worker would apply to this
+    // existing thread. The migration trigger rejects those legacy writes.
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) =>
+          db.execute(
+            dbSql`update scheduled_tasks set agent_config = jsonb_set(agent_config, '{goal}', '{"text":"overwrite"}'::jsonb) where id = ${task.id}`,
+          ),
+      ),
+    ).rejects.toThrow(
+      /target-aware scheduled task requires|targeted scheduled task cannot replace/i,
+    );
+    await expect(
+      withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        (db) =>
+          db.execute(
+            dbSql`update scheduled_tasks set run_mode = 'new_session_per_run' where id = ${task.id}`,
+          ),
+      ),
+    ).rejects.toThrow(/target-aware scheduled task requires/i);
+    const targetAwareUpdate = await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
+      expectedCurrent: await requireScheduledTask(dbClient.db, grant.workspaceId, task.id),
+      agentConfig: {
+        ...task.agentConfig,
+        prompt: "updated without changing the target route",
+        sandboxBackend: "none",
+      },
+    });
+    expect(targetAwareUpdate.targetSessionId).toBe(target.id);
     await expect(
       withRlsContext(
         dbClient.db,

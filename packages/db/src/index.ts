@@ -1602,6 +1602,21 @@ export type UpdateScheduledTaskInput = Partial<{
   expectedCurrent?: ScheduledTask;
 };
 
+/**
+ * Targeted scheduled-task rows are readable by an older worker during a
+ * rolling deployment, but only a target-aware writer may change their route,
+ * goal, or attachment contract. The migration-backed trigger checks this
+ * transaction-local capability; it is deliberately not a process-global
+ * flag, so a pooled connection cannot leak write authority between requests.
+ */
+const SCHEDULED_TASK_TARGET_WRITE_CAPABILITY = "v1";
+
+async function allowScheduledTaskTargetWrite(db: Database): Promise<void> {
+  await db.execute(
+    sql`select set_config('opengeni.scheduled_task_target_capability', ${SCHEDULED_TASK_TARGET_WRITE_CAPABILITY}, true)`,
+  );
+}
+
 export class ScheduledTaskConflictError extends Error {
   constructor(taskId: string) {
     super(`scheduled task changed while it was being updated: ${taskId}`);
@@ -5011,6 +5026,7 @@ export async function createScheduledTask(
     async (scopedDb) => {
       let agentConfig = input.agentConfig;
       if (input.targetSessionId) {
+        await allowScheduledTaskTargetWrite(scopedDb);
         const [target] = await scopedDb
           .select({ sandboxBackend: schema.sessions.sandboxBackend })
           .from(schema.sessions)
@@ -5066,6 +5082,15 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    // New API/worker code supplies an OCC snapshot for targeted edits. Set the
+    // capability before the UPDATE so the database trigger can distinguish a
+    // target-aware writer from an older API that only knows the legacy columns.
+    // Setting it for an explicit target clear is intentional: clearing a
+    // target is also a route/ownership mutation and must be authorized by the
+    // caller's validated path rather than becoming an old-worker fallback.
+    if (input.targetSessionId !== undefined || input.expectedCurrent?.targetSessionId) {
+      await allowScheduledTaskTargetWrite(scopedDb);
+    }
     const update = {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),

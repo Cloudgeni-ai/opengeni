@@ -679,7 +679,9 @@ describe("DB integration", () => {
             `,
           ),
       ),
-    ).rejects.toThrow(/scheduled_tasks_target_legacy_route_ck|check constraint/i);
+    ).rejects.toThrow(
+      /scheduled_tasks_target_legacy_route_ck|target-aware scheduled task requires|check constraint/i,
+    );
   });
 
   test("session goal lifecycle: set, revise, complete, replace", async () => {
