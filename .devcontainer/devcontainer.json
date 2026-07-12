@@ -1,0 +1,26 @@
+{
+  "name": "opengeni",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "hostRequirements": {
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:${containerEnv:HOME}/.bun/bin"
+  },
+  "onCreateCommand": "curl -fsSL https://bun.sh/install | bash",
+  "postCreateCommand": "bash .devcontainer/setup-env.sh",
+  "postStartCommand": "bash .devcontainer/publish-api-port.sh",
+  "forwardPorts": [3000, 8000, 8222, 9001],
+  "portsAttributes": {
+    "3000": { "label": "web" },
+    "8000": { "label": "api" },
+    "8222": { "label": "nats monitor", "onAutoForward": "silent" },
+    "9001": { "label": "minio console", "onAutoForward": "silent" }
+  }
+}

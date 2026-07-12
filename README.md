@@ -164,6 +164,17 @@ bun run dev:worker
 bun run dev:web
 ```
 
+## GitHub Codespaces
+
+The repo ships a devcontainer (`.devcontainer/`), so the full stack also runs in a GitHub Codespace — useful for testing changes from a browser or phone:
+
+1. On the repo page: **Code → Codespaces → Create codespace** (pick a 4-core machine; the devcontainer requests one).
+2. In the Codespace terminal, run `bun run dev`.
+3. Make port `8000` (api) **Public** in the Ports panel if the container startup did not manage to do it automatically (right-click the port → Port Visibility → Public). The web app is loaded from the forwarded port `3000` URL and calls the API on the forwarded port `8000` URL, which the browser cannot reach while the port is private.
+4. Open the forwarded URL for port `3000`.
+
+On creation, `.devcontainer/setup-env.sh` rewrites `.env` so `VITE_API_BASE_URL`, `OPENGENI_WEB_ALLOWED_HOSTS`, and `OPENGENI_CORS_ALLOW_ORIGIN_REGEX` point at the Codespace's forwarded hostnames. Note that a public port `8000` exposes the dev API (unauthenticated by default) to anyone who has the unguessable Codespace URL; set `OPENGENI_AUTH_REQUIRED=true` plus `OPENGENI_ACCESS_KEY` in `.env` if that matters for your testing.
+
 ## Configuration
 
 Copy `.env.example` to `.env` and configure at least:
