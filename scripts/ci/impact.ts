@@ -60,6 +60,22 @@ const GENERATED_FENCES = [
 const MIGRATION_FENCES = [/^packages\/db\/drizzle\//, /^packages\/db\/src\/migrate\.ts$/];
 const DOC_PATTERN = /^(?:docs\/|[^/]+\.md$)/;
 
+export const TEMPORAL_WORKFLOW_INTEGRATION_TESTS = [
+  "test/integration/temporal-workflow-activities.integration.ts",
+  "test/integration/temporal-workflow-capacity.integration.ts",
+  "test/integration/temporal-workflow-continuity.integration.ts",
+  "test/integration/temporal-workflow-dispatch.integration.ts",
+  "test/integration/temporal-workflow-interrupt.integration.ts",
+  "test/integration/temporal-workflow-worker-death.integration.ts",
+] as const;
+export const TEMPORAL_WORKFLOW_TEST_HELPER = "test/integration/temporal-workflow.test-support.ts";
+
+const TEMPORAL_WORKFLOW_DEPENDENCIES = [
+  "@opengeni/worker-bundle",
+  "@opengeni/db",
+  "@opengeni/events",
+];
+
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/integration/api.integration.ts": [
     "@opengeni/api-router",
@@ -85,11 +101,6 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/integration/selfhosted-control-transport.integration.ts": [
     "@opengeni/agent-proto",
     "@opengeni/runtime",
-  ],
-  "test/integration/temporal-workflow.integration.ts": [
-    "@opengeni/worker-bundle",
-    "@opengeni/db",
-    "@opengeni/events",
   ],
   "test/integration/worker-activity.integration.ts": [
     "@opengeni/worker-bundle",
@@ -120,6 +131,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/api-router",
   ],
+  "test/e2e/session-pins.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/opstream-runner.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/channel-a.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
   "test/e2e/rig-setup.e2e.ts": ["@opengeni/runtime", "@opengeni/api-router"],
@@ -129,6 +149,14 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/worker-bundle",
     "@opengeni/api-router",
   ],
+};
+
+for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
+  ROOT_TEST_DEPENDENCIES[path] = [...TEMPORAL_WORKFLOW_DEPENDENCIES];
+}
+
+const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  [TEMPORAL_WORKFLOW_TEST_HELPER]: TEMPORAL_WORKFLOW_INTEGRATION_TESTS,
 };
 
 function matchesAny(path: string, patterns: readonly RegExp[]): boolean {
@@ -243,6 +271,26 @@ export function createImpactPlan(
     if (path === "test/source-hygiene.test.ts") {
       changedTests.add(path);
       reasons.push({ path, reason: "root source-hygiene test" });
+      continue;
+    }
+    const helperDependents = ROOT_TEST_HELPER_DEPENDENTS[path];
+    if (helperDependents) {
+      for (const dependent of helperDependents) {
+        const dependencies = ROOT_TEST_DEPENDENCIES[dependent];
+        if (!dependencies) {
+          reasons.push({
+            path,
+            reason: `root test helper mapping is stale for ${dependent}; failing closed`,
+          });
+          return fullPlan(graph, changedFiles, reasons, base, head);
+        }
+        changedTests.add(dependent);
+        for (const name of dependencies) direct.add(name);
+      }
+      reasons.push({
+        path,
+        reason: `explicit root integration helper dependency rule (${helperDependents.length} tests)`,
+      });
       continue;
     }
     if (ROOT_TEST_DEPENDENCIES[path]) {

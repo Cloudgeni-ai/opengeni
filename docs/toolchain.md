@@ -89,7 +89,14 @@ explicit reserve. Override only for measured runner constraints
 with `OPENGENI_TEST_MAX_CONCURRENCY`,
 `OPENGENI_TEST_MEMORY_PER_WORKER_MB`, or
 `OPENGENI_TEST_FILES_PER_PROCESS`; invalid values fail closed.
-Only the E2E shard that actually owns `browser.e2e.ts` installs Playwright's
+The 24-case real Temporal workflow suite is split into six deterministic
+`.integration.ts` entry points. Each entry owns its service lifecycle and one
+immutable workflow bundle; `temporal-workflow.test-support.ts` is a
+non-discoverable typed helper whose changes map fail-closed to all six entries.
+This preserves isolated workers and real Temporal behavior while allowing the
+hosted-runner planner's hard six-shard ceiling to distribute the former
+monolithic critical path without unbounded fan-out.
+Only an E2E shard that actually owns a browser entry installs Playwright's
 Chromium runtime; Docker/sandbox-only shards do not repeat that apt/browser
 setup. Selected React and web changes still run their demo/application builds
 on the local fast path; impact selection never substitutes typecheck for a

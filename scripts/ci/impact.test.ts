@@ -4,7 +4,12 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createImpactPlan, parseGitNameStatus } from "./impact";
+import {
+  createImpactPlan,
+  parseGitNameStatus,
+  TEMPORAL_WORKFLOW_INTEGRATION_TESTS,
+  TEMPORAL_WORKFLOW_TEST_HELPER,
+} from "./impact";
 import {
   assertTestTierMapComplete,
   deterministicFileBatches,
@@ -183,6 +188,37 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).toContain("test/e2e/session-pins.browser.e2e.ts");
   });
 
+  test("Temporal split files and helper stay in the full safety net", () => {
+    const discovered = discoverTestFiles().integration;
+    expect(discovered).not.toContain("test/integration/temporal-workflow.integration.ts");
+    for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
+      expect(discovered).toContain(path);
+      expect(readFileSync(path, "utf8")).toContain("createTemporalWorkflowTestContext");
+    }
+
+    const helperPlan = createImpactPlan([TEMPORAL_WORKFLOW_TEST_HELPER]);
+    expect(helperPlan.mode).toBe("focused");
+    expect(helperPlan.integrationTests).toEqual(
+      expect.arrayContaining([...TEMPORAL_WORKFLOW_INTEGRATION_TESTS]),
+    );
+    expect(helperPlan.reasons).toContainEqual({
+      path: TEMPORAL_WORKFLOW_TEST_HELPER,
+      reason: "explicit root integration helper dependency rule (6 tests)",
+    });
+  });
+
+  test("OPE-26 session-pin boundaries select its browser acceptance", () => {
+    for (const changed of [
+      "apps/web/src/lib/session-pins.ts",
+      "packages/sdk/src/client.ts",
+      "packages/db/src/index.ts",
+      "apps/api/src/routes/sessions.ts",
+    ]) {
+      const plan = createImpactPlan([changed]);
+      expect(plan.e2eTests).toContain("test/e2e/session-pins.browser.e2e.ts");
+    }
+  });
+
   test("focused runners bound build memory and use unambiguous Bun worker counts", () => {
     const packageBuilder = readFileSync("scripts/build-publishable-packages.ts", "utf8");
     const unitRunner = readFileSync("scripts/ci/run-unit-shard.ts", "utf8");
@@ -197,12 +233,32 @@ describe("fail-closed change impact", () => {
     expect(ci).toContain("needs_ope26_session_pins=$(jq -r .needsOpe26SessionPins");
     expect(ci).toContain("Upload OPE-26 session pin visual evidence");
     expect(ci).toContain("/tmp/ope26-session-pin-mobile-dark.png");
+    expect(ci).toContain(
+      "integration_matrix=$(matrix \"$(jq '.integrationTests | length' impact-plan.json)\" 6)",
+    );
     expect(unitRunner).not.toMatch(/"--parallel",\s*"1"/);
     expect(serviceRunner).not.toMatch(/"--parallel",\s*"1"/);
   });
 });
 
 describe("deterministic sharding and isolation", () => {
+  test("Temporal split projection is exhaustive with a bounded six-shard critical weight", () => {
+    const integration = discoverTestFiles().integration;
+    const shards = deterministicShards(process.cwd(), integration, 6);
+    const assigned = shards.flat().sort();
+    expect(assigned).toEqual([...integration].sort());
+    expect(new Set(assigned).size).toBe(integration.length);
+
+    const temporalFiles = new Set<string>(TEMPORAL_WORKFLOW_INTEGRATION_TESTS);
+    const temporalShardWeights = shards.map((files) =>
+      files
+        .filter((path) => temporalFiles.has(path))
+        .reduce((total, path) => total + readFileSync(path).byteLength, 0),
+    );
+    expect(temporalShardWeights.filter((weight) => weight > 0).length).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...temporalShardWeights)).toBeLessThan(60_000);
+  });
+
   test("LPT sharding is deterministic, exhaustive, and duplicate-free", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-shards-"));
     for (const [name, contents] of [
