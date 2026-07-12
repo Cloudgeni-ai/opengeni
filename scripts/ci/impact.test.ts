@@ -187,6 +187,15 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("the rig-setup E2E observes the dedicated lifecycle event contract", () => {
+    const e2e = readFileSync("test/e2e/rig-setup.e2e.ts", "utf8");
+    expect(e2e).toContain('e.type.startsWith("rig.setup.")');
+    for (const type of ["started", "completed", "skipped", "failed"]) {
+      expect(e2e).toContain(`rig.setup.${type}`);
+    }
+    expect(e2e).not.toContain('e.type.startsWith("sandbox.operation.")');
+  });
+
   test("workload images use one shared bake graph and one dependency install layer", () => {
     const bake = readFileSync("docker/docker-bake.hcl", "utf8");
     const dockerfile = readFileSync("docker/opengeni.Dockerfile", "utf8");
