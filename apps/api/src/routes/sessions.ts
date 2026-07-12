@@ -101,6 +101,7 @@ import {
 import {
   acceptSessionUserMessage,
   assertConfiguredModel,
+  assertWorkspaceModelPolicyAllows,
   createSessionForRequest,
   requireQueuedTurnForApi,
   readSessionLineage,
@@ -518,8 +519,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const existing = await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
     const payload = UpdateSessionTurnRequest.parse(await c.req.json());
     // A turn-update may switch the queued turn's model; reject one the host
-    // does not expose (omitted leaves the existing model unchanged).
+    // does not expose (omitted leaves the existing model unchanged) or one the
+    // workspace's model policy blocks.
     assertConfiguredModel(settings, payload.model);
+    await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, payload.model);
     const session = await requireSession(db, workspaceId, sessionId);
     const runtimeSettings = settingsWithSessionMcpServerMetadata(
       await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings),

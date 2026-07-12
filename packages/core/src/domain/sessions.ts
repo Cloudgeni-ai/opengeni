@@ -1,7 +1,12 @@
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
-import { configuredAllowedModels, type Settings } from "@opengeni/config";
+import {
+  configuredAllowedModels,
+  policyProviderIdForModel,
+  type Settings,
+} from "@opengeni/config";
 import {
   CreateSessionRequest,
+  evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
   type AccessGrant,
   type GoalSpec,
@@ -34,6 +39,7 @@ import {
   getSessionByCreateIdempotencyKey,
   getSessionLineage,
   getSessionTurn,
+  getWorkspaceModelPolicy,
   requireSession,
   setTemporalWorkflowId,
   updateSessionTitle as updateSessionTitleRow,
@@ -572,6 +578,42 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   throw new HTTPException(422, { message: `model is not available: ${model}` });
 }
 
+/**
+ * Reject a model the WORKSPACE's model policy blocks, at the same choke points
+ * as assertConfiguredModel — a 422 at the edge instead of a queued turn the
+ * worker's authoritative post-resolution gate would fail. `model` is the
+ * EFFECTIVE value the caller is about to persist: pass the explicit value at
+ * message/turn-update/scheduled-task edges (omitted inherits an
+ * already-validated stored default), but at session CREATION pass
+ * `payload.model ?? settings.openaiModel` — an omitted model stamps the
+ * deployment default onto the session, and under a restricted policy that
+ * default may be exactly the provider the policy exists to block.
+ */
+export async function assertWorkspaceModelPolicyAllows(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  model: string | null | undefined,
+): Promise<void> {
+  if (model === null || model === undefined) {
+    return;
+  }
+  const policy = await getWorkspaceModelPolicy(db, workspaceId);
+  if (!policy) {
+    return;
+  }
+  const providerId = policyProviderIdForModel(settings, model);
+  const verdict = evaluateWorkspaceModelPolicy(policy, { providerId, modelId: model });
+  if (!verdict.allowed) {
+    throw new HTTPException(422, {
+      message:
+        verdict.reason === "provider"
+          ? `model "${model}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+          : `model "${model}" is not allowed by this workspace's model policy`,
+    });
+  }
+}
+
 export async function requireQueuedTurnForApi(
   db: Database,
   workspaceId: string,
@@ -630,6 +672,7 @@ export async function postUserMessageTurn(input: {
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
   const appended = await appendSessionEventsWithLockedSessionUpdate(
     db,
     workspaceId,
@@ -829,6 +872,16 @@ export async function createSessionForRequest(
     }
   }
   assertConfiguredModel(settings, payload.model);
+  // Session creation persists the EFFECTIVE model — an omitted payload.model
+  // stamps the deployment default onto the session — so the policy must vet
+  // that effective value, not just explicit ones (a restricted workspace's
+  // default-model session would otherwise be born blocked).
+  await assertWorkspaceModelPolicyAllows(
+    db,
+    settings,
+    workspaceId,
+    payload.model ?? settings.openaiModel,
+  );
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
   // A session's first-party MCP token can carry a non-default permission set
