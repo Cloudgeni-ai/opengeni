@@ -36,8 +36,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const rawPayload = await c.req.json();
-    const payload = CreateScheduledTaskRequest.parse(rawPayload);
+    const rawPayload = await c.req.json().catch(() => undefined);
+    const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
+    if (!parsedPayload.success) {
+      throw scheduledTaskRequestValidationError(parsedPayload.error);
+    }
+    const payload = parsedPayload.data;
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -75,8 +79,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
-    const rawPayload = await c.req.json();
-    const payload = UpdateScheduledTaskRequest.parse(rawPayload);
+    const rawPayload = await c.req.json().catch(() => undefined);
+    const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
+    if (!parsedPayload.success) {
+      throw scheduledTaskRequestValidationError(parsedPayload.error);
+    }
+    const payload = parsedPayload.data;
     const update = await validatedScheduledTaskUpdate({
       settings,
       db,
@@ -182,5 +190,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       boundedLimit(c.req.query("limit")),
     );
     return c.json(runs.map((run) => scheduledTaskRunForGrant(run, grant)));
+  });
+}
+
+function scheduledTaskRequestValidationError(error: {
+  issues: Array<{ path: Array<PropertyKey>; message: string }>;
+}): HTTPException {
+  const issue = error.issues[0];
+  const field = issue?.path.length ? issue.path.join(".") : "request";
+  return new HTTPException(422, {
+    message: issue ? `${field}: ${issue.message}` : "invalid scheduled task request",
   });
 }

@@ -3,11 +3,14 @@
 -- take the session row lock before every write, so the terminal cancellation
 -- invariant must also be enforced by PostgreSQL.
 --
--- The live-turn trigger takes the session row lock before it permits an
--- insert/status promotion, matching the session -> turn order used by the
--- current claim/cancellation paths.  If dispatch gets the lock first,
--- cancellation commits afterwards and drains it.  If cancellation gets it
--- first, the legacy write observes cancelled and is rejected.
+-- INSERTs take the session row lock before they can create a live turn, so an
+-- old enqueue either commits before cancellation (and is drained) or observes
+-- cancelled and is rejected.  UPDATEs must not take that parent lock: Postgres
+-- has already locked the turn row before a row-level UPDATE trigger runs, and
+-- cancellation drains turns while holding the session row.  UPDATEs therefore
+-- use a non-locking status read; an old claim's subsequent session promotion
+-- is still atomically rejected by the terminal session trigger, rolling back
+-- the whole legacy transaction when cancellation won first.
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_session_cancellation_fence()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -47,12 +50,23 @@ DECLARE
   session_status text;
 BEGIN
   IF NEW."status" IN ('queued', 'running', 'requires_action') THEN
-    SELECT session."status"
-      INTO session_status
-      FROM "sessions" AS session
-     WHERE session."workspace_id" = NEW."workspace_id"
-       AND session."id" = NEW."session_id"
-     FOR UPDATE;
+    IF TG_OP = 'INSERT' THEN
+      SELECT session."status"
+        INTO session_status
+        FROM "sessions" AS session
+       WHERE session."workspace_id" = NEW."workspace_id"
+         AND session."id" = NEW."session_id"
+       FOR UPDATE;
+    ELSE
+      -- Never lock the parent from a row-level UPDATE trigger: the executor
+      -- already holds the session_turns row lock, while cancellation holds
+      -- the session row before draining turns.
+      SELECT session."status"
+        INTO session_status
+        FROM "sessions" AS session
+       WHERE session."workspace_id" = NEW."workspace_id"
+         AND session."id" = NEW."session_id";
+    END IF;
     IF session_status = 'cancelled' THEN
       RAISE EXCEPTION
         'cannot write a live turn for a cancelled session'

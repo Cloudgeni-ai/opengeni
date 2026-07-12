@@ -2709,7 +2709,22 @@ describe("API component integration", () => {
         agentConfig: { prompt: "must reject" },
       }),
     });
-    expect(invalidMode.status).toBe(400);
+    expect(invalidMode.status).toBe(422);
+    expect(await invalidMode.text()).toContain("targetSessionId");
+
+    const invalidGoalCreate = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "invalid target goal",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: { prompt: "must reject", goal: { text: "must not replace" } },
+      }),
+    });
+    expect(invalidGoalCreate.status).toBe(422);
+    expect(await invalidGoalCreate.text()).toContain("agentConfig.goal");
 
     const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
       method: "POST",
@@ -2730,6 +2745,20 @@ describe("API component integration", () => {
     };
     expect(task.targetSessionId).toBe(targetSessionId);
     expect(task.reusableSessionId).toBeNull();
+
+    const invalidGoalUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          targetSessionId,
+          agentConfig: { prompt: "must reject", goal: { text: "must not replace" } },
+        }),
+      },
+    );
+    expect(invalidGoalUpdate.status).toBe(422);
+    expect(await invalidGoalUpdate.text()).toContain("agentConfig.goal");
 
     const invalidUpdate = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
