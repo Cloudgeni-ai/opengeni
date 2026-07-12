@@ -2288,6 +2288,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
+                // Backend sticky cache-routing key — the SAME id as the body's
+                // prompt_cache_key (set from input.sessionId for codex turns),
+                // so routing and cache key agree. Without this header on the
+                // wire, byte-identical resends hit the prompt cache ~50%
+                // (per-request shard lottery = prod's measured 48.6% on sol);
+                // with it, resends pin to the warm shard (Codex CLI parity).
+                sessionId: input.sessionId,
                 getToken: resolver.getToken,
                 refresh: resolver.refresh,
                 resolveModel: buildModelResolver(

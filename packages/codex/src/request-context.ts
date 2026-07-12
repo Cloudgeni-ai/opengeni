@@ -32,6 +32,19 @@ export type CodexUsageHeaderSnapshot = {
 
 export type CodexRequestContext = {
   clientVersion: string;
+  /**
+   * Stable per-session affinity id, sent as the `session_id` header on every
+   * request. This is the backend's STICKY CACHE-ROUTING key — measured
+   * 2026-07-12 with byte-identical ~99k-token gpt-5.6-sol requests on one idle
+   * account: without the header, repeat requests hit the prompt cache ~50% of
+   * the time (a per-request routing lottery across cache shards; matches the
+   * prod fleet's 48.6%); with a stable session_id, 10/10 requests hit at the
+   * 99.0% ceiling — Codex CLI parity (the CLI always sends it; its own last-3d
+   * token-weighted rate here is 94%). `prompt_cache_key` in the body only
+   * influences routing and does NOT pin it. Use the SAME value as
+   * prompt_cache_key (the OpenGeni sessionId) so routing and cache key agree.
+   */
+  sessionId?: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */
   getToken: () => Promise<CodexTokenSnapshot>;
   /** Forced refresh used for the 401 retry. */
