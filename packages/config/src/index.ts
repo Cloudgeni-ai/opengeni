@@ -9,7 +9,7 @@ import {
   StaticUsageLimits,
   UsageLimitsMode,
 } from "@opengeni/contracts";
-import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
+import { CODEX_MODEL_ID_PREFIX, CODEX_PROVIDER_ID } from "@opengeni/codex/constants";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -1338,6 +1338,27 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
     }),
   );
   return [builtin, ...registry];
+}
+
+/**
+ * The provider identity a model id resolves to, for workspace model-policy
+ * evaluation — MUST agree with the real router (resolveTurnModel /
+ * MultiProviderModelProvider) on every case:
+ *   - `codex/<slug>` → the codex-subscription provider id, ALWAYS. With no
+ *     active subscription the router fails loud (CodexSubscriptionUnavailableError),
+ *     never the built-in — so attributing by prefix is exact even against BASE
+ *     settings where the overlay provider is not injected.
+ *   - a configured model id → its configuredModels providerId (registry or built-in).
+ *   - anything else → the built-in id: an unknown id is the legacy
+ *     resolveTurnModel-null fallback, which the built-in OpenAI/Azure client
+ *     serves. A policy blocking the built-in must block this path too.
+ */
+export function policyProviderIdForModel(settings: Settings, modelId: string): string {
+  if (modelId.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return CODEX_PROVIDER_ID;
+  }
+  const configured = configuredModels(settings).find((model) => model.id === modelId);
+  return configured?.providerId ?? builtinProviderId(settings);
 }
 
 /**
