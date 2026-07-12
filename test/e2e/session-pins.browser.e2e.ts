@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb } from "@opengeni/db";
+import { createDb, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
+import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
   acquireSharedTestDatabase,
@@ -19,6 +20,7 @@ import {
   type BrowserContextOptions,
   type Page,
 } from "playwright";
+import postgres from "postgres";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "ope26-owner" };
@@ -357,6 +359,115 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
     await context.close();
   }, 90_000);
+
+  test("returns authenticated 403 when removal wins a concurrent listing", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const barrier = postgres(shared.adminUrl, { max: 1 });
+    const removalClient = createDb(shared.appUrl, { max: 1 });
+    const raceSecret = "ope26-browser-race-secret";
+    const raceSubject = "configured:ope26-browser-race";
+    const barrierClass = 81326028;
+    const removalLock = 1;
+    const triggerFunction = "ope26_browser_removal_first_barrier";
+    const triggerName = "ope26_browser_removal_first_membership_barrier";
+    let removalPromise: Promise<boolean> | null = null;
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const [workspace] = await shared.admin<{ accountId: string }[]>`
+        select account_id as "accountId" from workspaces where id = ${workspaceId}`;
+      expect(workspace?.accountId).toBeTruthy();
+      await grantWorkspaceAccess(dbClient.db, {
+        accountId: workspace!.accountId,
+        workspaceId,
+        subjectId: raceSubject,
+        permissions: ["sessions:read"] satisfies Permission[],
+      });
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "API race first");
+      await createSessionThroughApi(page, apiBaseUrl, workspaceId, "API race second");
+
+      const raceApp = createApp({
+        settings: testSettings({
+          databaseUrl: shared.appUrl,
+          productAccessMode: "configured",
+          delegationSecret: raceSecret,
+        }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+      });
+      const token = await signDelegatedAccessToken(raceSecret, {
+        accountId: workspace!.accountId,
+        workspaceId,
+        subjectId: raceSubject,
+        permissions: ["sessions:read"],
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+
+      await barrier.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          perform pg_advisory_xact_lock(${barrierClass}, ${removalLock});
+          return old;
+        end
+        $$;
+        create trigger ${triggerName}
+          before delete on workspace_memberships
+          for each row when (
+            old.workspace_id = '${workspaceId}'::uuid
+            and old.subject_id = '${raceSubject}'
+          ) execute function ${triggerFunction}();
+      `);
+      await barrier`select pg_advisory_lock(${barrierClass}, ${removalLock})`;
+
+      removalPromise = removeWorkspaceMember(removalClient.db, workspaceId, raceSubject);
+      await waitForAdvisoryWait(barrier, barrierClass, removalLock);
+
+      const listingPromise = raceApp.request(
+        `/v1/workspaces/${workspaceId}/sessions?view=page&limit=1`,
+        {
+          headers: { authorization: `Bearer ${token}` },
+        },
+      );
+      await waitForDatabaseQueryWait(barrier, "workspace_memberships");
+      await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
+      expect(await removalPromise).toBe(true);
+
+      const response = await listingPromise;
+      expect(response.status).toBe(403);
+      expect(await response.text()).toContain("workspace access denied");
+
+      const [counts] = await shared.admin<{ snapshots: number; orphans: number }[]>`
+        select
+          (select count(*)::int from session_list_snapshots
+            where workspace_id = ${workspaceId} and subject_id = ${raceSubject}) as snapshots,
+          (select count(*)::int
+            from session_list_snapshots snapshot
+            left join workspace_memberships membership
+              on membership.workspace_id = snapshot.workspace_id
+             and membership.subject_id = snapshot.subject_id
+            where snapshot.workspace_id = ${workspaceId}
+              and membership.id is null) as orphans`;
+      expect(counts).toEqual({ snapshots: 0, orphans: 0 });
+    } finally {
+      await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
+      await barrier
+        .unsafe(`
+        drop trigger if exists ${triggerName} on workspace_memberships;
+        drop function if exists ${triggerFunction}();
+      `)
+        .catch(() => undefined);
+      await barrier.end().catch(() => undefined);
+      await Promise.allSettled([removalPromise].filter(Boolean));
+      await removalClient.close().catch(() => undefined);
+      await context.close().catch(() => undefined);
+    }
+  }, 60_000);
 });
 
 type BrowserSession = { id: string; pinned: boolean; pinVersion: number };
@@ -511,4 +622,47 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
       nodes: violation.nodes.map((node) => node.target),
     })),
   ).toEqual([]);
+}
+
+async function waitForAdvisoryWait(
+  connection: postgres.Sql,
+  classId: number,
+  objectId: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ waiting: boolean }[]>`
+      select exists (
+        select 1
+        from pg_locks
+        where locktype = 'advisory'
+          and classid = ${classId}
+          and objid = ${objectId}
+          and not granted
+      ) as waiting`;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for advisory lock ${classId}/${objectId}`);
+}
+
+async function waitForDatabaseQueryWait(
+  connection: postgres.Sql,
+  queryFragment: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ waiting: boolean }[]>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where datname = current_database()
+          and pid <> pg_backend_pid()
+          and wait_event_type = 'Lock'
+          and query like ${`%${queryFragment}%`}
+      ) as waiting`;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for database query containing ${queryFragment}`);
 }

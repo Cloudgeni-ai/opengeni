@@ -80,6 +80,27 @@ async function waitForAdvisoryWait(
   throw new Error(`timed out waiting for advisory lock ${classId}/${objectId}`);
 }
 
+async function waitForDatabaseQueryWait(
+  connection: postgres.Sql,
+  queryFragment: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ waiting: boolean }[]>`
+      select exists (
+        select 1
+        from pg_stat_activity
+        where datname = current_database()
+          and pid <> pg_backend_pid()
+          and wait_event_type = 'Lock'
+          and query like ${`%${queryFragment}%`}
+      ) as waiting`;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`timed out waiting for database query containing ${queryFragment}`);
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("session-pins");
   if (!shared) {
@@ -727,11 +748,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
+    const listingClient = createDb(shared.appUrl, { max: 1 });
     const barrierClass = 81326027;
     const removalLock = 1;
     const triggerFunction = "ope26_test_removal_first_barrier";
     const triggerName = "ope26_test_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
+    let listingPromise: Promise<Awaited<ReturnType<typeof listSessionsForSubject>>> | null = null;
     try {
       await barrier.unsafe(`
         create function ${triggerFunction}() returns trigger
@@ -753,17 +776,21 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
+      // Start listing while removal owns the membership lock. The query must
+      // reach the row-lock wait before removal commits, establishing the
+      // listing transaction's repeatable-read snapshot first.
+      listingPromise = listSessionsForSubject(listingClient.db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+      });
+      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+
       // The stale authorization is intentionally held while removal owns the
       // membership lock. Release the native barrier, wait for removal to
-      // commit, then resume listing and prove it cannot write a new snapshot.
+      // commit, then assert the one bounded retry observes no membership.
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
-      await expect(
-        listSessionsForSubject(db, workspace.workspaceId, {
-          subjectId,
-          limit: 1,
-        }),
-      ).rejects.toBeInstanceOf(SessionListAccessError);
+      await expect(listingPromise).rejects.toBeInstanceOf(SessionListAccessError);
 
       const [counts] = await admin<
         { memberships: number; pins: number; snapshots: number; orphans: number }[]
@@ -792,8 +819,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       `)
         .catch(() => undefined);
       await barrier.end().catch(() => undefined);
-      await Promise.allSettled([removalPromise].filter(Boolean));
+      await Promise.allSettled([listingPromise, removalPromise].filter(Boolean));
       await removalClient.close().catch(() => undefined);
+      await listingClient.close().catch(() => undefined);
     }
   }, 60_000);
 

@@ -10551,6 +10551,19 @@ export class SessionListAccessError extends Error {
   }
 }
 
+function isPostgresSerializationFailure(error: unknown): boolean {
+  const seen = new Set<object>();
+  let candidate: unknown = error;
+  while (typeof candidate === "object" && candidate !== null && !seen.has(candidate)) {
+    seen.add(candidate);
+    if ("code" in candidate && (candidate as { code?: unknown }).code === "40001") {
+      return true;
+    }
+    candidate = "cause" in candidate ? (candidate as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
 type SessionPinRow = Pick<
   typeof schema.sessionPins.$inferSelect,
   "pinned" | "pinnedAt" | "version"
@@ -10675,186 +10688,208 @@ export async function listSessionsForSubject(
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
   const limit = Math.max(1, options.limit ?? 50);
-  return await withWorkspaceSubjectRls(
-    db,
-    workspaceId,
-    options.subjectId,
-    async (tx) => {
-      // Authorization is resolved before this helper by the API, but that
-      // grant can be stale by the time this transaction starts. Lock the live
-      // membership before touching snapshots so removal and listing serialize:
-      // listing first lets removal clean its committed snapshot, while removal
-      // first makes listing observe the missing membership and do no writes.
-      const [membership] = await tx
-        .select({ id: schema.workspaceMemberships.id })
-        .from(schema.workspaceMemberships)
-        .where(
-          and(
-            eq(schema.workspaceMemberships.workspaceId, workspaceId),
-            eq(schema.workspaceMemberships.subjectId, options.subjectId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!membership) {
-        throw new SessionListAccessError();
-      }
-
-      const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
-      const parentFilter = sessionParentFilter(options.parentSessionId);
-      const searchFilter = sessionSearchFilter(options.search);
-      const now = new Date();
-      await tx
-        .delete(schema.sessionListSnapshots)
-        .where(lt(schema.sessionListSnapshots.expiresAt, now));
-
-      let pageIds: string[];
-      let nextCursor: string | null = null;
-      if (options.cursor) {
-        const cursor = options.cursor;
-        if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
-          throw new SessionListCursorError("session list cursor does not match its filters");
+  let membershipCheckSerializationFailure = false;
+  const listInTransaction = async (): Promise<SessionListResponse> => {
+    membershipCheckSerializationFailure = false;
+    return await withWorkspaceSubjectRls(
+      db,
+      workspaceId,
+      options.subjectId,
+      async (tx) => {
+        // Authorization is resolved before this helper by the API, but that
+        // grant can be stale by the time this transaction starts. Lock the live
+        // membership before touching snapshots so removal and listing serialize:
+        // listing first lets removal clean its committed snapshot, while removal
+        // first makes listing observe the missing membership and do no writes.
+        let membership: { id: string } | undefined;
+        try {
+          [membership] = await tx
+            .select({ id: schema.workspaceMemberships.id })
+            .from(schema.workspaceMemberships)
+            .where(
+              and(
+                eq(schema.workspaceMemberships.workspaceId, workspaceId),
+                eq(schema.workspaceMemberships.subjectId, options.subjectId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+        } catch (error) {
+          membershipCheckSerializationFailure = isPostgresSerializationFailure(error);
+          throw error;
         }
-        const [snapshot] = await tx
-          .select()
-          .from(schema.sessionListSnapshots)
+        if (!membership) {
+          throw new SessionListAccessError();
+        }
+
+        const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
+        const parentFilter = sessionParentFilter(options.parentSessionId);
+        const searchFilter = sessionSearchFilter(options.search);
+        const now = new Date();
+        await tx
+          .delete(schema.sessionListSnapshots)
+          .where(lt(schema.sessionListSnapshots.expiresAt, now));
+
+        let pageIds: string[];
+        let nextCursor: string | null = null;
+        if (options.cursor) {
+          const cursor = options.cursor;
+          if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
+            throw new SessionListCursorError("session list cursor does not match its filters");
+          }
+          const [snapshot] = await tx
+            .select()
+            .from(schema.sessionListSnapshots)
+            .where(
+              and(
+                eq(schema.sessionListSnapshots.id, cursor.snapshotId),
+                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+              ),
+            )
+            .limit(1);
+          if (!snapshot || snapshot.expiresAt.getTime() <= now.getTime()) {
+            throw new SessionListCursorError();
+          }
+          if (
+            snapshot.parentSessionFilter !== parentFilter ||
+            (snapshot.search ?? null) !== searchFilter ||
+            cursor.offset > snapshot.ordinarySessionIds.length
+          ) {
+            throw new SessionListCursorError();
+          }
+          pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
+          const nextOffset = cursor.offset + pageIds.length;
+          if (nextOffset < snapshot.ordinarySessionIds.length) {
+            nextCursor = encodeSessionListCursor({
+              snapshotId: snapshot.id,
+              offset: nextOffset,
+              parentSessionFilter: snapshot.parentSessionFilter,
+              search: snapshot.search ?? null,
+            });
+          }
+        } else {
+          const ordinaryIdRows = await tx
+            .select({ id: schema.sessions.id })
+            .from(schema.sessions)
+            .leftJoin(
+              schema.sessionPins,
+              and(
+                eq(schema.sessionPins.workspaceId, workspaceId),
+                eq(schema.sessionPins.subjectId, options.subjectId),
+                eq(schema.sessionPins.sessionId, schema.sessions.id),
+              ),
+            )
+            .where(
+              and(
+                ...filters,
+                or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+              ),
+            )
+            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id));
+          const ordinaryIds = ordinaryIdRows.map((row) => row.id);
+          pageIds = ordinaryIds.slice(0, limit);
+          if (ordinaryIds.length > limit) {
+            const [workspace] = await tx
+              .select({ accountId: schema.workspaces.accountId })
+              .from(schema.workspaces)
+              .where(eq(schema.workspaces.id, workspaceId))
+              .limit(1);
+            if (!workspace) {
+              throw new SessionListCursorError();
+            }
+            const [snapshot] = await tx
+              .insert(schema.sessionListSnapshots)
+              .values({
+                accountId: workspace.accountId,
+                workspaceId,
+                subjectId: options.subjectId,
+                parentSessionFilter: parentFilter,
+                search: searchFilter,
+                ordinarySessionIds: ordinaryIds,
+                expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
+              })
+              .returning();
+            if (!snapshot) {
+              throw new SessionListCursorError();
+            }
+            nextCursor = encodeSessionListCursor({
+              snapshotId: snapshot.id,
+              offset: limit,
+              parentSessionFilter: parentFilter,
+              search: searchFilter,
+            });
+          }
+        }
+        const pinnedRows = await tx
+          .select({ session: schema.sessions, pin: schema.sessionPins })
+          .from(schema.sessionPins)
+          .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
           .where(
-            and(
-              eq(schema.sessionListSnapshots.id, cursor.snapshotId),
-              eq(schema.sessionListSnapshots.workspaceId, workspaceId),
-              eq(schema.sessionListSnapshots.subjectId, options.subjectId),
-            ),
-          )
-          .limit(1);
-        if (!snapshot || snapshot.expiresAt.getTime() <= now.getTime()) {
-          throw new SessionListCursorError();
-        }
-        if (
-          snapshot.parentSessionFilter !== parentFilter ||
-          (snapshot.search ?? null) !== searchFilter ||
-          cursor.offset > snapshot.ordinarySessionIds.length
-        ) {
-          throw new SessionListCursorError();
-        }
-        pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
-        const nextOffset = cursor.offset + pageIds.length;
-        if (nextOffset < snapshot.ordinarySessionIds.length) {
-          nextCursor = encodeSessionListCursor({
-            snapshotId: snapshot.id,
-            offset: nextOffset,
-            parentSessionFilter: snapshot.parentSessionFilter,
-            search: snapshot.search ?? null,
-          });
-        }
-      } else {
-        const ordinaryIdRows = await tx
-          .select({ id: schema.sessions.id })
-          .from(schema.sessions)
-          .leftJoin(
-            schema.sessionPins,
             and(
               eq(schema.sessionPins.workspaceId, workspaceId),
               eq(schema.sessionPins.subjectId, options.subjectId),
-              eq(schema.sessionPins.sessionId, schema.sessions.id),
-            ),
-          )
-          .where(
-            and(
+              eq(schema.sessionPins.pinned, true),
               ...filters,
-              or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
             ),
           )
-          .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id));
-        const ordinaryIds = ordinaryIdRows.map((row) => row.id);
-        pageIds = ordinaryIds.slice(0, limit);
-        if (ordinaryIds.length > limit) {
-          const [workspace] = await tx
-            .select({ accountId: schema.workspaces.accountId })
-            .from(schema.workspaces)
-            .where(eq(schema.workspaces.id, workspaceId))
-            .limit(1);
-          if (!workspace) {
-            throw new SessionListCursorError();
-          }
-          const [snapshot] = await tx
-            .insert(schema.sessionListSnapshots)
-            .values({
-              accountId: workspace.accountId,
-              workspaceId,
-              subjectId: options.subjectId,
-              parentSessionFilter: parentFilter,
-              search: searchFilter,
-              ordinarySessionIds: ordinaryIds,
-              expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
-            })
-            .returning();
-          if (!snapshot) {
-            throw new SessionListCursorError();
-          }
-          nextCursor = encodeSessionListCursor({
-            snapshotId: snapshot.id,
-            offset: limit,
-            parentSessionFilter: parentFilter,
-            search: searchFilter,
-          });
-        }
-      }
-      const pinnedRows = await tx
-        .select({ session: schema.sessions, pin: schema.sessionPins })
-        .from(schema.sessionPins)
-        .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
-        .where(
-          and(
-            eq(schema.sessionPins.workspaceId, workspaceId),
-            eq(schema.sessionPins.subjectId, options.subjectId),
-            eq(schema.sessionPins.pinned, true),
-            ...filters,
+          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id));
+        const ordinaryRows =
+          pageIds.length === 0
+            ? []
+            : await tx
+                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .from(schema.sessions)
+                .leftJoin(
+                  schema.sessionPins,
+                  and(
+                    eq(schema.sessionPins.workspaceId, workspaceId),
+                    eq(schema.sessionPins.subjectId, options.subjectId),
+                    eq(schema.sessionPins.sessionId, schema.sessions.id),
+                  ),
+                )
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    inArray(schema.sessions.id, pageIds),
+                    or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+                  ),
+                );
+        const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
+        const pageRows = pageIds.flatMap((id) => {
+          const row = ordinaryById.get(id);
+          return row ? [row] : [];
+        });
+        const ids = [
+          ...pinnedRows.map((row) => row.session.id),
+          ...pageRows.map((row) => row.session.id),
+        ];
+        const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
+        return {
+          pinned: pinnedRows.map((row) =>
+            mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
           ),
-        )
-        .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id));
-      const ordinaryRows =
-        pageIds.length === 0
-          ? []
-          : await tx
-              .select({ session: schema.sessions, pin: schema.sessionPins })
-              .from(schema.sessions)
-              .leftJoin(
-                schema.sessionPins,
-                and(
-                  eq(schema.sessionPins.workspaceId, workspaceId),
-                  eq(schema.sessionPins.subjectId, options.subjectId),
-                  eq(schema.sessionPins.sessionId, schema.sessions.id),
-                ),
-              )
-              .where(
-                and(
-                  eq(schema.sessions.workspaceId, workspaceId),
-                  inArray(schema.sessions.id, pageIds),
-                  or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
-                ),
-              );
-      const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
-      const pageRows = pageIds.flatMap((id) => {
-        const row = ordinaryById.get(id);
-        return row ? [row] : [];
-      });
-      const ids = [
-        ...pinnedRows.map((row) => row.session.id),
-        ...pageRows.map((row) => row.session.id),
-      ];
-      const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
-      return {
-        pinned: pinnedRows.map((row) =>
-          mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
-        ),
-        sessions: pageRows.map((row) =>
-          mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
-        ),
-        nextCursor,
-      };
-    },
-    { isolationLevel: "repeatable read" },
-  );
+          sessions: pageRows.map((row) =>
+            mapSession(row.session, mcpServers.get(row.session.id) ?? [], mapSessionPin(row.pin)),
+          ),
+          nextCursor,
+        };
+      },
+      { isolationLevel: "repeatable read" },
+    );
+  };
+
+  try {
+    return await listInTransaction();
+  } catch (error) {
+    if (!membershipCheckSerializationFailure || !isPostgresSerializationFailure(error)) {
+      throw error;
+    }
+    // PostgreSQL has already aborted and rolled back the first transaction.
+    // Retry exactly once so the fresh snapshot can observe a membership that
+    // removal committed while the listing was waiting on its row lock.
+    return await listInTransaction();
+  }
 }
 
 /** Read a session with the caller subject's personal pin projection. */
