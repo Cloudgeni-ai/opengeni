@@ -34,6 +34,12 @@ export function startTestMcpServer(
     // and then fail a later request with a NON-auth error, modeling an optional
     // integration that is simply down (provider 5xx) rather than unauthenticated.
     serverErrorForMethods?: string[];
+    // Per-request Authorization validator. Called for EVERY request with the raw
+    // `authorization` header; returning false → 401. Unlike requiredHeaders (a
+    // static string match) this can decode/verify a token — e.g. reject an
+    // expired signed bearer — so a test can prove a token that is valid at
+    // connect is rejected once the clock advances past its TTL.
+    validateAuthorization?: (authorization: string | null) => boolean | Promise<boolean>;
   } = {},
 ): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
@@ -71,6 +77,20 @@ export function startTestMcpServer(
             },
           });
         }
+      }
+      if (
+        options.validateAuthorization &&
+        !(await options.validateAuthorization(request.headers.get("authorization")))
+      ) {
+        return new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            ...(options.unauthorizedAuthenticateHeader
+              ? { "www-authenticate": options.unauthorizedAuthenticateHeader }
+              : {}),
+          },
+        });
       }
       if (await matchesJsonRpcMethod(request, options.unauthorizedForMethods ?? [])) {
         return new Response(JSON.stringify({ error: "unauthorized" }), {

@@ -1797,7 +1797,9 @@ export async function prepareAgentTools(
         : globalThis.fetch;
       const fetchImpl = config.connectionRef
         ? connectionBrokerFetch(baseFetch, config, options)
-        : baseFetch;
+        : isFirstPartyMcpServer(settings, config)
+          ? firstPartyAuthFetch(baseFetch, settings, options)
+          : baseFetch;
       // A server is connected BEST-EFFORT (a connect OR tools-list failure drops
       // it — its tools go unavailable for the turn — instead of failing the turn)
       // in two cases:
@@ -1830,7 +1832,7 @@ export async function prepareAgentTools(
           // sanitize the response on the wire before validation. The namespace Set
           // also captures each tool's original connector namespace (P4 Part B.1).
           ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
-          ...(await mcpServerRequestInit(settings, config, options)),
+          ...(await mcpServerRequestInit(settings, config)),
           ...(config.timeoutMs
             ? {
                 timeout: config.timeoutMs,
@@ -2244,7 +2246,6 @@ function mcpErrorReason(fields: { errorClass: string; status?: number }): string
 async function mcpServerRequestInit(
   settings: Settings,
   config: Settings["mcpServers"][number],
-  options: PrepareToolsOptions,
 ): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
   // codex_apps is checked FIRST so the static-headers path can never apply to
   // it: its refreshing ChatGPT/Codex bearer is resolved per-connect from the
@@ -2253,7 +2254,7 @@ async function mcpServerRequestInit(
     return await codexAppsMcpRequestInit(settings);
   }
   if (isFirstPartyMcpServer(settings, config)) {
-    return await firstPartyMcpRequestInit(settings, config, options);
+    return await firstPartyMcpRequestInit(settings, config);
   }
   // Third-party MCP servers get their configured credential headers (for
   // example workspace-enabled capability MCP credentials) and nothing else —
@@ -2267,7 +2268,6 @@ async function mcpServerRequestInit(
 async function firstPartyMcpRequestInit(
   settings: Settings,
   config: Settings["mcpServers"][number],
-  options: PrepareToolsOptions,
 ): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
   if (!isFirstPartyMcpServer(settings, config)) {
     return {};
@@ -2276,18 +2276,14 @@ async function firstPartyMcpRequestInit(
   if (settings.authRequired && settings.accessKey) {
     headers["x-opengeni-access-key"] = settings.accessKey;
   }
-  if (settings.delegationSecret && options.accountId && options.workspaceId) {
-    headers.authorization = `Bearer ${await signDelegatedAccessToken(settings.delegationSecret, {
-      accountId: options.accountId,
-      workspaceId: options.workspaceId,
-      subjectId: options.subjectId ?? "worker:first-party-mcp",
-      ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
-      permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
-      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-      ...(options.turnId ? { turnId: options.turnId } : {}),
-      exp: Math.floor(Date.now() / 1000) + 60 * 60,
-    })}`;
-  }
+  // The delegated bearer is deliberately NOT baked here. It is re-signed PER
+  // REQUEST by firstPartyAuthFetch (wired in prepareAgentTools) so a turn or
+  // persistent MCP connection that outlives the token's 1h TTL never sends a
+  // stale bearer — an expired first-party bearer 401s ("authentication
+  // required"), and because the first-party server is REQUIRED that killed the
+  // turn on any run past ~1h. This function keeps only NON-expiring static
+  // headers (the access key); the per-request fetch wrapper is the single source
+  // of truth for the ever-refreshed Authorization header.
   if (Object.keys(headers).length === 0) {
     return {};
   }
@@ -2295,6 +2291,55 @@ async function firstPartyMcpRequestInit(
     requestInit: {
       headers,
     },
+  };
+}
+
+// Sign a FRESH first-party delegated bearer for a single request. Returns null
+// when the run lacks the inputs to mint one (no delegation secret / account /
+// workspace), in which case the request proceeds with whatever static headers
+// requestInit already set. The 1h TTL is safe precisely because this runs per
+// request: the token on the wire is always seconds old, never near expiry.
+async function signFirstPartyDelegatedBearer(
+  settings: Settings,
+  options: PrepareToolsOptions,
+): Promise<string | null> {
+  if (!settings.delegationSecret || !options.accountId || !options.workspaceId) {
+    return null;
+  }
+  return await signDelegatedAccessToken(settings.delegationSecret, {
+    accountId: options.accountId,
+    workspaceId: options.workspaceId,
+    subjectId: options.subjectId ?? "worker:first-party-mcp",
+    ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
+    permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.turnId ? { turnId: options.turnId } : {}),
+    exp: Math.floor(Date.now() / 1000) + 60 * 60,
+  });
+}
+
+// Per-request auth for the FIRST-PARTY MCP server: re-sign the delegated bearer
+// on EVERY request (connect/initialize, every tools/list re-list, every
+// tools/call) and set it as the Authorization header, so a turn or connection
+// outliving the 1h token TTL never sends an expired bearer. This is the fix for
+// the prod grind where a >1h turn's next re-list/tool-call 401'd on the stale
+// first-party bearer and — the first-party server being required — failed the
+// whole turn. Scoped STRICTLY to the token WE mint; external OAuth (connectionRef
+// servers) go through connectionBrokerFetch and are untouched.
+function firstPartyAuthFetch(
+  baseFetch: FetchLike,
+  settings: Settings,
+  options: PrepareToolsOptions,
+): FetchLike {
+  return async (input, init) => {
+    const bearer = await signFirstPartyDelegatedBearer(settings, options);
+    if (!bearer) {
+      return await baseFetch(input, init);
+    }
+    return await baseFetch(
+      fetchInputForAttempt(input),
+      withConnectionHeaders(input, init, { authorization: `Bearer ${bearer}` }),
+    );
   };
 }
 

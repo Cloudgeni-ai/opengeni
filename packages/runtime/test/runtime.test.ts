@@ -11,7 +11,7 @@ import {
   DEFAULT_AGENT_INSTRUCTIONS,
   getSettings,
 } from "@opengeni/config";
-import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
+import { CLEARED_RUN_STATE_BLOB, verifyDelegatedAccessToken } from "@opengeni/contracts";
 import {
   applyMissingManifestEntries,
   pinProvidedSessionManifestEnvironment,
@@ -2307,6 +2307,114 @@ describe("runtime event normalization", () => {
       expect(JSON.stringify(result)).toContain("found document for auth");
     } finally {
       await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("first-party MCP bearer is re-signed PER REQUEST so a turn outliving the 1h TTL never 401s", async () => {
+    // The prod killer: the first-party delegated bearer is signed with a 1h TTL.
+    // Baked once at connect (the old behavior), a turn/connection that runs past
+    // 1h re-sends the stale bearer → the endpoint 401s → the REQUIRED first-party
+    // server fails the whole turn. The fix re-signs the bearer on EVERY request,
+    // so it is always fresh. This test validates the bearer server-side with the
+    // REAL verifier and fast-forwards the clock past the TTL between requests.
+    const delegationSecret = "test-delegation-secret"; // testSettings default
+    const seenExps: number[] = [];
+    const mcp = startTestMcpServer({
+      validateAuthorization: async (authorization) => {
+        if (!authorization?.startsWith("Bearer ")) {
+          return false;
+        }
+        // verifyDelegatedAccessToken rejects exp < now (now reads the mocked
+        // clock), exactly like the production first-party endpoint.
+        const payload = await verifyDelegatedAccessToken(
+          delegationSecret,
+          authorization.slice("Bearer ".length),
+        );
+        if (!payload) {
+          return false;
+        }
+        seenExps.push(payload.exp);
+        return true;
+      },
+    });
+    const realDateNow = Date.now;
+    let nowMs = 1_700_000_000_000; // fixed base
+    globalThis.Date.now = () => nowMs;
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          // A `{workspaceId}` template keeps the config first-party (isFirstParty
+          // short-circuits on it) and resolves to the test server's /mcp path
+          // (the token goes in a query param the server ignores), so the real
+          // first-party auth wrapper is exercised without URL rewriting.
+          mcpServers: [
+            {
+              id: "opengeni",
+              name: "OpenGeni",
+              url: `${mcp.url}?ws={workspaceId}`,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "opengeni" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+        },
+      );
+      try {
+        // T0: connect + first list — bearer minted with exp = T0 + 1h.
+        const first = await prepared.mcpServers[0]!.listTools();
+        expect(first.map((t) => t.name)).toContain("opengeni__search_documents");
+        const expsAfterFirst = seenExps.length;
+        // Fast-forward 2h — any bearer minted at connect is now expired.
+        nowMs += 2 * 60 * 60 * 1000;
+        // Re-list (the SDK's per-step re-fetch). Pre-fix this 401s on the stale
+        // baked bearer and throws (required → turn dies); post-fix the wrapper
+        // re-signs a fresh bearer and it succeeds.
+        const second = await prepared.mcpServers[0]!.listTools();
+        expect(second.map((t) => t.name)).toContain("opengeni__search_documents");
+        // Proof of per-request re-signing: the later bearer's exp advanced with
+        // the clock (a static baked bearer would have a constant exp).
+        expect(seenExps.length).toBeGreaterThan(expsAfterFirst);
+        expect(seenExps[seenExps.length - 1]!).toBeGreaterThan(seenExps[0]!);
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      globalThis.Date.now = realDateNow;
+      mcp.close();
+    }
+  });
+
+  test("a genuinely-broken first-party bearer still fails loud (no masking, no retry loop)", async () => {
+    // The dynamic refresh must NOT mask a real breakage: if the endpoint rejects
+    // every bearer (e.g. a server-side secret mismatch), the required first-party
+    // server must still fail the turn — we always send a fresh VALID-format token
+    // and never retry, so a persistent 401 surfaces as a hard connect failure.
+    const mcp = startTestMcpServer({ validateAuthorization: () => false });
+    try {
+      await expect(
+        prepareAgentTools(
+          testSettings({
+            mcpServers: [
+              {
+                id: "opengeni",
+                name: "OpenGeni",
+                url: `${mcp.url}?ws={workspaceId}`,
+                cacheToolsList: false,
+              },
+            ],
+          }),
+          [{ kind: "mcp", id: "opengeni" }],
+          {
+            accountId: "11111111-1111-4111-8111-111111111111",
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+          },
+        ),
+      ).rejects.toThrow();
+    } finally {
       mcp.close();
     }
   });
