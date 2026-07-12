@@ -238,6 +238,29 @@ describe("runtime event normalization", () => {
       cachedTokens: 30,
       reasoningTokens: null,
     });
+    // A wire `cached_tokens: 0` is REAL data (the provider cached nothing) and
+    // must record as 0, not null — 10k+ genuinely-uncached Azure calls once
+    // masqueraded as a telemetry gap because 0 was coerced to null. Absent
+    // details still record null (unknown).
+    expect(
+      modelCallUsageTelemetry({
+        inputTokens: 50,
+        outputTokens: 10,
+        inputTokensDetails: { cached_tokens: 0 },
+        outputTokensDetails: { reasoning_tokens: 0 },
+      }),
+    ).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedTokens: 0,
+      reasoningTokens: 0,
+    });
+    expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedTokens: null,
+      reasoningTokens: null,
+    });
   });
 
   test("ignores duplicate raw Responses text delta mirror events", () => {
