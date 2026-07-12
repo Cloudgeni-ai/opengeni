@@ -186,6 +186,9 @@ describe("fail-closed change impact", () => {
     expect(ci.match(/rm -rf node_modules/g)).toHaveLength(8);
     expect(ci.match(/bun install --frozen-lockfile/g)).toHaveLength(8);
     expect(ci).toContain("key: bun-store-v1-");
+    expect(ci.indexOf("Install exact dependency tree")).toBeLessThan(
+      ci.indexOf("Build fail-closed impact plan"),
+    );
     expect(() => Bun.YAML.parse(readFileSync(".github/workflows/ci.yml", "utf8"))).not.toThrow();
   });
 

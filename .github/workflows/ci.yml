@@ -41,6 +41,24 @@ jobs:
         with:
           bun-version-file: .bun-version
 
+      - name: Restore reusable Bun package store
+        id: bun-store-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
+
+      - name: Remove any pre-existing dependency tree
+        run: rm -rf node_modules
+
+      - name: Install exact dependency tree
+        run: >-
+          bun scripts/ci/profile-command.ts
+          --name dependencies
+          --output ci-profile/dependencies.json
+          --timeout-seconds 600
+          -- bun install --frozen-lockfile
+
       - name: Build fail-closed impact plan
         id: plan
         env:
@@ -82,24 +100,6 @@ jobs:
             jq '{mode, changedFiles, affectedPackages, reasons, typecheckProjects, unitCount:(.unitTests|length), integrationTests, e2eTests, buildPackages}' impact-plan.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Restore reusable Bun package store
-        id: bun-store-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-store-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version') }}
-
-      - name: Remove any pre-existing dependency tree
-        run: rm -rf node_modules
-
-      - name: Install exact dependency tree
-        run: >-
-          bun scripts/ci/profile-command.ts
-          --name dependencies
-          --output ci-profile/dependencies.json
-          --timeout-seconds 600
-          -- bun install --frozen-lockfile
 
       - name: Record dependency cache outcome
         if: always()
