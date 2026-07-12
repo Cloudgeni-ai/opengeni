@@ -1,5 +1,10 @@
-import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
+  configuredStaticUsageLimits,
+  policyProviderIdForModel,
+  type Settings,
+} from "@opengeni/config";
+import {
+  evaluateWorkspaceModelPolicy,
   mergeToolRefs,
   reasoningEffortForMetadata,
   type SessionGoal,
@@ -10,6 +15,7 @@ import {
   evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
+  getWorkspaceModelPolicy,
   getSessionEvent,
   getSessionGoal,
   isCodexBilledTurn,
@@ -51,10 +57,34 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       input.workspaceId,
       input.sessionId,
     );
-    const continuationModel = latestStartedTurn?.model ?? session.model;
+    let continuationModel = latestStartedTurn?.model ?? session.model;
     const continuationReasoningEffort =
       latestStartedTurn?.reasoningEffort ??
       reasoningEffortForMetadata(session.metadata, settings.openaiReasoningEffort);
+    // Workspace model policy: a continuation inherits the last STARTED turn's
+    // model, so a single policy-violating turn would otherwise re-arm itself on
+    // every continuation (exactly how one bare-model turn kept a goal loop on
+    // the paid built-in provider all night). If the inherited model is blocked
+    // but the session's own default is allowed, recover to the default; if
+    // both are blocked, pause the goal visibly (the budget-pause channel, with
+    // a truthful rationale) instead of synthesizing a turn the worker's hard
+    // gate would fail over and over.
+    let modelPolicyBlocked: string | null = null;
+    const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
+    if (workspaceModelPolicy) {
+      const policyBlocks = (modelId: string): boolean =>
+        !evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
+          providerId: policyProviderIdForModel(settings, modelId),
+          modelId,
+        }).allowed;
+      if (policyBlocks(continuationModel)) {
+        if (continuationModel !== session.model && !policyBlocks(session.model)) {
+          continuationModel = session.model;
+        } else {
+          modelPolicyBlocked = `workspace model policy blocks model "${continuationModel}"; pick an allowed model or change the workspace model policy`;
+        }
+      }
+    }
     // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
     // so it must not be budget-paused for zero OpenGeni credits. This file uses
     // BASE settings (no codex overlay); the predicate does its own credential read.
@@ -79,7 +109,10 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       sessionId: input.sessionId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
       noProgressLimit: settings.goalNoProgressLimit,
-      budgetBlocked,
+      // A model-policy block takes precedence: it is deterministic (a budget
+      // pause can clear on its own; a policy pause needs a model/policy change)
+      // and rides the same visible-pause channel.
+      budgetBlocked: modelPolicyBlocked ?? budgetBlocked,
     });
     if (decision.decision === "none" || decision.decision === "queue") {
       return { action: decision.decision };

@@ -83,6 +83,28 @@ describe("codexSubscriptionFetch", () => {
     expect("id" in sent.input[0]).toBe(false);
   });
 
+  test("sends the session_id affinity header when the context carries a sessionId", async () => {
+    // The backend's sticky cache-routing key: without it, byte-identical
+    // resends miss the prompt cache ~50% (measured shard lottery); with it
+    // they pin to the warm shard. Must ride EVERY request of the session.
+    const { base, captures } = baseRecorder();
+    const fetchImpl = codexSubscriptionFetch(base);
+    await codexRequestStorage.run(ctx({ sessionId: "11111111-2222-4333-8444-555555555555" }), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
+    );
+    const headers = new Headers(captures[0]?.init?.headers);
+    expect(headers.get("session_id")).toBe("11111111-2222-4333-8444-555555555555");
+  });
+
+  test("omits the session_id header when the context has none (legacy behavior)", async () => {
+    const { base, captures } = baseRecorder();
+    const fetchImpl = codexSubscriptionFetch(base);
+    await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
+    );
+    expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
+  });
+
   test("does not double-rewrite when url already targets /codex/responses", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);

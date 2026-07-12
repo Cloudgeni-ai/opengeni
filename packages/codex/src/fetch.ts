@@ -142,6 +142,12 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       headers.set("version", ctx.clientVersion);
       headers.set("accept", "text/event-stream");
       headers.set("content-type", "application/json");
+      if (ctx.sessionId) {
+        // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
+        // without it, byte-identical resends miss the prompt cache ~half the
+        // time; with it they pin to a warm shard and hit at the ceiling.
+        headers.set("session_id", ctx.sessionId);
+      }
       if (auth.isFedramp) {
         headers.set("X-OpenAI-Fedramp", "true");
       }

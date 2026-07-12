@@ -4,6 +4,7 @@ import {
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
+  UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   Workspace,
@@ -18,6 +19,7 @@ import {
   createWorkspace,
   deleteWorkspace,
   getManagedUserByEmail,
+  getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listScheduledTasks,
   listWorkspaceMembers,
@@ -28,6 +30,7 @@ import {
   setWorkspaceDefaultRig,
   updateWorkspace,
   updateWorkspaceSettings,
+  upsertWorkspaceModelPolicy,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -128,6 +131,36 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
     return c.json(Workspace.parse(workspace));
+  });
+
+  // Per-workspace model/provider availability policy (the HARD blocker over
+  // which providers/models may serve a turn at all). Absent row reads as
+  // unrestricted {null, null}.
+  app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const policy = await getWorkspaceModelPolicy(deps.db, workspaceId);
+    return c.json({
+      allowedProviders: policy?.allowedProviders ?? null,
+      allowedModels: policy?.allowedModels ?? null,
+    });
+  });
+
+  // Full replace (PUT, not merge): null/omitted = unrestricted for that
+  // dimension; an empty array is a valid explicit total block. Admin access —
+  // this decides whether turns can reach paid providers, so it is the same
+  // trust level as billing-affecting workspace settings.
+  app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = UpdateWorkspaceModelPolicyRequest.parse(await c.req.json());
+    const policy = await upsertWorkspaceModelPolicy(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      allowedProviders: payload.allowedProviders ?? null,
+      allowedModels: payload.allowedModels ?? null,
+    });
+    return c.json(policy);
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

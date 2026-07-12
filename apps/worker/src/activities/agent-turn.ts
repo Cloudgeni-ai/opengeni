@@ -23,6 +23,7 @@ import {
   releaseCodexCredentialLease,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   getCodexRotationSettings,
+  getWorkspaceModelPolicy,
   listCodexAccountStatuses,
   fetchCodexUsageForAccount,
   getSessionCodexState,
@@ -93,6 +94,7 @@ import {
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import {
+  builtinProviderId,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
@@ -204,9 +206,14 @@ import {
 import { captureWorkspaceRevision } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
-import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
+import {
+  desktopCapableBackend,
+  sandboxRunAs,
+  WorkspaceModelPolicyBlockedError,
+} from "@opengeni/runtime";
 import {
   CAPABILITY_DESCRIPTORS,
+  evaluateWorkspaceModelPolicy,
   type ResourceRef,
   type SessionEventType,
 } from "@opengeni/contracts";
@@ -2266,6 +2273,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
+      // after resolution and BEFORE any model call (the compaction summarizer
+      // and the main run both come later in this scope), so a blocked
+      // provider/model can never be reached through ANY stamp path: explicit
+      // turn model, inherited session default, goal-continuation inheritance,
+      // or the legacy null-resolution fallback (null → the built-in
+      // OpenAI/Azure client, attributed here via builtinProviderId so a policy
+      // blocking the built-in also blocks that fallback — this exact path is
+      // how bare-model turns silently spent real Azure money in a
+      // codex-intended workspace). Fail-loud, never a silent remap.
+      {
+        const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
+        if (workspaceModelPolicy) {
+          const effectiveProviderId = resolvedModel
+            ? resolvedModel.provider.id
+            : builtinProviderId(capabilitySettings);
+          const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
+            providerId: effectiveProviderId,
+            modelId: turn.model,
+          });
+          if (!verdict.allowed) {
+            throw new WorkspaceModelPolicyBlockedError(
+              turn.model,
+              effectiveProviderId,
+              verdict.reason,
+            );
+          }
+        }
+      }
       // A codex-subscription turn resolves the bearer for THIS turn's effective
       // codex account (effectiveCodexCredentialId; pin > workspace-active) at
       // model-call time — multi-account P1 means a workspace can hold N accounts,
@@ -2288,6 +2324,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
+                // Backend sticky cache-routing key — the SAME id as the body's
+                // prompt_cache_key (set from input.sessionId for codex turns),
+                // so routing and cache key agree. Without this header on the
+                // wire, byte-identical resends hit the prompt cache ~50%
+                // (per-request shard lottery = prod's measured 48.6% on sol);
+                // with it, resends pin to the warm shard (Codex CLI parity).
+                sessionId: input.sessionId,
                 getToken: resolver.getToken,
                 refresh: resolver.refresh,
                 resolveModel: buildModelResolver(
