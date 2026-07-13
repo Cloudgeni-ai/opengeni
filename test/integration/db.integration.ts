@@ -10,6 +10,7 @@ import {
   applySessionTurnPreemption,
   applySessionTurnSettlement,
   applySessionTurnWorkerDeath,
+  applySessionOnlySettlement,
   applyContextCompaction,
   bootstrapWorkspace,
   claimNextQueuedTurn,
@@ -65,6 +66,7 @@ import {
   registerSessionTurnDispatch,
   saveRunState,
   setSessionStatus,
+  settleSessionIdleWithParentOutbox,
   updateScheduledTask,
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
@@ -1514,6 +1516,80 @@ describe("DB integration", () => {
       const finalSession = await getSession(dbClient.db, grant.workspaceId, session.id);
       expect(finalSession?.activeTurnId).toBe(concurrentClaim?.id ?? null);
     }
+  });
+
+  test("session-only failure and idle settlement cannot overwrite newly queued work", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "settlement queue race",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "new work wins" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "new work wins",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const before = await getSession(dbClient.db, grant.workspaceId, session.id);
+
+    expect(
+      await applySessionOnlySettlement(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        status: "failed",
+        events: [
+          { type: "turn.failed", payload: { error: "obsolete workflow failure" } },
+          { type: "session.status.changed", payload: { status: "failed" } },
+        ],
+      }),
+    ).toEqual({ action: "stale", events: [] });
+    expect(
+      await settleSessionIdleWithParentOutbox(dbClient.db, grant.workspaceId, session.id),
+    ).toEqual({ action: "stale", episodeKey: null, events: [] });
+
+    const preserved = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(preserved?.status).toBe("queued");
+    expect(preserved?.activeTurnId).toBeNull();
+    expect(preserved?.lastSequence).toBe(before?.lastSequence);
+    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("queued");
+
+    const emptySession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "legitimate idle boundary",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const idle = await settleSessionIdleWithParentOutbox(
+      dbClient.db,
+      grant.workspaceId,
+      emptySession.id,
+    );
+    expect(idle.action).toBe("settled");
+    if (idle.action === "settled") {
+      expect(idle.changed).toBe(true);
+      expect(idle.events.map((event) => event.type)).toEqual(["session.status.changed"]);
+      expect(idle.episodeKey).toBe(String(idle.events[0]!.sequence));
+    }
+    expect((await getSession(dbClient.db, grant.workspaceId, emptySession.id))?.status).toBe("idle");
   });
 
   test("preemption rolls back event, turn, and pointer together at injected transaction failures", async () => {

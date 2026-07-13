@@ -108,7 +108,10 @@ id/generation. Every lifecycle writer must match that attempt. A typed
 schedule-to-start timeout is the only no-registration recovery case because its
 activity never ran.
 
-Claim and settlement share one lock order: session, then exact turn. Start,
+Claim, control, and event-writing settlement share one lock order: workspace,
+then session, then exact turn. Event inserts also touch the workspace through
+their foreign keys, so acquiring it later would reintroduce a claim/preemption
+deadlock. Start,
 requires-action, ordinary terminal, preemption, and worker-death events commit
 with turn status, session status/pointer, and `lastSequence` in one transaction.
 For preemption that transaction appends `turn.preempted` plus queued status,

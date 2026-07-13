@@ -16759,6 +16759,12 @@ export async function clearSessionGoal(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, workspaceId))
+          .for("update")
+          .limit(1);
         const [session] = await tx
           .select()
           .from(schema.sessions)
@@ -18929,6 +18935,12 @@ export async function applySessionTurnSettlement(
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
       const [session] = await tx
         .select()
         .from(schema.sessions)
@@ -19541,6 +19553,12 @@ export async function applySessionTurnPreemption(
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
       const [session] = await tx
         .select()
         .from(schema.sessions)
@@ -19742,6 +19760,12 @@ export async function applySessionTurnWorkerDeath(
 ): Promise<ApplySessionTurnWorkerDeathResult> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
       const [session] = await tx
         .select()
         .from(schema.sessions)
@@ -19830,6 +19854,21 @@ export async function applySessionTurnWorkerDeath(
         };
       }
       const metadata = { ...(turn.metadata ?? {}) } as Record<string, unknown>;
+      if (!exactAttempt) {
+        if (parsedMetadata.generation >= Number.MAX_SAFE_INTEGER) {
+          return {
+            action: "stale" as const,
+            events: [] as [],
+            turnStatus,
+            activeTurnId: session.activeTurnId,
+          };
+        }
+        // A schedule-to-start timeout represents a real Temporal dispatch that
+        // never entered the activity and therefore could not self-register.
+        // Consume its generation here so a later registered attempt remains
+        // strictly newer and an old timeout can never alias it.
+        metadata[TURN_DISPATCH_GENERATION_METADATA_KEY] = parsedMetadata.generation + 1;
+      }
       const redispatches = redispatchMetadata.count + 1;
       metadata.workerDeathRedispatches = redispatches;
 
@@ -20038,6 +20077,12 @@ export async function applySessionTurnInterrupt(
 ): Promise<ApplySessionTurnInterruptResult> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      await tx
+        .select({ id: schema.workspaces.id })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .for("update")
+        .limit(1);
       const [session] = await tx
         .select()
         .from(schema.sessions)
@@ -20646,6 +20691,12 @@ export async function applySessionOnlySettlement(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, workspaceId))
+          .for("update")
+          .limit(1);
         const [session] = await tx
           .select()
           .from(schema.sessions)
@@ -20730,6 +20781,12 @@ export async function settleSessionIdle(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, workspaceId))
+          .for("update")
+          .limit(1);
         const [session] = await tx
           .select()
           .from(schema.sessions)
