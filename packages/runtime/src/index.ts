@@ -119,6 +119,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   computerCallNormalizingFetch,
+  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
@@ -126,6 +127,7 @@ import { installCodexToolSearch } from "./codex-tool-search";
 import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
+  INTERNAL_RESUME_MESSAGE_MARKER,
   SUMMARY_BUFFER_TOKENS,
   clientCompactionThresholdTokens,
   enforceInputBudget,
@@ -179,6 +181,7 @@ setSelfhostedApplyDiff(
 );
 
 export {
+  elideSupersededViewImagePairs,
   sanitizeHistoryItemsForModel,
   stripReasoningEncryptedContent,
   stripReasoningIdentityFromSerializedRunState,
@@ -306,6 +309,10 @@ export type AgentSegmentInput =
   | {
       kind: "message";
       text: string;
+      // Platform-authored turn-resume notices need a user-role turn boundary
+      // for the SDK, but are marked so compaction never mistakes them for
+      // durable user intent and retains one copy per recovery forever.
+      internalResumeKind?: string;
       serializedRunState?: string | null;
       // Items-mode conversation truth (issue #35): when provided, turn input is
       // built from these verbatim AgentInputItems and the stored sandbox
@@ -1000,12 +1007,17 @@ export type BuildAgentOptions = {
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   toolspaceTokenSeed?: string;
-  // Genesis turn only: append a one-shot instruction to the agent's system
-  // prompt telling it to title the session via opengeni__set_session_title
-  // before responding. Delivered through the instructions channel (where the
-  // model actually obeys), appended AFTER the non-bypassable core so a
-  // white-label persona template can't drop it.
+  // Genesis turn only: inject a one-shot instruction into the FIRST model
+  // call telling it to title the session via opengeni__set_session_title.
+  // Keeping this out of the persistent Agent.instructions prevents every
+  // tool-follow-up model call in a long first turn from re-running setup.
   genesisTitleHint?: boolean;
+  // Persistent session settings, resolved by the worker from the durable
+  // session row at turn start. Tool schemas are rebuilt on every turn, so
+  // without this factual state the model can mistake persistent metadata tools
+  // for per-turn initialization and re-apply the same title/notification mode.
+  // Values only — never the user-controlled title text — enter instructions.
+  persistentSessionSettings?: PersistentSessionSettings;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -1053,6 +1065,11 @@ export type WorkspaceEnvironmentContext = {
   name: string;
   description?: string | null;
   variableNames?: string[];
+};
+
+export type PersistentSessionSettings = {
+  titleIsSet: boolean;
+  childNotificationsMode?: "digest" | "passive";
 };
 
 /**
@@ -1150,6 +1167,29 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
 }
 
 /**
+ * Append the durable session metadata the model otherwise cannot observe.
+ * This is deliberately declarative and excludes the title text: the title is
+ * user-controlled display metadata, while the agent only needs to know whether
+ * initialization has already happened. The block is present on every turn when
+ * supplied so compaction cannot erase knowledge that these settings persist.
+ */
+export function appendPersistentSessionSettings(
+  composed: string,
+  settings?: PersistentSessionSettings,
+): string {
+  if (!settings) {
+    return composed;
+  }
+  const childState = settings.childNotificationsMode
+    ? `; spawned-worker completion notifications are ${settings.childNotificationsMode}`
+    : "";
+  const persistentTools = settings.childNotificationsMode
+    ? "opengeni__set_session_title or opengeni__set_child_notifications_mode"
+    : "opengeni__set_session_title";
+  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}${childState}. These settings persist across turns, continuations, and interruptions. Do not call ${persistentTools} merely to reassert an unchanged value; call them only when the current value actually needs to change.`;
+}
+
+/**
  * Appends the workspace memory working-set block to the already-composed
  * (workspace + CORE + generic substrate) instructions, joined by " ". The
  * memory slice is workspace-ground and intentionally lands before
@@ -1201,6 +1241,10 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // Absent when no brokered repo is attached / on the selfhosted path.
 const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentToolspaceTokenSeed = new WeakMap<object, string>();
+// A genesis directive is consumed by runAgentStream exactly once for the
+// freshly-built agent. It must not remain in Agent.instructions: those
+// instructions are presented again on every internal model/tool loop.
+const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -1310,10 +1354,11 @@ export function buildOpenGeniAgent(
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
     //   4. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   5. + the one-shot genesis title directive (genesis turn only).
-    // With no toolspace token, no workspace memory, no session instructions, and
-    // no genesis hint this is byte-identical to the historical composed instructions.
-    instructions: appendGenesisTitleDirective(
+    //   5. + durable session-setting state (title present + child notification
+    //      mode), when supplied by the worker,
+    // The genesis title directive is deliberately NOT part of this persistent
+    // string. runAgentStream injects it into the first model call only.
+    instructions: appendPersistentSessionSettings(
       appendSessionInstructions(
         appendWorkspaceMemory(
           appendToolspaceInstructions(
@@ -1328,7 +1373,7 @@ export function buildOpenGeniAgent(
         ),
         options.sessionInstructions,
       ),
-      options.genesisTitleHint,
+      options.persistentSessionSettings,
     ),
     modelSettings: {
       reasoning: {
@@ -1371,6 +1416,9 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
+    if (options.genesisTitleHint) {
+      agentsNeedingGenesisTitleDirective.add(agent);
+    }
     maybeInstallCodexToolSearch(agent, settings, options);
     applyMcpApprovalPolicy(agent, settings);
     return agent;
@@ -1397,6 +1445,9 @@ export function buildOpenGeniAgent(
         : {}),
     }),
   });
+  if (options.genesisTitleHint) {
+    agentsNeedingGenesisTitleDirective.add(agent);
+  }
   agentFileDownloads.set(
     agent,
     normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter(
@@ -1660,6 +1711,41 @@ function withExecOpCorrelation(tools: Tool<unknown>[]): Tool<unknown>[] {
   });
 }
 
+/**
+ * Codex accepts ordinary FUNCTION tools but also accepts `input_image` content
+ * inside a function_call_output (the same transport used by codex-rs
+ * view_image). The SDK filesystem capability unnecessarily couples this choice
+ * to hosted apply_patch support; when hosted tools are disabled it degrades
+ * view_image to a giant text data URL, charging roughly one token per four
+ * base64 characters. Re-wrap only successful data-URL results as a structured
+ * image. Text errors remain text, and the tool itself remains a normal function.
+ */
+export function withStructuredViewImageFunctionResults(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "view_image") {
+      return capabilityTool;
+    }
+    const invoke = capabilityTool.invoke;
+    return {
+      ...capabilityTool,
+      invoke: async (runContext, input, details) => {
+        const output = await invoke(runContext, input, details);
+        const dataUrl =
+          typeof output === "string"
+            ? output
+            : output &&
+                typeof output === "object" &&
+                typeof (output as { text?: unknown }).text === "string"
+              ? (output as { text: string }).text
+              : null;
+        return dataUrl?.startsWith("data:image/")
+          ? { type: "image" as const, image: { url: dataUrl } }
+          : output;
+      },
+    };
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
@@ -1685,7 +1771,11 @@ export function buildAgentCapabilities(
   // handles their function_call round-trip natively, so no reimplementation.
   // Scoped to filesystem: shell() (always function tools) and compaction() (a
   // sampling param, dropped by the codex normalizer) are untouched.
-  const filesystemCapability = filesystem();
+  const filesystemCapability = filesystem({
+    ...(options.structuredToolTransport === false
+      ? { configureTools: withStructuredViewImageFunctionResults }
+      : {}),
+  });
   if (options.structuredToolTransport === false) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
@@ -2733,6 +2823,18 @@ export async function prepareRunInput(
   options: PrepareInputOptions = {},
 ): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
+    const trailingMessage = {
+      type: "message",
+      role: "user",
+      content: input.text,
+      ...(input.internalResumeKind
+        ? {
+            providerData: {
+              [INTERNAL_RESUME_MESSAGE_MARKER]: input.internalResumeKind,
+            },
+          }
+        : {}),
+    } as AgentInputItem;
     if (input.historyItems && input.historyItems.length > 0) {
       // Items mode: conversation truth comes from the database, the sandbox
       // recovery descriptor from its own store. The RunState blob is not
@@ -2755,15 +2857,7 @@ export async function prepareRunInput(
         // input can exceed the model window (pre-turn compaction is best-effort
         // and can no-op). Trim the oldest history at a clean turn boundary so an
         // over-budget request is never sent. No-op when no budget is supplied.
-        input: guardAssembledInput(
-          sanitizedHistory,
-          {
-            type: "message",
-            role: "user",
-            content: input.text,
-          } as AgentInputItem,
-          options.inputBudgetTokens,
-        ),
+        input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
         ...(sandboxSessionState ? { sandboxSessionState } : {}),
       };
     }
@@ -2774,7 +2868,7 @@ export async function prepareRunInput(
     // after a /clear, so recognizing the sentinel here is what keeps the next
     // turn working (a fresh, empty context) instead of bricking on deserialize.
     if (!input.serializedRunState || isClearedRunStateBlob(input.serializedRunState)) {
-      return { input: input.text };
+      return { input: input.internalResumeKind ? [trailingMessage] : input.text };
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
     const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
@@ -2788,15 +2882,7 @@ export async function prepareRunInput(
       // Read-path budget guard (see the items path above): keep an over-budget
       // resumed history off the wire by trimming the oldest turns when a budget
       // is supplied.
-      input: guardAssembledInput(
-        sanitizedHistory,
-        {
-          type: "message",
-          role: "user",
-          content: input.text,
-        } as AgentInputItem,
-        options.inputBudgetTokens,
-      ),
+      input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
     };
@@ -2872,13 +2958,43 @@ export type ContextRobustnessFilterOptions = {
   throwOnCompactionNeeded?: boolean;
 };
 
-// One-shot directive appended to the agent's system prompt on the genesis turn
+// One-shot directive injected into the FIRST model call on the genesis turn
 // (see buildOpenGeniAgent's genesisTitleHint). Delivered through the
 // authoritative instructions channel so the model reliably obeys; references
 // the prefixed tool name the agent actually sees (opengeni__set_session_title).
-// Appended after the non-bypassable core so a white-label persona can't drop it.
 export const GENESIS_TITLE_DIRECTIVE =
   "This is the first turn of a new session. Before responding to the user, call the opengeni__set_session_title tool with a concise 3-7 word title that summarizes what this session is about, then address the user's request normally.";
+
+/**
+ * Inject the genesis-title directive into exactly one model request. Agent
+ * instructions are reused for every model call in a tool loop, so placing this
+ * directive there turned a nominally one-shot setup action into repeated title
+ * calls. The closure is intentionally consumed even when the first request
+ * fails: a retry/recovery must continue the task, not restart setup.
+ */
+export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
+  let pending = true;
+  return ({ modelData }) => {
+    if (!pending) {
+      return modelData;
+    }
+    pending = false;
+    return {
+      ...modelData,
+      instructions: modelData.instructions
+        ? `${modelData.instructions} ${GENESIS_TITLE_DIRECTIVE}`
+        : GENESIS_TITLE_DIRECTIVE,
+    };
+  };
+}
+
+function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilter | undefined {
+  if (!agentsNeedingGenesisTitleDirective.has(agent)) {
+    return undefined;
+  }
+  agentsNeedingGenesisTitleDirective.delete(agent);
+  return oneShotGenesisTitleInputFilter();
+}
 
 // Generic substrate prompting for programmatic tool calling (toolspace). Same
 // text for every host; gated per-turn by appendToolspaceInstructions on the
@@ -2932,6 +3048,18 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
   ) as unknown as AgentInputItem[],
 });
 
+/**
+ * Per-call state compaction for local image inspection. Re-opening the same
+ * path supersedes its prior base64 result; carrying both provides no newer
+ * information and can otherwise balloon every following model request.
+ */
+export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelData }) => ({
+  ...modelData,
+  input: elideSupersededViewImagePairs(
+    modelData.input as unknown as Array<Record<string, unknown>>,
+  ) as unknown as AgentInputItem[],
+});
+
 export function contextRobustnessFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
@@ -2959,7 +3087,7 @@ export function contextRobustnessFilterForSettings(
       const signalTokens = hasReported
         ? reported
         : estimateTokens(input as unknown as Array<Record<string, unknown>>);
-      if (signalTokens > compactionThresholdTokens) {
+      if (signalTokens >= compactionThresholdTokens) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens: compactionThresholdTokens,
@@ -3004,7 +3132,10 @@ export function callModelInputFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter | undefined {
-  const filters: CallModelInputFilter[] = [normalizeComputerCallsFilter];
+  const filters: CallModelInputFilter[] = [
+    normalizeComputerCallsFilter,
+    elideSupersededViewImagesFilter,
+  ];
   if (settings.openaiProviderItemIds === "strip") {
     filters.push(stripProviderItemIdsFilter);
   }
@@ -3021,6 +3152,7 @@ export async function runAgentStream(
   const prepared: PreparedAgentInput =
     typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
+  const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
   // live, externally-owned box. We thread the live `session` straight into
@@ -3098,6 +3230,7 @@ export async function runAgentStream(
             ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
             : {}),
         }),
+        genesisTitleInputFilter,
         overrides.callModelInputFilter,
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
@@ -3184,6 +3317,7 @@ export async function runAgentStream(
           ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
           : {}),
       }),
+      genesisTitleInputFilter,
       overrides.callModelInputFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   computerCallNormalizingFetch,
+  elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
@@ -40,6 +41,16 @@ function functionResult(callId: string) {
     callId,
     status: "completed",
     output: { type: "text", text: "ok" },
+  };
+}
+
+function viewImageCall(callId: string, path: string) {
+  return {
+    type: "function_call",
+    callId,
+    name: "view_image",
+    arguments: JSON.stringify({ path }),
+    status: "completed",
   };
 }
 // tool_search items (progressive connector disclosure). The SDK holds the wire
@@ -173,6 +184,50 @@ describe("sanitizeHistoryItemsForModel", () => {
     sanitizeHistoryItemsForModel(items);
     expect(items).toHaveLength(2);
     expect(JSON.stringify(items)).toBe(snapshot);
+  });
+});
+
+describe("elideSupersededViewImagePairs", () => {
+  test("keeps only the newest fully-paired image observation for the same path", () => {
+    const items = [
+      userMessage("inspect both"),
+      reasoning("rs-old"),
+      viewImageCall("img-old", "/tmp/a.png"),
+      functionResult("img-old"),
+      viewImageCall("img-b", "/tmp/b.png"),
+      functionResult("img-b"),
+      reasoning("rs-new"),
+      viewImageCall("img-new", "/tmp/a.png"),
+      functionResult("img-new"),
+    ];
+
+    const out = elideSupersededViewImagePairs(items);
+    expect(out).toEqual([items[0], items[4], items[5], items[6], items[7], items[8]]);
+  });
+
+  test("does not discard the last valid image when a newer call is incomplete", () => {
+    const items = [
+      viewImageCall("img-valid", "/tmp/a.png"),
+      functionResult("img-valid"),
+      viewImageCall("img-inflight", "/tmp/a.png"),
+    ];
+
+    expect(elideSupersededViewImagePairs(items)).toEqual(items);
+  });
+
+  test("leaves distinct image paths and non-image tools byte-identical", () => {
+    const items = [
+      viewImageCall("img-a", "/tmp/a.png"),
+      functionResult("img-a"),
+      viewImageCall("img-b", "/tmp/b.png"),
+      functionResult("img-b"),
+      functionCall("other", "memory_search"),
+      functionResult("other"),
+    ];
+
+    const out = elideSupersededViewImagePairs(items);
+    expect(out).toEqual(items);
+    expect(out[0]).toBe(items[0]);
   });
 });
 

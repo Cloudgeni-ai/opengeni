@@ -952,6 +952,20 @@ describe("SandboxRow — failed chip", () => {
 
     await r.unmount();
   });
+
+  test("sandbox establishment says whether the box was reattached", async () => {
+    const item = sandboxItem({
+      name: "sandbox.provision",
+      status: "complete",
+      origin: "resumed",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    expect(r.container.textContent ?? "").toContain("Sandbox reattached");
+
+    await r.unmount();
+  });
 });
 
 function memoryItem(overrides: Partial<MemoryItem>): MemoryItem {

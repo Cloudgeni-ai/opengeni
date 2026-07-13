@@ -52,6 +52,8 @@ const RegistryModelSchema = z.object({
   id: z.string().min(1),                 // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
   label: z.string().min(1).optional(),   // display name; defaults to id
   contextWindowTokens: z.number().int().positive().optional(),
+  effectiveContextWindowTokens: z.number().int().positive().optional(),
+  autoCompactTokenLimit: z.number().int().positive().optional(),
   reasoningEffort: z.boolean().optional(),  // model accepts a reasoning-effort control
   hostedWebSearch: z.boolean().optional(),  // provider executes the hosted web_search tool for this model
   pricing: ModelPricingSchema.optional(),
@@ -91,6 +93,8 @@ export interface ConfiguredModel {
   providerLabel: string;
   api: ModelProviderApi;
   contextWindowTokens?: number;
+  effectiveContextWindowTokens?: number;
+  autoCompactTokenLimit?: number;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
 }
@@ -107,7 +111,8 @@ export interface ConfiguredModel {
   (`configuredAllowedModels`-from-openai mapped: `api: "responses"`,
   `hostedWebSearch: settings.webSearchEnabled`, `contextWindowTokens: settings.contextWindowTokens`,
   `reasoningEffort: true`), then each registry provider's models (defaults: label→id,
-  `hostedWebSearch` defaults `false`, `reasoningEffort` defaults `false`). De-dup by `id`, first wins, default model first.
+  `hostedWebSearch` defaults `false`, `reasoningEffort` defaults `false`; optional
+  raw/effective/auto-compact token metadata is preserved). De-dup by `id`, first wins, default model first.
 - `configuredAllowedModels(settings)` — **reimplement** as `configuredModels(settings).map(m => m.id)`
   (keeps existing behaviour: `settings.openaiModel` first, then the openai allow-list, now plus registry ids).
 - `resolveModelProvider(settings, modelId): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined`.
@@ -158,6 +163,9 @@ provider for unconfigured names). The worker therefore passes the model as a
 **string** (`agent.model = runSettings.openaiModel`), not an instance, so every
 path resolves through the router. Gating (compaction/web-search/encrypted
 reasoning/context window) still comes from `resolveTurnModel` in the worker.
+The worker applies `settingsWithResolvedModelContext` before every model-facing
+operation, so model-specific raw/effective/auto-compact limits govern the turn
+input guard and streamed runner rather than only the agent capability.
 
 ## Runtime — `packages/runtime/src/index.ts`
 

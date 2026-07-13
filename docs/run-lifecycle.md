@@ -93,6 +93,14 @@ A no-shrink result publishes a clear recovery message and leaves the session
 fails with an error that names compaction summarization/fallback, not the
 threshold event.
 
+Resolved model context metadata is authoritative on every model-facing path.
+For the Codex subscription catalog this means a 272,000-token raw window, a
+258,400-token effective input ceiling (95%), and automatic compaction at
+244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
+only the newest real user messages that fit one cumulative 20,000-token budget,
+then appends the summary; internal resume notices are never retained as user
+intent. See [`context-compaction.md`](context-compaction.md).
+
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
 creating the group sandbox waits at most

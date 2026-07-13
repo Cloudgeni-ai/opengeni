@@ -5,9 +5,10 @@ past the model context window. Compaction is provider-aware:
 
 - **OpenAI platform / server mode** keeps using the Responses API server-side
   `context_management` path. This path is intentionally unchanged.
-- **Azure / client mode** uses OpenGeni's local compaction, now simplified to
-  **Codex CLI parity**: checkpoint summarize the current active history, then
-  rebuild active history as user messages plus one summary.
+- **Azure and registry-provider / client mode** uses OpenGeni's local
+  compaction. The Codex-subscription registry models use the same catalog token
+  policy and local-checkpoint rebuild semantics as Codex CLI, while retaining
+  OpenGeni's durable audit rows and strict-shrink recovery guard.
 
 Code wins over this document. The main files are:
 
@@ -39,19 +40,35 @@ Code wins over this document. The main files are:
 The server path still uses `contextServerCompactThresholdTokens` when set,
 otherwise `floor(contextWindowTokens * contextCompactionThresholdRatio)`.
 `contextCompactionThresholdRatio` is configured with
-`OPENGENI_COMPACTION_THRESHOLD_RATIO`, defaults to `0.6`, and is clamped to
+`OPENGENI_COMPACTION_THRESHOLD_RATIO`, defaults to `0.9`, and is clamped to
 `[0.3, 0.9]`.
 
 ## Client Trigger
 
-Client mode has one threshold:
+Client mode compacts when the signal reaches (not only exceeds) one threshold:
 
 ```
-signal > contextWindowTokens * contextCompactionThresholdRatio
+signal >= contextClientCompactThresholdTokens
 ```
 
-With the defaults (`1,050,000` window, ratio `0.6`), the threshold is
-`630,000`.
+When a resolved model does not declare an explicit limit, the right-hand side
+is `floor(contextWindowTokens * contextCompactionThresholdRatio)`. An explicit
+model limit is clamped to 90% of the raw window, matching Codex core.
+
+Codex subscription model metadata is pinned to the live Codex CLI 0.144.1
+catalog fetched on 2026-07-13:
+
+| quantity | derivation | tokens |
+| --- | --- | ---: |
+| raw context window | catalog `context_window` | 272,000 |
+| effective input ceiling | raw × catalog `effective_context_window_percent` (95%) | 258,400 |
+| automatic compaction trigger | raw × 90% (`auto_compact_token_limit` fallback) | 244,800 |
+
+These are deliberately distinct. The turn-start and per-call compaction checks
+use 244,800; the read/per-call hard input guard uses 258,400. The worker applies
+the resolved model settings to the agent build, pre-turn history read,
+summarizer, and every streamed model call, so a Codex turn cannot accidentally
+inherit the deployment's 1.05M OpenAI/Azure defaults.
 
 The signal prefers provider-reported input tokens:
 
@@ -86,17 +103,22 @@ The model output is wrapped with Codex CLI's `summary_prefix.md` text verbatim
 and stored as one plain user `message` item with
 `opengeni_context_summary: true`.
 
-The new active history is:
+The local checkpoint replacement history is:
 
-1. All real user messages in order, excluding prior OpenGeni summary items.
-2. Each retained user message capped at 20k estimated tokens by truncating the
-   middle with a marker.
+1. The newest real user messages that fit one **20k-token cumulative budget**,
+   in chronological order. Prior summaries and platform-authored resume notices
+   are excluded.
+2. The oldest retained boundary message is truncated when only part of that
+   20k budget remains; this is not a 20k allowance per message.
 3. One summary item appended last.
 
 Assistant messages, tool calls/results, reasoning items, and images are removed
 from active history. They are not deleted: the compaction DB transaction marks
 the old active rows inactive and inserts replacement active rows, preserving the
-audit trail.
+audit trail. The same transaction replaces the stale pre-compaction
+`last_input_tokens` signal with the new active-history estimate, so a
+re-dispatched activity cannot immediately recompact the replacement based on
+the superseded request's token count.
 
 If the full rendered summarizer call fails or returns no summary, OpenGeni
 retries the summarizer once with a hard-trimmed transcript that drops the oldest
@@ -136,7 +158,9 @@ same compaction/retry/requeue logic.
 
 ## Read-Path Guard
 
-`enforceInputBudget` remains a request-local airbag. It can drop the oldest
+`enforceInputBudget` remains a request-local airbag. For a model with an
+explicit effective window it uses that ceiling; otherwise it uses
+`contextWindowTokens - contextReservedOutputTokens`. It can drop the oldest
 history at a clean user-message boundary so an oversized input is not sent. It
 does not create summaries and does not mutate the DB. It exists behind the
 real compaction path as a last-resort guard.

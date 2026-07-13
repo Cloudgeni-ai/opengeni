@@ -21,10 +21,12 @@ import {
   buildManifest,
   composeAgentInstructions,
   coreInstructions,
+  appendPersistentSessionSettings,
   appendToolspaceInstructions,
   appendWorkspaceMemory,
   TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
+  oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
@@ -44,6 +46,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxFileDownloadsForAgent,
   sandboxRunAs,
@@ -428,6 +431,29 @@ describe("runtime event normalization", () => {
     });
   });
 
+  test("codex view_image function results use structured image content, not tokenized data-URL text", async () => {
+    const dataUrl = "data:image/png;base64,aGk=";
+    const tool = {
+      type: "function",
+      name: "view_image",
+      invoke: async () => dataUrl,
+    } as any;
+    const [wrapped] = withStructuredViewImageFunctionResults([tool]);
+    expect(await (wrapped as any).invoke(undefined, "{}", undefined)).toEqual({
+      type: "image",
+      image: { url: dataUrl },
+    });
+
+    const errorTool = {
+      ...tool,
+      invoke: async () => "image path `/tmp/missing.png` was not found",
+    } as any;
+    const [wrappedError] = withStructuredViewImageFunctionResults([errorTool]);
+    expect(await (wrappedError as any).invoke(undefined, "{}", undefined)).toBe(
+      "image path `/tmp/missing.png` was not found",
+    );
+  });
+
   describe("failed MCP tool calls carry an isError flag", () => {
     test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
       const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
@@ -772,6 +798,25 @@ describe("runtime event normalization", () => {
     expect(prepared.input).toBe("hello");
   });
 
+  test("marks platform resume notices so compaction cannot retain them as user intent", async () => {
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "[TURN RESUMED AFTER CONTEXT COMPACTION] Continue.",
+        internalResumeKind: "context_compacted",
+      },
+    );
+    expect(prepared.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: "[TURN RESUMED AFTER CONTEXT COMPACTION] Continue.",
+        providerData: { opengeni_internal_resume: "context_compacted" },
+      },
+    ]);
+  });
+
   test("treats the cleared run-state sentinel as a fresh start (run_state mode /clear)", async () => {
     // Regression (adversarial review): after /clear, in run_state history mode
     // the message path reads the cleared sentinel blob (not a real serialized
@@ -1113,17 +1158,51 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("the genesis title directive stays LAST, after per-session instructions", () => {
+  test("the genesis title directive is not persisted across model calls", async () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
     });
     expect(agent.instructions).toContain("Session-scoped rule.");
-    // Genesis directive is appended after everything, including the session slice.
-    expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
-    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
-      agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE),
+    expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
+
+    const filter = oneShotGenesisTitleInputFilter();
+    const first = await filter({
+      modelData: { input: [], instructions: agent.instructions },
+      agent,
+      context: undefined,
+    });
+    const followUp = await filter({
+      modelData: { input: [], instructions: agent.instructions },
+      agent,
+      context: undefined,
+    });
+    expect(first.instructions?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
+    expect(followUp.instructions).toBe(agent.instructions);
+  });
+
+  test("persistent session settings survive turn reconstruction without restarting genesis setup", () => {
+    expect(appendPersistentSessionSettings("base")).toBe("base");
+
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Session-scoped rule.",
+      persistentSessionSettings: {
+        titleIsSet: true,
+        childNotificationsMode: "passive",
+      },
+      genesisTitleHint: true,
+    });
+
+    expect(agent.instructions).toContain(
+      "Persistent session settings already in effect: the display title is set; spawned-worker completion notifications are passive.",
     );
+    expect(agent.instructions).toContain(
+      "Do not call opengeni__set_session_title or opengeni__set_child_notifications_mode merely to reassert an unchanged value",
+    );
+    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
+      agent.instructions.indexOf("Persistent session settings already in effect"),
+    );
+    expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
   });
 
   // ── generic programmatic-tool-calling (toolspace) substrate directive ──────
@@ -1205,19 +1284,16 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("the toolspace directive stays before the genesis directive, which remains LAST", () => {
+  test("the toolspace directive and session slice stay persistent while genesis stays one-shot", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
       toolspaceTokenSeed: "ogd_seed",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
-    expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
+    expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
     expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE)).toBeLessThan(
       agent.instructions.indexOf("Session-scoped rule."),
-    );
-    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(
-      agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE),
     );
   });
 

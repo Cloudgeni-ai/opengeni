@@ -674,6 +674,33 @@ describe("buildTimeline", () => {
     expect(sandbox.status).toBe("complete");
   });
 
+  test("preserves whether sandbox establishment created, restored, or reattached the box", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.completed", { name: "sandbox.provision", origin: "resumed" }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect((items[0] as SandboxItem).origin).toBe("resumed");
+    expect((items[0] as SandboxItem).status).toBe("complete");
+  });
+
+  test("keeps every context compaction visible with its before and after size", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compacted", {
+        estimatedTokensBefore: 288_000,
+        estimatedTokensAfter: 23_091,
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "Context compacted from approximately 288,000 to 23,091 tokens.",
+    });
+  });
+
   test("routine repository-clone operations never render", () => {
     // Per-turn platform plumbing (idempotent clone check + token re-seed) —
     // rendering it every turn reads as the agent redoing work.

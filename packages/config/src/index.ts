@@ -214,6 +214,10 @@ const SettingsSchema = z.object({
   // derived from these settings on the server path, and use the same numbers to
   // budget the client path.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
+  // Optional model-catalog effective input ceiling. Codex models expose this as
+  // raw context_window * effective_context_window_percent; when absent, retain
+  // the deployment-level window-minus-reserved-output behavior.
+  contextEffectiveWindowTokens: z.coerce.number().int().positive().optional(),
   // Proactive compaction threshold as a ratio of the model context window.
   // Defaults to 90%: compact as late as possible — retained context beats early
   // headroom now that per-model windows are declared honestly (input-effective,
@@ -233,6 +237,9 @@ const SettingsSchema = z.object({
   // Tokens reserved for model output; subtracted from the window to get the
   // usable input budget B = contextWindowTokens - contextReservedOutputTokens.
   contextReservedOutputTokens: z.coerce.number().int().nonnegative().default(128_000),
+  // Client-path model-catalog auto-compact limit. When present it is clamped to
+  // 90% of the raw window, matching Codex core's auto_compact_token_limit().
+  contextClientCompactThresholdTokens: z.coerce.number().int().positive().optional(),
   // Server path only: explicit compact_threshold (tokens) handed to the SDK's
   // StaticCompactionPolicy. Defaults to floor(contextWindowTokens *
   // contextCompactionThresholdRatio) when unset.
@@ -779,6 +786,8 @@ const RegistryModelSchema = z.object({
   id: z.string().min(1), // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
   label: z.string().min(1).optional(), // display name; defaults to id
   contextWindowTokens: z.number().int().positive().optional(),
+  effectiveContextWindowTokens: z.number().int().positive().optional(),
+  autoCompactTokenLimit: z.number().int().positive().optional(),
   reasoningEffort: z.boolean().optional(), // model accepts a reasoning-effort control
   hostedWebSearch: z.boolean().optional(), // provider executes the hosted web_search tool for this model
   pricing: ModelPricingSchema.optional(),
@@ -836,6 +845,8 @@ export interface ConfiguredModel {
   providerLabel: string;
   api: ModelProviderApi;
   contextWindowTokens?: number | undefined;
+  effectiveContextWindowTokens?: number | undefined;
+  autoCompactTokenLimit?: number | undefined;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
 }
@@ -1037,8 +1048,12 @@ export function getSettings(): Settings {
     sessionHistorySource: optional("OPENGENI_SESSION_HISTORY_SOURCE"),
     contextCompactionMode: optional("OPENGENI_CONTEXT_COMPACTION_MODE"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
+    contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
+    contextClientCompactThresholdTokens: optional(
+      "OPENGENI_CONTEXT_CLIENT_COMPACT_THRESHOLD_TOKENS",
+    ),
     contextServerCompactThresholdTokens: optional(
       "OPENGENI_CONTEXT_SERVER_COMPACT_THRESHOLD_TOKENS",
     ),
@@ -1422,6 +1437,12 @@ export function configuredModels(settings: Settings): ConfiguredModel[] {
         ...(model.contextWindowTokens === undefined
           ? {}
           : { contextWindowTokens: model.contextWindowTokens }),
+        ...(model.effectiveContextWindowTokens === undefined
+          ? {}
+          : { effectiveContextWindowTokens: model.effectiveContextWindowTokens }),
+        ...(model.autoCompactTokenLimit === undefined
+          ? {}
+          : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
         reasoningEffort: model.reasoningEffort ?? false,
         hostedWebSearch: model.hostedWebSearch ?? false,
       });
@@ -1523,17 +1544,26 @@ export function resolveContextCompactionMode(
   }
 }
 
-/** Usable input-token budget B = window - reserved output. */
+/**
+ * Usable input-token budget: an explicit model-catalog effective window when
+ * available, otherwise the deployment window minus its output reserve.
+ */
 export function contextInputBudgetTokens(
-  settings: Pick<Settings, "contextWindowTokens" | "contextReservedOutputTokens">,
+  settings: Pick<
+    Settings,
+    "contextWindowTokens" | "contextEffectiveWindowTokens" | "contextReservedOutputTokens"
+  >,
 ): number {
+  if (settings.contextEffectiveWindowTokens !== undefined) {
+    return Math.min(settings.contextWindowTokens, settings.contextEffectiveWindowTokens);
+  }
   return Math.max(0, settings.contextWindowTokens - settings.contextReservedOutputTokens);
 }
 
 /**
  * Server-path compact_threshold (tokens) handed to the SDK's
  * StaticCompactionPolicy: the explicit override when set, else
- * floor(B * softFraction). This is what sidesteps the SDK's wrong 240k
+ * floor(raw window * threshold ratio). This is what sidesteps the SDK's wrong 240k
  * fallback for newer GPT-5.x models that are absent from its hardcoded window map.
  */
 export function contextServerCompactThreshold(
@@ -1550,6 +1580,38 @@ export function contextServerCompactThreshold(
     return settings.contextServerCompactThresholdTokens;
   }
   return Math.floor(settings.contextWindowTokens * settings.contextCompactionThresholdRatio);
+}
+
+/**
+ * Apply the resolved provider/model's context policy to one turn. Registry
+ * metadata is authoritative when present; deployment defaults remain the
+ * fallback for models that do not declare their own limits.
+ */
+export function settingsWithResolvedModelContext(
+  settings: Settings,
+  provider: Pick<ResolvedModelProvider, "compactionMode">,
+  model: Pick<
+    ConfiguredModel,
+    "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
+  >,
+): Settings {
+  const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
+  return {
+    ...settings,
+    contextCompactionMode: provider.compactionMode,
+    contextWindowTokens,
+    ...(model.effectiveContextWindowTokens === undefined
+      ? {}
+      : {
+          contextEffectiveWindowTokens: Math.min(
+            contextWindowTokens,
+            model.effectiveContextWindowTokens,
+          ),
+        }),
+    ...(model.autoCompactTokenLimit === undefined
+      ? {}
+      : { contextClientCompactThresholdTokens: model.autoCompactTokenLimit }),
+  };
 }
 
 export function configuredStaticUsageLimits(settings: Settings): StaticUsageLimitsConfig {

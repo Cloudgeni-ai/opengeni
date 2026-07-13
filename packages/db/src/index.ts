@@ -11806,6 +11806,8 @@ export async function applyContextCompaction(
      */
     replacementItems?: Array<{ position: number; item: Record<string, unknown> }>;
     summaryItem: Record<string, unknown>;
+    /** Estimated input tokens for the newly installed active history. */
+    replacementInputTokens?: number;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -11877,6 +11879,25 @@ export async function applyContextCompaction(
             ],
             set: { active: true },
           });
+        // The provider-reported token count described the history we just
+        // superseded. Keeping it would make the next re-dispatched activity
+        // immediately compact the already-compacted replacement again. Install
+        // the replacement estimate in the SAME transaction so active history
+        // and its durable compaction signal cannot disagree after a crash.
+        if (input.replacementInputTokens !== undefined) {
+          await tx
+            .update(schema.sessions)
+            .set({
+              lastInputTokens: Math.max(0, Math.floor(input.replacementInputTokens)),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            );
+        }
       });
     },
   );
@@ -16649,9 +16670,11 @@ export async function updateSessionGoal(
  * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
  * carry an `AND title_source IS DISTINCT FROM 'user'` guard (NULL-safe in
  * Postgres) while user writes are unconditional. Never read-modify-write.
- * Returns `{ updated, title }`: `updated` is false when an agent write was
- * skipped because a user title already pinned the session, true otherwise;
- * `title` is the resulting title (null when skipped).
+ * Re-applying the exact title is also a no-op so a confused agent cannot churn
+ * `updated_at` every turn. Returns `{ updated, title }`: `updated` is false when
+ * the value was unchanged or an agent write was skipped because a user title
+ * already pinned the session; `title` is always the resulting stored title when
+ * the session exists.
  */
 export async function updateSessionTitle(
   db: Database,
@@ -16674,13 +16697,27 @@ export async function updateSessionTitle(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
           eq(schema.sessions.id, input.sessionId),
+          sql`${schema.sessions.title} is distinct from ${input.title}`,
           ...(input.source === "agent"
             ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
             : []),
         ),
       )
       .returning({ title: schema.sessions.title });
-    return { updated: Boolean(row), title: row?.title ?? null };
+    if (row) {
+      return { updated: true, title: row.title };
+    }
+    const [existing] = await scopedDb
+      .select({ title: schema.sessions.title })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    return { updated: false, title: existing?.title ?? null };
   });
 }
 
@@ -16698,15 +16735,23 @@ export async function setSessionChildNotificationsMode(
   workspaceId: string,
   sessionId: string,
   mode: ChildNotificationsMode,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
       .update(schema.sessions)
       .set({
         metadata: sql`${schema.sessions.metadata} || jsonb_build_object('childNotificationsMode', ${mode}::text)`,
         updatedAt: new Date(),
       })
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          sql`coalesce(${schema.sessions.metadata} ->> 'childNotificationsMode', 'digest') is distinct from ${mode}`,
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    return Boolean(row);
   });
 }
 
@@ -17731,6 +17776,52 @@ export async function requeuePreemptedTurn(
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
+  });
+}
+
+const CONTEXT_COMPACTION_RECOVERY_AFTER_TOKENS_KEY = "contextCompactionRecoveryAfterTokens";
+
+/**
+ * Persist the well-founded measure for context-compaction recovery across
+ * activity dispatches. The in-activity attempt counter resets when a preempted
+ * turn is requeued, so it cannot detect a loop spanning Temporal activities.
+ * A recovery may continue only when its post-compaction active token estimate
+ * is STRICTLY lower than the previous recovery for this same logical turn.
+ *
+ * The compare-and-set is one SQL UPDATE over the JSON metadata field, preserving
+ * unrelated turn metadata and making concurrent/stale recovery attempts safe.
+ */
+export async function recordContextCompactionRecoveryProgress(
+  db: Database,
+  workspaceId: string,
+  turnId: string,
+  estimatedTokensAfter: number,
+): Promise<boolean> {
+  if (!Number.isInteger(estimatedTokensAfter) || estimatedTokensAfter < 0) {
+    throw new Error("Context compaction recovery token estimate must be a non-negative integer");
+  }
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const key = CONTEXT_COMPACTION_RECOVERY_AFTER_TOKENS_KEY;
+    const [row] = await scopedDb
+      .update(schema.sessionTurns)
+      .set({
+        metadata: sql`jsonb_set(${schema.sessionTurns.metadata}, array[${key}]::text[], to_jsonb(${estimatedTokensAfter}::integer), true)`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.id, turnId),
+          sql`case
+            when not (${schema.sessionTurns.metadata} ? ${key}) then true
+            when jsonb_typeof(${schema.sessionTurns.metadata} -> ${key}) = 'number'
+              then (${schema.sessionTurns.metadata} ->> ${key})::integer > ${estimatedTokensAfter}
+            else false
+          end`,
+        ),
+      )
+      .returning({ id: schema.sessionTurns.id });
+    return Boolean(row);
   });
 }
 

@@ -2464,6 +2464,7 @@ describe("DB integration", () => {
         },
       ],
     });
+    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 244_800);
 
     await applyContextCompaction(dbClient.db, {
       accountId: grant.accountId,
@@ -2479,6 +2480,7 @@ describe("DB integration", () => {
         content: "[CONTEXT CHECKPOINT] SUMMARY:folded",
         opengeni_context_summary: true,
       },
+      replacementInputTokens: 12_345,
     });
 
     // Active read = [summary @3.5, recent user @4, assistant @5].
@@ -2493,6 +2495,9 @@ describe("DB integration", () => {
     const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
     expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 3.5, 4, 5]);
     expect(await countSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toBe(7);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(
+      12_345,
+    );
 
     // The exact audit-loss regression: the original assistant 'a2' at position 3
     // must still be retrievable verbatim after compaction (the bug overwrote it

@@ -30,20 +30,28 @@ export const CODEX_MODEL_ID_PREFIX = "codex/";
 // this product allowlist.
 export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
 
-// The ChatGPT/Codex subscription serves a SMALLER effective context window than
-// the raw gpt-5.6 API: production turns hard-rejected with
-// `context_length_exceeded` at ~334-348k input tokens on 2026-07-10. We declare
-// a real per-model window so proactive compaction (threshold = window * ratio,
-// default 0.60) fires WELL before that cliff instead of never firing against
-// the 1.05M global default. 320k (below the empirical ~340k reject) yields a
-// ~192k proactive trigger with a ~148k safety margin. Applies to every codex
-// subscription slug (all gpt-5.6 family on the same subscription window).
-export const CODEX_MODEL_CONTEXT_WINDOW_TOKENS = 320_000;
+// Live Codex model-catalog values for every exposed gpt-5.6 subscription slug.
+// Verified 2026-07-13 against Codex CLI 0.144.1's freshly fetched
+// ~/.codex/models_cache.json and the matching openai/codex core derivations:
+//   raw context window                = 272,000
+//   effective input window (95%)      = 258,400
+//   automatic compaction limit (90%)  = 244,800
+// Keep all three explicit: the effective ceiling is a hard input guard while
+// the lower auto-compact limit is the proactive checkpoint trigger.
+export const CODEX_MODEL_CONTEXT_WINDOW_TOKENS = 272_000;
+export const CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
+export const CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS = Math.floor(
+  (CODEX_MODEL_CONTEXT_WINDOW_TOKENS * CODEX_EFFECTIVE_CONTEXT_WINDOW_PERCENT) / 100,
+);
+export const CODEX_AUTO_COMPACTION_PERCENT = 90;
+export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
+  (CODEX_MODEL_CONTEXT_WINDOW_TOKENS * CODEX_AUTO_COMPACTION_PERCENT) / 100,
+);
 
 // Sent as the `version` header and inside the User-Agent. Staging-proven on
 // 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, while the
 // official Codex 0.144.0 release returned all three exact slugs above.
-export const CODEX_CLIENT_VERSION = "0.144.0";
+export const CODEX_CLIENT_VERSION = "0.144.1";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable
