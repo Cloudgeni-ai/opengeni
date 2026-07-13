@@ -798,7 +798,14 @@ describe("runtime event normalization", () => {
     expect(prepared.input).toBe("hello");
   });
 
-  test("marks platform resume notices so compaction cannot retain them as user intent", async () => {
+  test("platform resume notices reach the wire WITHOUT the internal marker", async () => {
+    // The marker must never be serialized to a provider: strict Responses
+    // backends reject unknown per-item fields — in production every turn whose
+    // input carried it died with `400 Unknown parameter:
+    // 'input[N].opengeni_internal_resume'`, and because the marker is durable
+    // in replayed history, retries could never succeed. Detection of resume
+    // notices uses STORED history plus the text-prefix fallback
+    // (isInternalResumeMessage), so the wire copy stays clean.
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
       {
@@ -812,9 +819,38 @@ describe("runtime event normalization", () => {
         type: "message",
         role: "user",
         content: "[TURN RESUMED AFTER CONTEXT COMPACTION] Continue.",
-        providerData: { opengeni_internal_resume: "context_compacted" },
       },
     ]);
+    expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
+  });
+
+  test("replayed history items are stripped of the internal resume marker (the prod 400)", async () => {
+    // Reproduces the outage shape: a PRIOR turn's resume message persisted with
+    // the marker in providerData; replaying it must not leak the key to the
+    // wire, while unrelated providerData keys survive.
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          {
+            type: "message",
+            role: "user",
+            content: "[TURN RESUMED AFTER WORKER RESTART] Continue.",
+            providerData: { opengeni_internal_resume: "worker_restart", keep_me: "yes" },
+          } as never,
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "ok" }],
+          } as never,
+        ],
+      },
+    );
+    const serialized = JSON.stringify(prepared.input);
+    expect(serialized).not.toContain("opengeni_internal_resume");
+    expect(serialized).toContain("keep_me");
   });
 
   test("treats the cleared run-state sentinel as a fresh start (run_state mode /clear)", async () => {

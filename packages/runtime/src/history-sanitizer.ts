@@ -315,9 +315,56 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
   }
 
   if (dropped.size === 0) {
-    return items.slice();
+    return items.map(stripInternalResumeMarker);
   }
-  return items.filter((_item, index) => !dropped.has(index));
+  return items.filter((_item, index) => !dropped.has(index)).map(stripInternalResumeMarker);
+}
+
+/**
+ * Internal marker stamping machine-generated resume/continuation messages
+ * (turn-resumed notices, goal continuations) so compaction housekeeping can
+ * recognize them in STORED history. Lives here (not context-compaction, which
+ * imports from this module) so the wire sanitizer below can strip it without
+ * an import cycle; context-compaction re-exports it.
+ */
+export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
+
+/**
+ * Remove the {@link INTERNAL_RESUME_MESSAGE_MARKER} providerData key from a
+ * single item before it reaches ANY model wire. Pure + non-mutating; returns
+ * the SAME reference when there is nothing to strip (keeping the common path
+ * byte-identical, mirroring {@link stripReasoningEncryptedContent}).
+ *
+ * WHY. The @openai/agents SDK serializes providerData keys verbatim into the
+ * request item, and strict Responses backends reject unknown per-item fields —
+ * observed in production as `400 Unknown parameter:
+ * 'input[N].opengeni_internal_resume'`, which deterministically failed every
+ * turn whose replayed history contained a marked resume message (the marker is
+ * durable in conversation truth, so retries could never succeed). Detection
+ * (isInternalResumeMessage) reads STORED items and also keeps a text-prefix
+ * fallback, so stripping at the wire degrades housekeeping gracefully and
+ * never the turn.
+ */
+export function stripInternalResumeMarker<T extends HistoryItem>(item: T): T {
+  const providerData = (item as Record<string, unknown>).providerData;
+  if (
+    !providerData ||
+    typeof providerData !== "object" ||
+    !(INTERNAL_RESUME_MESSAGE_MARKER in (providerData as Record<string, unknown>))
+  ) {
+    return item;
+  }
+  const { [INTERNAL_RESUME_MESSAGE_MARKER]: _dropped, ...rest } = providerData as Record<
+    string,
+    unknown
+  >;
+  const next: Record<string, unknown> = { ...(item as Record<string, unknown>) };
+  if (Object.keys(rest).length > 0) {
+    next.providerData = rest;
+  } else {
+    delete next.providerData;
+  }
+  return next as T;
 }
 
 /**

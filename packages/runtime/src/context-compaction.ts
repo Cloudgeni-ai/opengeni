@@ -9,7 +9,10 @@
  * from the active model-facing history; the database audit rows remain.
  */
 
-import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
+import {
+  INTERNAL_RESUME_MESSAGE_MARKER,
+  TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
+} from "./history-sanitizer";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -18,7 +21,9 @@ export type CompactionItem = Record<string, unknown>;
  * next rebuild can exclude old summaries from the retained user-message set.
  */
 export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
-export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
+// Moved to history-sanitizer (this module imports from it; the wire sanitizer
+// strips the marker before ANY model request). Re-exported for compatibility.
+export { INTERNAL_RESUME_MESSAGE_MARKER };
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
 // A single cumulative budget for all retained real user messages, matching

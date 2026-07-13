@@ -122,6 +122,7 @@ import {
   elideSupersededViewImagePairs,
   normalizeComputerCallActions,
   sanitizeHistoryItemsForModel,
+  stripInternalResumeMarker,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
 import { modelCallUsageTelemetry } from "./usage-telemetry";
@@ -2857,7 +2858,11 @@ export async function prepareRunInput(
         // input can exceed the model window (pre-turn compaction is best-effort
         // and can no-op). Trim the oldest history at a clean turn boundary so an
         // over-budget request is never sent. No-op when no budget is supplied.
-        input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
+        input: guardAssembledInput(
+          sanitizedHistory,
+          stripInternalResumeMarker(trailingMessage as Record<string, unknown>) as AgentInputItem,
+          options.inputBudgetTokens,
+        ),
         ...(sandboxSessionState ? { sandboxSessionState } : {}),
       };
     }
@@ -2868,7 +2873,15 @@ export async function prepareRunInput(
     // after a /clear, so recognizing the sentinel here is what keeps the next
     // turn working (a fresh, empty context) instead of bricking on deserialize.
     if (!input.serializedRunState || isClearedRunStateBlob(input.serializedRunState)) {
-      return { input: input.internalResumeKind ? [trailingMessage] : input.text };
+      return {
+        input: input.internalResumeKind
+          ? [
+              stripInternalResumeMarker(
+                trailingMessage as Record<string, unknown>,
+              ) as AgentInputItem,
+            ]
+          : input.text,
+      };
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
     const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
@@ -2882,7 +2895,11 @@ export async function prepareRunInput(
       // Read-path budget guard (see the items path above): keep an over-budget
       // resumed history off the wire by trimming the oldest turns when a budget
       // is supplied.
-      input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
+      input: guardAssembledInput(
+        sanitizedHistory,
+        stripInternalResumeMarker(trailingMessage as Record<string, unknown>) as AgentInputItem,
+        options.inputBudgetTokens,
+      ),
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
     };
