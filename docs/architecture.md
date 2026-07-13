@@ -330,7 +330,7 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 
 ### 6.4 Deployment (`deploy/`)
 
-`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
+`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary), and `deploy/release/migration-contracts.json` (provider-neutral expand/contract compatibility assertions consumed by external operators). See §12.
 
 ### 6.5 Docs, scripts, test
 
@@ -493,9 +493,9 @@ The current map:
 - **Dev stack.** `bun run dev` (= `scripts/dev-stack.sh`): copy `.env`, pick free ports, `docker compose up` Postgres/NATS/Temporal/MinIO, migrate, build the sandbox image, launch api+worker+web. It auto-selects alternate ports if defaults are taken.
 - **Test tiers.** `test`/`test:unit` (bun test, **no infra**), `test:integration` (a fixed enumerated list of `*.integration.ts`), `test:e2e` (browser harness + Docker sandbox + Channel-A), `test:live` (opt-in via `OPENGENI_ENABLE_LIVE_TESTS`). **Unit tests and typecheck require no Temporal/NATS/Postgres/sandbox/model credentials** — keep new unit tests in that tier.
 - **Typecheck/check/prep.** `typecheck` is a hand-ordered `cd`-chain (add new packages to it). `check` = typecheck + unit + build sdk/react + web build; `check:full`/`prep` add integration + e2e; `check:workspace-billing` adds the static auth/billing guard.
-- **Static guards (build steps).** `scripts/publish-closure-guard.ts` (full npm closure has no ignored-package runtime dependencies; `sdk`/`react` remain client-clean), `scripts/check-workspace-billing-static.ts` (no unscoped `/v1` routes; Stripe only in `routes/billing.ts`, Better Auth only under `auth/`), `scripts/check-docs-refs.ts` (current-tier docs reference existing repo paths and workspace packages), `source-hygiene.test.ts` (no raw NUL bytes).
+- **Static guards (build steps).** `scripts/publish-closure-guard.ts` (full npm closure has no ignored-package runtime dependencies; `sdk`/`react` remain client-clean), `scripts/check-single-release-publisher.ts` (app workflows cannot publish the Helm chart or API/worker/web/relay images; the external SHA/digest-fenced operator is the sole runtime publisher), `scripts/check-workspace-billing-static.ts` (no unscoped `/v1` routes; Stripe only in `routes/billing.ts`, Better Auth only under `auth/`), `scripts/check-docs-refs.ts` (current-tier docs reference existing repo paths and workspace packages), `source-hygiene.test.ts` (no raw NUL bytes).
 - **Changesets / publish.** Releases publish via **npm `changeset publish`** (bun can't emit provenance). Committed publishable `package.json` entry points point at `./src/...` (CI builds from source before `dist` exists); `build-publishable-packages.ts`, `rewrite-entry-points.ts`, and `rewrite-workspace-deps.ts` derive the publishable set from workspace manifests + `.changeset/config.json`, then build, swap to `dist`, and rewrite workspace ranges only in the ephemeral CI checkout. `sdk` + `react` are version-linked; package manifests and `.changeset/config.json` own which leaf packages stay ignored.
-- **CI.** `ci.yml` (typecheck + unit + guards + package/image builds + deployment-artifact validation; asserts no floating `latest` tags), `release.yml` (changesets Version-PR/publish + GHCR images, dormant until `RELEASE_ENABLED=true`), `agent-ci.yml`/`agent-release.yml` (Rust agent, path-filtered, independently versioned via `agent-v*` tags).
+- **CI.** `ci.yml` (typecheck + unit + guards + package/image builds + deployment-artifact validation; asserts no floating `latest` tags), `release.yml` (changesets Version-PR/npm publish only, dormant until `RELEASE_ENABLED=true`; it cannot publish runtime images or charts), `agent-ci.yml`/`agent-release.yml` (Rust agent, path-filtered, independently versioned via `agent-v*` tags). Runtime image/chart acceptance and any future publication is single-writer work owned by the external SHA/digest-fenced operator; public GHCR chart/image publication stays disabled until that operator has a reviewed complete-set publication step.
 
 > Canonical: `package.json`, `tsconfig.base.json`, `.changeset/config.json`, `scripts/release-publish.sh`, `.github/workflows/*`, [`../AGENTS.md`](../AGENTS.md) (Verification).
 
@@ -509,6 +509,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 - **Secrets never reach Helm values.** `generateRuntimeArtifacts` puts sensitive Terraform outputs only into `runtime.env` (and records them in `sensitiveTerraformOutputsUsed`); generated files carry "Do not commit generated copies."
 - **Parity (not import).** `@opengeni/deployment`'s `SANDBOX_REQUIRED_ENV` and `SandboxBackend` *mirror* `@opengeni/config`/`@opengeni/contracts` — enforced by **tests, not the type system**. Edit one side without the other and it compiles but the parity test goes red.
 - **Conformance.** `scripts/deployment-conformance.ts` black-box-verifies a running deployment (health, access boundary, session run, SSE replay, MCP-tool session, scheduled task, storage round-trip). Preflight is `scripts/deployment-preflight.ts`.
+- **Schema-safe code rollback.** External automatic release paths compare migrations from last known good to the candidate and accept only new entries declared `expand` + previous-code-compatible + `code-only` in `deploy/release/migration-contracts.json`. A contract/destructive migration is a separate maintenance operation; code rollback never improvises schema rollback. The metadata must be backed by mixed-version tests.
 
 > Canonical: `packages/deployment/src/index.ts`, `deploy/helm/opengeni/`, `deploy/terraform/{azure,aws,gcp}/`, `deploy/stacks/`, [`deployment.md`](deployment.md).
 
@@ -552,8 +553,10 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The published SDK/React surface | `packages/sdk/src/index.ts`, `packages/react/src/index.ts` | `.changeset/config.json` |
 | The Rust agent / wire proto | `agent/proto/opengeni_agent.proto`, `agent/scripts/codegen.sh` | `agent/README.md` |
 | Deployment (Helm/Terraform/profiles) | `packages/deployment/src/index.ts`, `deploy/helm/opengeni/` | [`deployment.md`](deployment.md) |
+| Migration compatibility for external release/rollback | `deploy/release/migration-contracts.json`, immutable SQL under `packages/db/drizzle/` | [`deployment.md`](deployment.md) |
 | Build / test / release tooling | `package.json`, `.changeset/config.json`, `.github/workflows/` | [`../AGENTS.md`](../AGENTS.md) Verification |
 | Operator revival of an existing failed/idle session | `scripts/operator/revive-session.ts`, `packages/core/src/domain/sessions.ts` (`acceptSessionUserMessage`) | [`operator-session-revival.md`](operator-session-revival.md) |
+| Read-only exactly-once audit of a release sentinel | `scripts/operator/release-sentinel-audit.ts` | [`release-sentinel-audit.md`](release-sentinel-audit.md) |
 | The web console | `apps/web/src/App.tsx`, `apps/web/src/context.tsx` | [`command-palette.md`](command-palette.md) |
 
 ---
@@ -579,6 +582,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`reliability-fixes.md`](reliability-fixes.md) | Reliability bugs/fixes (bounded Temporal history, orphan repair, scheduled-task/billing idempotency). |
 | [`deployment.md`](deployment.md) | Operator guide: profiles, preflight/stack plans, Helm/Terraform; the disposable-fixtures rule. |
 | [`operator-session-revival.md`](operator-session-revival.md) | Control-plane-only dry-run/apply procedure for reviving one exact session through shared message admission, including audit and no-delete rollback semantics. |
+| [`release-sentinel-audit.md`](release-sentinel-audit.md) | Content-free RLS-scoped audit contract for one synthetic session spanning a worker rollout. |
 | [`embedding.md`](embedding.md) | Host-app embedding guide: router mounting, direct core calls, ports/bindings, schema/RLS, worker, and EventBus. |
 | [`connected-machines.md`](connected-machines.md) | Integrator guide for targeting, swapping, enrolling, and operating Connected Machines. |
 | [`design/lazy-provisioning.md`](design/lazy-provisioning.md) | Point-in-time lazy sandbox provisioning design: first-op provisioner, synthetic manifest invariant, and failure contract. |

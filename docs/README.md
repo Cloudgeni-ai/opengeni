@@ -25,6 +25,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
 | Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
 | Operator session revival | `docs/operator-session-revival.md` | Incident notes should record stable IDs/statuses and link the reviewed runbook rather than copying volatile commands. |
+| Release sentinel audit | `docs/release-sentinel-audit.md`, `scripts/operator/release-sentinel-audit.ts` | External operators should store only content-free IDs/counts and link this contract. |
 | Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
 | Client/SDK integration | `packages/sdk/README.md` | `README.md`, `docs/embedding.md`, `@opengeni/react` docs should link. |
 | Credential taxonomy | `docs/credentials.md` | `docs/embedding.md`, `docs/capabilities.md`, route comments should link instead of re-listing token types. |

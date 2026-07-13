@@ -473,6 +473,18 @@ export function modelUsageSourceKey(input: {
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
 }
 
+/**
+ * Claims one durable model-usage source identity for the current SDK stream.
+ * Some providers surface the same completed response usage frame more than
+ * once. Billing is independently idempotent, but publishing every duplicate
+ * would make the audit timeline claim multiple model effects for one response.
+ */
+export function claimModelUsageSourceKey(seen: Set<string>, sourceKey: string): boolean {
+  if (seen.has(sourceKey)) return false;
+  seen.add(sourceKey);
+  return true;
+}
+
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
@@ -3260,6 +3272,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stream = undefined;
         batcher = null;
         let responseUsageCount = 0;
+        const publishedModelUsageSourceKeys = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
         let lastInputTokensObserved: number | null = null;
@@ -3325,6 +3338,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               break;
             }
             let modelUsageEventContext: Record<string, unknown> | null = null;
+            let suppressModelUsageEvent = false;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               await renewCodexLease("model_usage");
@@ -3337,6 +3351,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 dispatchId,
                 positionalKey: `response-${responseUsageCount}`,
               });
+              const isFirstSourceFrame = claimModelUsageSourceKey(
+                publishedModelUsageSourceKeys,
+                responseSourceKey,
+              );
+              suppressModelUsageEvent = !isFirstSourceFrame;
+              if (!isFirstSourceFrame) {
+                observability.info("duplicate model usage frame suppressed", {
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  sourceKey: responseSourceKey,
+                });
+              }
               // Within a turn the serving credential is fixed, so a switch can only
               // surface on the turn's FIRST model call (vs the session's prior).
               const responseAccountCtx = modelCallAccountContext({
@@ -3344,33 +3370,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 priorSessionCredentialId: priorSessionCodexCredentialId,
                 isFirstCallOfTurn: responseUsageCount === 1,
               });
-              await emitModelCallUsage({
-                observability,
-                publish: null,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: responseSourceKey,
-                usage: responseUsage,
-                servingAccountHash: responseAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              });
-              modelUsageEventContext = {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: responseSourceKey,
-              };
+              if (isFirstSourceFrame)
+                await emitModelCallUsage({
+                  observability,
+                  publish: null,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  model: turn.model,
+                  sourceKey: responseSourceKey,
+                  usage: responseUsage,
+                  servingAccountHash: responseAccountCtx.servingAccountHash,
+                  accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+                });
+              modelUsageEventContext = isFirstSourceFrame
+                ? {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                    providerApi: resolvedModel?.provider.api ?? "responses",
+                    model: turn.model,
+                    sourceKey: responseSourceKey,
+                  }
+                : null;
               const observed = responseUsage.usage?.inputTokens;
-              if (typeof observed === "number" && observed > 0) {
+              if (isFirstSourceFrame && typeof observed === "number" && observed > 0) {
                 recordModelInputTokens(observability, streamProvider, observed);
                 lastInputTokensObserved = observed;
                 await setSessionLastInputTokens(
@@ -3384,22 +3413,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               }
               // Prompt-cache efficiency for this response — same usage frame as the
               // input-token accounting above, so the two are always consistent.
-              recordModelCacheTokens(observability, streamProvider, {
-                cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                promptTokens: responseUsage.usage?.inputTokens,
-              });
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                model: turn.model,
-                isCodexTurn,
-                usage: responseUsage.usage,
-                sourceKey: responseSourceKey,
-                observability,
-              });
-              await reconcileConversationTruth();
+              if (isFirstSourceFrame)
+                recordModelCacheTokens(observability, streamProvider, {
+                  cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
+                  promptTokens: responseUsage.usage?.inputTokens,
+                });
+              if (isFirstSourceFrame)
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  model: turn.model,
+                  isCodexTurn,
+                  usage: responseUsage.usage,
+                  sourceKey: responseSourceKey,
+                  observability,
+                });
+              if (isFirstSourceFrame) await reconcileConversationTruth();
               try {
                 await ensureRunAllowed(
                   settings,
@@ -3435,6 +3466,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
+              if (event.type === "agent.model.usage" && suppressModelUsageEvent) {
+                continue;
+              }
               if (
                 event.type === "agent.model.usage" &&
                 modelUsageEventContext &&

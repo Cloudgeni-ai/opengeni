@@ -92,6 +92,9 @@ jobs:
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 
+      - name: Single runtime publisher guard
+        run: bun scripts/check-single-release-publisher.ts
+
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
 

@@ -84,7 +84,9 @@ export type AppDependencies = {
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
   observability?: Observability;
-  readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
+  readinessChecks?: Partial<
+    Record<"db" | "nats" | "temporal" | "schema", () => Promise<void> | void>
+  >;
   githubStateSecret?: string;
   managedAuth?: ManagedAuth | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from

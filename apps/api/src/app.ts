@@ -202,6 +202,16 @@ export function createApp(deps: AppDependencies): Hono {
       service: deps.settings.serviceName,
       environment: deps.settings.environment,
       deploymentRevision: deps.settings.deploymentRevision,
+      ...(deps.settings.deploymentImageDigests
+        ? {
+            images: Object.fromEntries(
+              Object.entries(deps.settings.deploymentImageDigests).map(([name, digest]) => [
+                name,
+                { digest },
+              ]),
+            ),
+          }
+        : {}),
       ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
       ok: true,
     }),
@@ -357,8 +367,12 @@ export function httpStatusForError(error: unknown): number {
   return 500;
 }
 
-type ReadinessCheckName = "db" | "nats" | "temporal";
-type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | void>;
+type ReadinessCheckName = "db" | "nats" | "temporal" | "schema";
+type ReadinessCheckDetails = Record<string, unknown> | void;
+type ReadinessChecks = Record<
+  ReadinessCheckName,
+  () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails
+>;
 
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
   return {
@@ -380,6 +394,26 @@ function readinessChecks(deps: AppDependencies): ReadinessChecks {
       (() => {
         throw new Error("Temporal readiness check unavailable");
       }),
+    schema:
+      deps.readinessChecks?.schema ??
+      (async () => {
+        const expected = deps.settings.releaseSchema;
+        if (!expected) return;
+        const rows = (await deps.db.execute(
+          dbSql`select name from schema_migrations order by name`,
+        )) as unknown as Array<{ name?: unknown }>;
+        const applied = rows
+          .map((row) => row.name)
+          .filter((name): name is string => typeof name === "string");
+        if (JSON.stringify(applied) !== JSON.stringify(expected.migrations)) {
+          throw new Error("applied migration names do not match the reviewed release schema");
+        }
+        return {
+          migrations: expected.migrations,
+          migrationSetSha256: expected.migrationSetSha256,
+          contractsSha256: expected.contractsSha256,
+        };
+      }),
   };
 }
 
@@ -388,26 +422,28 @@ async function runReadinessChecks(
   timeoutMs: number,
 ): Promise<{
   ok: boolean;
-  checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+  checks: Record<ReadinessCheckName, { ok: boolean; error?: string } & Record<string, unknown>>;
 }> {
   const entries = await Promise.all(
-    (Object.entries(checks) as Array<[ReadinessCheckName, () => Promise<void> | void]>).map(
-      async ([name, check]) => {
-        try {
-          await withTimeout(Promise.resolve().then(check), timeoutMs);
-          return [name, { ok: true }] as const;
-        } catch (error) {
-          return [
-            name,
-            { ok: false, error: error instanceof Error ? error.message : String(error) },
-          ] as const;
-        }
-      },
-    ),
+    (
+      Object.entries(checks) as Array<
+        [ReadinessCheckName, () => Promise<ReadinessCheckDetails> | ReadinessCheckDetails]
+      >
+    ).map(async ([name, check]) => {
+      try {
+        const details = await withTimeout(Promise.resolve().then(check), timeoutMs);
+        return [name, { ok: true, ...(details ?? {}) }] as const;
+      } catch (error) {
+        return [
+          name,
+          { ok: false, error: error instanceof Error ? error.message : String(error) },
+        ] as const;
+      }
+    }),
   );
   const result = Object.fromEntries(entries) as Record<
     ReadinessCheckName,
-    { ok: boolean; error?: string }
+    { ok: boolean; error?: string } & Record<string, unknown>
   >;
   return {
     ok: Object.values(result).every((check) => check.ok),

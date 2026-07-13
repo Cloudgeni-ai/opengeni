@@ -341,6 +341,64 @@ describe("API helpers", () => {
     expect(body.checks.nats.error).toContain("nats down");
   });
 
+  test("projects exact image digests and DB-verified release schema evidence", async () => {
+    const digest = (value: string) => `sha256:${value.repeat(64)}`;
+    const settings = testSettings({
+      deploymentRevision: "a".repeat(40),
+      deploymentImageDigests: { api: digest("1"), worker: digest("2"), web: digest("3") },
+      releaseSchema: {
+        migrationSetSha256: digest("4"),
+        contractsSha256: digest("5"),
+        migrations: ["0048_example.sql", "0049_next.sql"],
+      },
+    });
+    const app = createApp({
+      settings,
+      db: {
+        execute: async () => [{ name: "0048_example.sql" }, { name: "0049_next.sql" }],
+      } as never,
+      bus: { isConnected: () => true } as never,
+      workflowClient: { check: async () => {} } as never,
+      managedAuth: null,
+    });
+
+    expect(await (await app.request("/healthz")).json()).toMatchObject({
+      deploymentRevision: "a".repeat(40),
+      images: {
+        api: { digest: digest("1") },
+        worker: { digest: digest("2") },
+        web: { digest: digest("3") },
+      },
+    });
+    expect(await (await app.request("/readyz")).json()).toMatchObject({
+      ok: true,
+      checks: {
+        schema: { ok: true, migrationSetSha256: digest("4"), contractsSha256: digest("5") },
+      },
+    });
+  });
+
+  test("fails readiness when the live migration set differs from reviewed metadata", async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const app = createApp({
+      settings: testSettings({
+        deploymentImageDigests: { api: digest, worker: digest, web: digest },
+        releaseSchema: {
+          migrationSetSha256: digest,
+          contractsSha256: digest,
+          migrations: ["0049_expected.sql"],
+        },
+      }),
+      db: { execute: async () => [{ name: "0048_old.sql" }] } as never,
+      bus: { isConnected: () => true } as never,
+      workflowClient: { check: async () => {} } as never,
+      managedAuth: null,
+    });
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ ok: false, checks: { schema: { ok: false } } });
+  });
+
   test("builds Stripe Checkout sessions that can collect tax addresses for existing customers", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
