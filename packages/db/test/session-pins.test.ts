@@ -369,6 +369,47 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(sameWorkspaceOtherSubject).toEqual([]);
   }, 60_000);
 
+  test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    // Deliberately NO grantMember for this subject: a workspace-scoped API key
+    // is authorized by requireAccessGrant from its api_keys row, never through
+    // a workspace_memberships row. Listing must work anyway (this is the geni
+    // fleet-view regression: OPE-26's membership gate 403'd every api_key
+    // principal platform-wide).
+    const apiKeySubject = "api_key:00000000-0000-4000-8000-000000000001";
+    const first = await session({ ...workspace, message: "api key first" });
+    const second = await session({ ...workspace, message: "api key second" });
+    await admin`
+      update sessions set updated_at = now() - interval '1 minute' where id = ${first.id}`;
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: apiKeySubject,
+      limit: 1,
+    });
+    expect(page.pinned).toEqual([]);
+    expect(page.sessions.map((row) => row.id)).toEqual([second.id]);
+    expect(page.sessions[0]!.pinned).toBe(false);
+    expect(page.nextCursor).toBeTruthy();
+
+    const decoded = decodeSessionListCursor(page.nextCursor!);
+    expect(decoded).not.toBeNull();
+    const continuation = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: apiKeySubject,
+      limit: 1,
+      cursor: decoded!,
+    });
+    expect(continuation.sessions.map((row) => row.id)).toEqual([first.id]);
+
+    // People are still authorized exclusively through memberships: a user
+    // subject with no membership row stays denied.
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId: "user:never-a-member",
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  }, 60_000);
+
   test("keeps a session that moves above the cursor in its snapshot continuation", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
