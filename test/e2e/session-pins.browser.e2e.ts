@@ -360,7 +360,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await context.close();
   }, 90_000);
 
-  test("returns authenticated 403 when removal wins a concurrent listing", async () => {
+  test("keeps token-carried listing alive when removal wins, with personal state cleaned", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -438,22 +438,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
+      // The delegated token carries its own workspace grant — losing the
+      // membership row must not revoke listing (that same over-reach 403'd
+      // every workspace-scoped api_key principal in production). Membership
+      // is personalization for non-user subjects, not authorization: removal
+      // cleans their pins, and any snapshot the post-removal listing writes is
+      // TTL-bounded, not an unbounded leak.
       const response = await listingPromise;
-      expect(response.status).toBe(403);
-      expect(await response.text()).toContain("workspace access denied");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        pinned: unknown[];
+        sessions: { id: string }[];
+      };
+      expect(body.pinned).toEqual([]);
+      expect(body.sessions.length).toBe(1);
 
-      const [counts] = await shared.admin<{ snapshots: number; orphans: number }[]>`
+      const [counts] = await shared.admin<{ pins: number; unboundedSnapshots: number }[]>`
         select
+          (select count(*)::int from session_pins
+            where workspace_id = ${workspaceId} and subject_id = ${raceSubject}) as pins,
           (select count(*)::int from session_list_snapshots
-            where workspace_id = ${workspaceId} and subject_id = ${raceSubject}) as snapshots,
-          (select count(*)::int
-            from session_list_snapshots snapshot
-            left join workspace_memberships membership
-              on membership.workspace_id = snapshot.workspace_id
-             and membership.subject_id = snapshot.subject_id
-            where snapshot.workspace_id = ${workspaceId}
-              and membership.id is null) as orphans`;
-      expect(counts).toEqual({ snapshots: 0, orphans: 0 });
+            where workspace_id = ${workspaceId}
+              and subject_id = ${raceSubject}
+              and expires_at > now() + interval '11 minutes') as "unboundedSnapshots"`;
+      expect(counts).toEqual({ pins: 0, unboundedSnapshots: 0 });
     } finally {
       await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
       await barrier
