@@ -45,3 +45,22 @@ consciously — with a doc update, not silently.
 8. **Error envelope unification is deferred.** Auth's bare `{ error }` shape
    and route-level variance predate `ErrorEnvelope`; unifying is a breaking
    change worth batching into the next natural major, not worth its own break.
+
+---
+
+## Amendment (2026-07-13) — the principal model is a contract
+
+9. **Membership authorizes people; credentials authorize themselves.** Decided
+   after an incident: OPE-26's session-list rewrite required a
+   `workspace_memberships` row for every caller, which 403'd every
+   workspace-scoped `api_key:*` principal in production (embedder fleet views
+   went blank platform-wide). The contract: `user:*` subjects are authorized
+   exclusively through memberships (missing row = revoked); `api_key:*` and
+   delegated-token subjects carry their own grants, and a membership row for
+   them is optional roster/personalization state — never an authorization or
+   liveness signal. Any new per-subject personal state must degrade gracefully
+   for non-member subjects (default values on read, TTL-bounded persistence,
+   membership-gated writes where cleanup depends on removal). New route-level
+   behavior keyed on `grant.subjectId` must be exercised against all three
+   principal personas (managed user, workspace-scoped API key, delegated
+   token) before merge; see `docs/architecture.md` §10.

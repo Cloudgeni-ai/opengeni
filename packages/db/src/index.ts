@@ -10948,7 +10948,16 @@ export async function listSessionsForSubject(
           membershipCheckSerializationFailure = isPostgresSerializationFailure(error);
           throw error;
         }
-        if (!membership) {
+        // A missing membership only means "denied" for user subjects — people
+        // are authorized exclusively through memberships, so absence here is a
+        // removal that the route-level grant hasn't observed yet. Non-user
+        // principals (workspace-scoped `api_key:*`, delegated service subjects)
+        // are authorized by requireAccessGrant from their own credential row and
+        // may legitimately have no membership; they list without the removal
+        // serialization. That is sound: member-removal cleanup already purges a
+        // removed subject's pins and snapshots, and any snapshot a never-member
+        // subject writes is bounded by TTL expiry.
+        if (!membership && options.subjectId.startsWith("user:")) {
           throw new SessionListAccessError();
         }
 
