@@ -4,7 +4,10 @@ ALTER TABLE "scheduled_tasks"
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'scheduled_tasks_target_session_id_fk'
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'scheduled_tasks_target_session_id_fk'
+       AND conrelid = 'scheduled_tasks'::regclass
   ) THEN
     ALTER TABLE "scheduled_tasks"
       ADD CONSTRAINT "scheduled_tasks_target_session_id_fk"

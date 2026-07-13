@@ -6,7 +6,9 @@ import {
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
+  createScheduledTask,
   createSession,
+  dbSql,
   enqueueSessionTurn,
   getSession,
   getSessionTurn,
@@ -158,6 +160,57 @@ describe("scheduled-task cancellation database fences", () => {
 
     expect((await getSession(appDb.db, workspaceId, fixture.sessionId))?.status).toBe("cancelled");
     expect((await getSessionTurn(appDb.db, workspaceId, fixture.turnId))?.status).toBe("cancelled");
+  });
+
+  test("FORCE-RLS target deletion is restricted and cannot become task-owned fallback", async () => {
+    const target = await createSession(appDb.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "deletion-fenced target",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createScheduledTask(appDb.db, {
+      accountId,
+      workspaceId,
+      name: "deletion-fenced target task",
+      status: "active",
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "keep this thread", resources: [], tools: [], metadata: {} },
+      targetSessionId: target.id,
+      metadata: {},
+    });
+
+    const [foreignKey] = await shared.admin<
+      {
+        delete_rule: string;
+        definition: string;
+      }[]
+    >`
+      select c.confdeltype as delete_rule, pg_get_constraintdef(c.oid) as definition
+        from pg_constraint c
+       where c.conname = 'scheduled_tasks_target_session_id_fk'
+         and c.conrelid = 'scheduled_tasks'::regclass
+    `;
+    expect(foreignKey).toMatchObject({ delete_rule: "r" });
+    expect(foreignKey?.definition).toContain("ON DELETE RESTRICT");
+
+    await expect(
+      withRlsContext(appDb.db, { accountId, workspaceId }, (scopedDb) =>
+        scopedDb.execute(dbSql`delete from sessions where id = ${target.id}`),
+      ),
+    ).rejects.toThrow(/scheduled_tasks_target_session_id_fk|foreign key/i);
+
+    expect((await getSession(appDb.db, workspaceId, target.id))?.id).toBe(target.id);
+    const [physicalTask] = await shared.admin<{ target_session_id: string | null }[]>`
+      select target_session_id::text from scheduled_tasks where id = ${task.id}
+    `;
+    expect(physicalTask?.target_session_id).toBe(target.id);
   });
 
   test("legacy promotion and cancellation serialize, then cancelled claim is rejected", async () => {

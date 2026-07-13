@@ -284,6 +284,11 @@ enqueue/claim order cannot create or revive a live turn, and a cancellation
 that wins drains any already-queued turn before commit. Keep this migration
 applied before allowing old workers to consume targeted tasks.
 
+Migration `0060_scheduled_task_target_deletion_fence.sql` is additive and
+repairs the target-session `ON DELETE RESTRICT` foreign key for installations
+that already recorded the earlier target migrations. It is also safe for
+dedicated schemas where another schema may contain a same-named constraint.
+
 The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:

@@ -30,7 +30,10 @@ WHERE task."target_session_id" = session."id"
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'scheduled_tasks_target_legacy_route_ck'
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'scheduled_tasks_target_legacy_route_ck'
+       AND conrelid = 'scheduled_tasks'::regclass
   ) THEN
     ALTER TABLE "scheduled_tasks"
       ADD CONSTRAINT "scheduled_tasks_target_legacy_route_ck"

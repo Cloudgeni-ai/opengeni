@@ -2,11 +2,28 @@ import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
   ReasoningEffort,
   ResourceRef,
+  Session,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   ScheduledTaskRun,
   ScheduledTaskScheduleSpec,
 } from "@/types";
+
+/**
+ * A selected target must stay represented in the native select until the user
+ * explicitly chooses a replacement. In particular, a cancelled target is
+ * filtered out of the normal options, but it is not the same thing as an
+ * empty (task-owned) target.
+ */
+export function selectedTargetUnavailable(
+  sessions: ReadonlyArray<Pick<Session, "id" | "status">>,
+  targetSessionId: string | null,
+): boolean {
+  return (
+    targetSessionId !== null &&
+    !sessions.some((session) => session.id === targetSessionId && session.status !== "cancelled")
+  );
+}
 
 export type ScheduledTaskFormState = {
   name: string;

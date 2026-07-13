@@ -55,6 +55,7 @@ import {
   formStateFromScheduledTask,
   newScheduledTaskFormState,
   scheduleFromFormState,
+  selectedTargetUnavailable,
   summarizeLastRun,
 } from "./lib/scheduled-tasks";
 import { entitlementEntries, formatEntitlementValue } from "./lib/format";
@@ -1057,6 +1058,18 @@ describe("capability catalog helpers", () => {
 });
 
 describe("scheduled task form helpers", () => {
+  test("keeps a cancelled or disappeared target distinct from task-owned reuse", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      selectedTargetUnavailable([{ id: targetSessionId, status: "cancelled" }], targetSessionId),
+    ).toBe(true);
+    expect(selectedTargetUnavailable([], targetSessionId)).toBe(true);
+    expect(
+      selectedTargetUnavailable([{ id: targetSessionId, status: "idle" }], targetSessionId),
+    ).toBe(false);
+    expect(selectedTargetUnavailable([], null)).toBe(false);
+  });
+
   test("hydrates an existing target and keeps the task-owned default nullable", () => {
     const targetSessionId = "00000000-0000-4000-8000-000000000001";
     expect(
