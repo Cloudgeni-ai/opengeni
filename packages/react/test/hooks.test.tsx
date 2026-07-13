@@ -5,7 +5,13 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent, SessionTurn, WorkspaceEnvironment } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  SessionQueueMutationResponse,
+  SessionQueueSnapshot,
+  SessionTurn,
+  WorkspaceEnvironment,
+} from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { OpenGeniApiError } from "@opengeni/sdk";
@@ -41,6 +47,25 @@ function makeEvent(
 
 const noEvents: SessionEvent[] = [];
 
+function queueSnapshot(
+  items: SessionTurn[],
+  overrides: Partial<SessionQueueSnapshot> = {},
+): SessionQueueSnapshot {
+  return {
+    version: 1,
+    controlState: "active",
+    controlGeneration: 3,
+    workspaceInferenceState: "active",
+    workspaceInferenceGeneration: 2,
+    items,
+    ...overrides,
+  };
+}
+
+function queueMutation(items: SessionTurn[], version = 2): SessionQueueMutationResponse {
+  return { snapshot: queueSnapshot(items, { version }), events: [], shouldWake: false };
+}
+
 describe("useWorkspaceSessions", () => {
   test("keeps pinned rows in the historical sessions result while exposing the section", async () => {
     const pinned = { id: "pinned", pinned: true } as never;
@@ -75,7 +100,7 @@ describe("useTurnQueue", () => {
       fakeTurn({ id: "second", position: 2 }),
       fakeTurn({ id: "first", position: 1 }),
     ];
-    const client = fakeClient({ listTurns: async () => turns });
+    const client = fakeClient({ getQueue: async () => queueSnapshot(turns) });
     const hook = await renderHook(
       () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
       undefined,
@@ -84,6 +109,8 @@ describe("useTurnQueue", () => {
     expect(hook.result.current.loading).toBe(false);
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["first", "second"]);
     expect(hook.result.current.activeTurn?.id).toBe("active");
+    expect(hook.result.current.controlGeneration).toBe(3);
+    expect(hook.result.current.workspaceInferenceGeneration).toBe(2);
     await hook.unmount();
   });
 
@@ -91,14 +118,17 @@ describe("useTurnQueue", () => {
     const queued = fakeTurn({ id: "edit-me", prompt: "old prompt" });
     const updateCalls: { turnId: string; prompt?: string | undefined }[] = [];
     const client = fakeClient({
-      listTurns: async () => [queued],
-      updateQueuedTurn: async (_ws, _session, turnId, update) => {
-        updateCalls.push({ turnId, prompt: update.prompt });
-        return {
-          ...queued,
-          prompt: update.prompt ?? queued.prompt,
-          updatedAt: "2026-06-12T01:00:00.000Z",
-        };
+      getQueue: async () => queueSnapshot([queued]),
+      editQueueItem: async (_ws, _session, turnId, request) => {
+        updateCalls.push({ turnId, prompt: request.update.prompt });
+        return queueMutation([
+          {
+            ...queued,
+            prompt: request.update.prompt ?? queued.prompt,
+            version: 2,
+            updatedAt: "2026-06-12T01:00:00.000Z",
+          },
+        ]);
       },
     });
     const hook = await renderHook(
@@ -121,11 +151,11 @@ describe("useTurnQueue", () => {
     const queued = fakeTurn({ id: "victim", prompt: "original" });
     let listCalls = 0;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [queued];
+        return queueSnapshot([queued]);
       },
-      deleteQueuedTurn: async () => {
+      cancelQueueItem: async () => {
         throw new OpenGeniApiError(409, "turn already claimed");
       },
     });
@@ -150,11 +180,11 @@ describe("useTurnQueue", () => {
   test("reorderTurns applies optimistically before the server confirms", async () => {
     const a = fakeTurn({ id: "a", position: 1 });
     const b = fakeTurn({ id: "b", position: 2 });
-    let resolveReorder: ((turns: SessionTurn[]) => void) | null = null;
+    let resolveReorder: ((result: SessionQueueMutationResponse) => void) | null = null;
     const client = fakeClient({
-      listTurns: async () => [a, b],
-      reorderQueuedTurns: async () =>
-        await new Promise<SessionTurn[]>((resolve) => {
+      getQueue: async () => queueSnapshot([a, b]),
+      reorderQueue: async () =>
+        await new Promise<SessionQueueMutationResponse>((resolve) => {
           resolveReorder = resolve;
         }),
     });
@@ -172,10 +202,12 @@ describe("useTurnQueue", () => {
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["b", "a"]);
     expect(hook.result.current.mutating).toBe(true);
     await flushing(async () => {
-      resolveReorder!([
-        { ...b, position: 1 },
-        { ...a, position: 2 },
-      ]);
+      resolveReorder!(
+        queueMutation([
+          { ...b, position: 1 },
+          { ...a, position: 2 },
+        ]),
+      );
       await pending;
     });
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["b", "a"]);
@@ -186,9 +218,9 @@ describe("useTurnQueue", () => {
   test("turn.* events on a shared event log trigger a debounced refetch", async () => {
     let listCalls = 0;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [fakeTurn({ id: `turn-${listCalls}` })];
+        return queueSnapshot([fakeTurn({ id: `turn-${listCalls}` })]);
       },
     });
     const hook = await renderHook(
@@ -219,9 +251,9 @@ describe("useTurnQueue", () => {
     const streamedAfter: { value: number | null } = { value: null };
     let push: ((event: SessionEvent) => void) | null = null;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [fakeTurn({ id: `turn-${listCalls}` })];
+        return queueSnapshot([fakeTurn({ id: `turn-${listCalls}` })]);
       },
       getSession: async () => ({ lastSequence: 41 }) as never,
       streamEvents: (_ws, _session, options) => {
@@ -549,7 +581,7 @@ describe("useComposer queue-vs-steer", () => {
       },
       steerMessage: async () => {
         calls.push("steer");
-        return { accepted: makeEvent(1, "user.message"), turn: null, interrupted: false };
+        return { accepted: makeEvent(1, "user.message"), turn: fakeTurn(), interrupted: false };
       },
     });
     const hook = await renderHook(
@@ -569,7 +601,7 @@ describe("useComposer queue-vs-steer", () => {
     const client = fakeClient({
       steerMessage: async (_ws, _session, message) => {
         steered.push(message);
-        return { accepted: makeEvent(1, "user.message"), turn: null, interrupted: true };
+        return { accepted: makeEvent(1, "user.message"), turn: fakeTurn(), interrupted: true };
       },
     });
     const hook = await renderHook(

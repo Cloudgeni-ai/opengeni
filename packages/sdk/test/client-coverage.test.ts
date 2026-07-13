@@ -141,200 +141,63 @@ describe("OpenGeniClient turn queue", () => {
     );
   });
 
-  test("steerMessage queues, promotes to the queue front, and interrupts a running session", async () => {
+  test("steerMessage performs one atomic server request", async () => {
     const accepted = makeEvent(7, "user.message", { text: "do this now" });
-    const steerTurn = fakeTurn({ id: TURN_B, position: 2, triggerEventId: accepted.id });
-    const olderTurn = fakeTurn({ id: TURN_A, position: 1 });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([olderTurn, steerTurn, fakeTurn({ id: "done", status: "completed" })]);
-      }
-      if (request.url.endsWith("/turns/reorder")) {
-        return jsonResponse([steerTurn, olderTurn]);
-      }
-      if (request.url.endsWith(`/sessions/${SESSION_ID}`)) {
-        return jsonResponse({ id: SESSION_ID, status: "running" });
-      }
-      throw new Error(`unexpected request: ${request.url}`);
-    });
+    const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ accepted, turn: steerTurn, interrupted: true }, 202),
+    );
     const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "do this now");
     expect(result.accepted.id).toBe(accepted.id);
-    expect(result.turn?.id).toBe(TURN_B);
+    expect(result.turn.id).toBe(TURN_B);
     expect(result.interrupted).toBe(true);
-    const urls = requests.map((request) => new URL(request.url).pathname);
-    expect(urls).toEqual([
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns`,
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns/reorder`,
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
-      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
-    ]);
-    expect(JSON.parse(requests[2]!.body!)).toEqual({ turnIds: [TURN_B, TURN_A] });
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
-      type: "user.interrupt",
-      payload: { reason: "steer" },
-    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/steer`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ text: "do this now" });
   });
 
-  test("steerMessage skips the interrupt when the session already claimed the steer turn", async () => {
+  test("steerMessage forwards idempotency and generation fences", async () => {
     const accepted = makeEvent(9, "user.message", { text: "now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([steerTurn]);
-      }
-      // The running turn finished mid-call and the session claimed the steer
-      // turn itself: interrupting now would cancel the steered message.
-      return jsonResponse({ id: SESSION_ID, status: "running", activeTurnId: TURN_B });
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ accepted, turn: steerTurn, interrupted: false }, 202),
+    );
+    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
+      text: "now",
+      clientEventId: "steer-once",
+      expectedControlGeneration: 17,
+      expectedWorkspaceInferenceGeneration: 4,
     });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(result.turn?.id).toBe(TURN_B);
+    expect(result.turn.id).toBe(TURN_B);
     expect(result.interrupted).toBe(false);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      text: "now",
+      clientEventId: "steer-once",
+      expectedControlGeneration: 17,
+      expectedWorkspaceInferenceGeneration: 4,
+    });
   });
 
-  test("steerMessage retries the turn lookup while the server materializes it", async () => {
-    const accepted = makeEvent(9, "user.message", { text: "now" });
-    const steerTurn = fakeTurn({ id: TURN_B, position: 2, triggerEventId: accepted.id });
-    let turnListings = 0;
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        turnListings += 1;
-        // First listing races the turn creation; the retry sees it.
-        return jsonResponse(
-          turnListings === 1 ? [fakeTurn({ id: TURN_A })] : [fakeTurn({ id: TURN_A }), steerTurn],
-        );
-      }
-      if (request.url.endsWith("/turns/reorder")) {
-        return jsonResponse([steerTurn, fakeTurn({ id: TURN_A, position: 2 })]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "running" });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(turnListings).toBe(2);
-    expect(result.turn?.id).toBe(TURN_B);
-    expect(result.interrupted).toBe(true);
-    expect(requests.some((request) => request.url.endsWith("/turns/reorder"))).toBe(true);
-  });
-
-  test("steerMessage skips the interrupt when the steer turn cannot be promoted over queued work", async () => {
-    const accepted = makeEvent(9, "user.message", { text: "now" });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        // The steer turn never shows up, but another queued turn exists:
-        // interrupting would promote that one instead of the steer message.
-        return jsonResponse([fakeTurn({ id: TURN_A })]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "running" });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(result.turn).toBeNull();
-    expect(result.interrupted).toBe(false);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
-    expect(requests.filter((request) => request.url.endsWith("/turns"))).toHaveLength(4);
-  });
-
-  test("steerMessage with an empty queue still interrupts (next claim is the steer turn)", async () => {
-    const accepted = makeEvent(9, "user.message", { text: "now" });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([fakeTurn({ id: "done", status: "completed" })]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "running" });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(result.turn).toBeNull();
-    expect(result.interrupted).toBe(true);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(1);
-  });
-
-  test("steerMessage skips the interrupt when the steer turn was claimed before it was ever seen queued", async () => {
-    const accepted = makeEvent(9, "user.message", { text: "now" });
-    // The worker claimed the steer turn between sendMessage and the first
-    // turns listing: it never appears queued, only running. The queue is
-    // empty and the session reads "running" — interrupting here would cancel
-    // the steered message itself.
-    const claimedSteerTurn = fakeTurn({
-      id: TURN_B,
-      status: "running",
-      triggerEventId: accepted.id,
-      startedAt: "2026-06-12T00:00:01.000Z",
-    });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([fakeTurn({ id: "done", status: "completed" }), claimedSteerTurn]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "running", activeTurnId: TURN_B });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(result.turn?.id).toBe(TURN_B);
-    expect(result.turn?.status).toBe("running");
-    expect(result.interrupted).toBe(false);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
-    expect(requests.filter((request) => request.url.endsWith("/reorder"))).toHaveLength(0);
-  });
-
-  test("steerMessage skips the interrupt when the steer turn already finished mid-call", async () => {
-    const accepted = makeEvent(9, "user.message", { text: "now" });
-    // Fast turn: claimed AND completed before the first listing. The session
-    // is already running someone else's next turn — interrupting would cancel
-    // unrelated work over a message that was fully delivered.
-    const finishedSteerTurn = fakeTurn({
-      id: TURN_B,
-      status: "completed",
-      triggerEventId: accepted.id,
-      finishedAt: "2026-06-12T00:00:02.000Z",
-    });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([finishedSteerTurn, fakeTurn({ id: TURN_A, status: "running" })]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "running", activeTurnId: TURN_A });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
-    expect(result.turn?.id).toBe(TURN_B);
-    expect(result.interrupted).toBe(false);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
-  });
-
-  test("steerMessage does not interrupt an idle session", async () => {
-    const accepted = makeEvent(3, "user.message", { text: "later" });
-    const steerTurn = fakeTurn({ triggerEventId: accepted.id });
-    const { client, requests } = makeClient((request) => {
-      if (request.url.endsWith("/events")) {
-        return jsonResponse(accepted, 202);
-      }
-      if (request.url.endsWith("/turns")) {
-        return jsonResponse([steerTurn]);
-      }
-      return jsonResponse({ id: SESSION_ID, status: "queued" });
-    });
-    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "later");
-    expect(result.interrupted).toBe(false);
-    // Single queued turn: no reorder call, no interrupt call.
-    expect(requests.filter((request) => request.url.endsWith("/reorder"))).toHaveLength(0);
-    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
+  test("steerMessage surfaces an atomic generation conflict without fallback calls", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ message: "session control generation changed" }, 409),
+    );
+    let thrown: unknown;
+    try {
+      await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "now",
+        expectedControlGeneration: 16,
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(OpenGeniApiError);
+    expect((thrown as OpenGeniApiError).status).toBe(409);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url.endsWith("/steer")).toBe(true);
   });
 });
 

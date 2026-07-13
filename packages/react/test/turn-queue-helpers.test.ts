@@ -10,7 +10,7 @@ import {
 import { fakeTurn } from "./fake-client";
 
 describe("queueFromTurns", () => {
-  test("keeps only queued turns, ordered by position then createdAt", () => {
+  test("keeps only queued turns, ordered by priority, position, then createdAt", () => {
     const turns = [
       fakeTurn({ id: "done", status: "completed", position: 1 }),
       fakeTurn({ id: "b", position: 2 }),
@@ -24,6 +24,19 @@ describe("queueFromTurns", () => {
       "b",
       "tie-early",
       "tie-late",
+    ]);
+  });
+
+  test("keeps urgent human intent ahead of routine system work", () => {
+    const turns = [
+      fakeTurn({ id: "routine", priority: 200, position: 1 }),
+      fakeTurn({ id: "human", priority: 100, position: 9 }),
+      fakeTurn({ id: "operator", priority: 50, position: 20 }),
+    ];
+    expect(queueFromTurns(turns).map((turn) => turn.id)).toEqual([
+      "operator",
+      "human",
+      "routine",
     ]);
   });
 });
@@ -83,10 +96,13 @@ describe("applyTurnRemoval", () => {
 });
 
 describe("isTurnQueueEvent", () => {
-  test("matches turn.* and nothing else", () => {
+  test("matches every event family that changes the queue/control snapshot", () => {
     expect(isTurnQueueEvent({ type: "turn.queued" })).toBe(true);
     expect(isTurnQueueEvent({ type: "turn.updated" })).toBe(true);
     expect(isTurnQueueEvent({ type: "turn.cancelled" })).toBe(true);
+    expect(isTurnQueueEvent({ type: "session.queue.item.edited" })).toBe(true);
+    expect(isTurnQueueEvent({ type: "session.control.stopped" })).toBe(true);
+    expect(isTurnQueueEvent({ type: "workspace.inference.killed" })).toBe(true);
     expect(isTurnQueueEvent({ type: "agent.message.delta" })).toBe(false);
     expect(isTurnQueueEvent({ type: "goal.paused" })).toBe(false);
   });

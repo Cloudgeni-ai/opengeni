@@ -87,6 +87,7 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionLineageResponse,
+  SessionMcpCredentialUpdateInput,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
   SessionSystemUpdateBundlePage,
@@ -185,17 +186,16 @@ export type SendMessageInput = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   clientEventId?: string;
+  expectedControlGeneration?: number;
+  expectedWorkspaceInferenceGeneration?: number;
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
 };
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
   accepted: SessionEvent;
-  /**
-   * The turn created for the message, when it could be located — usually
-   * still queued, but already claimed (running/requires_action or even
-   * finished) when the worker picked it up mid-call.
-   */
-  turn: SessionTurn | null;
+  /** The exact turn created for this message in the same server transaction. */
+  turn: SessionTurn;
   /** True when the running turn was interrupted to make way for the message. */
   interrupted: boolean;
 };
@@ -853,20 +853,10 @@ export class OpenGeniClient {
   }
 
   /**
-   * Steer: deliver a message *now* instead of behind the queue. Sends the
-   * message, promotes its queued turn to the front, and interrupts the
-   * running turn so the session picks the steer turn up next. On a session
-   * that is not running this degrades gracefully to a plain queued message.
-   *
-   * The steer turn is located by `triggerEventId` across ALL turns (retried
-   * briefly in case the server is still materializing it) — not just the
-   * queued ones, because the worker can claim the steer turn before it is
-   * ever observed queued, and a claimed steer turn means the message is
-   * already being delivered: interrupting then would cancel the very message
-   * being steered. If the turn cannot be found while other turns are queued,
-   * the interrupt is also skipped — stopping the running turn would otherwise
-   * promote someone else's queued work over this message — and the call
-   * degrades to a plain queued send (`interrupted: false`).
+   * Steer: atomically append a message, create and promote its exact queue
+   * item, and fence cancellation to the active turn generation observed by
+   * the server. The client performs one request; it never derives queue state
+   * from paginated turn history or races a separate reorder/interrupt call.
    */
   async steerMessage(
     workspaceId: string,

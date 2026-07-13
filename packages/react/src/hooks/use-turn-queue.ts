@@ -1,4 +1,9 @@
-import type { SessionEvent, SessionTurn, UpdateSessionTurnRequest } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  SessionQueueSnapshot,
+  SessionTurn,
+  UpdateSessionTurnRequest,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
@@ -8,18 +13,25 @@ import {
   type SessionEventFeedOptions,
 } from "./internal";
 
-/** Event types that change the turn queue (queue/edit/reorder/claim/finish). */
+/** Event types that can change the authoritative queue/control snapshot. */
 export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type.startsWith("turn.");
+  return (
+    event.type.startsWith("turn.") ||
+    event.type.startsWith("session.queue.") ||
+    event.type.startsWith("session.control.") ||
+    event.type.startsWith("workspace.inference.")
+  );
 }
 
-/** Queued turns in execution order (position, then creation time). */
+/** Queued turns in the same priority/order relation as the server snapshot. */
 export function queueFromTurns(turns: SessionTurn[]): SessionTurn[] {
   return turns
     .filter((turn) => turn.status === "queued")
     .sort(
       (a, b) =>
+        (a.priority ?? 100) - (b.priority ?? 100) ||
         a.position - b.position ||
+        (b.promotedAt ?? "").localeCompare(a.promotedAt ?? "") ||
         a.createdAt.localeCompare(b.createdAt) ||
         a.id.localeCompare(b.id),
     );
@@ -84,12 +96,18 @@ export type UseTurnQueueOptions = ClientOverride &
   };
 
 export type UseTurnQueueResult = {
-  /** All turns the API returned (history + queue), newest server view. */
+  /** Versioned server snapshot used for all queue/control decisions. */
+  snapshot: SessionQueueSnapshot | null;
+  /** Active and queued items from the authoritative queue snapshot. */
   turns: SessionTurn[];
   /** Queued turns in execution order — render this as the editable queue. */
   queue: SessionTurn[];
   /** The running / requires_action turn, if any. */
   activeTurn: SessionTurn | null;
+  controlState: SessionQueueSnapshot["controlState"] | null;
+  controlGeneration: number | null;
+  workspaceInferenceState: SessionQueueSnapshot["workspaceInferenceState"] | null;
+  workspaceInferenceGeneration: number | null;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
@@ -120,12 +138,18 @@ export function useTurnQueue(
 ): UseTurnQueueResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const [turns, setTurns] = useState<SessionTurn[]>([]);
+  const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
   const mutation = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
+  const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
+
+  const replaceSnapshot = useCallback((next: SessionQueueSnapshot | null): void => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
 
   const load = useCallback(async (): Promise<void> => {
     if (!sessionId) {
@@ -133,9 +157,9 @@ export function useTurnQueue(
     }
     const ticket = ++generation.current;
     try {
-      const fetched = await client.listTurns(workspaceId, sessionId);
+      const fetched = await client.getQueue(workspaceId, sessionId);
       if (ticket === generation.current) {
-        setTurns(fetched);
+        replaceSnapshot(fetched);
         setError(null);
         setLoading(false);
       }
@@ -145,14 +169,14 @@ export function useTurnQueue(
         setLoading(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, replaceSnapshot]);
 
   // Reset when the target session changes; initial load + optional polling.
   useEffect(() => {
     const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
     if (targetKeyRef.current !== targetKey) {
       targetKeyRef.current = targetKey;
-      setTurns([]);
+      replaceSnapshot(null);
       setError(null);
     }
     if (!enabled) {
@@ -172,7 +196,7 @@ export function useTurnQueue(
       clearInterval(timer);
       generation.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs]);
+  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, replaceSnapshot]);
 
   // Live updates: any turn.* event re-syncs the queue (debounced).
   const scheduleRefresh = useDebouncedCallback(() => void load());
@@ -186,18 +210,25 @@ export function useTurnQueue(
       if (!sessionId) {
         return null;
       }
-      setTurns((current) => applyTurnEdit(current, turnId, update));
+      const current = snapshotRef.current;
+      const item = current?.items.find((turn) => turn.id === turnId && turn.status === "queued");
+      if (!current || !item) return null;
+      replaceSnapshot({ ...current, items: applyTurnEdit(current.items, turnId, update) });
       const result = await mutation.run(() =>
-        client.updateQueuedTurn(workspaceId, sessionId, turnId, update),
+        client.editQueueItem(workspaceId, sessionId, turnId, {
+          expectedQueueVersion: current.version,
+          expectedItemVersion: item.version ?? 1,
+          update,
+        }),
       );
       if (result) {
-        setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
+        replaceSnapshot(result.snapshot);
       } else {
         void load();
       }
-      return result;
+      return result?.snapshot.items.find((turn) => turn.id === turnId) ?? null;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [client, workspaceId, sessionId, mutation.run, load, replaceSnapshot],
   );
 
   const reorderTurns = useCallback(
@@ -205,22 +236,23 @@ export function useTurnQueue(
       if (!sessionId || turnIds.length === 0) {
         return null;
       }
-      setTurns((current) => applyTurnReorder(current, turnIds));
+      const current = snapshotRef.current;
+      if (!current) return null;
+      replaceSnapshot({ ...current, items: applyTurnReorder(current.items, turnIds) });
       const result = await mutation.run(() =>
-        client.reorderQueuedTurns(workspaceId, sessionId, turnIds),
+        client.reorderQueue(workspaceId, sessionId, {
+          expectedQueueVersion: current.version,
+          turnIds,
+        }),
       );
       if (result) {
-        // The server returns the queued turns; merge them over local state.
-        setTurns((current) => {
-          const bySId = new Map(result.map((turn) => [turn.id, turn] as const));
-          return current.map((turn) => bySId.get(turn.id) ?? turn);
-        });
+        replaceSnapshot(result.snapshot);
       } else {
         void load();
       }
-      return result;
+      return result ? queueFromTurns(result.snapshot.items) : null;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [client, workspaceId, sessionId, mutation.run, load, replaceSnapshot],
   );
 
   const removeTurn = useCallback(
@@ -228,24 +260,37 @@ export function useTurnQueue(
       if (!sessionId) {
         return null;
       }
-      setTurns((current) => applyTurnRemoval(current, turnId));
+      const current = snapshotRef.current;
+      const item = current?.items.find((turn) => turn.id === turnId && turn.status === "queued");
+      if (!current || !item) return null;
+      replaceSnapshot({ ...current, items: applyTurnRemoval(current.items, turnId) });
       const result = await mutation.run(() =>
-        client.deleteQueuedTurn(workspaceId, sessionId, turnId),
+        client.cancelQueueItem(workspaceId, sessionId, turnId, {
+          expectedQueueVersion: current.version,
+          expectedItemVersion: item.version ?? 1,
+        }),
       );
       if (result) {
-        setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
+        replaceSnapshot(result.snapshot);
+        return { ...item, status: "cancelled", deliveryState: "cancelled" };
       } else {
         void load();
+        return null;
       }
-      return result;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [client, workspaceId, sessionId, mutation.run, load, replaceSnapshot],
   );
 
+  const turns = snapshot?.items ?? [];
   return {
+    snapshot,
     turns,
     queue: queueFromTurns(turns),
     activeTurn: activeTurnFromTurns(turns),
+    controlState: snapshot?.controlState ?? null,
+    controlGeneration: snapshot?.controlGeneration ?? null,
+    workspaceInferenceState: snapshot?.workspaceInferenceState ?? null,
+    workspaceInferenceGeneration: snapshot?.workspaceInferenceGeneration ?? null,
     loading,
     error,
     refresh: load,

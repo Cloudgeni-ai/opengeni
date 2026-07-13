@@ -23,6 +23,12 @@ export type SessionClientLike = Pick<
   | "listEvents"
   | "streamEvents"
   // Turn queue
+  | "getQueue"
+  | "editQueueItem"
+  | "cancelQueueItem"
+  | "promoteQueueItem"
+  | "reorderQueue"
+  // Legacy turn-history mutation helpers retained for host compatibility.
   | "listTurns"
   | "updateQueuedTurn"
   | "reorderQueuedTurns"

@@ -51,6 +51,8 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionLineageResponse,
+  SessionQueueMutationResponse,
+  SessionQueueSnapshot,
   SessionStatus,
   SessionTurn,
   SteerMessageResult,
@@ -142,6 +144,7 @@ class SessionBus {
 
 export class MockOpenGeniClient implements SessionClientLike {
   private buses = new Map<string, SessionBus>();
+  private queueVersions = new Map<string, number>();
   private scripted = false;
 
   bus(sessionId: string): SessionBus {
@@ -302,6 +305,75 @@ export class MockOpenGeniClient implements SessionClientLike {
     return [...this.sessionTurns(sessionId)];
   }
 
+  async getQueue(_workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+    return this.queueSnapshot(sessionId);
+  }
+
+  async editQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: {
+      expectedQueueVersion: number;
+      expectedItemVersion: number;
+      update: UpdateSessionTurnRequest;
+    },
+  ): Promise<SessionQueueMutationResponse> {
+    await this.updateQueuedTurn(workspaceId, sessionId, turnId, request.update);
+    return this.queueMutation(sessionId);
+  }
+
+  async cancelQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+  ): Promise<SessionQueueMutationResponse> {
+    await this.deleteQueuedTurn(workspaceId, sessionId, turnId);
+    return this.queueMutation(sessionId);
+  }
+
+  async promoteQueueItem(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+  ): Promise<SessionQueueMutationResponse> {
+    const turns = this.sessionTurns(sessionId);
+    const ordered = turns.filter((turn) => turn.status === "queued");
+    await this.reorderQueuedTurns(
+      WORKSPACE_ID,
+      sessionId,
+      [turnId, ...ordered.filter((turn) => turn.id !== turnId).map((turn) => turn.id)],
+    );
+    return this.queueMutation(sessionId);
+  }
+
+  async reorderQueue(
+    workspaceId: string,
+    sessionId: string,
+    request: { expectedQueueVersion: number; turnIds: string[] },
+  ): Promise<SessionQueueMutationResponse> {
+    await this.reorderQueuedTurns(workspaceId, sessionId, request.turnIds);
+    return this.queueMutation(sessionId);
+  }
+
+  private queueSnapshot(sessionId: string): SessionQueueSnapshot {
+    return {
+      version: this.queueVersions.get(sessionId) ?? 0,
+      controlState: "active",
+      controlGeneration: 0,
+      workspaceInferenceState: "active",
+      workspaceInferenceGeneration: 0,
+      items: this.sessionTurns(sessionId).filter((turn) =>
+        ["queued", "running", "requires_action"].includes(turn.status),
+      ),
+    };
+  }
+
+  private queueMutation(sessionId: string): SessionQueueMutationResponse {
+    this.queueVersions.set(sessionId, (this.queueVersions.get(sessionId) ?? 0) + 1);
+    return { snapshot: this.queueSnapshot(sessionId), events: [], shouldWake: false };
+  }
+
   async updateQueuedTurn(
     _workspaceId: string,
     sessionId: string,
@@ -366,7 +438,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    return { accepted, turn: null, interrupted: this.bus(sessionId).status === "running" };
+    const prompt = typeof message === "string" ? message : message.text;
+    const turns = this.sessionTurns(sessionId);
+    for (const queued of turns) {
+      if (queued.status === "queued") queued.position += 1;
+    }
+    const turn = fabricateTurn(sessionId, 1, prompt);
+    turn.triggerEventId = accepted.id;
+    turns.unshift(turn);
+    return { accepted, turn: { ...turn }, interrupted: this.bus(sessionId).status === "running" };
   }
 
   // --- Goal -------------------------------------------------------------------

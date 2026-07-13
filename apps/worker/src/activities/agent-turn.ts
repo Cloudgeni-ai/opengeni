@@ -2102,9 +2102,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ],
             true,
           );
-          await finishTurn(db, input.workspaceId, turnId, "failed");
+          await settleTurnAndSession("failed", "idle", null);
           turnMetricOutcome = "failed";
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
           activityStatus = "idle";
           return { status: "idle" };
         }
@@ -2189,9 +2188,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ],
             true,
           );
-          await finishTurn(db, input.workspaceId, turnId, "failed");
+          await settleTurnAndSession("failed", "idle", null);
           turnMetricOutcome = "failed";
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
           activityStatus = "idle";
           // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
           // resumeMs even if a future change made it 0 — never a tight re-dispatch.
@@ -3823,9 +3821,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ],
                   true,
                 );
-                await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+                await settleTurnAndSession("failed", "idle", null);
                 turnMetricOutcome = "failed";
-                await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
                 activityStatus = "idle";
                 activityError = attemptError;
                 return { status: "idle" };

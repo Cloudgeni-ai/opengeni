@@ -1,6 +1,6 @@
 -- OPE-18: durable typed queue, generation-fenced system-update fan-in, and
--- session/workspace inference controls. Migration 0049 remains reserved for
--- OPE-21 credential leasing; OPE-20 lifecycle primitives are planned for 0055.
+-- session/workspace inference controls. Numbered after the current mainline
+-- migration sequence so this recovered branch cannot shadow migration 0050.
 --
 -- Rolling contract:
 --   * schema first, with workspaces.queue_runtime_state = 'legacy';
@@ -35,7 +35,7 @@ ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "pending_control_expected_genera
 ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "control_state_before_workspace_kill" text;
 
 -- Install the sentinel default BEFORE the typed queue defaults. Rows that
--- predate 0050 receive NULL because ADD COLUMN without a default does not
+-- predate 0057 receive NULL because ADD COLUMN without a default does not
 -- rewrite them; every concurrent/post-migration producer receives a non-null
 -- timestamp even if it still writes generation 0. The backfill can therefore
 -- select a population that no new typed row can ever join.
