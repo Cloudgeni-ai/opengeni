@@ -106,6 +106,7 @@ export type SandboxItem = {
   name: string;
   command: string | null;
   output: string;
+  origin?: "created" | "restored" | "resumed" | null;
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };

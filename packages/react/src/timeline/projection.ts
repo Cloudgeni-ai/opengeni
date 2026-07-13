@@ -298,6 +298,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const existing = findOpenSandbox(items, name);
         if (existing && status !== "running") {
           existing.status = status;
+          if (
+            payload.origin === "created" ||
+            payload.origin === "restored" ||
+            payload.origin === "resumed"
+          ) {
+            existing.origin = payload.origin;
+          }
           const message = failureMessage(payload);
           if (message) {
             existing.output = existing.output ? `${existing.output}\n${message}` : message;
@@ -313,6 +320,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             name,
             command: typeof payload.command === "string" ? payload.command : null,
             output: failureMessage(payload) ?? "",
+            origin:
+              payload.origin === "created" ||
+              payload.origin === "restored" ||
+              payload.origin === "resumed"
+                ? payload.origin
+                : null,
             status,
             occurredAt: event.occurredAt,
           });
@@ -378,6 +391,29 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           id: event.id,
           tone: "waiting",
           text: "Approval needed — the turn is paused until someone decides.",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
+      case "session.context.compacted": {
+        closeStreamingTail();
+        const before =
+          typeof payload.estimatedTokensBefore === "number"
+            ? Math.round(payload.estimatedTokensBefore).toLocaleString("en-US")
+            : null;
+        const after =
+          typeof payload.estimatedTokensAfter === "number"
+            ? Math.round(payload.estimatedTokensAfter).toLocaleString("en-US")
+            : null;
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text:
+            before && after
+              ? `Context compacted from approximately ${before} to ${after} tokens.`
+              : "Context compacted so the turn could continue.",
           occurredAt: event.occurredAt,
         });
         break;

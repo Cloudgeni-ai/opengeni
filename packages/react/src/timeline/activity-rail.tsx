@@ -246,11 +246,12 @@ function MemoryRow({
  */
 function sandboxRowTitle(item: SandboxItem): string {
   if (item.name === "sandbox.provision") {
-    return item.status === "failed"
-      ? "Sandbox didn’t start"
-      : item.status === "running"
-        ? "Starting sandbox"
-        : "Sandbox ready";
+    if (item.status === "failed") return "Sandbox didn’t start";
+    if (item.status === "running") return "Starting sandbox";
+    if (item.origin === "resumed") return "Sandbox reattached";
+    if (item.origin === "restored") return "Sandbox restored";
+    if (item.origin === "created") return "Sandbox created";
+    return "Sandbox ready";
   }
   return toolDisplayName(item.name);
 }

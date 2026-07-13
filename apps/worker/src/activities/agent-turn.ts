@@ -44,6 +44,7 @@ import {
   countSessionHistoryItems,
   getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
+  recordContextCompactionRecoveryProgress,
   requeuePreemptedTurn,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -99,6 +100,7 @@ import {
   configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
+  settingsWithResolvedModelContext,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -286,7 +288,8 @@ export function filterUnmaterializedSandboxFileDownloads(
 // agent continues instead of the session dying or stalling idle.
 export const CONTEXT_OVERFLOW_RESUME_TEXT = [
   "[TURN RESUMED AFTER CONTEXT COMPACTION] The conversation approached or exceeded the model's context window mid-turn; older history above was compacted into a summary.",
-  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
+  "Continue the original task from where it left off. The summary is the recovery state: do not restart session setup, reassert persistent settings, or repeat completed read-only calls (including memory searches, session reads, file reads, and image views) merely to reconstruct context.",
+  "Repeat an action only when a specific missing fact is necessary; before repeating anything with side effects, verify whether it already happened.",
 ].join("\n");
 
 export const WORKER_SHUTDOWN_RESUME_TEXT = [
@@ -2273,6 +2276,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      // Bind the provider/model catalog's context policy to every model-facing
+      // path for this turn. In particular, Codex subscription turns must not
+      // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
+      // raw window, effective ceiling, and auto-compact limit are distinct live
+      // catalog values and must reach pre-turn compaction, history guards, and
+      // every model call together.
+      const modelRunSettings = resolvedModel
+        ? settingsWithResolvedModelContext(
+            runSettings,
+            resolvedModel.provider,
+            resolvedModel.configured,
+          )
+        : runSettings;
       // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
       // after resolution and BEFORE any model call (the compaction summarizer
       // and the main run both come later in this scope), so a blocked
@@ -2782,9 +2798,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
           : {};
-      const agent = runtime.buildAgent(runSettings, turnResources, {
+      const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         genesisTitleHint: isGenesisTurn,
+        persistentSessionSettings: {
+          titleIsSet: Boolean(session.title?.trim()),
+          ...(runSettings.childCompletionParentWakeEnabled
+            ? {
+                childNotificationsMode:
+                  typeof session.metadata === "object" &&
+                  session.metadata !== null &&
+                  (session.metadata as { childNotificationsMode?: unknown })
+                    .childNotificationsMode === "passive"
+                    ? ("passive" as const)
+                    : ("digest" as const),
+              }
+            : {}),
+        },
         sandboxEnvironment,
         // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
         // seed. ONLY when the effective backend is NOT selfhosted (the connected
@@ -2901,6 +2931,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const lazyClient = {
           backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
         } as EstablishedSandboxSession["client"];
+        let lazyEstablishmentOrigin: EstablishedSandboxSession["origin"] | null = null;
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
@@ -2928,6 +2959,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "turn",
               lazyHolderId,
             );
+            lazyEstablishmentOrigin = provisioned.established.origin ?? null;
             setupBoxSession = provisioned.established.session;
             await publishSandboxLifecycleEvents(provisioned);
             await runOwnedSandboxSetup(
@@ -2965,7 +2997,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
             onCompleted: async () => {
               await publish?.(
-                [{ type: "sandbox.operation.completed", payload: { name: "sandbox.provision" } }],
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(lazyEstablishmentOrigin ? { origin: lazyEstablishmentOrigin } : {}),
+                    },
+                  },
+                ],
                 true,
               );
             },
@@ -3029,13 +3069,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 promptCacheKey,
               })
           : undefined;
-      // Client-path compaction must budget against the RESOLVED model's real
-      // context window (the codex subscription window is far smaller than the
-      // 1.05M global default), mirroring the SDK path above. Without this the
-      // threshold (window * ratio) uses 1.05M and proactive compaction never
-      // fires for codex turns — histories grow to the ~340k model cliff.
-      const compactionContextWindowTokens =
-        resolvedModel?.configured.contextWindowTokens ?? runSettings.contextWindowTokens;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
@@ -3057,7 +3090,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const outcome = await maybeCompactContext(
             db,
-            { ...runSettings, contextWindowTokens: compactionContextWindowTokens },
+            modelRunSettings,
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -3074,14 +3107,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {
-            const trigger = forced ? "operator" : undefined;
-            recordContextCompaction(observability, trigger ?? "auto");
+            const compactionTrigger = forced ? "operator" : undefined;
+            recordContextCompaction(observability, compactionTrigger ?? "auto");
             await publish([
               {
                 type: "session.context.compacted",
                 payload: {
                   summaryPosition: outcome.summaryPosition,
-                  ...(trigger ? { trigger } : {}),
+                  ...(compactionTrigger ? { trigger: compactionTrigger } : {}),
                 },
               },
             ]);
@@ -3162,7 +3195,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           runtime,
           agent,
           trigger,
-          runSettings,
+          modelRunSettings,
           { currentCodexCredentialId: effectiveCodexCredentialId },
           unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {},
         );
@@ -3213,9 +3246,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         recoverySignalTokens: number | null,
       ) => {
         const clientCompactionSettings: Settings = {
-          ...runSettings,
+          ...modelRunSettings,
           contextCompactionMode: "client",
-          contextWindowTokens: compactionContextWindowTokens,
         };
         const outcome = await maybeCompactContext(
           db,
@@ -3266,7 +3298,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throwIfWorkerShuttingDown();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
-          runtime.runStream(agent, runInput!, runSettings, {
+          runtime.runStream(agent, runInput!, modelRunSettings, {
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
               await renewCodexLease("runtime_event");
@@ -3645,6 +3677,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             thresholdTokens: compactionNeeded?.thresholdTokens,
           });
           let compacted = false;
+          let compactionEstimatedTokensAfter: number | null = null;
           let compactionFailureMessage: string | null = null;
           try {
             const outcome = await forceContextCompaction(
@@ -3652,7 +3685,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               compactionNeeded?.signalTokens ?? null,
             );
             compacted = outcome.compacted;
-            if (!outcome.compacted) {
+            if (outcome.compacted) {
+              compactionEstimatedTokensAfter = outcome.estimatedTokensAfter;
+            } else {
               compactionFailureMessage = compactionFailureReason(outcome.reason);
             }
           } catch (compactError) {
@@ -3710,8 +3745,44 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // estimatedTokensBefore (and below the provider signal), so every
             // requeue proves durable shrink; a no-shrink cycle stops naturally.
             const canAutoContinue =
-              compacted && settings.sessionHistorySource === "items" && activeTurnId != null;
+              compacted &&
+              settings.sessionHistorySource === "items" &&
+              activeTurnId != null &&
+              compactionEstimatedTokensAfter != null;
             if (canAutoContinue) {
+              const recoveryProgressed = await recordContextCompactionRecoveryProgress(
+                db,
+                input.workspaceId,
+                activeTurnId,
+                compactionEstimatedTokensAfter!,
+              );
+              if (!recoveryProgressed) {
+                const errorMessage =
+                  "Context compaction recovery stopped because post-compaction context did not shrink across re-dispatches.";
+                await publish!(
+                  [
+                    {
+                      type: "turn.failed",
+                      payload: {
+                        error: errorMessage,
+                        code: "context_compaction_no_progress",
+                        retryable: false,
+                        recovery: "user_message",
+                        compacted: true,
+                        estimatedTokensAfter: compactionEstimatedTokensAfter,
+                      },
+                    },
+                    { type: "session.status.changed", payload: { status: "idle" } },
+                  ],
+                  true,
+                );
+                await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+                turnMetricOutcome = "failed";
+                await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+                activityStatus = "idle";
+                activityError = attemptError;
+                return { status: "idle" };
+              }
               const [preemptedEvent] = await appendAndPublishEvents(
                 db,
                 bus,

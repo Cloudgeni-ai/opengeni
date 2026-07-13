@@ -196,7 +196,7 @@ export async function turnInput(
     );
   }
   if (trigger.type === "turn.preempted") {
-    const payload = trigger.payload as { text?: unknown };
+    const payload = trigger.payload as { text?: unknown; reason?: unknown };
     if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
       throw new Error("turn.preempted payload is missing text");
     }
@@ -211,6 +211,7 @@ export async function turnInput(
       withUnavailableSandboxFilesNote(payload.text, options.unavailableSandboxFilesNote),
       settings,
       current,
+      typeof payload.reason === "string" ? payload.reason : "turn_preempted",
     );
   }
   if (trigger.type === "user.approvalDecision") {
@@ -267,6 +268,7 @@ async function messageInput(
   text: string,
   settings?: Settings,
   current: TurnCodexAccount = NON_CODEX_TURN,
+  internalResumeKind?: string,
 ): Promise<PreparedTurnInput> {
   // Read-path budget guard (the last-resort backstop behind best-effort pre-turn
   // compaction): supply B only when the client-side compaction path is active
@@ -294,6 +296,7 @@ async function messageInput(
           {
             kind: "message",
             text,
+            ...(internalResumeKind ? { internalResumeKind } : {}),
             historyItems: historyItems as any,
             sandboxEnvelope: envelope,
           },
@@ -312,6 +315,7 @@ async function messageInput(
       {
         kind: "message",
         text,
+        ...(internalResumeKind ? { internalResumeKind } : {}),
         // Cross-account run-state strip (HOLE C): the items-mode fallback replays
         // the RunState blob when no history rows exist yet. If the resuming turn's
         // codex account differs from the one that froze the blob, neutralize its

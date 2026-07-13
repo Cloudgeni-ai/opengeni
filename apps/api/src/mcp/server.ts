@@ -140,7 +140,7 @@ export function buildOpenGeniMcpServer(
       "set_session_title",
       {
         description:
-          "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
+          "Set this session's display title to a concise 3-7 word summary. The title persists across turns: call once on a new untitled session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
         inputSchema: { title: z4.string().min(1).max(200) },
       },
       async ({ title }) => {
@@ -148,16 +148,31 @@ export function buildOpenGeniMcpServer(
         return json({ ok: true, updated: result.updated, title: result.title ?? title });
       },
     );
+  }
+  // Child-completion mode has no effect while parent wakes are disabled and is
+  // meaningful only to a manager that can spawn child sessions. Do not expose
+  // an inert persistent-setting tool that invites routine setup calls.
+  if (
+    sessionId !== null &&
+    !toolspaceMode &&
+    deps.settings.childCompletionParentWakeEnabled &&
+    can("sessions:create")
+  ) {
     server.registerTool(
       "set_child_notifications_mode",
       {
         description:
-          "Control how workers you spawn report back when they finish. 'digest' (default): their completions arrive as a coalesced turn you process. 'passive': their completions appear only as quiet cards in your timeline and never queue a turn or a model run — use this when spawned-session completions are flooding your chat and you want them out of the way.",
+          "Change how workers you spawn report back when they finish. This setting persists across turns and must not be re-applied as routine setup or recovery. 'digest' (default): completions arrive as a coalesced turn you process. 'passive': completions appear only as quiet cards and never queue a turn or model run. Call only when the desired mode differs from the mode already in effect.",
         inputSchema: { mode: z4.enum(["digest", "passive"]) },
       },
       async ({ mode }) => {
-        await setSessionChildNotificationsMode(deps.db, grant.workspaceId, sessionId, mode);
-        return json({ ok: true, mode });
+        const changed = await setSessionChildNotificationsMode(
+          deps.db,
+          grant.workspaceId,
+          sessionId,
+          mode,
+        );
+        return json({ ok: true, changed, mode });
       },
     );
   }
@@ -1257,7 +1272,7 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get one session: status, goal-bearing metadata, resources, tools, and variableSet attachment (names/ids only, never variable values). Unbounded agent-set fields (metadata, initial message) are clamped so monitoring another session cannot flood this context.",
+          "Get another session you are managing: status, goal-bearing metadata, resources, tools, and variableSet attachment (names/ids only, never variable values). Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
         inputSchema: { sessionId: z4.string().uuid() },
       },
       async ({ sessionId }) => {

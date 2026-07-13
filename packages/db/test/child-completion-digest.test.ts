@@ -8,7 +8,9 @@ import {
   enqueueSessionTurn,
   finishTurn,
   listPendingSessionTurns,
+  recordContextCompactionRecoveryProgress,
   setSessionChildNotificationsMode,
+  updateSessionTitle,
   wakeParentSessionForChildCompletion,
   createDb,
   type Database,
@@ -251,6 +253,50 @@ describe("cancelQueuedSessionTurns (stop-drains-the-queue)", () => {
   });
 });
 
+describe("context compaction recovery progress", () => {
+  test("continues only while post-compaction tokens strictly shrink across dispatches", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await makeParent(accountId, workspaceId);
+    const turn = await enqueueSessionTurn(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${session.id}`,
+      source: "user",
+      prompt: "long task",
+      resources: [],
+      tools: [],
+      model: "gpt",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: { unrelated: "preserved" },
+    });
+
+    expect(await recordContextCompactionRecoveryProgress(db, workspaceId, turn.id, 23_091)).toBe(
+      true,
+    );
+    expect(await recordContextCompactionRecoveryProgress(db, workspaceId, turn.id, 23_178)).toBe(
+      false,
+    );
+    expect(await recordContextCompactionRecoveryProgress(db, workspaceId, turn.id, 23_091)).toBe(
+      false,
+    );
+    expect(await recordContextCompactionRecoveryProgress(db, workspaceId, turn.id, 22_000)).toBe(
+      true,
+    );
+
+    const [stored] = await admin<
+      Array<{ metadata: { unrelated?: string; contextCompactionRecoveryAfterTokens?: number } }>
+    >`select metadata from session_turns where id = ${turn.id}`;
+    expect(stored?.metadata).toEqual({
+      unrelated: "preserved",
+      contextCompactionRecoveryAfterTokens: 22_000,
+    });
+  });
+});
+
 describe("human messages preempt machine notifications (lever 5)", () => {
   function humanTurn(accountId: string, workspaceId: string, sessionId: string, preempt: boolean) {
     return enqueueSessionTurn(db, {
@@ -302,6 +348,53 @@ describe("human messages preempt machine notifications (lever 5)", () => {
 });
 
 describe("child-completion suppression opt-in (lever 6)", () => {
+  test("persistent session settings are idempotent and preserve a human title", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const parent = await makeParent(accountId, workspaceId);
+
+    expect(await setSessionChildNotificationsMode(db, workspaceId, parent.id, "passive")).toBe(
+      true,
+    );
+    expect(await setSessionChildNotificationsMode(db, workspaceId, parent.id, "passive")).toBe(
+      false,
+    );
+
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: parent.id,
+        title: "OpenGeni Main Orchestrator",
+        source: "agent",
+      }),
+    ).toEqual({ updated: true, title: "OpenGeni Main Orchestrator" });
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: parent.id,
+        title: "OpenGeni Main Orchestrator",
+        source: "agent",
+      }),
+    ).toEqual({ updated: false, title: "OpenGeni Main Orchestrator" });
+
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: parent.id,
+        title: "Human title",
+        source: "user",
+      }),
+    ).toEqual({ updated: true, title: "Human title" });
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: parent.id,
+        title: "Agent overwrite",
+        source: "agent",
+      }),
+    ).toEqual({ updated: false, title: "Human title" });
+  });
+
   test("passive mode lands a card event with NO queued turn and no wake", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

@@ -3,7 +3,8 @@
  *
  * This mirrors Codex CLI's compaction model: the checkpoint model sees the
  * current active history plus one fixed checkpoint prompt, then the active
- * history is rebuilt as all real user messages plus one summary message.
+ * history is rebuilt from the newest real user messages within one cumulative
+ * 20k-token budget plus one summary message.
  * Assistant messages, tool calls/results, reasoning, and images are removed
  * from the active model-facing history; the database audit rows remain.
  */
@@ -17,16 +18,18 @@ export type CompactionItem = Record<string, unknown>;
  * next rebuild can exclude old summaries from the retained user-message set.
  */
 export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
+export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
+// A single cumulative budget for all retained real user messages, matching
+// Codex core's build_compacted_history_with_limit (not a per-message allowance).
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
 // 0.9: compact as LATE as possible — retained context is worth more than early
 // headroom now that declared per-model windows are honest (input-effective,
 // empirically measured). Overshoot from estimator skew is absorbed by the
 // fail-closed reactive compact-on-reject ladder, so a late trigger costs at
-// worst one retried call, never a dead session. Was 0.6 when windows lied
-// (1.05M default vs the codex ~340k cliff meant the ratio compensated for the
-// wrong base — fix the base, not the ratio).
+// worst one retried call, never a dead session. Model-catalog explicit limits
+// take precedence; the ratio remains the fallback for models without one.
 export const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.9;
 export const MIN_COMPACTION_THRESHOLD_RATIO = 0.3;
 export const MAX_COMPACTION_THRESHOLD_RATIO = 0.9;
@@ -86,6 +89,29 @@ export function isCompactionSummary(item: unknown): boolean {
 }
 
 /**
+ * True for a platform-authored resume notice. These enter the next model call
+ * as a user-role item because the SDK needs a turn boundary, but they are not
+ * user intent and must never be retained as another permanent "real user"
+ * message by compaction. The text-prefix fallback repairs notices written by
+ * older workers before the durable providerData marker existed.
+ */
+export function isInternalResumeMessage(item: unknown): boolean {
+  if (!isUserMessage(item) || !item || typeof item !== "object") {
+    return false;
+  }
+  const record = item as Record<string, unknown>;
+  const providerData = record.providerData;
+  if (
+    providerData &&
+    typeof providerData === "object" &&
+    typeof (providerData as Record<string, unknown>)[INTERNAL_RESUME_MESSAGE_MARKER] === "string"
+  ) {
+    return true;
+  }
+  return messageText(record).startsWith("[TURN RESUMED AFTER ");
+}
+
+/**
  * Rough token estimate for an item: char/4 over its serialized text. Used for
  * the pre-first-call fallback, per-user-message cap, and read-path airbag.
  */
@@ -121,12 +147,19 @@ export function clampCompactionThresholdRatio(value: number | undefined | null):
 export function clientCompactionThresholdTokens(input: {
   contextWindowTokens: number;
   contextReservedOutputTokens: number;
-  contextCompactionThresholdRatio?: number | null;
+  contextClientCompactThresholdTokens?: number | null | undefined;
+  contextCompactionThresholdRatio?: number | null | undefined;
 }): number {
-  return Math.floor(
-    Math.max(0, input.contextWindowTokens) *
-      clampCompactionThresholdRatio(input.contextCompactionThresholdRatio),
-  );
+  const window = Math.max(0, input.contextWindowTokens);
+  const codexMaximum = Math.floor(window * MAX_COMPACTION_THRESHOLD_RATIO);
+  if (
+    typeof input.contextClientCompactThresholdTokens === "number" &&
+    Number.isFinite(input.contextClientCompactThresholdTokens) &&
+    input.contextClientCompactThresholdTokens > 0
+  ) {
+    return Math.min(Math.floor(input.contextClientCompactThresholdTokens), codexMaximum);
+  }
+  return Math.floor(window * clampCompactionThresholdRatio(input.contextCompactionThresholdRatio));
 }
 
 export type ClientCompactionDecision = {
@@ -141,7 +174,8 @@ export function decideClientCompaction(input: {
   lastInputTokens?: number | null;
   contextWindowTokens: number;
   contextReservedOutputTokens: number;
-  contextCompactionThresholdRatio?: number | null;
+  contextClientCompactThresholdTokens?: number | null | undefined;
+  contextCompactionThresholdRatio?: number | null | undefined;
   force?: boolean;
 }): ClientCompactionDecision {
   const thresholdTokens = clientCompactionThresholdTokens(input);
@@ -156,7 +190,7 @@ export function decideClientCompaction(input: {
   if (input.force) {
     return { shouldCompact: true, reason: "force", signalTokens, thresholdTokens };
   }
-  if (signalTokens > thresholdTokens) {
+  if (signalTokens >= thresholdTokens) {
     return { shouldCompact: true, reason: "above_threshold", signalTokens, thresholdTokens };
   }
   return { shouldCompact: false, reason: "below_threshold", signalTokens, thresholdTokens };
@@ -277,20 +311,29 @@ export function buildCompactionPromptInput(items: readonly CompactionItem[]): Co
 
 /**
  * Build the active history after compaction:
- * all real user messages (prior summaries excluded, images removed, each
- * message capped) plus one marked summary item.
+ * the newest real user messages that fit one cumulative 20k-token budget
+ * (prior summaries excluded, images removed) plus one marked summary item.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
 ): CompactionItem[] {
-  const history: CompactionItem[] = [];
-  for (const item of items) {
-    if (!isUserMessage(item) || isCompactionSummary(item)) {
+  const retainedReversed: CompactionItem[] = [];
+  let remaining = COMPACT_USER_MESSAGE_MAX_TOKENS;
+  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = items[index]!;
+    if (!isUserMessage(item) || isCompactionSummary(item) || isInternalResumeMessage(item)) {
       continue;
     }
-    history.push(compactUserMessage(item));
+    const textTokens = estimatedTextTokens(messageText(item));
+    retainedReversed.push(compactMessageToTokenBudget(item, remaining));
+    if (textTokens > remaining) {
+      remaining = 0;
+      break;
+    }
+    remaining -= textTokens;
   }
+  const history = retainedReversed.reverse();
   history.push(buildSummaryItem(summaryBody));
   return history;
 }
@@ -346,7 +389,7 @@ export function buildDeterministicFallbackCompactionHistory(
   const retainedUsers: CompactionItem[] = [];
   for (let index = input.items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = input.items[index]!;
-    if (!isUserMessage(item) || isCompactionSummary(item)) {
+    if (!isUserMessage(item) || isCompactionSummary(item) || isInternalResumeMessage(item)) {
       continue;
     }
     const capped = compactMessageToEstimatedItemBudget(
@@ -379,10 +422,6 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
     content: `${SUMMARY_PREFIX}\n${trimmed}`,
     [COMPACTION_SUMMARY_MARKER]: true,
   };
-}
-
-function compactUserMessage(item: CompactionItem): CompactionItem {
-  return compactMessageToTokenBudget(item, COMPACT_USER_MESSAGE_MAX_TOKENS);
 }
 
 function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): CompactionItem {

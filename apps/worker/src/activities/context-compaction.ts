@@ -89,6 +89,7 @@ export async function maybeCompactContext(
     lastInputTokens,
     contextWindowTokens: settings.contextWindowTokens,
     contextReservedOutputTokens: settings.contextReservedOutputTokens,
+    contextClientCompactThresholdTokens: settings.contextClientCompactThresholdTokens,
     contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
     ...(options.force ? { force: true } : {}),
   });
@@ -190,6 +191,7 @@ export async function maybeCompactContext(
     replacementItems,
     summaryPosition,
     summaryItem: summaryItem as Record<string, unknown>,
+    replacementInputTokens: estimatedTokensAfter,
   });
 
   return {

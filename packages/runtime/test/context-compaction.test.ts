@@ -5,6 +5,7 @@ import {
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
+  INTERNAL_RESUME_MESSAGE_MARKER,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_PREFIX,
@@ -21,6 +22,7 @@ import {
   findCompactionNeededError,
   findKeepBoundary,
   isCompactionSummary,
+  isInternalResumeMessage,
   isUserMessage,
   renderCompactionPromptInputForChat,
   type CompactionItem,
@@ -92,13 +94,39 @@ describe("codex-parity constants and summary marker", () => {
 });
 
 describe("single client compaction threshold", () => {
-  test("computes 90 percent of the model context window by default", () => {
+  test("derives the trigger from the raw window independently of the effective ceiling", () => {
     expect(
       clientCompactionThresholdTokens({
         contextWindowTokens: WINDOW,
         contextReservedOutputTokens: RESERVED_OUTPUT,
       }),
     ).toBe(THRESHOLD);
+  });
+
+  test("uses 90% of a 250k raw model window by default", () => {
+    expect(
+      clientCompactionThresholdTokens({
+        contextWindowTokens: 250_000,
+        contextReservedOutputTokens: 128_000,
+      }),
+    ).toBe(225_000);
+  });
+
+  test("honors a model-catalog auto-compact limit and clamps it to 90%", () => {
+    expect(
+      clientCompactionThresholdTokens({
+        contextWindowTokens: 272_000,
+        contextReservedOutputTokens: 128_000,
+        contextClientCompactThresholdTokens: 244_800,
+      }),
+    ).toBe(244_800);
+    expect(
+      clientCompactionThresholdTokens({
+        contextWindowTokens: 272_000,
+        contextReservedOutputTokens: 128_000,
+        contextClientCompactThresholdTokens: 260_000,
+      }),
+    ).toBe(244_800);
   });
 
   test("supports an env-configurable ratio with a defensive clamp", () => {
@@ -134,6 +162,18 @@ describe("single client compaction threshold", () => {
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
     expect(decision.signalTokens).toBeGreaterThan(THRESHOLD);
+    expect(decision.shouldCompact).toBe(true);
+    expect(decision.reason).toBe("above_threshold");
+  });
+
+  test("compacts when the token signal reaches the threshold exactly", () => {
+    const decision = decideClientCompaction({
+      items: [user("history")],
+      lastInputTokens: 244_800,
+      contextWindowTokens: 272_000,
+      contextReservedOutputTokens: 128_000,
+      contextClientCompactThresholdTokens: 244_800,
+    });
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("above_threshold");
   });
@@ -186,6 +226,29 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
   });
 
+  test("platform resume notices never become permanent user history", () => {
+    const markedResume = {
+      ...user("[TURN RESUMED AFTER CONTEXT COMPACTION] continue"),
+      providerData: { [INTERNAL_RESUME_MESSAGE_MARKER]: "context_compacted" },
+    };
+    const legacyResume = user("[TURN RESUMED AFTER WORKER RESTART] continue");
+    expect(isInternalResumeMessage(markedResume)).toBe(true);
+    expect(isInternalResumeMessage(legacyResume)).toBe(true);
+
+    const rebuilt = buildCompactionReplacementHistory(
+      [user("real request"), markedResume, legacyResume],
+      "summary",
+    );
+    expect(rebuilt).toHaveLength(2);
+    expect(rebuilt[0]).toMatchObject(user("real request"));
+
+    const fallback = buildDeterministicFallbackCompactionHistory({
+      items: [user("real request"), markedResume, legacyResume],
+      targetTokens: 2_000,
+    });
+    expect(fallback.some((item) => isInternalResumeMessage(item))).toBe(false);
+  });
+
   test("drops images from retained user messages", () => {
     const rebuilt = buildCompactionReplacementHistory(
       [
@@ -201,7 +264,7 @@ describe("codex-parity rebuild", () => {
     ]);
   });
 
-  test("caps each retained user message at 20k estimated tokens with a middle marker", () => {
+  test("caps an oversized newest user message at 20k estimated tokens with a middle marker", () => {
     const long = `${"a".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS * 2 * 4)}TAIL`;
     const rebuilt = buildCompactionReplacementHistory([user(long)], "summary");
     const content = String(rebuilt[0]!.content);
@@ -209,6 +272,23 @@ describe("codex-parity rebuild", () => {
     expect(content.startsWith("aaaa")).toBe(true);
     expect(content.endsWith("TAIL")).toBe(true);
     expect(Math.ceil(content.length / 4)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+  });
+
+  test("shares one 20k budget across newest retained user messages", () => {
+    const oldest = bigUser(5_000, "a");
+    const boundary = bigUser(15_000, "b");
+    const newest = bigUser(10_000, "c");
+    const rebuilt = buildCompactionReplacementHistory(
+      [oldest, assistant("drop"), boundary, newest],
+      "summary",
+    );
+
+    expect(rebuilt).toHaveLength(3);
+    expect(String(rebuilt[0]!.content).startsWith("b")).toBe(true);
+    expect(String(rebuilt[0]!.content)).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+    expect(Math.ceil(String(rebuilt[0]!.content).length / 4)).toBeLessThanOrEqual(10_000);
+    expect(rebuilt[1]!.content).toBe(newest.content);
+    expect(isCompactionSummary(rebuilt[2])).toBe(true);
   });
 
   test("rebuilt active history is orphan-clean because tool items are dropped", () => {

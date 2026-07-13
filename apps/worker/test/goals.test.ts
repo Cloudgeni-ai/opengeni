@@ -1,7 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { ToolRef } from "@opengeni/contracts";
-import { isSteerInterrupt, withCodexAppsTool } from "../src/activities/goals";
+import {
+  goalContinuationPrompt,
+  isSteerInterrupt,
+  withCodexAppsTool,
+} from "../src/activities/goals";
+
+describe("goalContinuationPrompt", () => {
+  test("continues from durable context instead of restarting turn housekeeping", () => {
+    const prompt = goalContinuationPrompt(
+      {
+        text: "Ship the fix",
+        successCriteria: "Tests pass",
+      } as Parameters<typeof goalContinuationPrompt>[0],
+      3,
+      null,
+    );
+
+    expect(prompt).toContain("[GOAL CONTINUATION 3]");
+    expect(prompt).toContain(
+      "Do not repeat completed session setup, persistent metadata settings, or context checks",
+    );
+  });
+});
 
 // The steer-vs-stop ruling: a `user.interrupt` tagged `reason: "steer"`
 // (sent by OpenGeniClient.steerMessage) redirects the work instead of
