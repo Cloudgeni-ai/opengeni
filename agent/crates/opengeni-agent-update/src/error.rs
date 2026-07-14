@@ -76,6 +76,17 @@ pub enum UpdateError {
         source: semver::Error,
     },
 
+    /// macOS updates must replace the complete signed app bundle. Mutating only
+    /// `.app/Contents/MacOS/opengeni-agent` would invalidate the bundle signature
+    /// and its TCC identity, so the running-executable path fails before any write.
+    #[error(
+        "macOS in-place update is disabled for {path}: no files were changed; reinstall the complete signed OpenGeni Agent.app bundle"
+    )]
+    BundleReinstallRequired {
+        /// The running executable path that was intentionally left untouched.
+        path: String,
+    },
+
     /// The post-update health gate failed; the prior binary was rolled back.
     #[error("post-update health check failed: {0}")]
     HealthCheck(String),

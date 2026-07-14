@@ -66,17 +66,19 @@
 # bundle at "$HOME/Applications/OpenGeni Agent.app" (a STABLE CFBundleIdentifier,
 # ai.opengeni.agent) and ~/.local/bin/opengeni-agent is a SYMLINK into that bundle
 # — one code-signing identity for both the CLI and the background app. macOS TCC
-# (Screen Recording / Accessibility) grants attach to that identity + bundle id, so
-# the agent's screen/computer-use features work from either entry point. The two
-# system permission prompts fire at `opengeni-agent enroll`, not on first use.
+# (Screen Recording / Accessibility) grants attach to that identity + bundle id.
+# Stable releases currently disable the experimental native desktop feature and
+# report `display_unavailable`; they do not claim working capture/input or a TCC
+# prompt flow. The bundle shape preserves the required identity boundary for a
+# future release only after it is verified on a live, consenting Mac.
 #
-# Immutable-per-version + GH-Releases fallback. The edge serves the latest
-# release at $BASE/install.sh and immutable copies at $BASE/v/<ver>/install.sh.
-# Assets resolve to $BASE/agent/<ver>/<asset> (immutable per version). If the
-# edge is down, the SAME assets are mirrored on the GitHub Release:
+# Installer + asset routes. The installer exists only at $BASE/install.sh; there is
+# no $BASE/v/<ver>/install.sh route. Latest assets resolve to
+# $BASE/agent/latest/<asset>, and a pinned OPENGENI_AGENT_VERSION=<ver> resolves to
+# $BASE/agent/v<ver>/<asset>. The same pinned assets are archived on GitHub at:
 #   https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v<ver>/<asset>
-# point OPENGENI_INSTALL_BASE_URL there (with OPENGENI_AGENT_VERSION pinned) to
-# install straight from GitHub Releases — the verify is identical.
+# The installer base override expects the /agent/latest or /agent/v<ver> route
+# layout; do not point it directly at a GitHub release-download directory.
 #
 # Exit codes (so a CI harness can assert on the failure mode):
 #   0  success           3  download failed

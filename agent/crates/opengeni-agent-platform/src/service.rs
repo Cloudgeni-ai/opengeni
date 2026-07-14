@@ -17,9 +17,11 @@
 //!     ai.opengeni.agent.plist`, `RunAtLoad`+`KeepAlive`). LaunchAgent NOT
 //!     LaunchDaemon deliberately: desktop/computer-use needs the user's GUI Aqua
 //!     session + TCC. Structured + compiling; the plist generation is pure + tested.
-//!   * **Windows** — a true Windows Service (`OpengeniAgent`) via the SCM, with
-//!     restart-on-failure recovery + Automatic-(Delayed) start. Structured +
-//!     compiling; the registration command is generated + tested.
+//!   * **Windows** — foreground `opengeni-agent run` remains supported, but service
+//!     lifecycle commands are intentionally unsupported. The binary does not enter
+//!     the SCM dispatcher, so registering `opengeni-agent run` would create a
+//!     service that never reaches `SERVICE_RUNNING`. The command surface fails
+//!     before any `sc.exe` mutation.
 //!
 //! The coarse outer restart loop (the service manager) sits ABOVE the in-process
 //! full-jitter backoff (the fine loop) — two independent layers of resiliency.
@@ -103,14 +105,12 @@ impl ServiceSpec {
     }
 }
 
-/// The canonical service identifiers (shared across OSes for consistency).
+/// The canonical service identifiers for supported OS service managers.
 pub mod ids {
     /// The systemd unit name (Linux).
     pub const SYSTEMD_UNIT: &str = "opengeni-agent.service";
     /// The launchd label (macOS) + the plist file stem.
     pub const LAUNCHD_LABEL: &str = "ai.opengeni.agent";
-    /// The Windows Service name (Windows).
-    pub const WINDOWS_SERVICE: &str = "OpengeniAgent";
 }
 
 /// Renders the systemd unit-file body for `spec`. PURE (no IO) so it is fully
@@ -208,30 +208,6 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
         program_args = program_args,
         stdout = xml_escape(&stdout.to_string_lossy()),
         stderr = xml_escape(&stderr.to_string_lossy()),
-    )
-}
-
-/// Renders the `sc.exe create` command line registering the Windows Service. The
-/// recovery action (`sc failure … restart`) is a separate command, returned by
-/// [`windows_recovery_command`]. PURE + tested.
-#[must_use]
-pub fn windows_create_command(spec: &ServiceSpec) -> String {
-    let bin = spec.binary_path.to_string_lossy();
-    let args = spec.args.join(" ");
-    // binPath embeds the binary + its run args; Automatic-Delayed start; the
-    // service hosts itself via the windows-service crate's service_dispatcher.
-    format!(
-        "sc.exe create {name} binPath= \"\\\"{bin}\\\" {args}\" start= delayed-auto DisplayName= \"OpenGeni Agent\"",
-        name = ids::WINDOWS_SERVICE,
-    )
-}
-
-/// The `sc.exe failure` recovery command (restart on failure with a 5s delay).
-#[must_use]
-pub fn windows_recovery_command() -> String {
-    format!(
-        "sc.exe failure {name} reset= 0 actions= restart/5000/restart/5000/restart/5000",
-        name = ids::WINDOWS_SERVICE,
     )
 }
 
@@ -371,6 +347,18 @@ pub fn unsupported_backend() -> PlatformError {
     )
 }
 
+/// The explicit Windows lifecycle boundary. The foreground agent is a normal
+/// console process; it does not call `StartServiceCtrlDispatcher`, register a
+/// service control handler, or report SCM state transitions. Refuse every service
+/// action rather than leave a broken SCM registration behind.
+#[must_use]
+pub fn windows_service_unsupported() -> PlatformError {
+    PlatformError::Unsupported(
+        "Windows service lifecycle is not supported by this build: opengeni-agent does not host the SCM dispatcher, so no service was registered or changed. Use foreground `opengeni-agent run`."
+            .to_string(),
+    )
+}
+
 /// Convenience: the rendered service definition for the host backend, or an
 /// [`PlatformError::Unsupported`] on an unsupported target. Used by `service
 /// install --print`.
@@ -379,14 +367,14 @@ pub fn unsupported_backend() -> PlatformError {
 ///
 /// [`PlatformError::Unsupported`] when the host has no supported service manager.
 pub fn render_for_host(spec: &ServiceSpec) -> PlatformResult<String> {
-    match ServiceSpec::backend() {
+    render_for_backend(ServiceSpec::backend(), spec)
+}
+
+fn render_for_backend(backend: ServiceBackend, spec: &ServiceSpec) -> PlatformResult<String> {
+    match backend {
         ServiceBackend::Systemd => Ok(render_systemd_unit(spec)),
         ServiceBackend::Launchd => Ok(render_launchd_plist(spec)),
-        ServiceBackend::WindowsScm => Ok(format!(
-            "{}\n{}",
-            windows_create_command(spec),
-            windows_recovery_command()
-        )),
+        ServiceBackend::WindowsScm => Err(windows_service_unsupported()),
         ServiceBackend::Unsupported => Err(unsupported_backend()),
     }
 }
@@ -566,14 +554,14 @@ mod tests {
     }
 
     #[test]
-    fn windows_commands_register_and_set_recovery() {
-        let create = windows_create_command(&spec());
-        assert!(create.contains("sc.exe create OpengeniAgent"));
-        assert!(create.contains("start= delayed-auto"));
-        assert!(create.contains("opengeni-agent"));
-        let recovery = windows_recovery_command();
-        assert!(recovery.contains("sc.exe failure OpengeniAgent"));
-        assert!(recovery.contains("restart/5000"));
+    fn windows_service_contract_fails_closed_without_scm_commands() {
+        let error = windows_service_unsupported().to_string();
+        assert_eq!(
+            error,
+            "unsupported operation: Windows service lifecycle is not supported by this build: opengeni-agent does not host the SCM dispatcher, so no service was registered or changed. Use foreground `opengeni-agent run`."
+        );
+        assert!(!error.contains("sc.exe create"));
+        assert!(render_for_backend(ServiceBackend::WindowsScm, &spec()).is_err());
     }
 
     #[test]
@@ -590,8 +578,8 @@ mod tests {
         // On the build host this returns the host's definition without error.
         let out = render_for_host(&spec());
         match ServiceSpec::backend() {
-            ServiceBackend::Unsupported => assert!(out.is_err()),
-            _ => assert!(out.is_ok()),
+            ServiceBackend::Unsupported | ServiceBackend::WindowsScm => assert!(out.is_err()),
+            ServiceBackend::Systemd | ServiceBackend::Launchd => assert!(out.is_ok()),
         }
     }
 }

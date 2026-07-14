@@ -160,6 +160,18 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+## Windows support boundary
+
+Foreground `opengeni-agent run` is the supported Windows lifecycle. The binary
+does not currently enter the Windows Service Control Manager dispatcher or report
+SCM state transitions. Therefore every `opengeni-agent service` action—including
+`install --print`, uninstall, status, and logs—returns an explicit unsupported
+error before invoking `sc.exe`; no broken service registration is left behind.
+Windows compilation/unit tests prove compatibility only. A real service may be
+claimed only after a native Windows host demonstrates dispatcher startup, control
+handling, state transitions, restart/recovery, logs, uninstall, and foreground-run
+regression coverage.
+
 ## macOS support boundary
 
 macOS command and service code can be built and unit-tested from another
@@ -169,12 +181,22 @@ a system LaunchDaemon: it must share the user's GUI/TCC identity. `service logs`
 reads the LaunchAgent's configured user-owned stdout/stderr files; it does not
 claim a system-wide logging scope.
 
-The current macOS desktop backend truthfully reports `display_unavailable`; it
-does not provide live screen capture or input. Before a future live desktop path
-can be accepted, a signed/notarized stable bundle identity, a logged-in Aqua
-user, human Screen Recording and Accessibility TCC grants, and whole-machine
-enrollment consent must all be demonstrated on a real consenting Mac.
-Cross-compilation and CI cannot substitute for that human gate.
+The source contains an experimental ScreenCaptureKit/CGEvent backend behind the
+`macos-desktop` Cargo feature, but stable releases intentionally leave that feature
+off. Stable macOS agents therefore report `display_unavailable` and do not claim
+live screen capture/input or prompt for TCC grants. Before enabling it, a
+signed/notarized stable bundle identity, a logged-in Aqua user, human Screen
+Recording and Accessibility TCC grants, and whole-machine enrollment consent must
+all be demonstrated on a real consenting Mac. Cross-compilation and CI cannot
+substitute for that human gate.
+
+`opengeni-agent update --check` may discover and verify a macOS candidate. Apply
+does not mutate `.app/Contents/MacOS/opengeni-agent`: it fails before any temp or
+backup write and directs the user to rerun `<base>/install.sh` with
+`OPENGENI_INSTALL_REPLACE_APP=1`, replacing the complete verified app bundle. A
+stable Developer ID/designated requirement can preserve TCC identity only when the
+whole replacement bundle is signed and verified; an in-place Mach-O swap would
+invalidate that claim.
 
 ## Swap the active sandbox
 

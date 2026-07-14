@@ -24,7 +24,10 @@
 //! * [`cli`] — the `run` / `enroll` / `service` / `update` / `uninstall` surface.
 //! * [`service`] — the opt-in always-on service install/uninstall/status glue.
 //! * [`update`] — the `update` subcommand wiring the self-update crate.
-//! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
+//! * [`uninstall`] — the `uninstall` subcommand (attempt service cleanup and,
+//!   with `--purge`, request remote deactivation before removing local credentials,
+//!   unless explicitly local-only; retain the running executable for the installer
+//!   uninstaller to delete after exit).
 //!
 //! The DESKTOP + terminal/framebuffer STREAMS are M8: the
 //! [`Platform`](opengeni_agent_platform::Platform) trait declares them and the

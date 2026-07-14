@@ -33,6 +33,13 @@ opengeni-agent update [--check] [--base-url <origin>] [--channel <channel>]
 opengeni-agent uninstall [--purge [--local-only]]
 ```
 
+The service verbs are real on Linux (systemd) and macOS (a per-user LaunchAgent).
+On Windows every service verb, including `install --print`, returns one explicit
+unsupported error without invoking `sc.exe`; the supported Windows lifecycle is
+foreground `opengeni-agent run`. A direct `uninstall` attempts service cleanup and
+can purge enrollment credentials/state, but retains the running executable.
+`install/uninstall.sh` removes the file after that process exits.
+
 There are currently **no CLI compatibility aliases**. Existing persisted-state
 compatibility (for example the legacy `nats_credentials` JSON field) is unrelated
 to the executable command surface and remains unchanged.
@@ -43,7 +50,7 @@ to the executable command surface and remains unchanged.
 |---|---|
 | `opengeni-agent-proto` | Generated wire-protocol types (Rust side of the codegen). |
 | `opengeni-agent` | The binary: `run`/`enroll`/`service`/`update`/`uninstall`; dial, RPC dispatch, supervisor. |
-| `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer. |
+| `opengeni-agent-platform` | Per-OS `Platform` + systemd/launchd service definitions; explicit Windows SCM unsupported contract. |
 | `opengeni-agent-stream` | Relay-edge stream transport + pty/framebuffer pumps. |
 | `opengeni-agent-update` | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback. |
 | `opengeni-relay` | The stateless stream-relay edge image. |
@@ -59,41 +66,52 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   the script body** + a sha256 — then installs to a per-user path and prints the
   enroll+run command. It installs **no service by default** (foreground `run` is
   the default run model, dossier §23.0) and contains **no secrets**. Read it before
-  piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
-  dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
-  removes it (`--purge` also deletes credentials + deactivates the enrollment).
+  piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base with an origin that
+  implements `/agent/latest/*` and `/agent/v<ver>/*` (for example a local mock).
+  The installer itself exists only at `<base>/install.sh`; direct GitHub Release
+  assets are an archive, not a route-compatible installer base.
+  [`install/uninstall.sh`](install/uninstall.sh) removes the executable/bundle
+  (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
   [`install/opengeni-agent-minisign.pub`](install/opengeni-agent-minisign.pub) and
   embedded in both install scripts + `opengeni-agent-update` (one key, one verify
   routine for install AND self-update). The **private** key is the GitHub Actions
   secret `OPENGENI_AGENT_MINISIGN_KEY` — never in the repo.
 - **Self-update** — `opengeni-agent update [--check]` fetches the signed stable
-  manifest at `<base>/agent/stable/manifest.json`, verifies minisign + sha256 +
-  version-monotonicity, and atomically self-replaces (including Windows
-  rename-self-aside). It retains the previous binary as a **manual** rollback
-  copy; the foreground user or service manager must restart it. This command does
-  not claim an automatic post-restart health gate or rollback. A tampered artifact
-  is always rejected. `beta` requires an explicit custom publication origin.
+  manifest at `<base>/agent/stable/manifest.json` and fully downloads/verifies the
+  candidate with minisign + sha256 + version monotonicity. On Linux/Windows, apply
+  atomically self-replaces (including Windows rename-self-aside) and retains the
+  previous binary as a **manual** rollback copy; the foreground user or supervisor
+  must restart it. On macOS, check-only works but apply fails **before any write**:
+  mutating only `.app/Contents/MacOS/opengeni-agent` would invalidate the signed
+  bundle/TCC identity, so the error directs the user to reinstall the complete
+  verified bundle with `curl -fsSL '<base>/install.sh' |
+  OPENGENI_INSTALL_REPLACE_APP=1 sh`. This command does not claim an automatic
+  post-restart health gate or rollback. A tampered artifact is always rejected.
+  `beta` requires an explicit custom publication origin.
 - **Service (opt-in)** — `opengeni-agent service install|uninstall|start|stop|status|logs`
-  installs an always-on service (systemd user/system unit, macOS LaunchAgent,
-  Windows Service). `logs` is bounded by default and `--follow` is explicit.
-  `--print` dry-runs the generated unit/plist. The default remains foreground
-  `run`.
+  installs an always-on service on Linux (systemd user/system unit) or macOS
+  (per-user LaunchAgent). `logs` is bounded by default and `--follow` is explicit;
+  `--print` dry-runs the generated unit/plist. Windows service hosting is not
+  implemented and every service action fails without mutation. The default remains
+  foreground `run` on every OS.
 
 ### macOS compatibility versus live acceptance
 
-The Rust workspace can compile and unit-test macOS-specific command rendering on
-non-macOS hosts, but that is **compatibility evidence only**, not proof that a
-Mac is ready for desktop use. Service persistence is deliberately a per-user
-`LaunchAgent` in the logged-in `gui/<uid>` Aqua domain — never a LaunchDaemon or
-system scope. The currently supported desktop behavior remains an honest
-`display_unavailable` degradation until the deferred native backend is delivered.
+The source contains a ScreenCaptureKit/CGEvent backend behind the experimental
+`macos-desktop` Cargo feature. Stable release artifacts intentionally build with
+default features, so that backend is disabled and stable macOS agents report
+`display_unavailable`. Native compilation and unit tests are **compatibility
+evidence only**, not proof that a Mac is ready for desktop use. Service persistence
+is deliberately a per-user `LaunchAgent` in the logged-in `gui/<uid>` Aqua domain
+— never a LaunchDaemon or system scope.
 
-Any future screen capture/input acceptance requires all of: a signed and
-notarized stable app-bundle identity (so TCC grants survive updates), a live Mac
-with a logged-in Aqua user, human Screen Recording and Accessibility grants, and
-human whole-machine enrollment consent. A live consenting Mac must accept those
-flows; CI/cross-compilation cannot grant or prove them.
+Enabling the feature in stable requires all of: a signed and notarized stable app
+bundle, full-bundle update/reinstall verification (never an in-place Mach-O swap),
+a live Mac with a logged-in Aqua user, human Screen Recording and Accessibility
+grants, and human whole-machine enrollment consent. A live consenting Mac must
+accept capture, input, relaunch, and full-bundle replacement while preserving the
+expected identity/grants; CI/cross-compilation cannot grant or prove them.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows

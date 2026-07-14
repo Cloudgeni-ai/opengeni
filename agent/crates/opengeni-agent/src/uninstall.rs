@@ -1,5 +1,7 @@
 //! The `uninstall` subcommand — stop any service, remove credentials (with
-//! `--purge`), and deactivate the enrollment.
+//! `--purge`), and deactivate the enrollment. A direct invocation cannot delete
+//! its currently running executable; the installer uninstaller removes that file
+//! after this process exits.
 //!
 //! The binary-level uninstall complements the `uninstall.sh` script: the script
 //! calls `opengeni-agent service uninstall` + `opengeni-agent uninstall --purge`.
@@ -19,6 +21,11 @@ use crate::enrollment;
 ///
 /// Returns a human-facing error string if a filesystem op fails.
 pub async fn run(args: &UninstallArgs, api_url_override: Option<&str>) -> Result<(), String> {
+    let retained_binary = std::env::current_exe().map_or_else(
+        |_| "the currently running opengeni-agent executable".to_string(),
+        |path| path.display().to_string(),
+    );
+
     // Best-effort: stop + remove any opt-in service first.
     let service_args = ServiceArgs {
         action: ServiceAction::Uninstall(ServiceScopeArgs { system: false }),
@@ -55,12 +62,45 @@ pub async fn run(args: &UninstallArgs, api_url_override: Option<&str>) -> Result
                 .map_err(|e| format!("could not remove {}: {e}", dir.display()))?;
             println!("removed local credentials at {}.", dir.display());
         }
-        println!("opengeni-agent fully uninstalled (credentials purged).");
+        println!("{}", uninstall_summary(true, &retained_binary));
     } else {
-        println!(
-            "opengeni-agent service removed. Credentials kept (re-install to reconnect); \n\
-             pass --purge to remove them and deactivate the enrollment."
-        );
+        println!("{}", uninstall_summary(false, &retained_binary));
     }
     Ok(())
+}
+
+fn uninstall_summary(purge: bool, retained_binary: &str) -> String {
+    let state = if purge {
+        "service cleanup attempted and local credentials purged"
+    } else {
+        "service cleanup attempted; credentials kept so a reinstall can reconnect (pass --purge to remove them and deactivate the enrollment)"
+    };
+    format!(
+        "opengeni-agent {state}. This direct command retained the running executable at {retained_binary}; run the installer uninstaller or remove that file after the process exits."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_uninstall_never_claims_the_retained_binary_was_removed() {
+        let path = "/home/u/.local/bin/opengeni-agent";
+        for purge in [false, true] {
+            let summary = uninstall_summary(purge, path);
+            assert!(summary.contains("retained the running executable"));
+            assert!(summary.contains(path));
+            assert!(!summary.contains("fully uninstalled"));
+        }
+    }
+
+    #[test]
+    fn purge_summary_distinguishes_state_cleanup_from_executable_removal() {
+        let summary = uninstall_summary(true, "opengeni-agent.exe");
+        assert!(summary.contains("service cleanup attempted"));
+        assert!(summary.contains("local credentials purged"));
+        assert!(!summary.contains("enrollment state removed"));
+        assert!(summary.contains("remove that file after the process exits"));
+    }
 }

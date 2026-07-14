@@ -6,9 +6,11 @@
 //! consumes a signed channel manifest (codegen'd [`UpdateManifest`] so the TS
 //! publisher and this Rust consumer never drift), verifies each artifact two
 //! independent ways (minisign + sha256) plus a version-monotonicity gate, performs
-//! an ATOMIC same-filesystem self-replace (incl. the Windows rename-self-aside),
-//! and exposes a retained prior binary plus explicit rollback primitive for a
-//! caller that actually executes a post-restart health gate.
+//! an ATOMIC same-filesystem self-replace on Linux/Windows (incl. the Windows
+//! rename-self-aside), and exposes a retained prior binary plus explicit rollback
+//! primitive for a caller that actually executes a post-restart health gate.
+//! macOS running-executable apply is intentionally rejected before any write: the
+//! complete signed `.app` must be reinstalled as one unit.
 //!
 //! # Flow
 //!
@@ -19,7 +21,8 @@
 //! 3. **fetch + verify the artifact** — download the target artifact + its
 //!    `.minisig`, verify the minisign signature against the pinned key AND the
 //!    sha256 from the (signed) manifest — a TAMPERED artifact is rejected here;
-//! 4. **apply** — atomic swap with a retained backup ([`apply`]);
+//! 4. **apply** — Linux/Windows atomic swap with a retained backup ([`apply`]);
+//!    macOS returns a complete-bundle-reinstall requirement before mutation;
 //! 5. **health-gate + rollback** — a caller that truly runs a post-restart health
 //!    gate may trigger [`apply::rollback`]. The CLI update command does not claim
 //!    that it runs such a gate automatically.
@@ -272,7 +275,8 @@ impl PendingUpdate {
     ///
     /// # Errors
     ///
-    /// [`UpdateError::Io`] if the swap fails.
+    /// [`UpdateError::BundleReinstallRequired`] on macOS before mutation, or
+    /// [`UpdateError::Io`] if a supported-platform swap fails.
     pub fn apply_running(&self) -> UpdateResult<PathBuf> {
         replace_running_exe(&self.bytes)
     }

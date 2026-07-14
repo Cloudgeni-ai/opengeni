@@ -13,9 +13,10 @@
   contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
-  Run model (dossier §23.0): the default is a FOREGROUND `opengeni-agent run`. An
-  always-on Windows Service is an explicit opt-in (`opengeni-agent service
-  install`), never installed by this script. This script is rename-running-exe
+  Run model (dossier §23.0): the supported Windows model is FOREGROUND
+  `opengeni-agent run`. Windows service subcommands are intentionally unsupported:
+  this binary does not host the SCM dispatcher, so it refuses service actions
+  without registering or changing a service. This script is rename-running-exe
   aware: a re-install over a running agent renames the live .exe aside before
   placing the new one (the same trick self-update uses).
 
@@ -255,12 +256,12 @@ function Complete-Install($bin) {
   Write-Host "  2. Run it (online while this runs, offline when you stop it):"
   Write-Host "       $bin run"
   Write-Host ""
-  Write-Host "Want an always-on machine instead? That is opt-in:  $bin service install"
-  Write-Host "Uninstall any time:  $bin uninstall"
+  Write-Host "Windows Service hosting is not supported in this build; keep $bin run in the foreground."
+  Write-Host "Clean up service/enrollment state:  $bin uninstall [--purge]  (the running .exe is retained; remove it after exit)"
   # Never start `run` from the installer. In particular `irm … | iex` can run in
   # an interactive host while the downloaded script has no durable stdin, which
   # would turn a successful install into an opaque hang. The human explicitly
-  # performs enrollment and starts either a foreground run or the opt-in service.
+  # performs enrollment and starts the supported foreground run.
 }
 
 Main

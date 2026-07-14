@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-update"
-description = "Self-update for the OpenGeni agent: signed-manifest discovery, minisign verify, atomic self-replace, and rollback."
+description = "Signed update discovery/verification for the OpenGeni agent, with Linux/Windows atomic self-replace and fail-closed macOS bundle reinstall."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

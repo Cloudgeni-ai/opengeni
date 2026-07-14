@@ -8,12 +8,13 @@
 //! * [`Command::Enroll`] — the device-flow enrollment only (print a user-code +
 //!   URL, poll to completion, persist credentials `0600`), then exit.
 //! * [`Command::Service`] — the opt-in always-on daemon path (systemd-user /
-//!   LaunchAgent / Windows Service). The default supported model is FOREGROUND
-//!   `run`; this is the explicit opt-in for a dedicated machine.
+//!   LaunchAgent). Windows service actions are explicitly unsupported until the
+//!   binary is a real SCM host; foreground `run` remains supported everywhere.
 //! * [`Command::Update`] — check for and apply a signed self-update (minisign +
 //!   sha256 verify, atomic swap, retained manual rollback copy).
-//! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
-//!   `--purge`) delete credentials + deactivate the enrollment.
+//! * [`Command::Uninstall`] — stop any service and (with `--purge`) delete
+//!   credentials + deactivate the enrollment. A direct invocation retains its
+//!   currently running executable; the installer uninstaller removes that file.
 
 use clap::{Parser, Subcommand};
 
@@ -49,14 +50,16 @@ pub enum Command {
     /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status/logs).
     ///
     /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
-    /// service (systemd user unit / macOS LaunchAgent / Windows Service) is for a
-    /// genuinely dedicated machine (a build box, a CI Mac mini) — install it only
-    /// if you want the agent to start on boot and run unattended.
+    /// service (systemd user unit / macOS LaunchAgent) is for a genuinely dedicated
+    /// machine. Windows service actions fail explicitly because this binary is not
+    /// an SCM service host; use foreground `opengeni-agent run` there.
     Service(ServiceArgs),
     /// Check for and apply a signed self-update for this channel + target.
     Update(UpdateArgs),
-    /// Remove the agent: stop any service, delete the binary, and (with `--purge`)
-    /// remove credentials + deactivate the enrollment.
+    /// Attempt service cleanup. With `--purge`, remove local credentials after a
+    /// confirmed revoke (or explicit `--local-only` override). The running
+    /// executable is retained; use the installer uninstaller (or remove it after
+    /// this process exits) to delete it.
     Uninstall(UninstallArgs),
 }
 
@@ -164,9 +167,9 @@ pub struct ServiceInstallArgs {
     #[arg(long)]
     pub system: bool,
 
-    /// Print the generated service definition (systemd unit / launchd plist /
-    /// Windows registration commands) and exit WITHOUT touching the system — a
-    /// dry-run so you can review exactly what would be installed.
+    /// Print the generated service definition (systemd unit / launchd plist) and
+    /// exit WITHOUT touching the system. Windows returns the same explicit
+    /// unsupported error as every other service action.
     #[arg(long)]
     pub print: bool,
 }
@@ -197,8 +200,8 @@ pub struct ServiceLogsArgs {
 /// Arguments for the `update` subcommand.
 #[derive(Debug, Default, clap::Args)]
 pub struct UpdateArgs {
-    /// Only CHECK whether a newer build is available (verify the manifest), do not
-    /// download or apply.
+    /// Only CHECK whether a newer build is available and fully verify its manifest
+    /// and artifact; do not apply it.
     #[arg(long)]
     pub check: bool,
 
@@ -365,6 +368,24 @@ mod tests {
     }
 
     #[test]
+    fn service_command_inventory_is_exact_and_documents_windows_boundary() {
+        let mut root = Cli::command();
+        let service = root
+            .find_subcommand_mut("service")
+            .expect("service command");
+        assert_eq!(
+            service
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .collect::<Vec<_>>(),
+            ["install", "uninstall", "start", "stop", "status", "logs"]
+        );
+        let help = service.render_long_help().to_string();
+        assert!(help.contains("Windows service actions fail explicitly"));
+        assert!(help.contains("opengeni-agent run"));
+    }
+
+    #[test]
     fn service_install_parses_print_and_system() {
         let cli = Cli::parse_from([
             "opengeni-agent",
@@ -430,6 +451,7 @@ mod tests {
         let uninstall_help = uninstall.render_long_help().to_string();
         assert!(uninstall_help.contains("--purge"));
         assert!(uninstall_help.contains("--local-only"));
+        assert!(uninstall_help.contains("running executable is retained"));
     }
 
     #[test]
