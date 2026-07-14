@@ -1694,6 +1694,224 @@ describe("worker activities integration", () => {
     expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).toBeNull();
   });
 
+  test("status-less Responses invalid content settles once without replay or raw payload", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "attempt once",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "attempt once" } },
+    ]);
+    const model = new ScriptedModel([
+      { error: providerInvalidContentApiError("req_zero_progress") },
+      { id: "new-user-response", outputText: "new turn completed" },
+    ]);
+    const exported: Array<{ body: unknown }> = [];
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      observabilityOtlpEndpoint: "http://collector:4318",
+    });
+    const observability = createObservability(settings, {
+      component: "worker",
+      exporter: async (_url, body) => {
+        exported.push({ body });
+      },
+    });
+    const activities = createActivities({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+      observability,
+    });
+
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-invalid-content-zero-progress",
+      }),
+    ).resolves.toEqual({ status: "idle" });
+    expect(model.calls).toBe(1);
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(failed?.payload).toMatchObject({
+      code: "provider_invalid_content",
+      retryable: false,
+      phase: "responses_stream",
+      api: "responses",
+      providerRequestId: "req_zero_progress",
+      recovery: "user_message",
+      modelOrToolProgressPersisted: false,
+      checkpointSucceeded: true,
+    });
+    expect(JSON.stringify(failed?.payload)).not.toContain("provider-secret");
+    await Bun.sleep(0);
+    expect(JSON.stringify(exported)).not.toContain("provider-secret");
+    expect(JSON.stringify(exported)).not.toContain("raw SSE diagnostic");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10)).map(
+        (turn) => turn.status,
+      ),
+    ).toEqual(["failed"]);
+
+    // An explicit later user message creates a new durable turn. It is not an
+    // activity/Temporal replay of the invalid provider attempt.
+    const [newTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "try a different approach" } },
+    ]);
+    await expect(
+      activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: newTrigger!.id,
+        workflowId: "workflow-invalid-content-new-user",
+      }),
+    ).resolves.toEqual({ status: "idle" });
+    expect(model.calls).toBe(2);
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10)).map(
+        (turn) => turn.status,
+      ),
+    ).toEqual(["completed", "failed"]);
+  });
+
+  test("post-tool invalid content checkpoints one tool result and does not duplicate usage or effect", async () => {
+    const grant = await testGrant(dbClient.db);
+    const mcp = startTestMcpServer();
+    try {
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "search once",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "search once" } },
+      ]);
+      const callId = "invalid-content-tool-once";
+      const model = new ScriptedModel([
+        {
+          id: "provider-response-before-invalid-content",
+          output: [functionCall("docs__search_documents", { query: "current state" }, callId)],
+        },
+        { error: providerInvalidContentApiError("req_after_tool") },
+        { id: "provider-response-new-turn", outputText: "continued from checkpoint" },
+      ]);
+      const activities = createActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+          mcpServers: [
+            {
+              id: "docs",
+              name: "Documents",
+              url: mcp.url,
+              allowedTools: ["search_documents"],
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+
+      await expect(
+        activities.runAgentTurn({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: trigger!.id,
+          workflowId: "workflow-invalid-content-after-tool",
+        }),
+      ).resolves.toEqual({ status: "idle" });
+      expect(model.calls).toBe(2);
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
+
+      const firstEvents = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        0,
+        100,
+      );
+      expect(firstEvents.find((event) => event.type === "turn.failed")?.payload).toMatchObject({
+        code: "provider_invalid_content",
+        providerRequestId: "req_after_tool",
+        recovery: "user_message",
+        modelOrToolProgressPersisted: true,
+        checkpointSucceeded: true,
+      });
+      expect(firstEvents.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
+      const activeHistory = await getActiveSessionHistoryItems(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+      );
+      expect(
+        activeHistory.filter(
+          (row) =>
+            (row.item as Record<string, unknown>).type === "function_call_result" &&
+            (row.item as Record<string, unknown>).callId === callId,
+        ),
+      ).toHaveLength(1);
+      const firstUsage = await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 30,
+      });
+      expect(
+        firstUsage.filter(
+          (event) =>
+            event.eventType === "model.tokens" &&
+            event.sourceResourceId?.endsWith("provider-response-before-invalid-content"),
+        ),
+      ).toHaveLength(1);
+
+      const [newTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "continue safely" } },
+      ]);
+      await expect(
+        activities.runAgentTurn({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          triggerEventId: newTrigger!.id,
+          workflowId: "workflow-invalid-content-after-tool-new-user",
+        }),
+      ).resolves.toEqual({ status: "idle" });
+      expect(model.calls).toBe(3);
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
+      const finalUsage = await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 30,
+      });
+      expect(
+        finalUsage.filter(
+          (event) =>
+            event.eventType === "model.tokens" &&
+            event.sourceResourceId?.endsWith("provider-response-before-invalid-content"),
+        ),
+      ).toHaveLength(1);
+    } finally {
+      mcp.close();
+    }
+  });
+
   test("runs a turn whose stored history carries an orphaned tool output instead of 400ing", async () => {
     // A session whose session_history_items contains an orphaned
     // function_call_result (a tool output whose function_call is absent — the
@@ -2714,6 +2932,22 @@ describe("worker activities integration", () => {
     expect(runs[0]?.status).toBe("failed");
   });
 });
+
+function providerInvalidContentApiError(requestId: string): Error {
+  const error = new Error(
+    "The model produced invalid content. provider-secret raw SSE diagnostic must not persist",
+  );
+  Object.assign(error, {
+    name: "APIError",
+    status: undefined,
+    request_id: requestId,
+    type: "invalid_request_error",
+    code: "invalid_content",
+    body: { secret: "provider-secret" },
+    headers: { authorization: "Bearer provider-secret" },
+  });
+  return error;
+}
 
 type TestDb = ReturnType<typeof createDb>["db"];
 

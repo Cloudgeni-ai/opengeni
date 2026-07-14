@@ -222,6 +222,18 @@ import {
   type SessionStatus,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  classifyProviderInvalidContentError,
+  providerInvalidContentFailurePayload,
+  providerInvalidContentRecoveryPlan,
+  type ProviderInvalidContentFailurePayload,
+} from "./provider-invalid-content";
+
+export {
+  classifyProviderInvalidContentError,
+  providerInvalidContentFailurePayload,
+  providerInvalidContentRecoveryPlan,
+} from "./provider-invalid-content";
 
 // How long the session workflow holds the loop after a retryable provider
 // failure before the goal continuation re-enters the model. Azure/OpenAI TPM
@@ -1328,6 +1340,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
+    // Retained outside model-resolution scope for terminal classification. The
+    // built-in/legacy null resolution is the Responses path; registry chat
+    // providers must never be classified from matching message text alone.
+    let activeProviderApi: ModelProviderApi = "responses";
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
     const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
       const established = sandbox.established;
@@ -1511,6 +1527,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // stable and this scalar append watermark is valid again. The sanitizer
     // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
+    let modelOrToolProgressPersisted = false;
     // Next free WHOLE-NUMBER absolute position to append at. Tracked separately
     // from persistedHistoryCount (the in-memory slice index) because a compaction
     // inserts a fractional summary position, so total rows no longer equal
@@ -1555,6 +1572,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 "turn execution generation was fenced while saving conversation history",
               );
             }
+            if (hasModelOrToolProgress) modelOrToolProgressPersisted = true;
           }
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
@@ -2420,6 +2438,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      activeProviderApi = resolvedModel?.provider.api ?? "responses";
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -4201,6 +4220,78 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnMetricOutcome = "cancelled";
         throw error;
       }
+      // A status-less Responses streaming invalid-content error means the
+      // provider accepted the request but returned no safely replayable result.
+      // Settle this exact attempt atomically after a required final history
+      // checkpoint. The original trigger/full turn/model/tool request is never
+      // requeued: only a paced NEW goal continuation or a later user message may
+      // continue. A checkpoint failure is recoverably terminal and requires the
+      // user-message boundary.
+      const providerInvalidContent =
+        activeProviderApi === "responses" ? classifyProviderInvalidContentError(error) : null;
+      if (providerInvalidContent && publish && settle && turnId && turnStartedPublished) {
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        const goalActive = Boolean(goal && goal.status === "active");
+        let checkpointSucceeded = false;
+        try {
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({ requireDurable: true });
+          checkpointSucceeded = true;
+        } catch (checkpointError) {
+          observability.warn("provider invalid content checkpoint failed", {
+            sessionId: input.sessionId,
+            turnId,
+            errorName: checkpointError instanceof Error ? checkpointError.name : "unknown",
+          });
+        }
+        const recoveryPlan = providerInvalidContentRecoveryPlan({
+          checkpointSucceeded,
+          goalActive,
+          continuationDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+        });
+        const accepted = await settle({
+          events: [
+            {
+              type: "turn.failed",
+              payload: {
+                ...providerInvalidContentFailurePayload(providerInvalidContent),
+                recovery: recoveryPlan.recovery,
+                modelOrToolProgressPersisted,
+                checkpointSucceeded,
+              },
+            },
+            {
+              type: "session.status.changed",
+              payload: { status: recoveryPlan.sessionStatus },
+            },
+          ],
+          turnStatus: "failed",
+          sessionStatus: recoveryPlan.sessionStatus,
+          activeTurnId: null,
+        });
+        if (!accepted) return { status: "cancelled" };
+        turnMetricOutcome = "failed";
+        activityStatus = recoveryPlan.activityStatus;
+        // Never attach the raw SDK APIError to telemetry. Its message/provider
+        // body may contain customer content. The safe synthetic marker exists
+        // only when the durable checkpoint failed.
+        activityError = checkpointSucceeded
+          ? undefined
+          : new Error("provider_invalid_content_checkpoint_failed");
+        observability.warn("provider invalid content settled without replay", {
+          sessionId: input.sessionId,
+          turnId,
+          ...providerInvalidContent,
+          modelOrToolProgressPersisted,
+          checkpointSucceeded,
+        });
+        return recoveryPlan.continueDelayMs === undefined
+          ? { status: recoveryPlan.activityStatus }
+          : {
+              status: recoveryPlan.activityStatus,
+              continueDelayMs: recoveryPlan.continueDelayMs,
+            };
+      }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues
       // via a synthesized continuation turn (or a user message resumes work).
@@ -4901,7 +4992,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // ops channel between goals) must never go terminal because the
       // provider had a bad minute -- a failed session would reject the very
       // retry message the failure asks for.
-      const failure = agentRunFailurePayload(error);
+      const failure = agentRunFailurePayload(error, activeProviderApi);
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
@@ -5264,11 +5355,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
  * that will NOT clear on retry) is classified and returned BEFORE this in
  * agentRunFailurePayload, so it never reaches here.
  */
+function safeErrorProperty(error: unknown, key: string): unknown {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    return Reflect.get(error, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  const message = safeErrorProperty(error, "message");
+  if (typeof message === "string") return message;
+  try {
+    return String(error);
+  } catch {
+    return "Unknown provider error";
+  }
+}
+
 export function isTransientProviderError(error: unknown): boolean {
+  const rawStatus = safeErrorProperty(error, "status");
   const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
-      : undefined;
+    typeof rawStatus === "number"
+      ? rawStatus
+      : typeof rawStatus === "string" && /^\d{3}$/.test(rawStatus)
+        ? Number(rawStatus)
+        : undefined;
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
   // a request fault that must NOT auto-retry — even if its body happens to read like
@@ -5277,34 +5391,41 @@ export function isTransientProviderError(error: unknown): boolean {
   if (status !== undefined && Number.isFinite(status)) {
     return status >= 500 && status < 600;
   }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
+  const rawCode = safeErrorProperty(error, "code");
+  const code = typeof rawCode === "string" ? rawCode : undefined;
   if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
 }
 
-export function agentRunFailurePayload(error: unknown): {
-  error: string;
-  code?: string;
-  retryable?: boolean;
-  detail?: string;
-} {
-  const message = error instanceof Error ? error.message : String(error);
+export function agentRunFailurePayload(
+  error: unknown,
+  providerApi: ModelProviderApi = "responses",
+):
+  | ProviderInvalidContentFailurePayload
+  | { error: string; code?: string; retryable?: boolean; detail?: string } {
+  // Run the narrow secret-safe classifiers before reading generic SDK error
+  // fields: a status-less Responses APIError may expose hostile getters and its
+  // raw message/body must never be copied into the durable failure payload.
+  const providerInvalidContent =
+    providerApi === "responses" ? classifyProviderInvalidContentError(error) : null;
+  if (providerInvalidContent) {
+    return providerInvalidContentFailurePayload(providerInvalidContent);
+  }
+  const message = safeErrorMessage(error);
+  const rawStatus = safeErrorProperty(error, "status");
   const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
-      : undefined;
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
+    typeof rawStatus === "number"
+      ? rawStatus
+      : typeof rawStatus === "string" && /^\d{3}$/.test(rawStatus)
+        ? Number(rawStatus)
+        : undefined;
+  const rawCode = safeErrorProperty(error, "code");
+  const code = typeof rawCode === "string" ? rawCode : undefined;
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with

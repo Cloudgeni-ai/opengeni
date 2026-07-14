@@ -483,6 +483,144 @@ describe("worker restart resilience", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("paused");
   }, 180_000);
 
+  test("after provider invalid content, a restarted worker runs only a new user turn", async () => {
+    const grant = await testGrant();
+    const taskQueue = `invalid-content-restart-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      { error: providerInvalidContentApiError("req_restart_safe") },
+      { id: "invalid-restart-new-user", outputText: "continued after restart" },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const activities = createActivities({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "attempt once",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    await enqueueSessionMessageAtomically(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      actor: grant.subjectId,
+      origin: "human",
+      text: "attempt once",
+      resources: [],
+      tools: [],
+      delivery: "queue",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const client = new Client({ connection });
+    const workflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async (input) => {
+        await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId: input.workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+            },
+          ],
+          signal: "queueChanged",
+        });
+      },
+      signalApprovalDecision: async () => undefined,
+      signalSessionControl: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+
+    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const firstRun = firstWorker.run();
+    try {
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [
+          { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+        ],
+      });
+      await handle.result();
+    } finally {
+      firstWorker.shutdown();
+      await firstRun;
+    }
+    expect(model.calls).toBe(1);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    const afterInvalid = await listSessionEvents(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      0,
+      200,
+    );
+    expect(
+      afterInvalid.some(
+        (event) =>
+          event.type === "turn.failed" &&
+          (event.payload as { code?: unknown }).code === "provider_invalid_content",
+      ),
+    ).toBe(true);
+
+    // No worker is alive and no original-trigger work is queued. This explicit
+    // human message creates the only next turn before a fresh worker starts.
+    await postUserMessageTurn({
+      db: dbClient.db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "continue from the checkpoint",
+      resources: [],
+      tools: [],
+    });
+    const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const secondRun = secondWorker.run();
+    try {
+      await waitFor(async () => model.calls === 2);
+      await waitFor(
+        async () =>
+          (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle",
+      );
+    } finally {
+      secondWorker.shutdown();
+      await secondRun;
+    }
+
+    expect(model.calls).toBe(2);
+    const continuationRequest = JSON.stringify(
+      (model.requests.at(-1) as { input?: unknown })?.input ?? "",
+    );
+    expect(continuationRequest).toContain("continue from the checkpoint");
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).map(
+        (turn) => turn.status,
+      ),
+    ).toEqual(["failed", "completed"]);
+  }, 180_000);
+
   test("a failed session accepts a new user message and revives from stored items", async () => {
     const grant = await testGrant();
     const taskQueue = `failed-revival-${crypto.randomUUID()}`;
@@ -691,4 +829,18 @@ async function restartTestWorker(
       turns.shutdown();
     },
   };
+}
+
+function providerInvalidContentApiError(requestId: string): Error {
+  const error = new Error(
+    "The model produced invalid content. raw provider payload must not persist",
+  );
+  Object.assign(error, {
+    name: "APIError",
+    status: undefined,
+    request_id: requestId,
+    type: "invalid_request_error",
+    code: "invalid_content",
+  });
+  return error;
 }

@@ -24,6 +24,15 @@ contract for that capability. The first non-OpenAI provider shipped against it i
   **without** touching the global default client or forking the SDK. Concurrent
   multi-provider works out of the box.
 
+Responses and Chat providers intentionally have different terminal error
+classification. The worker recognizes the forensically verified status-less
+Responses invalid-content `APIError` only on a resolved `responses` wire and
+only with a bounded allow-listed provider request id. A Chat provider with the
+same message text does not match. The safe failure event contains no raw body,
+headers, prompt, tool output, or transcript, and recovery starts a new turn only
+after the exact attempt's conversation truth is durably checkpointed; the
+accepted provider request is never replayed.
+
 ### Why Fireworks uses the `chat` wire API (not Responses)
 
 Live probing of Fireworks (2026-06) showed its beta `/v1/responses` echoes the user
