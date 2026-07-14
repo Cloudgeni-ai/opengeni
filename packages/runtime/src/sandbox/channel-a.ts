@@ -742,7 +742,7 @@ export class SandboxChannelAService {
       const command = [
         `timeout 15s bash -lc ${shellQuote(discovery)}`,
         "status=$?",
-        `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' \"$status\"`,
+        `printf '\\n${REPOSITORY_DISCOVERY_STATUS_PREFIX}%s\\n' "$status"`,
         'exit "$status"',
       ].join("; ");
       const { stdout } = await this.run({
