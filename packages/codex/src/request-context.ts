@@ -30,6 +30,34 @@ export type CodexUsageHeaderSnapshot = {
   checkedAt: Date;
 };
 
+export type CodexResponseTimeoutClass = "connect" | "headers" | "idle_stream" | "whole_request";
+
+export type CodexResponseTimeoutPolicy = {
+  /** Maximum wait for response headers, including DNS/TCP/TLS establishment. */
+  headersTimeoutMs: number;
+  /** Maximum silence between response-body chunks after headers arrive. */
+  streamIdleTimeoutMs: number;
+  /** Maximum wall time for one logical Responses request, including retries. */
+  wholeRequestTimeoutMs: number;
+  /** Safe retries allowed only before any response headers/body are observed. */
+  noByteRetries: number;
+  retryBackoffMs: number;
+};
+
+export type CodexModelRequestEvent = {
+  requestId: string;
+  transportAttempt: number;
+  phase: "started" | "headers" | "first_byte" | "completed" | "failed" | "timed_out";
+  model?: string;
+  durationMs: number;
+  responseObserved: boolean;
+  timeoutPolicy: CodexResponseTimeoutPolicy;
+  timeoutClass?: CodexResponseTimeoutClass;
+  providerRequestId?: string;
+  status?: number;
+  willRetry?: boolean;
+};
+
 export type CodexRequestContext = {
   clientVersion: string;
   /**
@@ -58,6 +86,12 @@ export type CodexRequestContext = {
    * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
    */
   onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
+  /** Optional per-run override, primarily for deterministic transport tests. */
+  responseTimeoutPolicy?: Partial<CodexResponseTimeoutPolicy>;
+  /** Worker-owned durable audit sink; payloads never contain request bodies or auth. */
+  onModelRequestEvent?: (event: CodexModelRequestEvent) => Promise<void> | void;
+  /** Stable request identity supplied by the owning durable execution. */
+  nextRequestId?: () => string;
 };
 
 export const codexRequestStorage = new AsyncLocalStorage<CodexRequestContext>();

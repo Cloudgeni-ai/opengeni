@@ -140,6 +140,7 @@ import {
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
   CodexReloginRequired,
+  classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
@@ -2471,6 +2472,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Build it once and wrap BOTH the compaction summarizer (a separate model
       // call on the same codex client) and the main run; otherwise the summarizer
       // would hit the codex backend unauthenticated.
+      let codexModelRequestSequence = 0;
       const codexContext: CodexRequestContext | null =
         resolvedModel?.provider.kind === "codex-subscription"
           ? ((): CodexRequestContext => {
@@ -2501,6 +2503,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                onModelRequestEvent: async (event) => {
+                  if (!publish || !turnId) {
+                    throw new Error("Codex model request started before the turn event producer");
+                  }
+                  await publish([
+                    {
+                      type: "agent.model.request",
+                      payload: {
+                        ...event,
+                        provider: "codex-subscription",
+                        turnId,
+                        attemptId: input.attemptId,
+                        dispatchId,
+                        executionGeneration,
+                      },
+                    },
+                  ]);
+                },
               };
             })()
           : null;
@@ -4922,7 +4943,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // ops channel between goals) must never go terminal because the
       // provider had a bad minute -- a failed session would reject the very
       // retry message the failure asks for.
-      const failure = agentRunFailurePayload(error);
+      const failure = agentRunFailurePayload(error, { isCodexTurn });
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
@@ -5307,11 +5328,17 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
-export function agentRunFailurePayload(error: unknown): {
+export function agentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): {
   error: string;
   code?: string;
   retryable?: boolean;
   detail?: string;
+  timeoutClass?: string;
+  responseObserved?: boolean;
+  requestId?: string;
 } {
   const message = error instanceof Error ? error.message : String(error);
   const status =
@@ -5335,6 +5362,22 @@ export function agentRunFailurePayload(error: unknown): {
   const usageLimit = classifyCodexUsageLimitError(error);
   if (usageLimit) {
     return codexUsageLimitFailurePayload(usageLimit, message);
+  }
+  const codexTimeout = classifyCodexResponseTimeoutError(error, {
+    allowLegacyRequestTimeout: options.isCodexTurn === true,
+  });
+  if (codexTimeout) {
+    return {
+      error: codexTimeout.responseObserved
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed; continuation must re-check side effects before doing more work."
+        : "The Codex response timed out before any response was observed. The session can continue safely.",
+      code: "codex_response_timeout",
+      retryable: true,
+      timeoutClass: codexTimeout.timeoutClass,
+      responseObserved: codexTimeout.responseObserved,
+      ...(codexTimeout.requestId ? { requestId: codexTimeout.requestId } : {}),
+      ...(codexTimeout.message ? { detail: codexTimeout.message } : {}),
+    };
   }
   const mcpTimeout = classifyMcpTransportTimeoutError(error);
   if (mcpTimeout) {

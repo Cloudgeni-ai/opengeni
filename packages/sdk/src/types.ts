@@ -518,6 +518,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
   "agent.updated",
