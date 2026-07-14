@@ -39,6 +39,7 @@ import {
   mergeSessionContinuation,
   sessionPageKey,
 } from "@/lib/session-pagination";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import { applySessionPinProjection, subscribeToSessionPinChanges } from "@/lib/session-pins";
 import {
@@ -94,6 +95,11 @@ export function SessionList() {
   const loadMoreAttempt = useRef(0);
   const loadMoreError = activeContinuation.failed;
   const [announcement, setAnnouncement] = useState("");
+  const pinAnnouncementSequence = useRef(0);
+  const announcePinResult = useCallback((message: string) => {
+    pinAnnouncementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, pinAnnouncementSequence.current));
+  }, []);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -247,7 +253,7 @@ export function SessionList() {
         }
         await refresh();
         const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
-        setAnnouncement(
+        announcePinResult(
           updated
             ? `${nextPinned ? "Pinned" : "Unpinned"} ${label}.`
             : `${label} was not ${nextPinned ? "pinned" : "unpinned"}. Server state refreshed.`,
@@ -263,7 +269,7 @@ export function SessionList() {
         });
       }
     },
-    [context, refresh],
+    [announcePinResult, context, refresh],
   );
 
   const loadMore = useCallback(async () => {

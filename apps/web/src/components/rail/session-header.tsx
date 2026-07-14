@@ -11,7 +11,7 @@ import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { LockIcon, PanelRightIcon, PencilIcon, PinIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { SpawnedByBreadcrumb } from "@/components/session/subagents";
@@ -21,6 +21,7 @@ import {
   sessionDisplayTitle,
   useInlineRename,
 } from "@/lib/session-rename";
+import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import type { Session } from "@/types";
 
 export function SessionHeader({
@@ -133,6 +134,11 @@ function SessionPinButton({
 }) {
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const announcementSequence = useRef(0);
+  const announce = useCallback((message: string) => {
+    announcementSequence.current += 1;
+    setAnnouncement(pinLiveAnnouncement(message, announcementSequence.current));
+  }, []);
   return (
     <>
       <Button
@@ -149,14 +155,14 @@ function SessionPinButton({
           setBusy(true);
           void onPin(session, nextPinned)
             .then((updated) => {
-              setAnnouncement(
+              announce(
                 updated
                   ? `Session ${nextPinned ? "pinned" : "unpinned"}.`
                   : `Session was not ${nextPinned ? "pinned" : "unpinned"}.`,
               );
             })
             .catch(() => {
-              setAnnouncement(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
+              announce(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
             })
             .finally(() => setBusy(false));
         }}
