@@ -233,6 +233,15 @@ SELECT
 FROM "session_turns" t
 WHERE t."status" = 'queued' AND t."source" IN ('scheduled_task','system');
 
+-- The delivered-turn FK above is INITIALLY DEFERRED because normal runtime
+-- fan-in may preallocate an update and its delivered turn in one transaction.
+-- This migration still has table-level DDL below (RLS, constraints, indexes).
+-- PostgreSQL refuses ALTER TABLE while a table has pending deferred constraint
+-- triggers, even when every inserted delivered_turn_id is NULL. Settle the
+-- migration's own inserts now; this changes only this transaction's constraint
+-- mode and leaves the declared runtime default deferred.
+SET CONSTRAINTS ALL IMMEDIATE;
+
 UPDATE "session_turns"
 SET "status" = 'superseded',
     "cancelled_by" = 'control-plane-cutover',

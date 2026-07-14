@@ -26,6 +26,7 @@
     "db:migrate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run migrate",
     "db:provision-roles": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run provision-roles",
     "db:generate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run generate",
+    "operator:session-control-cutover": "bun scripts/operator/session-control-cutover.ts",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
     "typecheck": "bun scripts/typecheck.ts",

@@ -38,11 +38,14 @@ const execFileAsync = promisify(execFile);
 // handle used to seed accounts/workspaces (bypassing RLS).
 // ---------------------------------------------------------------------------
 
-const CONTAINER = "opengeni-shared-test-pg";
 // Keep the fixed cross-process listener outside Linux's default ephemeral client
 // range (32768-60999). A long-lived outbound HTTPS connection can otherwise own
 // the same source port and make Docker fail before PostgreSQL ever starts.
 const PORT = 61440;
+// The container and lock identities include the listener contract. Otherwise a
+// long-lived container created by an older worktree on another port can be
+// mistaken for this harness merely because its old name still exists.
+const CONTAINER = `opengeni-shared-test-pg-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";
@@ -93,7 +96,7 @@ async function templateDbName(): Promise<string> {
   return templateDbNameMemo;
 }
 
-const STATE_DIR = join(tmpdir(), "opengeni-shared-pg");
+const STATE_DIR = join(tmpdir(), `opengeni-shared-pg-${PORT}`);
 const LOCK_DIR = join(STATE_DIR, "lock");
 const REFCOUNT_FILE = join(STATE_DIR, "refcount");
 

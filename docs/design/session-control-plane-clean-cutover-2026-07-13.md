@@ -2,8 +2,9 @@
 
 > **Point-in-time design and execution record.** Written against OpenGeni commit
 > `65419ef9` plus its uncommitted OPE-18/OPE-22 worktree on 2026-07-13, Codex CLI
-> `0.144.3` / upstream tag `rust-v0.144.3` at
-> `78ad6e6bfd1d3b6a209acd3ef82172a96b25179c`, and the production fleet then
+> `0.144.4` / upstream tag `rust-v0.144.4` at
+> `8c68d4c87dc54d38861f5114e920c3de2efa5876` (re-verified 2026-07-14; the
+> 0.144.3→0.144.4 diff does not touch local/remote compaction), and the production fleet then
 > serving `21e21cb209b26627a78d7177f01b9793dc1e6001`. Paths and names may move. The
 > shipped code and canonical current-tier docs win after this cutover.
 
@@ -32,7 +33,7 @@ OpenGeni will have one small, truthful control model:
   persisted by the server. Goal and agent pills remain compact siblings in that
   composer stack, outside the queue.
 - Codex compaction uses one portable plaintext implementation derived from the
-  official Codex 0.144.3 local compaction path. It works across independently
+  official Codex 0.144.4 local compaction path. It works across independently
   authenticated Codex subscriptions without a bridge, account pin, or fallback.
 - A production deploy pauses admission, drains current work to durable checkpoints,
   replaces the old runtime in one direction, wakes all claimable work, and proves
@@ -46,18 +47,18 @@ application.
 
 ## 2. Terms used in the product and code
 
-| Term | Exact meaning |
-| --- | --- |
-| Prompt queue | Human-submitted prompts waiting to start inference. |
-| Current inference | The one logical turn that has started, including a temporarily recovering or capacity-waiting attempt. It is not in the queue. |
-| Send | Append a prompt to the queue and wake the session if runnable. |
-| Steer | Put a prompt first and cancel/supersede the current inference. If none is running, it is simply a front insertion plus wake. |
-| Pause | Make the session ineligible to infer and interrupt current model/tool work. Waiting prompts remain waiting. |
-| Resume | Make a paused session eligible again and continue its interrupted current inference before claiming queued prompts. |
-| Internal update | Durable typed information produced by schedules, subagents, runtime events, or other platform work. It is not a prompt queue entry. |
-| Recovery attempt | A new worker attempt for the same current inference after worker death, deploy drain, or infrastructure preemption. |
-| Compaction | Model-generated compression of active history inside the same inference loop. |
-| Late event | Output from an attempt that no longer owns the inference. It is preserved as inert diagnostic evidence and cannot change live state. |
+| Term              | Exact meaning                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Prompt queue      | Human-submitted prompts waiting to start inference.                                                                                  |
+| Current inference | The one logical turn that has started, including a temporarily recovering or capacity-waiting attempt. It is not in the queue.       |
+| Send              | Append a prompt to the queue and wake the session if runnable.                                                                       |
+| Steer             | Put a prompt first and cancel/supersede the current inference. If none is running, it is simply a front insertion plus wake.         |
+| Pause             | Make the session ineligible to infer and interrupt current model/tool work. Waiting prompts remain waiting.                          |
+| Resume            | Make a paused session eligible again and continue its interrupted current inference before claiming queued prompts.                  |
+| Internal update   | Durable typed information produced by schedules, subagents, runtime events, or other platform work. It is not a prompt queue entry.  |
+| Recovery attempt  | A new worker attempt for the same current inference after worker death, deploy drain, or infrastructure preemption.                  |
+| Compaction        | Model-generated compression of active history inside the same inference loop.                                                        |
+| Late event        | Output from an attempt that no longer owns the inference. It is preserved as inert diagnostic evidence and cannot change live state. |
 
 Do not use `item` as a vague user-facing synonym. Say prompt, current inference,
 update, goal, agent, or event.
@@ -175,7 +176,7 @@ diagnostics while preventing them from entering authoritative history or live ou
 
 ### 3.4 Why the old compaction assumption can lose memory on account rotation
 
-Exact Codex 0.144.3 remote compaction v2 sends structured history plus a
+Exact Codex 0.144.4 remote compaction v2 sends structured history plus a
 `CompactionTrigger` through the normal Responses stream and receives exactly one
 `ResponseItem::Compaction`. That item has encrypted content but no plaintext summary.
 The serde alias `compaction_summary` names the item type; it is not a `summary` field.
@@ -191,7 +192,7 @@ pinned to the account that is most likely to be exhausted. A bridge would requir
 more full-context call on that exhausted account, and a plaintext shadow would create a
 second compaction truth forever. All are rejected.
 
-### 3.5 Exact Codex 0.144.3 baseline
+### 3.5 Exact Codex 0.144.4 baseline
 
 For the currently selected Codex model metadata:
 
@@ -412,7 +413,7 @@ Delete the current `auto/server/client/off` ladder, server `context_management` 
 rendered-transcript summarizer, hard-trim second pass, deterministic non-model fallback,
 and any persistence/sanitizer branch that expects a portable remote `compaction` item.
 
-Implement the official Codex 0.144.3 local algorithm as the sole OpenGeni compaction
+Implement the official Codex 0.144.4 local algorithm as the sole OpenGeni compaction
 path for Codex subscriptions, OpenAI API-key models, and registry providers that use
 this agent runtime:
 
@@ -529,7 +530,7 @@ implementations are forbidden.
 - Fake resume user messages and fake compaction/requeue notices.
 - Private-ops `legacy|durable_v1` manifests, reverse conversion, rollback job, staging
   gate for this release, and any runtime switch that can re-enable old semantics.
-- Stale Codex client version `0.144.1`; pin/update to exact latest stable `0.144.3` with
+- Stale Codex client version `0.144.1`; pin/update to exact latest stable `0.144.4` with
   source provenance and tests.
 
 Before deletion, inspect every caller and migrate it to the target concept. “Delete” does
@@ -731,7 +732,7 @@ new fake user message, regress its goal, or remain owned by the old revision.
 
 ### Compaction
 
-- Golden tests against Codex 0.144.3 local history construction, prompt/prefix constants,
+- Golden tests against Codex 0.144.4 local history construction, prompt/prefix constants,
   20k retention, boundary truncation, initial-context placement, and overflow retry.
 - 272k raw / 258.4k effective / 244.8k auto threshold resolution for current Codex model.
 - pre-turn, mid-turn, repeated multi-call, manual active, and manual idle cases.
@@ -779,7 +780,7 @@ temporary runtime fallback.
    update/goal continuation; no machine queue work.
 5. **Attempt ownership and recovery**: generation/attempt fences, interrupted tool result,
    rejected-late diagnostics, graceful deploy checkpoint.
-6. **Codex 0.144.3 compaction**: official local semantics, allocator integration,
+6. **Codex 0.144.4 compaction**: official local semantics, allocator integration,
    transactional history replacement, removal of all alternate paths.
 7. **Workspace control**: pause generation, explicit per-session run, removal of kill and
    fan-out state rewriting.
@@ -801,7 +802,7 @@ Update existing OpenGeni issues rather than creating duplicates:
 - **OPE-9** tracks the single composer queue UI and delete-only prompt interaction; remove
   edit/reorder/send-now requirements.
 - **OPE-21** tracks portable official-local compaction and subscription-rotation proof.
-- **OPE-25** tracks the production-only one-way maintenance cutover and full session
+- Private ops tracks the production-only one-way maintenance cutover and full session
   continuity reconciliation; remove permanent expand/contract/rollback and staging gate.
 - **OPE-6** tracks compact goal presentation and continuation outside the queue.
 - Link archived **OPE-22** as the incident/evidence source for zombie settlement and retain
