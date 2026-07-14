@@ -153,6 +153,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-cold",
       backendOverride: "local",
+      createPolicy: "disposable",
     });
     expect(established.backendId).toBe("unix_local");
     expect(established.session).toBeDefined();
@@ -167,6 +168,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-override",
       backendOverride: "local",
+      createPolicy: "disposable",
     });
     expect(established.backendId).toBe("unix_local");
     await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
@@ -203,6 +205,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
       sessionId: "sess-env",
       backendOverride: "local",
       environment: sandboxEnvironment,
+      createPolicy: "disposable",
     });
     try {
       const boxManifest = (
@@ -236,19 +239,43 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
   });
 
-  test("box-gone phrasing -> NotFound", () => {
-    expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
-      true,
-    );
+  test("typed provider codes and the exact Modal SDK gone grammar -> NotFound", () => {
     expect(
-      isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
     ).toBe(true);
-    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
-      true,
-    );
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb_123 is no longer running."),
+      ),
+    ).toBe(true);
     expect(
       isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
     ).toBe(true);
+  });
+
+  test("generic gone-looking text and transient transport are NOT provider identity evidence", () => {
+    expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
+      false,
+    );
+    expect(
+      isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
+    ).toBe(false);
+    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
+      false,
+    );
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "ENOTFOUND",
+        message: "getaddrinfo ENOTFOUND api.modal.com",
+      }),
+    ).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { code: "UNAVAILABLE", status: 14 })).toBe(
+      false,
+    );
   });
 
   test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {

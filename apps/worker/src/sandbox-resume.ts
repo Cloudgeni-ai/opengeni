@@ -52,6 +52,7 @@ import {
   type RuntimeMetricsHooks,
 } from "@opengeni/runtime";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { establishWarmLeaseSandbox } from "@opengeni/core";
 
 export { DESKTOP_STREAM_PORT };
 
@@ -481,6 +482,7 @@ export async function resumeBoxForTurn(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let checkpointedInstanceId: string | null = null;
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
@@ -498,6 +500,7 @@ export async function resumeBoxForTurn(
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+        createPolicy: "lease_owner",
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           const resumeEnvelope = preserveWorkspaceArchiveOnInterimResumeState(
@@ -509,6 +512,7 @@ export async function resumeBoxForTurn(
             workspaceId: ids.workspaceId,
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
+            expectedPriorInstanceId: checkpointedInstanceId,
             instanceId: created.instanceId,
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
@@ -520,6 +524,7 @@ export async function resumeBoxForTurn(
           if (!recorded.recorded) {
             throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
           }
+          checkpointedInstanceId = created.instanceId;
           if (created.backendId === "modal") {
             await tagModalSandbox(settings, created.instanceId, {
               leaseId: acquired.lease.id,
@@ -546,11 +551,17 @@ export async function resumeBoxForTurn(
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch,
+        expectedWarmingInstanceId: established.instanceId,
         instanceId: established.instanceId,
         dataPlaneUrl: endpoint?.url ?? null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
         leaseTtlMs,
+        // Epoch 0 is the target's first materialization. Any later cold/image/
+        // rig rematerialization replaces the SAME logical home target, so the
+        // lease bump and every null/home route-cache epoch must advance in the
+        // same transaction.
+        ...(expectedEpoch > 0 ? { advanceActiveRoute: { targetSandboxId: null } } : {}),
       });
       if (!committed.committed || !committed.lease) {
         // A reaper reset our warming row (we were too slow) or a sibling
@@ -560,6 +571,10 @@ export async function resumeBoxForTurn(
         await terminateEstablishedSandbox(established);
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+      }
+      if (holderLivenessTimer) {
+        clearInterval(holderLivenessTimer);
+        holderLivenessTimer = undefined;
       }
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
@@ -580,6 +595,7 @@ export async function resumeBoxForTurn(
           workspaceId: ids.workspaceId,
           sandboxGroupId: ids.sandboxGroupId,
           expectedEpoch,
+          expectedInstanceId: checkpointedInstanceId,
         });
       }
       await release();
@@ -611,12 +627,30 @@ export async function resumeBoxForTurn(
     const live = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     const envelope =
       live?.resumeState ?? (await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId));
-    const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
-      sessionId: ids.sessionId,
-      backendOverride: ids.backend as never,
+    if (!live) {
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, leaseEpoch);
+    }
+    const resumed = await establishWarmLeaseSandbox({
+      db,
+      settings,
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      lifecycleSessionId: ids.sessionId,
+      backend: ids.backend,
       ...(ids.environment ? { environment: ids.environment } : {}),
+      initialLease: live,
+      fallbackEnvelope: envelope,
+      route: { targetSandboxId: null },
       ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+      prepareReplacement: async (replacement) => {
+        await ensureDisplayStack(settings, replacement);
+        const endpoint = await exposeStreamPort(settings, replacement);
+        return { dataPlaneUrl: endpoint?.url ?? null };
+      },
     });
+    const established = resumed.established;
+    leaseEpoch = resumed.lease.leaseEpoch;
     // Re-ensure the desktop display stack on the ATTACHED/REARMED path too — NOT
     // just the spawner path. A turn attaching to a warm box whose :0 was never
     // brought up (the box was first warmed by a Channel-A op, or a snapshot
@@ -627,6 +661,10 @@ export async function resumeBoxForTurn(
     // NO-OPs when the desktop tier is off or the backend is headless-only, so the
     // headless turn path stays byte-for-byte unchanged.
     await ensureDisplayStack(settings, established);
+    if (holderLivenessTimer) {
+      clearInterval(holderLivenessTimer);
+      holderLivenessTimer = undefined;
+    }
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();

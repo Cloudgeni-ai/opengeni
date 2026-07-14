@@ -7,8 +7,9 @@
 // sessionId claim). The swap is the epoch-fenced CAS `setActiveSandbox`: it bumps
 // active_epoch + repoints active_sandbox_id, which the routing proxy reads on the
 // NEXT tool call. Liveness for a selfhosted target is a real ControlRpc ping over
-// the events bus (the subject IS the registry); a Modal box is "live" while its
-// session group exists. `run_on` builds a one-off backend session and runs a
+// the events bus (the subject IS the registry); Modal liveness comes from an
+// unexpired target-owned lease (warming/materializing, warm/runnable, or
+// cold/expired offline). `run_on` builds a one-off backend session and runs a
 // single op WITHOUT touching the active pointer.
 
 import type { Settings } from "@opengeni/config";
@@ -16,11 +17,13 @@ import {
   getEnrollment,
   getSandbox,
   listSandboxes,
+  readLease,
   readActiveSandbox,
   requireSession,
   setActiveSandbox,
   type Database,
   type EnrollmentRecord,
+  type LeaseSnapshot,
   type SandboxRecord,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
@@ -132,6 +135,15 @@ export type FleetSwapResult = {
 
 const PROBE_TIMEOUT_MS = 5_000;
 
+function modalLeaseFleetLiveness(lease: LeaseSnapshot | null, nowMs: number): FleetLiveness {
+  // The liveness enum alone is not enough between reaper passes: an expired
+  // warm/warming row is no longer a truthful runnable/materializing signal.
+  if (!lease || lease.expiresAt.getTime() <= nowMs) return "offline";
+  if (lease.liveness === "warming") return "reconnecting";
+  if (lease.liveness === "warm" || lease.liveness === "draining") return "online";
+  return "offline";
+}
+
 function controlRpc(bus: EventBus | undefined): ControlRpc {
   return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
     if (!bus) {
@@ -198,28 +210,51 @@ export async function listFleet(
   };
 
   const entries: FleetSandboxEntry[] = [];
+  const nowMs = Date.now();
 
   // The session's own group box (the default/home sandbox; null active pointer ==
-  // this box). It is live by virtue of being the session's resumable group.
+  // this box). Derive liveness from its lease — never hard-code online. A stale
+  // heartbeat / cold lease is offline and not attachable; warming is
+  // reconnecting/materializing; warm or rearmable draining is runnable.
   const groupActive = pointer.activeSandboxId === null;
+  const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
+  const groupLiveness = modalLeaseFleetLiveness(groupLease, nowMs);
   entries.push({
     id: ctx.sessionGroupId,
     kind: ctx.sessionBackend === "selfhosted" ? "selfhosted" : "modal",
     name: "session sandbox",
-    liveness: "online",
+    liveness: groupLiveness,
     active: groupActive,
     isSessionGroup: true,
     enrollmentId: null,
-    attachable: true,
+    // A never-materialized home is still a clean cold start. An existing cold
+    // lease, however, is explicit offline truth (including stale-heartbeat
+    // eviction) and must not be presented as currently attachable.
+    attachable: groupLiveness === "online" || groupLease === null,
   });
 
   // The workspace's first-class selfhosted sandboxes (enrolled machines). Probe
   // each for liveness; a missing enrollment is offline.
   const sandboxes = await listSandboxes(db, ctx.workspaceId);
   for (const sandbox of sandboxes) {
-    if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+    if (sandbox.kind === "modal") {
+      const lease = await readLease(db, ctx.workspaceId, sandbox.id);
+      const liveness = modalLeaseFleetLiveness(lease, nowMs);
+      entries.push({
+        id: sandbox.id,
+        kind: "modal",
+        name: sandbox.name,
+        liveness,
+        active: pointer.activeSandboxId === sandbox.id,
+        isSessionGroup: false,
+        enrollmentId: null,
+        // No lease means a clean target-owned cold start. An existing cold row
+        // is an explicit offline lifecycle that must recover before attachable.
+        attachable: liveness === "online" || lease === null,
+      });
       continue;
     }
+    if (!sandbox.enrollmentId) continue;
     const enrollment = await getEnrollment(db, ctx.workspaceId, sandbox.enrollmentId);
     const probe = enrollment
       ? await probeEnrollment(services, ctx.workspaceId, enrollment)
@@ -520,10 +555,8 @@ export async function provisionSandbox(
       note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
     };
   }
-  // modal: create a first-class named modal sandbox record. NOTE: a session cannot
-  // yet be swapped onto a second Modal box — cross-group Modal routing is not built,
-  // so `sandbox_swap` to this id is rejected (unsupported_backend_context). The
-  // response says so plainly rather than implying an attach that does not work.
+  // modal: create a first-class named Modal target. Its UUID is also its target-
+  // owned lease/envelope identity; the box materializes lazily after a swap.
   const { createSandbox } = await import("@opengeni/db");
   const sandbox = await createSandbox(services.db, {
     accountId: ctx.accountId,
@@ -534,6 +567,6 @@ export async function provisionSandbox(
   return {
     kind: "modal",
     sandbox,
-    note: "A named Modal sandbox record was created, but it is NOT yet attachable as a swap target: routing a session onto a second Modal box is not supported yet, so a sandbox_swap to this id is rejected. Use the session's own box (the default) or attach a Connected Machine instead.",
+    note: "A named Modal sandbox was created. It materializes lazily under its own lifecycle when first selected; no calling session home envelope is reused.",
   };
 }

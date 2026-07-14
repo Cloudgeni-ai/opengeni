@@ -29,7 +29,11 @@ import {
   pointerReconcileReason,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRetryRecovery,
+  classifyProviderInvalidContentError,
+  providerInvalidContentFailurePayload,
+  providerInvalidContentRecoveryPlan,
   resolveActiveSandboxBackend,
+  evictOnFalseSandboxLeaseHeartbeat,
   shouldStartOnTurnRecording,
 } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
@@ -735,11 +739,10 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     ).toBeUndefined();
   });
 
-  test("returns undefined when the active swap target is itself a cloud (modal) box", async () => {
-    // A swap to a sibling cloud box is still cloud — the clone hook stays enabled.
-    expect(
-      await resolveActiveSandboxBackend(true, selfhostedPointer, async () => "modal"),
-    ).toBeUndefined();
+  test("returns 'modal' when the active swap target is a target-owned Modal box", async () => {
+    expect(await resolveActiveSandboxBackend(true, selfhostedPointer, async () => "modal")).toBe(
+      "modal",
+    );
   });
 
   test("never throws: a pointer-load failure falls back to the home backend default", async () => {
@@ -786,15 +789,233 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
   });
 });
 
+describe("sandbox lease heartbeat self-eviction", () => {
+  test("a resolved false aborts the stale turn/handle exactly once; current heartbeat does nothing", () => {
+    const controller = new AbortController();
+    let stops = 0;
+    const failure = evictOnFalseSandboxLeaseHeartbeat({
+      alive: false,
+      existingFailure: null,
+      sandboxGroupId: "group-old",
+      leaseEpoch: 7,
+      stopHeartbeat: () => {
+        stops += 1;
+      },
+      abort: (reason) => controller.abort(reason),
+    });
+    expect(failure).toMatchObject({ sandboxGroupId: "group-old", leaseEpoch: 7 });
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toBe(failure);
+    expect(stops).toBe(1);
+
+    const duplicate = evictOnFalseSandboxLeaseHeartbeat({
+      alive: false,
+      existingFailure: failure,
+      sandboxGroupId: "group-old",
+      leaseEpoch: 7,
+      stopHeartbeat: () => {
+        stops += 1;
+      },
+      abort: () => {
+        throw new Error("must not abort twice");
+      },
+    });
+    expect(duplicate).toBe(failure);
+    expect(stops).toBe(1);
+
+    expect(
+      evictOnFalseSandboxLeaseHeartbeat({
+        alive: true,
+        existingFailure: null,
+        sandboxGroupId: "group-current",
+        leaseEpoch: 8,
+        stopHeartbeat: () => {
+          throw new Error("current heartbeat must remain live");
+        },
+        abort: () => {
+          throw new Error("current heartbeat must not abort");
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("Responses provider invalid-content classifier", () => {
+  const prefix = "The model produced invalid content.";
+
+  function invalidContentError(overrides: Record<string, unknown> = {}) {
+    return Object.assign(new Error(`${prefix} raw provider text must never persist`), {
+      name: "APIError",
+      status: undefined,
+      request_id: "req_safe-123",
+      type: "invalid_request_error",
+      code: "invalid_content",
+      ...overrides,
+    });
+  }
+
+  test("matches only status-less Responses APIError and emits allow-listed fields", () => {
+    const error = invalidContentError({
+      body: { secret: "body-secret", nested: { prompt: "raw transcript" } },
+      headers: { authorization: "Bearer header-secret", "x-request-id": "not-used" },
+      response: { data: { request_id: "not-used" } },
+    });
+    const diagnostic = classifyProviderInvalidContentError(error);
+    expect(diagnostic).toEqual({
+      code: "provider_invalid_content",
+      phase: "responses_stream",
+      api: "responses",
+      providerRequestId: "req_safe-123",
+      providerErrorType: "invalid_request_error",
+      providerErrorCode: "invalid_content",
+    });
+    const payload = providerInvalidContentFailurePayload(diagnostic!);
+    expect(payload).toMatchObject({
+      code: "provider_invalid_content",
+      retryable: false,
+      phase: "responses_stream",
+      api: "responses",
+      providerRequestId: "req_safe-123",
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("raw provider text");
+    expect(serialized).not.toContain("body-secret");
+    expect(serialized).not.toContain("header-secret");
+    expect(serialized).not.toContain("raw transcript");
+    expect(agentRunFailurePayload(error)).toEqual(payload);
+    expect(agentRunFailurePayload(error, "chat")).toEqual({
+      error: "The model produced invalid content. raw provider text must never persist",
+    });
+  });
+
+  test("accepts bounded SDK/header request-ID spellings without copying other headers", () => {
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({ request_id: undefined, requestID: "req_sdk_upper" }),
+      )?.providerRequestId,
+    ).toBe("req_sdk_upper");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({ request_id: undefined, requestId: "req_sdk_camel" }),
+      )?.providerRequestId,
+    ).toBe("req_sdk_camel");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          request_id: undefined,
+          headers: { "X-ReQuEsT-Id": "req_header", authorization: "Bearer secret" },
+        }),
+      )?.providerRequestId,
+    ).toBe("req_header");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          request_id: undefined,
+          message: `${prefix} Request ID: req_message_suffix`,
+        }),
+      )?.providerRequestId,
+    ).toBe("req_message_suffix");
+  });
+
+  test("fails closed for near misses, unsafe IDs, status-bearing errors, and hostile getters", () => {
+    expect(classifyProviderInvalidContentError(invalidContentError({ status: 400 }))).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(invalidContentError({ name: "BadRequestError" })),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({ message: "the model produced invalid content." }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(invalidContentError({ request_id: "bad id" })),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(invalidContentError({ request_id: "x".repeat(129) })),
+    ).toBeNull();
+
+    const hostile = invalidContentError({ request_id: undefined });
+    Object.defineProperty(hostile, "request_id", {
+      get() {
+        throw new Error("getter must not escape");
+      },
+    });
+    Object.defineProperty(hostile, "headers", {
+      get() {
+        throw new Error("headers getter must not escape");
+      },
+    });
+    expect(() => classifyProviderInvalidContentError(hostile)).not.toThrow();
+    expect(classifyProviderInvalidContentError(hostile)).toBeNull();
+
+    for (let index = 0; index < 64; index += 1) {
+      const candidate = invalidContentError({
+        request_id: index % 2 === 0 ? `unsafe request ${index}` : undefined,
+        message: index % 3 === 0 ? `${prefix.slice(0, -1)}!` : `prefix ${prefix}`,
+        body: { request_id: `req_nested_${index}`, message: prefix },
+      });
+      expect(classifyProviderInvalidContentError(candidate)).toBeNull();
+    }
+  });
+
+  test("terminal payload classification reads no generic field before the secret-safe Responses classifier", () => {
+    const raw = "The model produced invalid content. customer payload must not survive";
+    const error = new Error(raw);
+    error.name = "APIError";
+    Object.defineProperties(error, {
+      status: {
+        get() {
+          return undefined;
+        },
+      },
+      request_id: { value: "req_safe_123", enumerable: true },
+      code: {
+        get() {
+          throw new Error("generic code getter must not run first");
+        },
+      },
+    });
+
+    const payload = agentRunFailurePayload(error, "responses");
+    expect(payload.code).toBe("provider_invalid_content");
+    expect(payload.error).not.toContain(raw);
+    expect(JSON.stringify(payload)).not.toContain("customer payload");
+  });
+
+  test("checkpoint failure forbids automatic goal continuation", () => {
+    expect(
+      providerInvalidContentRecoveryPlan({
+        checkpointSucceeded: false,
+        goalActive: true,
+        continuationDelayMs: 60_000,
+      }),
+    ).toEqual({
+      sessionStatus: "failed",
+      activityStatus: "failed",
+      recovery: "user_message",
+    });
+    expect(
+      providerInvalidContentRecoveryPlan({
+        checkpointSucceeded: true,
+        goalActive: true,
+        continuationDelayMs: 60_000,
+      }),
+    ).toEqual({
+      sessionStatus: "idle",
+      activityStatus: "idle",
+      recovery: "goal_continuation",
+      continueDelayMs: 60_000,
+    });
+  });
+});
+
 describe("turn-start pointer reconcile classification (issue #341 invariant B)", () => {
   test("an absent sandbox row (deleted target) → stale_pointer", () => {
     expect(pointerReconcileReason(null)).toBe("stale_pointer");
   });
 
-  test("a non-group Modal sibling → unsupported_backend_context (Shape 1)", () => {
-    expect(pointerReconcileReason({ kind: "modal", enrollmentId: null })).toBe(
-      "unsupported_backend_context",
-    );
+  test("a non-group Modal target is retained for the target-owned establisher", () => {
+    expect(pointerReconcileReason({ kind: "modal", enrollmentId: null })).toBeNull();
   });
 
   test("an unknown backend kind → unsupported_backend_context", () => {

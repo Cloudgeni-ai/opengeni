@@ -8,8 +8,10 @@
 //       cold->warming), establishes the box by id/cold-restore, commits warm
 //       (lease_epoch++), and returns a LIVE session; release() drops the holder
 //       and CASes warm->draining at refcount 0. NEVER stops the box.
-//   (2) a second concurrent turn ATTACHES to the same warm box (refcount fans in,
-//       still ONE box) — the stateless many-turns-one-box invariant.
+//   (2) a provider with no resumable instance identity returns typed gone and
+//       rematerializes only through the lease election; holders still fan in.
+//   (2a) a previously-used home target rematerialized from cold advances its
+//        sessions' active routing epoch together with the lease epoch.
 //   (3) epoch fence on the HEARTBEAT path under a forced re-establish: after a
 //       re-establish bumps lease_epoch, the OLD holder's heartbeat (stale epoch)
 //       is rejected (self-evicts) — the dead-URL/dead-handle fence.
@@ -25,8 +27,11 @@ import postgres from "postgres";
 import {
   acquireLease,
   commitWarmingToWarm,
+  confirmDrainCold,
   createDb,
+  createSession,
   heartbeatLeaseHolder,
+  readActiveSandbox,
   readLease,
   SandboxImageConflictError,
   type Database,
@@ -196,7 +201,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     expect(drained?.refcount).toBe(0);
   }, 60_000);
 
-  test("(2) a second turn ATTACHES to the same warm box (refcount fans in, ONE box)", async () => {
+  test("(2) identity-less local rematerialization is lease-elected and refcount still fans in", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -214,9 +219,10 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       "activity-B",
     );
     try {
-      // Both resolved against the SAME warm lease; the second attached (same
-      // epoch — no re-spawn). refcount fanned in to 2 turn holders.
-      expect(first.leaseEpoch).toBe(second.leaseEpoch);
+      // unix_local has no provider resume id, so the typed missing-identity path
+      // rematerializes under warm->warming election and advances the lease epoch
+      // instead of silently creating under a warm lease. Holders still fan in.
+      expect(second.leaseEpoch).toBe(first.leaseEpoch + 1);
       const row = await readRow(workspaceId, groupId);
       expect(row?.liveness).toBe("warm");
       expect(row?.turn_holders).toBe(2);
@@ -230,6 +236,52 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // both released -> draining.
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("draining");
+  }, 60_000);
+
+  test("(2a) cold rematerialization of the same home target advances active_epoch with lease_epoch", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "home rematerialization",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      sandboxBackend: "local",
+    });
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      sessionId: session.id,
+      backend: "local" as const,
+    };
+
+    const first = await resumeBoxForTurn({ db, settings }, ids, "turn", "activity-home-first");
+    expect((await readActiveSandbox(db, workspaceId, session.id))?.activeEpoch).toBe(0);
+    await first.release();
+    await dropSession(first.established);
+    expect(
+      (
+        await confirmDrainCold(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          expectedEpoch: first.leaseEpoch,
+        })
+      ).wentCold,
+    ).toBe(true);
+
+    const second = await resumeBoxForTurn({ db, settings }, ids, "turn", "activity-home-second");
+    try {
+      expect(second.leaseEpoch).toBe(first.leaseEpoch + 1);
+      expect((await readActiveSandbox(db, workspaceId, session.id))?.activeEpoch).toBe(1);
+    } finally {
+      await second.release();
+      await dropSession(second.established);
+    }
   }, 60_000);
 
   test("(3) epoch fence on the HEARTBEAT path: a re-establish bumps lease_epoch -> the stale holder's heartbeat is rejected (self-evicts)", async () => {

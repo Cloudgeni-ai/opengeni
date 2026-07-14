@@ -40,6 +40,7 @@ export * from "./managed-auth-type";
 // fleet tools, the machines REST route, and the rest of the sandbox layer.
 export * from "./sandbox/fleet";
 export * from "./sandbox/routing";
+export * from "./sandbox/modal-lifecycle";
 
 // Access layer (transport-neutral grant resolution + permission checks).
 export * from "./access";

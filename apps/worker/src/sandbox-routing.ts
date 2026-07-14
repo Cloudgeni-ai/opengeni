@@ -24,6 +24,7 @@ import {
   NatsOpStreamTransport,
   RoutingSandboxSession,
   type ControlRpc,
+  type ActivePointer,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
   type RoutableBackendSession,
@@ -85,6 +86,14 @@ export type RoutingWiringIds = {
    * (home IS the machine) passes true.
    */
   defaultIsHome?: boolean;
+  /** Target-owned named Modal establisher. Required at the worker construction
+   * boundary so admission cannot flip before every real resolver can establish a
+   * named target. It acquires `sandboxes.id`'s own lease and never reads the
+   * calling session's home envelope. */
+  establishModalTarget: (
+    sandbox: RoutableSandbox,
+    pointer: ActivePointer,
+  ) => Promise<RoutableBackendSession>;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -199,12 +208,7 @@ export function wrapTurnBoxWithRouting(
           },
         }
       : {}),
-    // A modal swap target in the turn path would need its own lease resume-by-id;
-    // that is a future cross-group-box concern. Until then a modal swap target is
-    // unresolvable (the swap tool validates liveness, so this only triggers if a
-    // session points at a sibling modal box the turn cannot resume here) and the
-    // op surfaces unresolvable — never a silent wrong-box landing.
-    //
+    establishModalTarget: ids.establishModalTarget,
     // For a machine-primary turn of a Modal-HOME session (pinned to a machine, no
     // group box established this turn), a mid-turn clear-to-null must NOT fall back to
     // the pinned machine — passing defaultIsHome:false makes the null branch throw typed
@@ -268,6 +272,7 @@ export function wrapLazyTurnBoxWithRouting(
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
+    establishModalTarget: ids.establishModalTarget,
   });
 
   const proxy = new RoutingSandboxSession({

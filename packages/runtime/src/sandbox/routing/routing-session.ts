@@ -30,6 +30,7 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
+import { isProviderSandboxTransientError } from "../provider-errors";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -145,6 +146,95 @@ export class RoutingUnsupportedError extends Error {
   }
 }
 
+/** A mutating provider operation may have been accepted even though its reply
+ * was lost. This is a checkpoint/surface, not a retry ticket: callers must
+ * reconcile the exact provider execution id (when present) or ask the human to
+ * inspect state. Re-running the whole operation would duplicate effects. */
+export class SandboxMutationAcceptanceUnknownError extends Error {
+  readonly name = "SandboxMutationAcceptanceUnknownError";
+  readonly code = "sandbox_mutation_acceptance_unknown";
+  readonly outcome = "acceptance_unknown" as const;
+  readonly acceptance = "unknown" as const;
+  readonly checkpoint: {
+    op: string;
+    backend: string;
+    providerExecId: string | null;
+    acceptance: "unknown";
+  };
+
+  constructor(
+    public readonly op: string,
+    public readonly backend: string,
+    public readonly providerExecId: string | null,
+  ) {
+    super(
+      `The active sandbox may have accepted mutating operation "${op}" on ${backend}; it was not replayed because acceptance is unknown${providerExecId ? ` (provider exec id ${providerExecId})` : ""}. Reconcile the existing operation before retrying.`,
+    );
+    this.checkpoint = {
+      op,
+      backend,
+      providerExecId,
+      acceptance: "unknown",
+    };
+  }
+}
+
+/** The methods whose second invocation can duplicate a command/process/write,
+ * input event, model-visible tool output, or history effect. */
+export function isMutatingRoutingOperation(op: string): boolean {
+  return (
+    op === "exec" ||
+    op === "execCommand" ||
+    op === "writeStdin" ||
+    op === "writeFile" ||
+    op === "materializeEntry" ||
+    op === "desktopInput" ||
+    op.startsWith("editor.")
+  );
+}
+
+function providerExecIdFromError(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  for (const key of ["providerExecId", "execId", "executionId", "processId"]) {
+    let value: unknown;
+    try {
+      value = Reflect.get(error, key);
+    } catch {
+      continue;
+    }
+    if (
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 128 &&
+      /^[A-Za-z0-9._:-]+$/.test(value)
+    ) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function safeErrorProperty(error: object, key: string): unknown {
+  try {
+    return Reflect.get(error, key);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Typed proof that the operation was rejected before acceptance. PR #359's
+ * `neverSent` bit is one such proof; the selfhosted FENCED response is another
+ * because the agent rejects it at the epoch gate before host-work admission. */
+function isProvenNotAccepted(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if (safeErrorProperty(error, "neverSent") === true) return true;
+  if (safeErrorProperty(error, "nonAcceptanceProven") === true) return true;
+  if (error instanceof SelfhostedControlError && safeErrorProperty(error, "fenced") === true) {
+    return true;
+  }
+  return false;
+}
+
 /** Recognize a stale-epoch FENCE error from a backend op so the proxy retries
  *  against the re-resolved active sandbox (the existing fenced-retry role). A
  *  selfhosted `SelfhostedControlError` carries `.fenced`; a generic fence is
@@ -153,13 +243,13 @@ function isFenceError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  if ((error as { fenced?: unknown }).fenced === true) {
+  if (safeErrorProperty(error, "fenced") === true) {
     return true;
   }
-  const name =
-    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const message =
-    error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
+  const rawName = safeErrorProperty(error, "name");
+  const rawMessage = safeErrorProperty(error, "message");
+  const name = typeof rawName === "string" && rawName.length <= 128 ? rawName : "";
+  const message = typeof rawMessage === "string" && rawMessage.length <= 512 ? rawMessage : "";
   const haystack = `${name} ${message}`.toLowerCase();
   return haystack.includes("fenced") || (haystack.includes("epoch") && haystack.includes("super"));
 }
@@ -334,7 +424,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       try {
         return await fn(backend.session);
       } catch (error) {
-        if (!isFenceError(error)) {
+        const mutating = isMutatingRoutingOperation(op);
+        const fenced = isFenceError(error);
+        const transient = isProviderSandboxTransientError(backend.kind, error);
+        if (mutating && (transient || fenced) && !isProvenNotAccepted(error)) {
+          throw new SandboxMutationAcceptanceUnknownError(
+            op,
+            backend.kind,
+            providerExecIdFromError(error),
+          );
+        }
+        if (!fenced) {
           throw error;
         }
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so
@@ -497,19 +597,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   /** createEditor is a synchronous factory in the SDK surface. The SDK's filesystem
    *  capability calls it ONCE at tool-BIND time — `FilesystemCapability.tools()`,
    *  every turn, before any tool runs — and throws "Filesystem sandbox sessions must
-   *  provide createEditor()" if it returns falsy. When a backend is already resolved
-   *  (eager/selfhosted routing) we bind to its editor directly, byte-for-byte as
-   *  before. But under LAZY provisioning the backend is not established yet
-   *  (defaultResolved is the synthetic unprovisioned session with no editor), so a
-   *  direct delegate returns undefined and every lazy turn would die at bind. Return a
-   *  LAZY EDITOR PROXY instead: a non-null editor whose async ops resolve the active
-   *  backend (establishing the box on first use, via `dispatch`) and delegate to its
-   *  real editor — mirroring how this proxy defers exec/readFile. */
+   *  provide createEditor()" if it returns falsy. Always return an EDITOR PROXY,
+   *  including for eager backends: editor mutations must re-read the active pointer
+   *  and cross the same acceptance-unknown fence as exec/write/desktop input. Returning
+   *  an eager backend's editor directly would both pin mutations to the pre-swap box
+   *  and bypass the no-replay policy. The proxy also preserves lazy provisioning by
+   *  establishing the backend on first editor operation. */
   createEditor(runAs?: string): unknown {
-    const eager = (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
-    if (eager) {
-      return eager;
-    }
     const op =
       (name: "createFile" | "updateFile" | "deleteFile") =>
       (operation: unknown, context?: unknown): Promise<unknown> =>

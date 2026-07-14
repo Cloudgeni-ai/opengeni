@@ -38,6 +38,7 @@ import {
   heartbeatLeaseHolder,
   loadWorkspaceEnvironmentForRun,
   readLease,
+  recordWarmingSandboxCreated,
   recordLeaseDataPlaneUrl,
   recordLeaseTerminalDataPlaneUrl,
   releaseLeaseHolder,
@@ -70,8 +71,14 @@ import {
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
+  tagModalSandbox,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "@opengeni/core";
+import {
+  establishNamedModalTarget,
+  establishWarmLeaseSandbox,
+  relayConfigFromSettings,
+  terminateExactCreatedSandbox,
+} from "@opengeni/core";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -159,6 +166,50 @@ export async function sessionAttachEnvironment(
   return environment;
 }
 
+type ModalLeaseTarget = {
+  sandboxGroupId: string;
+  lifecycleSessionId: string;
+  targetSandboxId: string | null;
+};
+
+/** Resolve the provider lifecycle identity for the session's ACTIVE Modal
+ * target. A first-class named Modal sandbox owns a lease keyed by its own UUID
+ * and has no session/home envelope; null/home keeps the session group identity. */
+async function modalLeaseTarget(
+  db: Database,
+  workspaceId: string,
+  session: Session,
+): Promise<ModalLeaseTarget> {
+  if (session.activeSandboxId) {
+    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    if (!active) {
+      // The session snapshot explicitly named a target. A concurrent delete or
+      // stale pointer must not turn an API-direct viewer/stream call into a
+      // silent home-box operation.
+      throw new HTTPException(409, {
+        message: "the active sandbox target no longer exists; re-read the session route",
+      });
+    }
+    if (active.kind === "modal") {
+      return {
+        sandboxGroupId: active.id,
+        lifecycleSessionId: active.id,
+        targetSandboxId: active.id,
+      };
+    }
+    // Selfhosted callers must take the relay branch before reaching this Modal
+    // lifecycle resolver. Unknown/unsupported kinds fail closed as well.
+    throw new HTTPException(409, {
+      message: `the active sandbox target (${active.kind}) is not a Modal lease target`,
+    });
+  }
+  return {
+    sandboxGroupId: session.sandboxGroupId,
+    lifecycleSessionId: session.id,
+    targetSandboxId: null,
+  };
+}
+
 /**
  * Acquire a `viewer` holder on the group lease, spinning up the box IN-PROCESS
  * when cold. Mirrors the worker's resumeBoxForTurn spawner/attached branches,
@@ -175,7 +226,42 @@ export async function attachViewer(
   const { accountId, workspaceId, session } = input;
   const viewerId = input.viewerId ?? crypto.randomUUID();
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
-  const sandboxGroupId = session.sandboxGroupId;
+  const lifecycleTarget = await modalLeaseTarget(db, workspaceId, session);
+  const sandboxGroupId = lifecycleTarget.sandboxGroupId;
+
+  if (lifecycleTarget.targetSandboxId) {
+    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const target = await establishNamedModalTarget({
+      db,
+      settings,
+      accountId,
+      workspaceId,
+      sandboxId: lifecycleTarget.targetSandboxId,
+      holderKind: "viewer",
+      holderId: viewerId,
+      subjectId: session.id,
+      environment,
+      ...((settings.modalImageRef ?? settings.dockerImage)
+        ? { image: settings.modalImageRef ?? settings.dockerImage }
+        : {}),
+    });
+    // Establishment owns an automatic heartbeat only while this API operation
+    // is in flight. Once the attach response hands the holder to the viewer,
+    // client heartbeats are authoritative; otherwise an abandoned viewer would
+    // be refreshed forever by this lost in-process timer.
+    target.stopAutomaticHeartbeat();
+    // Drop only the transient handle. The returned viewer holder intentionally
+    // remains until heartbeat/detach; its group id is the named target UUID.
+    await dropEstablishedHandle(target.established);
+    return {
+      viewerId,
+      liveness: target.lease.liveness,
+      leaseEpoch: target.lease.leaseEpoch,
+      sandboxGroupId,
+      viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+      dataPlaneUrl: target.lease.dataPlaneUrl,
+    };
+  }
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -218,6 +304,7 @@ export async function attachViewer(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let established: EstablishedSandboxSession | undefined;
+    let checkpointedInstanceId: string | null = null;
     try {
       const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
       // Create a cold box with the SAME stable run-environment the worker turn
@@ -237,6 +324,33 @@ export async function attachViewer(
         sessionId: session.id,
         backendOverride: session.sandboxBackend,
         environment,
+        createPolicy: "lease_owner",
+        onSandboxCreated: async (next) => {
+          established = next;
+          const checkpoint = await recordWarmingSandboxCreated(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId,
+            expectedEpoch,
+            expectedPriorInstanceId: checkpointedInstanceId,
+            instanceId: next.instanceId,
+            resumeBackendId: next.backendId,
+            resumeState: (await serializeEstablishedSandboxEnvelope(next)) ?? spawnEnvelope,
+            leaseTtlMs,
+            warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+          });
+          if (!checkpoint.recorded) {
+            throw new SandboxLeaseSupersededError(sandboxGroupId, expectedEpoch);
+          }
+          checkpointedInstanceId = next.instanceId;
+          if (next.backendId === "modal") {
+            await tagModalSandbox(settings, next.instanceId, {
+              leaseId: acquired.lease.id,
+              workspaceId,
+              sandboxGroupId,
+            }).catch(() => undefined);
+          }
+        },
       });
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state, so EVERY later op (another viewer, a Channel-A
@@ -250,17 +364,32 @@ export async function attachViewer(
         workspaceId,
         sandboxGroupId,
         expectedEpoch,
+        expectedWarmingInstanceId: established.instanceId,
         instanceId: established.instanceId,
         // The desktop tunnel-URL mint is P4; record null for now.
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
         leaseTtlMs,
+        // A nonzero epoch means this cold spawn rematerialized an already-used
+        // logical home target. Invalidate null/home routing caches atomically
+        // with the lease epoch bump; first materialization has no stale cache.
+        ...(expectedEpoch > 0 ? { advanceActiveRoute: { targetSandboxId: null } } : {}),
       });
       if (!committed.committed || !committed.lease) {
         // A reaper reset our warming row (we were too slow) or a sibling
         // re-established and bumped the epoch. Release our holder and surface a
         // 409. NEVER provider-delete the box (it rides the provider idle-timeout).
+        const terminated = await terminateExactCreatedSandbox(established);
+        if (terminated) {
+          await failWarmingToCold(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId,
+            expectedEpoch,
+            expectedInstanceId: established.instanceId,
+          }).catch(() => undefined);
+        }
         await release();
         throw new SandboxLeaseSupersededError(sandboxGroupId, expectedEpoch);
       }
@@ -273,17 +402,26 @@ export async function attachViewer(
         dataPlaneUrl: committed.lease.dataPlaneUrl,
       };
     } catch (error) {
+      // Caught spawn failure: roll the warming row back to cold so the next
+      // arrival (a turn or another viewer) re-acquires and re-spawns. Holders
+      // are intentionally kept by failWarmingToCold for the re-acquire; then
+      // release our own holder so we don't pin a cold lease.
+      const terminated = await terminateExactCreatedSandbox(established);
+      if (terminated) {
+        await failWarmingToCold(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId,
+          expectedEpoch,
+          expectedInstanceId: checkpointedInstanceId,
+        }).catch(() => undefined);
+      }
+      await release().catch(() => undefined);
       if (error instanceof SandboxLeaseSupersededError) {
         throw new HTTPException(409, {
           message: `sandbox lease superseded (epoch ${error.leaseEpoch}); re-read capabilities and re-attach`,
         });
       }
-      // Caught spawn failure: roll the warming row back to cold so the next
-      // arrival (a turn or another viewer) re-acquires and re-spawns. Holders
-      // are intentionally kept by failWarmingToCold for the re-acquire; then
-      // release our own holder so we don't pin a cold lease.
-      await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
-      await release();
       // Mirror the Channel-A spawner (channel-a.ts): a provider/config failure to
       // bring up the cold box is a client-actionable 409 ("sandbox not available;
       // re-attach to retry"), NOT a raw 500 — the warming row was just rolled back
@@ -291,7 +429,7 @@ export async function attachViewer(
       // HTTPException unchanged.
       if (error instanceof HTTPException) throw error;
       throw new HTTPException(409, {
-        message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
+        message: "sandbox not available; re-read capabilities and re-attach",
       });
     } finally {
       // Drop the in-process handle: the API resumed BY ID for the cold-spawn,
@@ -301,17 +439,56 @@ export async function attachViewer(
     }
   }
 
-  // ATTACHED / REARMED: the box is live (or a sibling is mid-warm). The viewer
-  // holder alone keeps it warm — no establish needed (the holder lifecycle is
-  // the P1.4 deliverable; P4 mints the pixel URL on the negotiation read).
-  return {
-    viewerId,
-    liveness: acquired.lease.liveness,
-    leaseEpoch: acquired.lease.leaseEpoch,
-    sandboxGroupId,
-    viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
-    dataPlaneUrl: acquired.lease.dataPlaneUrl,
-  };
+  // ATTACHED / REARMED: resume-only establish the exact warm instance. This is
+  // the viewer's provider-gone observation point even when an old cached tunnel
+  // URL exists; without it a viewer-only session could keep returning that dead
+  // URL forever. A structural NotFound enters the same epoch+instance election
+  // as workers/Channel-A, while transient transport releases this new holder and
+  // fails closed without creating.
+  let established: EstablishedSandboxSession | undefined;
+  try {
+    const live = await readLease(db, workspaceId, sandboxGroupId);
+    if (!live) {
+      throw new SandboxLeaseSupersededError(sandboxGroupId, acquired.lease.leaseEpoch);
+    }
+    const envelope =
+      live.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+    const environment = await sessionAttachEnvironment(services, workspaceId, session);
+    const resumed = await establishWarmLeaseSandbox({
+      db,
+      settings,
+      accountId,
+      workspaceId,
+      sandboxGroupId,
+      lifecycleSessionId: session.id,
+      backend: session.sandboxBackend,
+      environment,
+      initialLease: live,
+      fallbackEnvelope: envelope,
+      route: { targetSandboxId: null },
+    });
+    established = resumed.established;
+    return {
+      viewerId,
+      liveness: resumed.lease.liveness,
+      leaseEpoch: resumed.lease.leaseEpoch,
+      sandboxGroupId,
+      viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+      dataPlaneUrl: resumed.lease.dataPlaneUrl,
+    };
+  } catch (error) {
+    await release().catch(() => undefined);
+    if (error instanceof SandboxLeaseSupersededError) {
+      throw new HTTPException(409, {
+        message: `sandbox lease superseded (epoch ${error.leaseEpoch}); re-read capabilities and re-attach`,
+      });
+    }
+    throw new HTTPException(409, {
+      message: "sandbox not available; re-read capabilities and re-attach",
+    });
+  } finally {
+    await dropEstablishedHandle(established);
+  }
 }
 
 /**
@@ -495,7 +672,6 @@ export async function mintDesktopStream(
 ): Promise<DesktopStreamMint | null> {
   const { db, settings, bus } = services;
   const { accountId, workspaceId, session } = input;
-  const lease = input.lease;
   // The scoped token's viewerId must be a UUID (StreamTokenPayload). The GET caps
   // handshake passes grant.subjectId, which is a non-UUID for an API-key principal
   // ("configured:key") — coerce it to a deterministic UUID so the mint never 500s
@@ -547,6 +723,13 @@ export async function mintDesktopStream(
     // A Modal swap target (or unknown) falls through to the existing group-box path.
   }
 
+  const lifecycleTarget = await modalLeaseTarget(db, workspaceId, session);
+  let lease = lifecycleTarget.targetSandboxId
+    ? input.lease?.sandboxGroupId === lifecycleTarget.sandboxGroupId
+      ? input.lease
+      : await readLease(db, workspaceId, lifecycleTarget.sandboxGroupId)
+    : input.lease;
+
   // GATE 2: the box must be live (the handshake never spins one up — a cold box
   // returns lease_cold; the viewer-attach path warms it first, then mints).
   if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
@@ -584,19 +767,34 @@ export async function mintDesktopStream(
   // the box the lease currently fences); fall back to the session envelope only
   // when the lease has none (a freshly-warmed lease always has it).
   const envelope =
-    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+    lease.resumeState ??
+    (lifecycleTarget.targetSandboxId
+      ? null
+      : await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore (the lease's box is gone) this create() must carry the
     // SAME stable run-env the turn declares, so a later turn finds no env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
-    established = input.establish
-      ? await input.establish(envelope)
-      : await establishSandboxSessionFromEnvelope(settings, envelope, {
-          sessionId: session.id,
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
+    if (input.establish) {
+      established = await input.establish(envelope);
+    } else {
+      const resumed = await establishWarmLeaseSandbox({
+        db,
+        settings,
+        accountId,
+        workspaceId,
+        sandboxGroupId: lifecycleTarget.sandboxGroupId,
+        lifecycleSessionId: lifecycleTarget.lifecycleSessionId,
+        backend: "modal",
+        environment,
+        initialLease: lease,
+        fallbackEnvelope: lifecycleTarget.targetSandboxId ? null : envelope,
+        route: { targetSandboxId: lifecycleTarget.targetSandboxId },
+      });
+      established = resumed.established;
+      lease = resumed.lease;
+    }
 
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
     // that genuinely can't run the stack degrades to transport:null, not a throw.
@@ -634,7 +832,7 @@ export async function mintDesktopStream(
     await recordLeaseDataPlaneUrl(db, {
       accountId,
       workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
+      sandboxGroupId: lifecycleTarget.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       dataPlaneUrl: exposed.url,
     });
@@ -742,7 +940,6 @@ export async function mintTerminalStream(
 ): Promise<TerminalStreamMint | null> {
   const { db, settings } = services;
   const { accountId, workspaceId, session } = input;
-  const lease = input.lease;
   // Same caps-500 fix as the desktop mint: coerce a non-UUID principal id
   // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
   // so StreamTokenPayload.parse never throws an uncaught 500.
@@ -783,6 +980,13 @@ export async function mintTerminalStream(
     // (unchanged — Modal swap-target streaming is out of scope for this fix).
   }
 
+  const lifecycleTarget = await modalLeaseTarget(db, workspaceId, session);
+  let lease = lifecycleTarget.targetSandboxId
+    ? input.lease?.sandboxGroupId === lifecycleTarget.sandboxGroupId
+      ? input.lease
+      : await readLease(db, workspaceId, lifecycleTarget.sandboxGroupId)
+    : input.lease;
+
   // GATE 2: the box must be live (the handshake never spins one up).
   if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
     return null;
@@ -814,19 +1018,34 @@ export async function mintTerminalStream(
   // Resume the LIVE box by id (lease.resume_state authoritative), ensure ttyd, and
   // resolve the 7681 tunnel + mint the scoped token, IN-PROCESS.
   const envelope =
-    lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+    lease.resumeState ??
+    (lifecycleTarget.targetSandboxId
+      ? null
+      : await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
     // On a cold-restore this create() must carry the SAME stable run-env the turn
     // declares, so a later turn finds no manifest-env delta.
     const environment = await sessionAttachEnvironment(services, workspaceId, session);
-    established = input.establish
-      ? await input.establish(envelope)
-      : await establishSandboxSessionFromEnvelope(settings, envelope, {
-          sessionId: session.id,
-          backendOverride: session.sandboxBackend,
-          environment,
-        });
+    if (input.establish) {
+      established = await input.establish(envelope);
+    } else {
+      const resumed = await establishWarmLeaseSandbox({
+        db,
+        settings,
+        accountId,
+        workspaceId,
+        sandboxGroupId: lifecycleTarget.sandboxGroupId,
+        lifecycleSessionId: lifecycleTarget.lifecycleSessionId,
+        backend: "modal",
+        environment,
+        initialLease: lease,
+        fallbackEnvelope: lifecycleTarget.targetSandboxId ? null : envelope,
+        route: { targetSandboxId: lifecycleTarget.targetSandboxId },
+      });
+      established = resumed.established;
+      lease = resumed.lease;
+    }
 
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
     // genuinely can't run it degrades to the sse-events firehose, not a throw.
@@ -866,7 +1085,7 @@ export async function mintTerminalStream(
     await recordLeaseTerminalDataPlaneUrl(db, {
       accountId,
       workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
+      sandboxGroupId: lifecycleTarget.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       terminalDataPlaneUrl: exposed.url,
     });

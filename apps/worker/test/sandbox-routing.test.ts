@@ -65,7 +65,10 @@ function busWithAgent(workspaceId: string, agentId: string, hostname: string): M
     if (op?.$case === "ping") {
       res = {
         requestId: req.requestId,
-        result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+        result: {
+          $case: "ping",
+          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+        },
       };
     } else if (op?.$case === "exec") {
       res = {
@@ -110,7 +113,13 @@ function fakeGroupBox(marker: string): EstablishedSandboxSession {
       return { stdout: marker, exitCode: 0 };
     },
   };
-  return { client: {}, session, sessionState: {}, instanceId: "group-box", backendId: "modal" };
+  return {
+    client: {},
+    session,
+    sessionState: {},
+    instanceId: "group-box",
+    backendId: "modal",
+  };
 }
 
 beforeAll(async () => {
@@ -181,10 +190,18 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     // Wrap the established group box in the routing proxy (what the turn does).
     const established = wrapTurnBoxWithRouting(
       { db, settings, bus },
-      { workspaceId, sessionId: session.id },
+      {
+        workspaceId,
+        sessionId: session.id,
+        establishModalTarget: async () => {
+          throw new Error("unexpected Modal target establish");
+        },
+      },
       fakeGroupBox("group-box-marker"),
     );
-    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    const proxy = established.session as {
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
 
     // Default pointer (null) → the op lands on the GROUP box.
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
@@ -239,12 +256,22 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       model: "gpt-test",
       sandboxBackend: "modal",
     });
-    const manifest = buildManifest(settings, [], { HOME: "/workspace", LAZY: "1" });
+    const manifest = buildManifest(settings, [], {
+      HOME: "/workspace",
+      LAZY: "1",
+    });
     let provisions = 0;
     const real = fakeGroupBox("lazy-real");
     const lazy = wrapLazyTurnBoxWithRouting(
       { db, settings, bus: new MemoryEventBus() as never },
-      { workspaceId, sessionId: session.id, environment: { HOME: "/workspace", LAZY: "1" } },
+      {
+        workspaceId,
+        sessionId: session.id,
+        environment: { HOME: "/workspace", LAZY: "1" },
+        establishModalTarget: async () => {
+          throw new Error("unexpected Modal target establish");
+        },
+      },
       {
         client: { backendId: "modal" },
         backendId: "modal",
@@ -281,7 +308,7 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     return { accountId: a!.id, workspaceId: w!.id };
   }
 
-  test("a stranded Modal-sibling pointer resets to HOME (null) + emits session.route.reconciled (Shapes 1/2)", async () => {
+  test("a named Modal pointer remains target-owned and is not reconciled to home", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await seedAcctWs("recon");
     const session = await createSession(db, {
@@ -293,23 +320,21 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       model: "gpt-test",
       sandboxBackend: "modal",
     });
-    // A first-class Modal sibling row (no group/lease/box) — the categorical strand.
+    // A first-class Modal row is now establishable under its own UUID lifecycle.
     const sibling = await createSandbox(db, {
       accountId,
       workspaceId,
       kind: "modal",
       name: "sibling",
     });
-    // Persist a stranded pointer directly (a legacy pre-gate pointer / FK orphan):
-    // the session points at the unestablishable sibling at epoch 1.
-    const stranded = await setActiveSandbox(db, {
+    const selected = await setActiveSandbox(db, {
       accountId,
       workspaceId,
       sessionId: session.id,
       targetSandboxId: sibling.id,
       expectedEpoch: 0,
     });
-    expect(stranded.swapped).toBe(true);
+    expect(selected.swapped).toBe(true);
     const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
 
     const events: Array<{ type: string; payload: unknown }> = [];
@@ -323,24 +348,13 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       },
     );
 
-    // Reset to HOME under the fence: pointer null, epoch bumped, record cleared.
-    expect(result.pointer?.activeSandboxId ?? null).toBeNull();
-    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch + 1);
-    expect(result.record).toBeNull();
-    // The DB reflects the reset (not just the in-memory return).
+    expect(result.pointer?.activeSandboxId).toBe(sibling.id);
+    expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch);
+    expect(result.record?.id).toBe(sibling.id);
     const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
-    expect(persisted.activeSandboxId).toBeNull();
-    expect(persisted.activeEpoch).toBe(pointer.activeEpoch + 1);
-    // A VISIBLE typed event was emitted (never a silent downgrade), carrying the
-    // reason + epochs but NO target id.
-    expect(events).toHaveLength(1);
-    expect(events[0]!.type).toBe("session.route.reconciled");
-    expect(events[0]!.payload).toMatchObject({
-      reason: "unsupported_backend_context",
-      fromEpoch: pointer.activeEpoch,
-      toEpoch: pointer.activeEpoch + 1,
-    });
-    expect(JSON.stringify(events[0]!.payload)).not.toContain(sibling.id);
+    expect(persisted.activeSandboxId).toBe(sibling.id);
+    expect(persisted.activeEpoch).toBe(pointer.activeEpoch);
+    expect(events).toHaveLength(0);
   }, 60_000);
 
   test("reconcile is epoch-fenced: a concurrent higher-epoch swap is NOT clobbered", async () => {
@@ -372,19 +386,19 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       name: "laptop",
       enrollmentId: enrollment.id,
     });
-    const sibling = await createSandbox(db, {
+    const unsupported = await createSandbox(db, {
       accountId,
       workspaceId,
       kind: "modal",
-      name: "sibling",
+      name: "legacy-unsupported-target",
     });
 
-    // The turn LOADS a stranded modal-sibling pointer at epoch 1...
+    // The turn loads an unsupported-kind pointer at epoch 1...
     await setActiveSandbox(db, {
       accountId,
       workspaceId,
       sessionId: session.id,
-      targetSandboxId: sibling.id,
+      targetSandboxId: unsupported.id,
       expectedEpoch: 0,
     });
     const stalePointer = (await readActiveSandbox(db, workspaceId, session.id))!;
@@ -407,7 +421,10 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       db,
       { accountId, workspaceId, sessionId: session.id },
       stalePointer,
-      (id) => getSandbox(db, workspaceId, id),
+      async (id) => {
+        const record = await getSandbox(db, workspaceId, id);
+        return id === unsupported.id && record ? { ...record, kind: "daytona" } : record;
+      },
       async (evs) => {
         events.push(...evs);
       },
@@ -440,22 +457,22 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       model: "gpt-test",
       sandboxBackend: "modal",
     });
-    // A stranded Modal-sibling pointer that WOULD reconcile if the lookup succeeded.
-    const sibling = await createSandbox(db, {
+    // An unsupported-kind pointer WOULD reconcile if lookup succeeds.
+    const unsupported = await createSandbox(db, {
       accountId,
       workspaceId,
       kind: "modal",
-      name: "sibling",
+      name: "legacy-unsupported-target",
     });
     await setActiveSandbox(db, {
       accountId,
       workspaceId,
       sessionId: session.id,
-      targetSandboxId: sibling.id,
+      targetSandboxId: unsupported.id,
       expectedEpoch: 0,
     });
     const pointer = (await readActiveSandbox(db, workspaceId, session.id))!;
-    expect(pointer.activeSandboxId).toBe(sibling.id);
+    expect(pointer.activeSandboxId).toBe(unsupported.id);
 
     const events: Array<{ type: string }> = [];
     let lookups = 0;
@@ -473,16 +490,16 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       },
     );
 
-    // Fail open: no reconciliation happened. The pointer is UNTOUCHED (still the sibling
+    // Fail open: no reconciliation happened. The pointer is UNTOUCHED (still the target
     // at the same epoch), record null (→ machinePrimary:false, group box), no event.
     expect(lookups).toBe(1);
-    expect(result.pointer?.activeSandboxId).toBe(sibling.id);
+    expect(result.pointer?.activeSandboxId).toBe(unsupported.id);
     expect(result.pointer!.activeEpoch).toBe(pointer.activeEpoch);
     expect(result.record).toBeNull();
     expect(events).toHaveLength(0);
     // Crucially the DB pointer/epoch never moved — no CAS ran on the transient failure.
     const persisted = (await readActiveSandbox(db, workspaceId, session.id))!;
-    expect(persisted.activeSandboxId).toBe(sibling.id);
+    expect(persisted.activeSandboxId).toBe(unsupported.id);
     expect(persisted.activeEpoch).toBe(pointer.activeEpoch);
 
     // Sanity: the SAME pointer DOES reconcile once the lookup succeeds (proves the throw
@@ -492,7 +509,10 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       db,
       { accountId, workspaceId, sessionId: session.id },
       pointer,
-      (id) => getSandbox(db, workspaceId, id),
+      async (id) => {
+        const record = await getSandbox(db, workspaceId, id);
+        return record ? { ...record, kind: "daytona" } : null;
+      },
       async (evs) => {
         events2.push(...evs);
       },
@@ -502,10 +522,7 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     expect(events2[0]!.type).toBe("session.route.reconciled");
   }, 60_000);
 
-  // BEHAVIORAL "pointer untouched" (issue #341 invariant A / Shape 1): a rejected
-  // Modal-sibling swap must not move the pointer, proven by ROUTING — the next op
-  // still lands on the pre-swap backend, not by DB inspection alone.
-  test("a rejected sibling swap leaves the pointer untouched: the next op still routes to the pre-swap backend", async () => {
+  test("an admitted named Modal swap routes the next op through its target establisher", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await seedAcctWs("reject-untouched");
     const session = await createSession(db, {
@@ -554,14 +571,20 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
 
     const established = wrapTurnBoxWithRouting(
       { db, settings, bus },
-      { workspaceId, sessionId: session.id },
+      {
+        workspaceId,
+        sessionId: session.id,
+        establishModalTarget: async (target) => fakeGroupBox(`named:${target.id}`).session as never,
+      },
       fakeGroupBox("group-box-marker"),
     );
-    const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
+    const proxy = established.session as {
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
     // The op currently routes to the machine (the pre-swap backend).
     expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
 
-    // Attempt to swap onto the Modal sibling → REJECTED before the CAS.
+    // Swap onto the Modal sibling. Admission and establishment now agree.
     const ctx: FleetContext = {
       accountId,
       workspaceId,
@@ -569,15 +592,72 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       sessionBackend: "modal",
       sessionGroupId: session.sandboxGroupId,
     };
-    const rejected = await swapActiveSandbox({ db, settings, bus }, ctx, sibling.id);
-    expect(rejected.swapped).toBe(false);
-    expect(rejected.code).toBe("unsupported_backend_context");
+    const accepted = await swapActiveSandbox({ db, settings, bus }, ctx, sibling.id);
+    expect(accepted.swapped).toBe(true);
 
-    // The pointer never moved: the next op STILL routes to the pre-swap machine, and
-    // the persisted pointer/epoch are unchanged.
-    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+    expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe(`named:${sibling.id}`);
     const after = (await readActiveSandbox(db, workspaceId, session.id))!;
-    expect(after.activeSandboxId).toBe(machine.id);
-    expect(after.activeEpoch).toBe(before.activeEpoch);
+    expect(after.activeSandboxId).toBe(sibling.id);
+    expect(after.activeEpoch).toBe(before.activeEpoch + 1);
+  }, 60_000);
+
+  test("a same-target active epoch bump invalidates the named Modal handle cache", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await seedAcctWs("modal-epoch-cache");
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const named = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "same-target",
+    });
+    const selected = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: named.id,
+      expectedEpoch: 0,
+    });
+    expect(selected.pointer?.activeEpoch).toBe(1);
+
+    const establishedEpochs: number[] = [];
+    const established = wrapTurnBoxWithRouting(
+      { db, settings, bus: new MemoryEventBus() as never },
+      {
+        workspaceId,
+        sessionId: session.id,
+        establishModalTarget: async (target, pointer) => {
+          establishedEpochs.push(pointer.activeEpoch);
+          return fakeGroupBox(`named:${target.id}:${pointer.activeEpoch}`).session as never;
+        },
+      },
+      fakeGroupBox("group-box-marker"),
+    );
+    const proxy = established.session as {
+      exec: (a: unknown) => Promise<{ stdout: string }>;
+    };
+    expect((await proxy.exec({ cmd: "first" })).stdout).toBe(`named:${named.id}:1`);
+
+    // A replacement of this same logical target advances active_epoch while
+    // leaving active_sandbox_id unchanged. The stable proxy and target cache
+    // must both miss; reusing a UUID-only handle would return the epoch-1 box.
+    const advanced = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: named.id,
+      expectedEpoch: selected.pointer!.activeEpoch,
+    });
+    expect(advanced.pointer?.activeEpoch).toBe(2);
+    expect((await proxy.exec({ cmd: "second" })).stdout).toBe(`named:${named.id}:2`);
+    expect(establishedEpochs).toEqual([1, 2]);
   }, 60_000);
 });

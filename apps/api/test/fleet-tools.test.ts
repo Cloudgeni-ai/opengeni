@@ -25,11 +25,14 @@ import {
 } from "@opengeni/testing";
 import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
+  acquireLease,
+  commitWarmingToWarm,
   createDb,
   createEnrollment,
   createSandbox,
   createSession,
   readActiveSandbox,
+  recordWarmingSandboxCreated,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -237,7 +240,10 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.id).toBe(session.sandboxGroupId);
     expect(group.kind).toBe("modal");
     expect(group.active).toBe(true);
-    expect(group.liveness).toBe("online");
+    // No lease exists yet: the home is a clean cold start, truthfully offline
+    // until materialized (but selectable/attachable).
+    expect(group.liveness).toBe("offline");
+    expect(group.attachable).toBe(true);
 
     const machine = result.sandboxes.find((s) => !s.isSessionGroup)!;
     expect(machine.id).toBe(sandbox.id);
@@ -250,6 +256,66 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
 
     // Single-active invariant: exactly ONE active entry.
     expect(result.sandboxes.filter((s) => s.active).length).toBe(1);
+  }, 60_000);
+
+  test("fleet liveness follows cold/warming/warm lease truth; a cold stale group is not attachable", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    const acquired = await acquireLease(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sandboxGroupId: ctx.sessionGroupId,
+      kind: "viewer",
+      holderId: "fleet-liveness",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    let group = (await listFleet(services, ctx)).sandboxes.find((entry) => entry.isSessionGroup)!;
+    expect(group.liveness).toBe("reconnecting");
+    expect(group.attachable).toBe(false);
+
+    await recordWarmingSandboxCreated(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sandboxGroupId: ctx.sessionGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedPriorInstanceId: null,
+      instanceId: "sb-fleet-live",
+      leaseTtlMs: 45_000,
+    });
+    await commitWarmingToWarm(db, {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sandboxGroupId: ctx.sessionGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedWarmingInstanceId: "sb-fleet-live",
+      instanceId: "sb-fleet-live",
+      leaseTtlMs: 45_000,
+    });
+    group = (await listFleet(services, ctx)).sandboxes.find((entry) => entry.isSessionGroup)!;
+    expect(group.liveness).toBe("online");
+    expect(group.attachable).toBe(true);
+
+    // Reaper cadence must not create a false-online window: an expired warm row
+    // is already offline even before the sweep flips its enum to cold.
+    await admin`
+      update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${ctx.workspaceId}
+        and sandbox_group_id = ${ctx.sessionGroupId}`;
+    group = (await listFleet(services, ctx)).sandboxes.find((entry) => entry.isSessionGroup)!;
+    expect(group.liveness).toBe("offline");
+    expect(group.attachable).toBe(false);
+
+    // Reaper/eviction truth: an existing cold row is likewise not advertised
+    // online or attachable.
+    await admin`
+      update sandbox_leases set liveness = 'cold', instance_id = null
+      where workspace_id = ${ctx.workspaceId}
+        and sandbox_group_id = ${ctx.sessionGroupId}`;
+    group = (await listFleet(services, ctx)).sandboxes.find((entry) => entry.isSessionGroup)!;
+    expect(group.liveness).toBe("offline");
+    expect(group.attachable).toBe(false);
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {
@@ -373,18 +439,11 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       expect(modal.sandbox.kind).toBe("modal");
       expect(modal.sandbox.name).toBe("extra-box");
       expect(modal.sandbox.enrollmentId).toBeNull();
-      // Honest copy (issue #341): the note must say plainly that the provisioned Modal
-      // box is NOT yet attachable as a swap target — not imply an attach that is rejected.
-      expect(modal.note).toMatch(/not yet attachable|not supported yet|rejected/i);
+      expect(modal.note).toMatch(/materializes lazily|own lifecycle|home envelope/i);
     }
   }, 60_000);
 
-  // REGRESSION (issue #341 Shape 1 / invariant A): a swap to a first-class Modal
-  // sibling was ADMITTED (resolveTarget had no modal branch) and the epoch bumped,
-  // then every following op stranded because no turn context wires an establisher
-  // for it. The establisher-capability gate must reject it BEFORE the CAS — typed
-  // `unsupported_backend_context`, pointer + epoch untouched.
-  test("swap to a NON-group Modal sibling is rejected BEFORE commit (Shape 1), pointer + epoch unchanged", async () => {
+  test("a named Modal target is admitted and listed as a clean target-owned cold start", async () => {
     if (!available) return;
     const { ctx, services } = await seedFleet();
     const before = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
@@ -396,17 +455,20 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const siblingId = provisioned.kind === "modal" ? provisioned.sandbox.id : "";
 
     const r = await swapActiveSandbox(services, ctx, siblingId);
-    expect(r.swapped).toBe(false);
-    expect(r.code).toBe("unsupported_backend_context");
-    expect(r.reason).toMatch(/Modal sandbox other than this session/i);
+    expect(r.swapped).toBe(true);
+    expect(r.activeSandboxId).toBe(siblingId);
+    expect(r.activeEpoch).toBe(before.activeEpoch + 1);
 
-    // The CAS never ran: the pointer AND the epoch are exactly as before (no churn).
     const after = (await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))!;
-    expect(after.activeSandboxId).toBeNull();
-    expect(after.activeEpoch).toBe(before.activeEpoch);
-    // The rejection echoes the unchanged pointer/epoch, not a moved one.
-    expect(r.activeSandboxId).toBeNull();
-    expect(r.activeEpoch).toBe(before.activeEpoch);
+    expect(after.activeSandboxId).toBe(siblingId);
+    expect(after.activeEpoch).toBe(before.activeEpoch + 1);
+
+    const listed = await listFleet(services, ctx);
+    const sibling = listed.sandboxes.find((entry) => entry.id === siblingId)!;
+    expect(sibling.active).toBe(true);
+    expect(sibling.kind).toBe("modal");
+    expect(sibling.liveness).toBe("offline");
+    expect(sibling.attachable).toBe(true);
   }, 60_000);
 
   // The typed diagnostic also rides the liveness-gate rejection (offline_enrollment),

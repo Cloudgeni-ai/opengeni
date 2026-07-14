@@ -32,8 +32,9 @@ import type {
 } from "@openai/agents/sandbox";
 import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError } from "./errors";
-import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
+import { classifyProviderSandboxFailure } from "./provider-errors";
 import type { RuntimeMetricsHooks } from "../metrics";
+export type { RuntimeMetricsHooks } from "../metrics";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -52,6 +53,13 @@ export {
   type CapabilityDescriptor,
 } from "./capabilities";
 export { SandboxConfigError, SandboxProviderUnavailableError } from "./errors";
+export {
+  classifyProviderSandboxFailure,
+  isProviderSandboxNotFoundError,
+  isProviderSandboxTransientError,
+  type ProviderSandboxFailure,
+  type ProviderSandboxFailureKind,
+} from "./provider-errors";
 export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
@@ -295,6 +303,8 @@ export {
 export {
   RoutingSandboxSession,
   RoutingUnsupportedError,
+  SandboxMutationAcceptanceUnknownError,
+  isMutatingRoutingOperation,
   type ActivePointer,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
@@ -713,6 +723,30 @@ export type EstablishedSandboxSession = {
   lostInstanceId?: string;
 };
 
+/** A resume-only establish found that the exact provider instance is gone.
+ *
+ * This is a VALUE, not permission to create. The caller must first win the
+ * group lease's fenced warm->warming reclaim election. Only that winner may
+ * call this leaf again with `createPolicy:"lease_owner"` and `gone` set to
+ * this checkpoint. Concurrent attached/rearmed callers wait/re-read instead of
+ * creating rival boxes. */
+export type SandboxInstanceGoneOutcome = {
+  outcome: "gone";
+  backendId: string;
+  observedInstanceId: string | null;
+  resumeState: unknown;
+  reason: "provider_not_found" | "missing_resume_identity";
+  diagnostic: string;
+};
+
+export function isSandboxInstanceGoneOutcome(
+  value: EstablishedSandboxSession | SandboxInstanceGoneOutcome,
+): value is SandboxInstanceGoneOutcome {
+  return (value as SandboxInstanceGoneOutcome).outcome === "gone";
+}
+
+export type SandboxCreatePolicy = "never" | "lease_owner" | "disposable";
+
 export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
 
 // The structural slice we need from a provider SandboxClient to resume by id and
@@ -739,64 +773,6 @@ type ResumeCapableClient = {
  * an unrecognized error is treated as "not NotFound" (propagate), because a
  * false-positive recreate is the dangerous direction (double-spawn).
  */
-export function isProviderSandboxNotFoundError(backendId: string, error: unknown): boolean {
-  // selfhosted: agent-offline is NEVER a provider NotFound (the user's machine is
-  // not recreatable — a false NotFound would cold-create a RIVAL box). The
-  // selfhosted discriminator ALWAYS returns false; short-circuit so no goneMarker
-  // string match below can ever flip a selfhosted agent-offline error to true.
-  if (backendId === "selfhosted") {
-    return isSelfhostedProviderNotFoundError(error);
-  }
-  if (!error) {
-    return false;
-  }
-  const status =
-    (error as { status?: unknown; statusCode?: unknown }).status ??
-    (error as { statusCode?: unknown }).statusCode;
-  if (status === 404) {
-    return true;
-  }
-  const name =
-    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const code =
-    typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === "string"
-        ? error
-        : String((error as { message?: unknown })?.message ?? "");
-  const haystack = `${name} ${code} ${message}`.toLowerCase();
-  // Provider-agnostic "gone" markers (Modal: "sandbox … not found" / terminated;
-  // e2b/daytona/runloop: "not found" / "no longer running" / "terminated" /
-  // "does not exist"). Kept broad-but-conservative: it matches box-gone phrasing
-  // and never matches generic 5xx/transport errors.
-  const goneMarkers = [
-    "not found",
-    "no longer running",
-    "no longer exists",
-    "does not exist",
-    "doesn't exist",
-    "has been terminated",
-    "was terminated",
-    "is terminated",
-    "sandbox terminated",
-    "notfound",
-    "sandbox_not_found",
-    "box no longer running",
-  ];
-  // A "running"/"already exists" resume-conflict is explicitly NOT NotFound — the
-  // box is alive; recreating would double-spawn.
-  if (
-    haystack.includes("already running") ||
-    haystack.includes("still running") ||
-    haystack.includes("already exists")
-  ) {
-    return false;
-  }
-  return goneMarkers.some((marker) => haystack.includes(marker));
-}
-
 function readInstanceId(session: unknown): string {
   const state = (session as { state?: Record<string, unknown> }).state ?? {};
   const candidate =
@@ -831,30 +807,52 @@ async function terminateCreatedSandbox(
 }
 
 /**
- * Resume the one box by id from its recovery envelope, or cold-restore from the
- * snapshot when the provider reports it gone. The envelope is the lease's
+ * Resume one box by id from its recovery envelope. The envelope is the lease's
  * box-identity descriptor (the same per-turn `_sandbox` envelope upserted by the
- * turn activity). A null envelope means a cold session that was never warmed →
- * create() directly.
+ * turn activity). Creation is explicit policy: a resume-only caller receives a
+ * typed gone value, while an elected lease owner or disposable verification may
+ * cold-create/restore.
  *
  *  - `opts.backendOverride ?? envelope.backendId ?? settings.sandboxBackend`
  *    selects the backend; the client is built for THAT backend (resume-by-id is
  *    fenced to the original provider).
  *  - warm reattach: deserialize the envelope sessionState → client.resume(state)
- *    (no lock; R4-safe). On a provider NotFound, cold-restore via create().
- *  - cold restore / cold session: client.create() — the ONLY create() site.
+ *    (no lock; R4-safe). With `createPolicy:"never"`, provider NotFound NEVER
+ *    creates and returns the typed gone checkpoint.
+ *  - elected cold/reclaim owner or disposable verification: client.create() —
+ *    the ONLY create() site.
  */
+type EstablishSandboxOptions = {
+  sessionId: string;
+  backendOverride?: SandboxBackend;
+  environment?: Record<string, string>;
+  onSandboxCreated?: SandboxCreatedCallback;
+  metrics?: RuntimeMetricsHooks;
+  /** `never` is the warm/attached default: a provider NotFound returns a typed
+   * gone outcome. `lease_owner` is legal only after the caller won cold->warming
+   * or warm->warming in Postgres. `disposable` is reserved for explicitly-owned
+   * test/rig verification boxes with mandatory cleanup. */
+  createPolicy: SandboxCreatePolicy;
+  /** The typed gone checkpoint whose fenced reclaim election this caller won.
+   * Supplying it skips a redundant resume and cold-restores directly. */
+  gone?: SandboxInstanceGoneOutcome;
+};
+
+export function establishSandboxSessionFromEnvelope(
+  settings: Settings,
+  envelope: Record<string, unknown> | null,
+  opts: EstablishSandboxOptions & { createPolicy: "never" },
+): Promise<EstablishedSandboxSession | SandboxInstanceGoneOutcome>;
+export function establishSandboxSessionFromEnvelope(
+  settings: Settings,
+  envelope: Record<string, unknown> | null,
+  opts: EstablishSandboxOptions & { createPolicy: "lease_owner" | "disposable" },
+): Promise<EstablishedSandboxSession>;
 export async function establishSandboxSessionFromEnvelope(
   settings: Settings,
   envelope: Record<string, unknown> | null,
-  opts: {
-    sessionId: string;
-    backendOverride?: SandboxBackend;
-    environment?: Record<string, string>;
-    onSandboxCreated?: SandboxCreatedCallback;
-    metrics?: RuntimeMetricsHooks;
-  },
-): Promise<EstablishedSandboxSession> {
+  opts: EstablishSandboxOptions,
+): Promise<EstablishedSandboxSession | SandboxInstanceGoneOutcome> {
   const envelopeBackend =
     typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
   const backend =
@@ -1034,8 +1032,27 @@ export async function establishSandboxSessionFromEnvelope(
     (envelopeProviderState.sandboxId ||
       envelopeProviderState.instanceId ||
       envelopeProviderState.id ||
+      envelopeProviderState.hostId ||
       envelopeProviderState.containerId),
   );
+
+  const observedInstanceId = [
+    envelopeProviderState?.sandboxId,
+    envelopeProviderState?.instanceId,
+    envelopeProviderState?.id,
+    envelopeProviderState?.hostId,
+    envelopeProviderState?.containerId,
+  ].find((value): value is string => typeof value === "string" && value.length > 0);
+
+  // A fenced reclaim owner already proved this exact instance gone. Do not issue
+  // a second resume; create once under the lease-owner authority and carry the
+  // gone id into lifecycle evidence.
+  if (opts.gone && opts.createPolicy !== "never") {
+    const restoredSession = await coldRestore(opts.gone.resumeState);
+    return opts.gone.observedInstanceId
+      ? { ...restoredSession, lostInstanceId: opts.gone.observedInstanceId }
+      : restoredSession;
+  }
 
   // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
   if (
@@ -1071,8 +1088,19 @@ export async function establishSandboxSessionFromEnvelope(
         // ONLY a provider NotFound (box gone) licenses a cold-restore. Anything
         // else (transient/auth/network/resume-conflict) propagates: the caller
         // backs off and re-fences — NEVER spawns a rival box.
-        if (!isProviderSandboxNotFoundError(client.backendId, error)) {
+        const failure = classifyProviderSandboxFailure(client.backendId, error);
+        if (failure.kind !== "not_found") {
           throw error;
+        }
+        if (opts.createPolicy === "never") {
+          return {
+            outcome: "gone",
+            backendId: client.backendId,
+            observedInstanceId: observedInstanceId ?? null,
+            resumeState: resumedState,
+            reason: "provider_not_found",
+            diagnostic: failure.diagnostic,
+          };
         }
         // COLD-RESTORE: the box is genuinely gone. Modal does NOT restore via
         // create({ snapshot }) — passing `snapshot` to ModalSandboxClient.create()
@@ -1082,14 +1110,10 @@ export async function establishSandboxSessionFromEnvelope(
         // (sandbox-file-persistence). The shared coldRestore() seam creates a
         // fresh box and replays that archive. `lostInstanceId` carries the gone
         // box's id so the caller can emit the durable sandbox.box.lost event.
-        const lostInstanceId = [
-          envelopeProviderState?.sandboxId,
-          envelopeProviderState?.instanceId,
-          envelopeProviderState?.id,
-          envelopeProviderState?.containerId,
-        ].find((value): value is string => typeof value === "string" && value.length > 0);
         const restoredSession = await coldRestore(resumedState);
-        return lostInstanceId ? { ...restoredSession, lostInstanceId } : restoredSession;
+        return observedInstanceId
+          ? { ...restoredSession, lostInstanceId: observedInstanceId }
+          : restoredSession;
       }
     }
   }
@@ -1099,6 +1123,16 @@ export async function establishSandboxSessionFromEnvelope(
   // envelope confirmDrainCold preserves across draining->cold), replay it so
   // /workspace survives the box churn (sandbox-file-persistence). No archive -> a
   // clean empty box (a never-warmed session).
+  if (opts.createPolicy === "never") {
+    return {
+      outcome: "gone",
+      backendId: client.backendId,
+      observedInstanceId: observedInstanceId ?? null,
+      resumeState: envelopeSessionState,
+      reason: "missing_resume_identity",
+      diagnostic: `missing_resume_identity backend=${client.backendId}`,
+    };
+  }
   return await coldRestore();
 }
 

@@ -30,10 +30,13 @@ import {
   acquireLease,
   commitWarmingToWarm,
   failWarmingToCold,
+  getSandbox,
   getSandboxSessionEnvelope,
   loadWorkspaceEnvironmentForRun,
   readLease,
+  recordWarmingSandboxCreated,
   releaseLeaseHolder,
+  SandboxLeaseSupersededError,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
@@ -50,8 +53,15 @@ import {
   ChannelAValidationError,
   type ChannelASession,
   type EstablishedSandboxSession,
+  tagModalSandbox,
 } from "@opengeni/runtime/sandbox";
-import { routingEnabled, wrapChannelABoxWithRouting } from "@opengeni/core";
+import {
+  establishNamedModalTarget,
+  establishWarmLeaseSandbox,
+  routingEnabled,
+  terminateExactCreatedSandbox,
+  wrapChannelABoxWithRouting,
+} from "@opengeni/core";
 
 export type ChannelAServices = {
   db: Database;
@@ -73,6 +83,58 @@ export type ChannelAHandle = {
   service: SandboxChannelAService;
   lease: LeaseSnapshot;
 };
+
+async function channelAEnvironment(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  session: Session,
+): Promise<Record<string, string>> {
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
+    db,
+    settings,
+    workspaceId,
+    session.environmentId,
+  );
+  const settingsForSession =
+    session.sandboxBackend !== settings.sandboxBackend
+      ? { ...settings, sandboxBackend: session.sandboxBackend }
+      : settings;
+  const environment = stableSandboxEnvironmentForRun(
+    settingsForSession,
+    workspaceEnvironment?.values ?? {},
+    { workspaceId },
+  );
+  if (hasGitCredentialRepositorySelection(session.resources)) {
+    applyGitAuthPointerEnvironment(
+      environment,
+      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
+    );
+  }
+  return environment;
+}
+
+function syntheticActiveLease(session: Session, sandboxGroupId: string): LeaseSnapshot {
+  return {
+    id: `active:${sandboxGroupId}`,
+    sandboxGroupId,
+    liveness: "warm",
+    refcount: 1,
+    turnHolders: 0,
+    viewerHolders: 0,
+    instanceId: sandboxGroupId,
+    backend: "selfhosted",
+    os: session.sandboxOs,
+    image: null,
+    rigVersionId: null,
+    dataPlaneUrl: null,
+    terminalDataPlaneUrl: null,
+    leaseEpoch: session.activeEpoch,
+    resumeBackendId: "selfhosted",
+    resumeState: null,
+    expiresAt: new Date(0),
+  };
+}
 
 /**
  * Run a Channel-A op against a live box, API-direct. Acquires a viewer holder
@@ -98,6 +160,110 @@ export async function withChannelA<T>(
   const sandboxGroupId = session.sandboxGroupId;
   const viewerId = crypto.randomUUID();
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
+
+  // A non-home active target is established/addressed directly. Do this BEFORE
+  // touching the home lease: otherwise a Channel-A read against a named Modal or
+  // Connected Machine would cold-create an unused rival home box first.
+  if (routingEnabled(settings) && session.activeSandboxId) {
+    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    if (!active) {
+      // The caller selected a non-home target. A stale/deleted target is a
+      // routing conflict, never permission to provision or mutate the home box.
+      throw new HTTPException(409, {
+        message: "the active sandbox target no longer exists; re-read the session route",
+      });
+    }
+    {
+      const environment = await channelAEnvironment(db, settings, workspaceId, session);
+      const namedTargets = new Map<
+        string,
+        Promise<Awaited<ReturnType<typeof establishNamedModalTarget>>>
+      >();
+      const namedModalTarget = async (
+        sandbox: { id: string },
+        pointer: { activeEpoch: number },
+      ) => {
+        const cacheKey = `${sandbox.id}:${pointer.activeEpoch}`;
+        let pending = namedTargets.get(cacheKey);
+        if (!pending) {
+          pending = establishNamedModalTarget({
+            db,
+            settings,
+            accountId,
+            workspaceId,
+            sandboxId: sandbox.id,
+            holderKind: "viewer",
+            holderId: viewerId,
+            subjectId: session.id,
+            environment,
+            ...((settings.modalImageRef ?? settings.dockerImage)
+              ? { image: settings.modalImageRef ?? settings.dockerImage }
+              : {}),
+          });
+          namedTargets.set(cacheKey, pending);
+        }
+        return await pending;
+      };
+      const establishModalTarget = async (
+        sandbox: { id: string },
+        pointer: { activeEpoch: number },
+      ) => (await namedModalTarget(sandbox, pointer)).established.session as never;
+      let primary: EstablishedSandboxSession;
+      let lease: LeaseSnapshot;
+      if (active.kind === "modal") {
+        const target = await namedModalTarget(active, { activeEpoch: session.activeEpoch });
+        primary = target.established;
+        lease = target.lease;
+      } else {
+        // The resolver builds the real SelfhostedSession from the active pointer.
+        // This placeholder is never dispatched to while that pointer remains
+        // active; it exists only to satisfy the stable proxy's synchronous state
+        // surface without provisioning a provider box.
+        primary = {
+          client: {} as EstablishedSandboxSession["client"],
+          session: { state: {} },
+          sessionState: undefined,
+          instanceId: active.enrollmentId ?? active.id,
+          backendId: "selfhosted",
+        };
+        lease = syntheticActiveLease(session, active.id);
+      }
+      const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
+        await appendAndPublishEvents(
+          db,
+          bus,
+          workspaceId,
+          session.id,
+          events.map((event) => ({ type: event.type as never, payload: event.payload })),
+        );
+      };
+      const routed = wrapChannelABoxWithRouting(
+        { db, settings, bus },
+        {
+          workspaceId,
+          sessionId: session.id,
+          establishModalTarget,
+          defaultIsHome: false,
+        },
+        primary,
+      );
+      const service = new SandboxChannelAService({
+        session: routed.session as ChannelASession,
+        leaseEpoch: lease.leaseEpoch,
+        emit,
+      });
+      try {
+        return await fn({ service, lease });
+      } catch (error) {
+        throw mapChannelAError(error);
+      } finally {
+        for (const pending of namedTargets.values()) {
+          const target = await pending.catch(() => null);
+          await target?.release().catch(() => undefined);
+        }
+      }
+    }
+  }
 
   const release = async (): Promise<void> => {
     await releaseLeaseHolder(db, {
@@ -133,6 +299,10 @@ export async function withChannelA<T>(
 
   let established: EstablishedSandboxSession | undefined;
   let leaseSnapshot: LeaseSnapshot = acquired.lease;
+  const namedModalTargets = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof establishNamedModalTarget>>>
+  >();
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
@@ -144,27 +314,7 @@ export async function withChannelA<T>(
     // the SESSION's backend (the establish below passes backendOverride:
     // session.sandboxBackend, and HOME/token-file/askpass are backend-derived),
     // NOT the deployment default — mirrors sessionAttachEnvironment.
-    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
-      db,
-      settings,
-      workspaceId,
-      session.environmentId,
-    );
-    const settingsForSession =
-      session.sandboxBackend !== settings.sandboxBackend
-        ? { ...settings, sandboxBackend: session.sandboxBackend }
-        : settings;
-    const environment = stableSandboxEnvironmentForRun(
-      settingsForSession,
-      workspaceEnvironment?.values ?? {},
-      { workspaceId },
-    );
-    if (hasGitCredentialRepositorySelection(session.resources)) {
-      applyGitAuthPointerEnvironment(
-        environment,
-        hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
-      );
-    }
+    const environment = await channelAEnvironment(db, settings, workspaceId, session);
 
     if (acquired.role === "spawner") {
       // We won the cold->warming CAS: establish the box from the envelope, then
@@ -179,16 +329,54 @@ export async function withChannelA<T>(
       // resume_state is the lease's authoritative box descriptor; the session
       // `_sandbox` envelope is only the per-session fallback.
       const spawnEnvelope = acquired.lease.resumeState ?? envelope;
+      let created: EstablishedSandboxSession | undefined;
+      let checkpointedInstanceId: string | null = null;
       try {
         established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
           sessionId: session.id,
           backendOverride: session.sandboxBackend,
           environment,
+          createPolicy: "lease_owner",
+          onSandboxCreated: async (next) => {
+            created = next;
+            const checkpoint = await recordWarmingSandboxCreated(db, {
+              accountId,
+              workspaceId,
+              sandboxGroupId,
+              expectedEpoch,
+              expectedPriorInstanceId: checkpointedInstanceId,
+              instanceId: next.instanceId,
+              resumeBackendId: next.backendId,
+              resumeState: (await serializeEstablishedSandboxEnvelope(next)) ?? spawnEnvelope,
+              leaseTtlMs,
+              warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+            });
+            if (!checkpoint.recorded) {
+              throw new SandboxLeaseSupersededError(sandboxGroupId, expectedEpoch);
+            }
+            checkpointedInstanceId = next.instanceId;
+            if (next.backendId === "modal") {
+              await tagModalSandbox(settings, next.instanceId, {
+                leaseId: acquired.lease.id,
+                workspaceId,
+                sandboxGroupId,
+              }).catch(() => undefined);
+            }
+          },
         });
-      } catch (error) {
-        await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
+      } catch {
+        const terminated = await terminateExactCreatedSandbox(created);
+        if (terminated) {
+          await failWarmingToCold(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId,
+            expectedEpoch,
+            expectedInstanceId: checkpointedInstanceId,
+          });
+        }
         throw new HTTPException(409, {
-          message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})`,
+          message: "sandbox not available; re-read the lease and retry",
         });
       }
       // Persist the LIVE box as the lease's resume_state so the NEXT op resumes
@@ -202,13 +390,28 @@ export async function withChannelA<T>(
         workspaceId,
         sandboxGroupId,
         expectedEpoch,
+        expectedWarmingInstanceId: established.instanceId,
         instanceId: established.instanceId,
         dataPlaneUrl: acquired.lease.dataPlaneUrl,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
         leaseTtlMs,
+        // A nonzero epoch means this cold spawn rematerialized an already-used
+        // logical home target. Invalidate null/home routing caches atomically
+        // with the lease epoch bump; first materialization has no stale cache.
+        ...(expectedEpoch > 0 ? { advanceActiveRoute: { targetSandboxId: null } } : {}),
       });
       if (!committed.committed || !committed.lease) {
+        const terminated = await terminateExactCreatedSandbox(established);
+        if (terminated) {
+          await failWarmingToCold(db, {
+            accountId,
+            workspaceId,
+            sandboxGroupId,
+            expectedEpoch,
+            expectedInstanceId: established.instanceId,
+          }).catch(() => undefined);
+        }
         throw new HTTPException(409, {
           message: `sandbox lease superseded (epoch ${expectedEpoch}); retry`,
         });
@@ -218,13 +421,26 @@ export async function withChannelA<T>(
       // ATTACHED / REARMED: the box is live. Read the lease to get the
       // authoritative resume_state, then resume by id for this op.
       const live = await readLease(db, workspaceId, sandboxGroupId);
-      if (live) leaseSnapshot = live;
+      if (!live) {
+        throw new SandboxLeaseSupersededError(sandboxGroupId, leaseSnapshot.leaseEpoch);
+      }
+      leaseSnapshot = live;
       const resumeEnvelope = leaseSnapshot.resumeState ?? envelope;
-      established = await establishSandboxSessionFromEnvelope(settings, resumeEnvelope, {
-        sessionId: session.id,
-        backendOverride: session.sandboxBackend,
+      const resumed = await establishWarmLeaseSandbox({
+        db,
+        settings,
+        accountId,
+        workspaceId,
+        sandboxGroupId,
+        lifecycleSessionId: session.id,
+        backend: session.sandboxBackend,
         environment,
+        initialLease: leaseSnapshot,
+        fallbackEnvelope: resumeEnvelope,
+        route: { targetSandboxId: null },
       });
+      established = resumed.established;
+      leaseSnapshot = resumed.lease;
     }
 
     const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
@@ -248,7 +464,32 @@ export async function withChannelA<T>(
     const routedSession = routingEnabled(settings)
       ? wrapChannelABoxWithRouting(
           { db, settings, bus },
-          { workspaceId, sessionId: session.id },
+          {
+            workspaceId,
+            sessionId: session.id,
+            establishModalTarget: async (sandbox, pointer) => {
+              const cacheKey = `${sandbox.id}:${pointer.activeEpoch}`;
+              let pending = namedModalTargets.get(cacheKey);
+              if (!pending) {
+                pending = establishNamedModalTarget({
+                  db,
+                  settings,
+                  accountId,
+                  workspaceId,
+                  sandboxId: sandbox.id,
+                  holderKind: "viewer",
+                  holderId: viewerId,
+                  subjectId: session.id,
+                  environment,
+                  ...((settings.modalImageRef ?? settings.dockerImage)
+                    ? { image: settings.modalImageRef ?? settings.dockerImage }
+                    : {}),
+                });
+                namedModalTargets.set(cacheKey, pending);
+              }
+              return (await pending).established.session as never;
+            },
+          },
           established,
         ).session
       : established.session;
@@ -263,6 +504,10 @@ export async function withChannelA<T>(
   } catch (error) {
     throw mapChannelAError(error);
   } finally {
+    for (const pending of namedModalTargets.values()) {
+      const target = await pending.catch(() => null);
+      await target?.release().catch(() => undefined);
+    }
     await release();
     await dropEstablishedHandle(established);
   }

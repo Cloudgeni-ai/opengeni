@@ -24,6 +24,7 @@ const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
 // Controls for hydrateWorkspace-throw + delete tracking.
 let hydrateWorkspaceFailuresRemaining = 0;
 const deleteCalls: unknown[] = [];
+let resumeError: unknown = new Error("Modal sandbox sb-old not found (has been terminated)");
 
 class FakeModalSandboxClient {
   backendId = "modal";
@@ -32,7 +33,7 @@ class FakeModalSandboxClient {
     return { ...state };
   }
   async resume() {
-    throw new Error("Modal sandbox sb-old not found (has been terminated)");
+    throw resumeError;
   }
   async create(args: { manifest?: unknown; snapshot?: unknown }) {
     createArgs.push(args);
@@ -114,6 +115,42 @@ function modalSettings() {
 }
 
 describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
+  test("warm resume-only NotFound returns typed gone and NEVER creates", async () => {
+    createArgs.length = 0;
+    resumeError = new Error("Modal sandbox sb-old not found (has been terminated)");
+    const result = await establishSandboxSessionFromEnvelope(
+      modalSettings(),
+      envelopeWithArchive(SNAPSHOT_B64),
+      { sessionId: "sess-warm-gone", environment: {}, createPolicy: "never" },
+    );
+    expect(result).toMatchObject({
+      outcome: "gone",
+      backendId: "modal",
+      observedInstanceId: "sb-old",
+      reason: "provider_not_found",
+    });
+    expect(createArgs).toHaveLength(0);
+  });
+
+  test("DNS/UNAVAILABLE propagates and NEVER creates or becomes provider-gone", async () => {
+    createArgs.length = 0;
+    const dns = Object.assign(new Error("getaddrinfo ENOTFOUND api.modal.com"), {
+      code: "ENOTFOUND",
+    });
+    resumeError = dns;
+    try {
+      const caught = await establishSandboxSessionFromEnvelope(
+        modalSettings(),
+        envelopeWithArchive(SNAPSHOT_B64),
+        { sessionId: "sess-dns", environment: {}, createPolicy: "never" },
+      ).catch((error) => error);
+      expect(caught).toBe(dns);
+      expect(createArgs).toHaveLength(0);
+    } finally {
+      resumeError = new Error("Modal sandbox sb-old not found (has been terminated)");
+    }
+  });
+
   test("readWorkspaceArchiveFromEnvelopeSessionState round-trips base64 → exact bytes", () => {
     const out = readWorkspaceArchiveFromEnvelopeSessionState({ workspaceArchive: SNAPSHOT_B64 });
     expect(out).toBeInstanceOf(Uint8Array);
@@ -138,7 +175,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     const established = await establishSandboxSessionFromEnvelope(
       modalSettings(),
       envelopeWithArchive(SNAPSHOT_B64),
-      { sessionId: "sess-cold", environment: {} },
+      { sessionId: "sess-cold", environment: {}, createPolicy: "disposable" },
     );
 
     // (1) create() was called WITHOUT a `snapshot` arg (would throw on Modal).
@@ -158,7 +195,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     const established = await establishSandboxSessionFromEnvelope(
       modalSettings(),
       envelopeWithArchive(undefined),
-      { sessionId: "sess-cold-noarch", environment: {} },
+      { sessionId: "sess-cold-noarch", environment: {}, createPolicy: "disposable" },
     );
 
     expect(createArgs).toHaveLength(1);
@@ -177,7 +214,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       const established = await establishSandboxSessionFromEnvelope(
         modalSettings(),
         envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
-        { sessionId: "sess-hydrate-prev", environment: {} },
+        { sessionId: "sess-hydrate-prev", environment: {}, createPolicy: "disposable" },
       );
 
       expect(createArgs).toHaveLength(1);
@@ -200,7 +237,11 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       const established = await establishSandboxSessionFromEnvelope(
         modalSettings(),
         envelopeWithArchive(SNAPSHOT_B64),
-        { sessionId: "sess-hydrate-fail-open", environment: {} },
+        {
+          sessionId: "sess-hydrate-fail-open",
+          environment: {},
+          createPolicy: "disposable",
+        },
       );
 
       expect(established.instanceId).toBe("sb-fresh");

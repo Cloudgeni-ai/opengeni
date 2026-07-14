@@ -13110,6 +13110,15 @@ export type AcquireLeaseResult =
   // create().
   | { role: "fenced"; lease: LeaseSnapshot };
 
+/** Result of the provider-gone warm->warming reclaim election. Only `owner`
+ * licenses a replacement provider create. `waiting` means another caller owns
+ * this epoch's replacement and the caller must wait/re-read; `fenced` means the
+ * observed `(lease_epoch, instance_id)` is no longer current. */
+export type GoneLeaseReclaimResult =
+  | { role: "owner"; lease: LeaseSnapshot }
+  | { role: "waiting"; lease: LeaseSnapshot }
+  | { role: "fenced"; lease: LeaseSnapshot | null };
+
 // Thrown by callers that treat a fenced/superseded epoch as an error path.
 export class SandboxLeaseSupersededError extends Error {
   constructor(
@@ -13400,6 +13409,72 @@ export async function acquireLease(
   );
 }
 
+/**
+ * Re-elect exactly one replacement owner after a resume-only provider NotFound.
+ *
+ * The owner CAS is keyed by BOTH the observed lease epoch and exact provider
+ * instance id. A broad error string cannot reach this function; the runtime leaf
+ * first returned a typed gone outcome. The old instance id remains tracked while
+ * warming so an owner crash before replacement create is still drainable; the
+ * create callback overwrites it immediately with the replacement id.
+ */
+export async function claimGoneLeaseReclaim(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    observedLeaseEpoch: number;
+    observedInstanceId: string;
+    warmingLeaseTtlMs: number;
+  },
+): Promise<GoneLeaseReclaimResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const row = rows[0];
+        if (!row) return { role: "fenced" as const, lease: null };
+        if (Number(row.lease_epoch) !== input.observedLeaseEpoch) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
+        // A sibling already won this epoch's reclaim. It may already have
+        // checkpointed the replacement id, so instance identity is intentionally
+        // not re-checked on the waiter branch.
+        if (row.liveness === "warming") {
+          return { role: "waiting" as const, lease: mapLeaseRow(row) };
+        }
+        if (row.liveness !== "warm" || row.instance_id !== input.observedInstanceId) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
+        const claimed = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            liveness = 'warming',
+            data_plane_url = null,
+            terminal_data_plane_url = null,
+            expires_at = now() + (${String(input.warmingLeaseTtlMs)} || ' milliseconds')::interval,
+            updated_at = now()
+          where id = ${row.id}
+            and liveness = 'warm'
+            and lease_epoch = ${input.observedLeaseEpoch}
+            and instance_id = ${input.observedInstanceId}
+          returning *
+        `);
+        return claimed[0]
+          ? { role: "owner" as const, lease: mapLeaseRow(claimed[0]) }
+          : { role: "fenced" as const, lease: mapLeaseRow(row) };
+      }),
+  );
+}
+
 // §4.2 — the ONLY lease_epoch++ site. CAS on (warming AND lease_epoch=expected).
 // Folds the group box-envelope (resume_backend_id/resume_state) onto the lease.
 export async function commitWarmingToWarm(
@@ -13414,12 +13489,30 @@ export async function commitWarmingToWarm(
     resumeBackendId?: string | null;
     resumeState?: Record<string, unknown> | null;
     leaseTtlMs: number;
+    /** Exact provider id previously checkpointed by
+     * `recordWarmingSandboxCreated`. When supplied, a stale creator whose epoch
+     * was recycled through warming->draining->cold->warming cannot commit over a
+     * newer creator at the same lease epoch. */
+    expectedWarmingInstanceId?: string;
+    /** On a replacement of the SAME logical target, invalidate every session
+     * currently routing to it in the SAME transaction as lease_epoch++. null is
+     * the group-home target; a UUID is a named sandbox target. Omit on first
+     * materialization (there is no stale routing cache yet). */
+    advanceActiveRoute?: { targetSandboxId: string | null };
   },
-): Promise<{ committed: boolean; lease: LeaseSnapshot | null }> {
+): Promise<{
+  committed: boolean;
+  lease: LeaseSnapshot | null;
+  activeEpochsAdvanced: number;
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // `withRlsContext` owns one database transaction for this entire callback.
+      // Therefore the warming->warm lease CAS/epoch bump and the optional session
+      // active_epoch invalidation below commit or roll back together; observers
+      // cannot see a new provider lease behind a stale routing cache epoch.
       // resume_state is jsonb: the raw postgres driver does NOT auto-stringify a
       // plain object bound for a jsonb column, so serialize to a JSON string and
       // cast ::jsonb (null stays a real SQL null). Binding the object directly
@@ -13441,14 +13534,45 @@ export async function commitWarmingToWarm(
           updated_at        = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
+          ${
+            input.expectedWarmingInstanceId !== undefined
+              ? sql`and instance_id = ${input.expectedWarmingInstanceId}`
+              : sql``
+          }
         returning *
       `);
       // CAS miss = a reaper already reset this warming row to cold (the spawner
       // was too slow), or another spawner re-established and bumped the epoch.
       // The spawner MUST drop its in-memory handle and re-acquire — NEVER force
       // warm, NEVER provider-delete the box (it rides the provider idle-timeout).
-      if (rows.length === 0) return { committed: false, lease: null };
-      return { committed: true, lease: mapLeaseRow(rows[0]!) };
+      if (rows.length === 0) {
+        return { committed: false, lease: null, activeEpochsAdvanced: 0 };
+      }
+      let activeEpochsAdvanced = 0;
+      if (input.advanceActiveRoute) {
+        const target = input.advanceActiveRoute.targetSandboxId;
+        const advanced =
+          target === null
+            ? await scopedDb.execute<{ id: string }>(sql`
+                update sessions set active_epoch = active_epoch + 1, updated_at = now()
+                where workspace_id = ${input.workspaceId}
+                  and sandbox_group_id = ${input.sandboxGroupId}
+                  and active_sandbox_id is null
+                returning id
+              `)
+            : await scopedDb.execute<{ id: string }>(sql`
+                update sessions set active_epoch = active_epoch + 1, updated_at = now()
+                where workspace_id = ${input.workspaceId}
+                  and active_sandbox_id = ${target}
+                returning id
+              `);
+        activeEpochsAdvanced = advanced.length;
+      }
+      return {
+        committed: true,
+        lease: mapLeaseRow(rows[0]!),
+        activeEpochsAdvanced,
+      };
     },
   );
 }
@@ -13475,6 +13599,12 @@ export async function recordWarmingSandboxCreated(
      *  warming-death (c2) drain now that instance_id is set. Defaults to leaseTtlMs
      *  for legacy callers/tests. */
     warmingLeaseTtlMs?: number;
+    /** Exact instance identity expected on the warming row immediately before
+     * this create. `null` is a first cold create; a provider-gone reclaim passes
+     * the gone instance id. This prevents a late callback from overwriting a
+     * newer replacement after the same numeric epoch was recycled. Omit only for
+     * legacy callers that cannot supply the identity fence. */
+    expectedPriorInstanceId?: string | null;
   },
 ): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(
@@ -13492,6 +13622,11 @@ export async function recordWarmingSandboxCreated(
           updated_at        = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
+          ${
+            input.expectedPriorInstanceId !== undefined
+              ? sql`and instance_id is not distinct from ${input.expectedPriorInstanceId}`
+              : sql``
+          }
         returning *
       `);
       if (rows.length === 0) return { recorded: false, lease: null };
@@ -13522,6 +13657,10 @@ export async function failWarmingToCold(
     workspaceId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
+    /** Optional exact warming instance fence. `null` means create never returned;
+     * a string means that exact checkpointed replacement may be rolled back.
+     * A stale loser must never clear a newer creator's tracked provider id. */
+    expectedInstanceId?: string | null;
   },
 ): Promise<void> {
   await withRlsContext(
@@ -13554,6 +13693,11 @@ export async function failWarmingToCold(
           end
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
+          ${
+            input.expectedInstanceId !== undefined
+              ? sql`and instance_id is not distinct from ${input.expectedInstanceId}`
+              : sql``
+          }
       `);
     },
   );
@@ -14750,6 +14894,51 @@ export async function readLease(
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+/** Resolve the lease identity captured by a holder at attach time. This is the
+ * authoritative target for later heartbeat/detach/revoke calls: a session may
+ * swap its active pointer after the viewer attached, but that must never move
+ * the existing holder onto the new target or leak the original holder.
+ *
+ * `subjectId` prevents a caller from resolving another session's coincidentally
+ * equal holder id. More than one row is returned rather than guessed between;
+ * heartbeat callers can fail closed while detach/revoke callers release every
+ * exact row. No schema change is needed because holder + lease already contain
+ * the full ownership identity. */
+export type SandboxLeaseHolderTarget = {
+  sandboxGroupId: string;
+  leaseEpoch: number;
+};
+
+export async function listSandboxLeaseHolderTargets(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    kind: LeaseHolderKind;
+    holderId: string;
+  },
+): Promise<SandboxLeaseHolderTarget[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      sandbox_group_id: string;
+      lease_epoch: number | string;
+    }>(sql`
+      select l.sandbox_group_id, l.lease_epoch
+      from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where h.workspace_id = ${input.workspaceId}
+        and h.subject_id = ${input.subjectId}
+        and h.kind = ${input.kind}
+        and h.holder_id = ${input.holderId}
+      order by h.created_at desc
+    `);
+    return rows.map((row: { sandbox_group_id: string; lease_epoch: number | string }) => ({
+      sandboxGroupId: row.sandbox_group_id,
+      leaseEpoch: Number(row.lease_epoch),
+    }));
   });
 }
 

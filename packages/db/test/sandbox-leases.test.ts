@@ -3,18 +3,25 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   acquireLease,
+  claimGoneLeaseReclaim,
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  createSandbox,
+  createSession,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
+  listSandboxLeaseHolderTargets,
   markSandboxFileResourcesMaterialized,
   persistDrainSnapshot,
+  readActiveSandbox,
+  recordWarmingSandboxCreated,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
   SandboxImageConflictError,
   SandboxRigConflictError,
+  setActiveSandbox,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -338,6 +345,442 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       expectedEpoch: s2Epoch,
     });
     expect(freshAccepted).toBe(true);
+  }, 60_000);
+
+  test("(2c) N=50 warm-NotFound reclaim elections license exactly one replacement create", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "warm-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const firstRecorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedPriorInstanceId: null,
+      instanceId: "sb-gone",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-gone" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(firstRecorded.recorded).toBe(true);
+    const firstWarm = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedWarmingInstanceId: "sb-gone",
+      instanceId: "sb-gone",
+      resumeBackendId: "modal",
+      resumeState: firstRecorded.lease!.resumeState,
+      leaseTtlMs: 45_000,
+    });
+    expect(firstWarm.committed).toBe(true);
+
+    const observedEpoch = firstWarm.lease!.leaseEpoch;
+    const elections = await Promise.all(
+      Array.from({ length: 50 }, () =>
+        claimGoneLeaseReclaim(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          observedLeaseEpoch: observedEpoch,
+          observedInstanceId: "sb-gone",
+          warmingLeaseTtlMs: 60_000,
+        }),
+      ),
+    );
+    expect(elections.filter((result) => result.role === "owner")).toHaveLength(1);
+    expect(elections.filter((result) => result.role === "waiting")).toHaveLength(49);
+
+    // Provider create is downstream of role:"owner" only.
+    let providerCreates = 0;
+    for (const result of elections) {
+      if (result.role === "owner") providerCreates += 1;
+    }
+    expect(providerCreates).toBe(1);
+
+    const replacementRecorded = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: observedEpoch,
+      expectedPriorInstanceId: "sb-gone",
+      instanceId: "sb-replacement",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-replacement" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(replacementRecorded.recorded).toBe(true);
+
+    // A delayed callback from a rival create cannot overwrite the checkpointed id.
+    const lateLoser = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: observedEpoch,
+      expectedPriorInstanceId: "sb-gone",
+      instanceId: "sb-rival",
+      leaseTtlMs: 45_000,
+    });
+    expect(lateLoser.recorded).toBe(false);
+
+    const replacementWarm = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: observedEpoch,
+      expectedWarmingInstanceId: "sb-replacement",
+      instanceId: "sb-replacement",
+      resumeBackendId: "modal",
+      resumeState: replacementRecorded.lease!.resumeState,
+      leaseTtlMs: 45_000,
+    });
+    expect(replacementWarm.committed).toBe(true);
+    expect(replacementWarm.lease?.leaseEpoch).toBe(observedEpoch + 1);
+    expect(replacementWarm.lease?.instanceId).toBe("sb-replacement");
+
+    const staleElection = await claimGoneLeaseReclaim(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      observedLeaseEpoch: observedEpoch,
+      observedInstanceId: "sb-gone",
+      warmingLeaseTtlMs: 60_000,
+    });
+    expect(staleElection.role).toBe("fenced");
+  }, 60_000);
+
+  test("(2d) replacement commit advances lease + home active epochs atomically for the same logical target", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "epoch pair",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const groupId = session.sandboxGroupId;
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "epoch-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedPriorInstanceId: null,
+      instanceId: "sb-home-old",
+      leaseTtlMs: 45_000,
+    });
+    const initial = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedWarmingInstanceId: "sb-home-old",
+      instanceId: "sb-home-old",
+      leaseTtlMs: 45_000,
+    });
+    const routeBefore = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(routeBefore.activeSandboxId).toBeNull();
+
+    const election = await claimGoneLeaseReclaim(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      observedLeaseEpoch: initial.lease!.leaseEpoch,
+      observedInstanceId: "sb-home-old",
+      warmingLeaseTtlMs: 60_000,
+    });
+    expect(election.role).toBe("owner");
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: initial.lease!.leaseEpoch,
+      expectedPriorInstanceId: "sb-home-old",
+      instanceId: "sb-home-new",
+      leaseTtlMs: 45_000,
+    });
+    const replacement = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: initial.lease!.leaseEpoch,
+      expectedWarmingInstanceId: "sb-home-new",
+      instanceId: "sb-home-new",
+      leaseTtlMs: 45_000,
+      advanceActiveRoute: { targetSandboxId: null },
+    });
+    const routeAfter = (await readActiveSandbox(db, workspaceId, session.id))!;
+    expect(replacement.committed).toBe(true);
+    expect(replacement.activeEpochsAdvanced).toBe(1);
+    expect(replacement.lease?.leaseEpoch).toBe(initial.lease!.leaseEpoch + 1);
+    expect(routeAfter.activeEpoch).toBe(routeBefore.activeEpoch + 1);
+  }, 60_000);
+
+  test("(2e) named target rematerialization advances every route to that UUID, never home routes", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const named = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "ope13-named",
+    });
+    const sessions = await Promise.all(
+      ["named-a", "named-b", "home"].map((message) =>
+        createSession(db, {
+          accountId,
+          workspaceId,
+          initialMessage: message,
+          resources: [],
+          metadata: {},
+          model: "gpt-test",
+          sandboxBackend: "modal",
+        }),
+      ),
+    );
+    for (const session of sessions.slice(0, 2)) {
+      await admin`
+        update sessions set active_sandbox_id = ${named.id}, active_epoch = 7
+        where id = ${session.id}`;
+    }
+    await admin`update sessions set active_epoch = 11 where id = ${sessions[2]!.id}`;
+
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      kind: "turn",
+      holderId: "named-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedPriorInstanceId: null,
+      instanceId: "sb-named-old",
+      leaseTtlMs: 45_000,
+    });
+    const initial = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedWarmingInstanceId: "sb-named-old",
+      instanceId: "sb-named-old",
+      leaseTtlMs: 45_000,
+    });
+    await claimGoneLeaseReclaim(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      observedLeaseEpoch: initial.lease!.leaseEpoch,
+      observedInstanceId: "sb-named-old",
+      warmingLeaseTtlMs: 60_000,
+    });
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      expectedEpoch: initial.lease!.leaseEpoch,
+      expectedPriorInstanceId: "sb-named-old",
+      instanceId: "sb-named-new",
+      leaseTtlMs: 45_000,
+    });
+    const replacement = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: named.id,
+      expectedEpoch: initial.lease!.leaseEpoch,
+      expectedWarmingInstanceId: "sb-named-new",
+      instanceId: "sb-named-new",
+      leaseTtlMs: 45_000,
+      advanceActiveRoute: { targetSandboxId: named.id },
+    });
+    expect(replacement.activeEpochsAdvanced).toBe(2);
+    const pointers = await Promise.all(
+      sessions.map((session) => readActiveSandbox(db, workspaceId, session.id)),
+    );
+    expect(pointers[0]?.activeEpoch).toBe(8);
+    expect(pointers[1]?.activeEpoch).toBe(8);
+    expect(pointers[2]?.activeEpoch).toBe(11);
+  }, 60_000);
+
+  test("(2g) holder ownership remains on the attach-time target after the session swaps", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "holder target",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const otherSession = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "other holder subject",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const targetA = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "holder-a",
+    });
+    const targetB = await createSandbox(db, {
+      accountId,
+      workspaceId,
+      kind: "modal",
+      name: "holder-b",
+    });
+    const viewerId = "viewer-same-id";
+    const attachedA = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: targetA.id,
+      kind: "viewer",
+      holderId: viewerId,
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    // A coincidentally equal viewer id owned by another session must not leak
+    // into the lookup either.
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: targetB.id,
+      kind: "viewer",
+      holderId: viewerId,
+      subjectId: otherSession.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const ontoA = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: targetA.id,
+      expectedEpoch: 0,
+    });
+    const ontoB = await setActiveSandbox(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      targetSandboxId: targetB.id,
+      expectedEpoch: ontoA.pointer!.activeEpoch,
+    });
+    expect(ontoB.swapped).toBe(true);
+
+    const targets = await listSandboxLeaseHolderTargets(db, {
+      workspaceId,
+      subjectId: session.id,
+      kind: "viewer",
+      holderId: viewerId,
+    });
+    expect(targets).toEqual([
+      { sandboxGroupId: targetA.id, leaseEpoch: attachedA.lease.leaseEpoch },
+    ]);
+  }, 60_000);
+
+  test("(2f) reclaim crash after create keeps the exact replacement id drainable", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "crash-owner",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedPriorInstanceId: null,
+      instanceId: "sb-crash-old",
+      leaseTtlMs: 45_000,
+    });
+    const initial = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      expectedWarmingInstanceId: "sb-crash-old",
+      instanceId: "sb-crash-old",
+      leaseTtlMs: 45_000,
+    });
+    await claimGoneLeaseReclaim(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      observedLeaseEpoch: initial.lease!.leaseEpoch,
+      observedInstanceId: "sb-crash-old",
+      warmingLeaseTtlMs: 60_000,
+    });
+    const checkpoint = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: initial.lease!.leaseEpoch,
+      expectedPriorInstanceId: "sb-crash-old",
+      instanceId: "sb-crash-replacement",
+      leaseTtlMs: 45_000,
+    });
+    expect(checkpoint.recorded).toBe(true);
+    // Simulate a worker/API death before warming->warm commit.
+    await admin`
+      update sandbox_leases set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    const reaped = await reapStaleLeaseHolders(db, {
+      workspaceId,
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 1,
+      idleGraceMs: 0,
+    });
+    const drainable = reaped.drained.find((row) => row.sandboxGroupId === groupId);
+    expect(drainable?.instanceId).toBe("sb-crash-replacement");
+    const row = await readRow(workspaceId, groupId);
+    expect(row?.liveness).toBe("draining");
+    expect(row?.instance_id).toBe("sb-crash-replacement");
   }, 60_000);
 
   test("(2b) file materialization markers are keyed by warm box instance and epoch", async () => {
@@ -739,7 +1182,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       resumeBackendId: "modal",
       resumeState: {
         backendId: "modal",
-        sessionState: { providerState: { sandboxId: "sb-live" }, workspaceReady: true },
+        sessionState: {
+          providerState: { sandboxId: "sb-live" },
+          workspaceReady: true,
+        },
       },
       leaseTtlMs: 45_000,
     });
@@ -760,7 +1206,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(cold.wentCold).toBe(true);
     const [row] = await admin<
-      { liveness: string; resume_state: unknown; resume_backend_id: string | null }[]
+      {
+        liveness: string;
+        resume_state: unknown;
+        resume_backend_id: string | null;
+      }[]
     >`
       select liveness, resume_state, resume_backend_id
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
@@ -827,7 +1277,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(res.role).toBe("attached");
     const [row] = await admin<
-      { liveness: string; image: string | null; instance_id: string | null; refcount: number }[]
+      {
+        liveness: string;
+        image: string | null;
+        instance_id: string | null;
+        refcount: number;
+      }[]
     >`
       select liveness, image, instance_id, refcount from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.liveness).toBe("warm"); // never recreated
@@ -1097,7 +1552,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       }),
     ).rejects.toThrow(SandboxRigConflictError);
     const [row] = await admin<
-      { liveness: string; rig_version_id: string | null; instance_id: string | null }[]
+      {
+        liveness: string;
+        rig_version_id: string | null;
+        instance_id: string | null;
+      }[]
     >`
       select liveness, rig_version_id, instance_id from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(row?.liveness).toBe("warm");

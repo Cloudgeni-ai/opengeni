@@ -46,6 +46,17 @@ the completed tool call/full turn is never blindly replayed. Budget/credit
 exhaustion likewise idles the turn rather than failing the session, so a top-up
 lets the same session continue.
 
+A narrowly classified, status-less Responses `APIError` whose accepted stream
+produced invalid content is also a checkpoint boundary, never a retry ticket.
+The worker first requires a durable conversation-truth checkpoint, then
+atomically marks the exact turn failed and idles the session. An active goal may
+continue only as a paced **new** turn; without a goal, only a later user message
+continues. If the checkpoint itself fails, the session becomes recoverably
+failed and requires that user-message boundary. The classifier is Responses-
+only, requires a bounded allow-listed provider request id, and persists only
+product-owned text plus bounded diagnostic scalars—never the raw provider body,
+headers, transcript, original trigger, model request, tool request, or history.
+
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
 leases a credential under the workspace rotation-row lock; concurrent replicas
@@ -127,6 +138,18 @@ backend/capacity timeout instead of heartbeating forever. When a provider create
 does return, the worker immediately records the provider instance id on the
 warming lease before readiness/display/setup work; any later setup failure
 terminates that just-created sandbox before the lease can be retried.
+
+A warm/attached provider NotFound does **not** cold-create from the generic
+runtime resume leaf. The leaf returns a typed gone checkpoint; Postgres then
+elects exactly one replacement owner against the observed `(lease_epoch,
+instance_id)`. That winner creates once and checkpoints the new provider id
+before setup, while concurrent worker/API callers wait and re-read. Committing
+the replacement advances the lease epoch and the affected active-routing epochs
+together. DNS/`UNAVAILABLE` failures do not license this path. If a running
+turn's lease heartbeat is rejected, the stale handle is aborted and released;
+when progress exists the activity first requires the final durable conversation
+checkpoint, then uses the current OPE-18 exact-turn recovery transaction. It
+does not manufacture a prompt, queue row, or synthetic resume notice.
 
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with

@@ -1307,6 +1307,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       established = await establishSandboxSessionFromEnvelope(settings, null, {
         sessionId: ws.groupId,
         backendOverride: "modal",
+        createPolicy: "disposable",
       });
       // Fold the box onto the lease via the SAME serializer production uses
       // (serializeEstablishedSandboxEnvelope), so the envelope nests the flat

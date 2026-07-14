@@ -2804,6 +2804,10 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Abort the in-flight model/tool loop when its fenced sandbox lease is lost.
+   * The abort reason is preserved so the worker can requeue from the typed
+   * supersession checkpoint instead of continuing on a stale handle. */
+  signal?: AbortSignal;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -3125,6 +3129,7 @@ export async function runAgentStream(
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
       callModelInputFilter: ownedFilter,
+      ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
@@ -3214,6 +3219,7 @@ export async function runAgentStream(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
+    ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
     runOptions.sandbox = {

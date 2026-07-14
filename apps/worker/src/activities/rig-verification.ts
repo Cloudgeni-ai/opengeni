@@ -220,6 +220,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         established = await establishSandboxSessionFromEnvelope(runSettings, null, {
           sessionId: `rig-verification-${change.id}`,
           environment: {},
+          createPolicy: "disposable",
         });
         if ((candidateVersion.setupScript ?? "").trim()) {
           await runRigSetupHook(established.session as never, {
@@ -369,6 +370,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         established = await establishSandboxSessionFromEnvelope(runSettings, null, {
           sessionId: `rig-version-verification-${version.id}`,
           environment: {},
+          createPolicy: "disposable",
         });
         if ((version.setupScript ?? "").trim()) {
           await runRigSetupHook(established.session as never, {

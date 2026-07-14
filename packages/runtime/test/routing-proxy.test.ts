@@ -21,6 +21,7 @@ import { describe, expect, test } from "bun:test";
 import {
   RoutingSandboxSession,
   RoutingUnsupportedError,
+  SandboxMutationAcceptanceUnknownError,
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
   swapTargetEstablishability,
@@ -44,6 +45,7 @@ class FakeBackend implements RoutableBackendSession {
   readonly calls: string[] = [];
   // When set, exec throws a fence error UNTIL the pointer's epoch moves past it.
   fenceUntilEpoch: number | null = null;
+  fenceProvesNonAcceptance = false;
   private epochProvider: () => number;
   readonly state: { instanceId: string };
 
@@ -57,8 +59,10 @@ class FakeBackend implements RoutableBackendSession {
     if (this.fenceUntilEpoch !== null && this.epochProvider() <= this.fenceUntilEpoch) {
       const err = new Error("sandbox lease superseded; op fenced by a stale epoch") as Error & {
         fenced: boolean;
+        nonAcceptanceProven?: boolean;
       };
       err.fenced = true;
+      if (this.fenceProvesNonAcceptance) err.nonAcceptanceProven = true;
       throw err;
     }
     this.calls.push(String((args as { cmd?: string }).cmd ?? ""));
@@ -142,7 +146,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(selfhosted.calls).toEqual(["c"]);
   });
 
-  test("(2) stale-epoch in-flight op: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {
+  test("(2) proved pre-acceptance fence: a mutating exec retries against the new active sandbox", async () => {
     // The default (modal) box fences any op while the pointer is still at epoch 0
     // (simulating an in-flight op the active_epoch bumped under). After a swap to
     // selfhosted (epoch 1), the proxy must re-resolve and land the op on selfhosted.
@@ -150,6 +154,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     const modal = new FakeBackend("modal", () => ptr.current().activeEpoch);
     const selfhosted = new FakeBackend("selfhosted", () => ptr.current().activeEpoch);
     modal.fenceUntilEpoch = 0; // modal rejects while epoch <= 0
+    modal.fenceProvesNonAcceptance = true;
 
     let resolveCount = 0;
     const proxy = new RoutingSandboxSession({
@@ -180,6 +185,147 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(modal.calls).toEqual([]);
     // Re-resolved at least twice (initial + post-fence).
     expect(resolveCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("(2b) read-only op may re-resolve after a fence without mutation replay risk", async () => {
+    const ptr = mutablePointer();
+    let oldCalls = 0;
+    let newCalls = 0;
+    const oldBackend: RoutableBackendSession = {
+      state: {},
+      async readFile() {
+        oldCalls += 1;
+        const error = Object.assign(new Error("stale epoch fenced"), { fenced: true });
+        throw error;
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      state: {},
+      async readFile() {
+        newCalls += 1;
+        return new TextEncoder().encode("new");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "modal" },
+      onTransition: (event) => {
+        if (event.type === "fenced-retry") ptr.swap("replacement");
+      },
+    });
+
+    expect(new TextDecoder().decode(await proxy.readFile({ path: "/workspace/a" }))).toBe("new");
+    expect(oldCalls).toBe(1);
+    expect(newCalls).toBe(1);
+  });
+
+  test("(2c) acceptance-unknown mutations surface a typed checkpoint and are invoked exactly once", async () => {
+    const calls = new Map<string, number>();
+    const fail = (op: string): never => {
+      calls.set(op, (calls.get(op) ?? 0) + 1);
+      throw Object.assign(new Error(`transport reply lost for ${op}`), {
+        code: "UNAVAILABLE",
+        providerExecId: `provider-${op}`,
+      });
+    };
+    const backend: RoutableBackendSession = {
+      state: {},
+      exec: async () => fail("exec"),
+      execCommand: async () => fail("execCommand"),
+      writeStdin: async () => fail("writeStdin"),
+      writeFile: async () => fail("writeFile"),
+      materializeEntry: async () => fail("materializeEntry"),
+      desktopInput: async () => fail("desktopInput"),
+      screenshot: async () => ({
+        png: new Uint8Array(),
+        width: 1,
+        height: 1,
+        nativeWidth: 1,
+        nativeHeight: 1,
+      }),
+      createEditor: () => ({
+        createFile: async () => fail("editor.createFile"),
+        updateFile: async () => fail("editor.updateFile"),
+        deleteFile: async () => fail("editor.deleteFile"),
+      }),
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 4 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    });
+    const editor = proxy.createEditor() as Record<string, (operation: unknown) => Promise<unknown>>;
+    const operations: Array<[string, () => Promise<unknown>]> = [
+      ["exec", () => proxy.exec({ cmd: "mutate" })],
+      ["execCommand", () => proxy.execCommand({ cmd: "mutate" })],
+      ["writeStdin", () => proxy.writeStdin({ id: 1, data: "x" })],
+      ["writeFile", () => proxy.writeFile({ path: "/workspace/a", content: "x" })],
+      ["materializeEntry", () => proxy.materializeEntry({ path: "/workspace/a" })],
+      ["desktopInput", () => proxy.desktopInput!({ action: "click" })],
+      ["editor.createFile", () => editor.createFile!({ path: "/workspace/a" })],
+      ["editor.updateFile", () => editor.updateFile!({ path: "/workspace/a" })],
+      ["editor.deleteFile", () => editor.deleteFile!({ path: "/workspace/a" })],
+    ];
+
+    for (const [op, invoke] of operations) {
+      const error = await invoke().catch((caught) => caught);
+      expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+      expect((error as SandboxMutationAcceptanceUnknownError).checkpoint).toEqual({
+        op,
+        backend: "modal",
+        providerExecId: `provider-${op}`,
+        acceptance: "unknown",
+      });
+      expect(calls.get(op)).toBe(1);
+    }
+  });
+
+  test("(2d) hostile proof getters fail closed and unsafe provider exec ids never enter the checkpoint", async () => {
+    let calls = 0;
+    const rawExecId = "secret id with spaces and customer text";
+    const backend: RoutableBackendSession = {
+      state: {},
+      async exec() {
+        calls += 1;
+        const error = Object.assign(new Error("transport reply lost"), {
+          code: "UNAVAILABLE",
+          providerExecId: rawExecId,
+        });
+        Object.defineProperties(error, {
+          fenced: {
+            get() {
+              throw new Error("hostile fenced getter");
+            },
+          },
+          neverSent: {
+            get() {
+              throw new Error("hostile neverSent getter");
+            },
+          },
+          nonAcceptanceProven: {
+            get() {
+              throw new Error("hostile proof getter");
+            },
+          },
+        });
+        throw error;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 1 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    });
+
+    const error = await proxy.exec({ cmd: "mutate" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(SandboxMutationAcceptanceUnknownError);
+    expect((error as SandboxMutationAcceptanceUnknownError).checkpoint.providerExecId).toBeNull();
+    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect((error as Error).message).not.toContain(rawExecId);
+    expect(calls).toBe(1);
   });
 
   test("(3) heterogeneous swap (>=2 flips): ops land on the new active box each flip", async () => {
@@ -443,6 +589,31 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect((err as ActiveBackendUnresolvableError).code).toBe("unsupported_backend_context");
   });
 
+  test("modal swap target uses only the injected target establisher", async () => {
+    const group = new FakeBackend("group-home");
+    const named = new FakeBackend("named-target");
+    const establishedIds: string[] = [];
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: group,
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+      establishModalTarget: async (sandbox) => {
+        establishedIds.push(sandbox.id);
+        return named;
+      },
+    });
+
+    const result = await resolve({ activeSandboxId: "sbx-modal", activeEpoch: 9 });
+    expect(result.session).toBe(named);
+    expect(result.sandboxId).toBe("sbx-modal");
+    expect(result.kind).toBe("modal");
+    expect(establishedIds).toEqual(["sbx-modal"]);
+    expect(group.calls).toEqual([]);
+  });
+
   test("unknown sandbox id -> unresolvable, typed stale_pointer (issue #341 typed diagnostics)", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
@@ -593,13 +764,10 @@ describe("swapTargetEstablishability — the shared admission/establishment pred
     });
   });
 
-  test("a NON-group modal target is NOT establishable → unsupported_backend_context (Shape 1)", () => {
-    const r = swapTargetEstablishability({ kind: "modal", isSessionGroup: false });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe("unsupported_backend_context");
-      expect(r.reason).toMatch(/Modal sandbox other than this session/i);
-    }
+  test("a NON-group modal target is establishable once every construction root wires its target-owned closure", () => {
+    expect(swapTargetEstablishability({ kind: "modal", isSessionGroup: false })).toEqual({
+      ok: true,
+    });
   });
 
   test("an unknown backend kind is NOT establishable", () => {

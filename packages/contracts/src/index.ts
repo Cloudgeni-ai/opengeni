@@ -3286,8 +3286,8 @@ export const SessionEventType = z.enum([
   "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
   // Active-sandbox pointer reconcile (issue #341 invariant B). Turn start found the
   // persisted (active_sandbox_id, active_epoch) pointing at a target the turn cannot
-  // establish — a deleted/absent sandbox, a Modal sibling with no establisher, or a
-  // selfhosted sandbox with no enrollment — and reset it to the session HOME under
+  // establish — a deleted/absent sandbox, unknown kind, or selfhosted sandbox with
+  // no enrollment — and reset it to the session HOME under
   // the epoch fence instead of routing every op into the dead target. A VISIBLE,
   // never-silent downgrade: payload carries the typed reason + from/to epoch, never a
   // target id or command content. Announce-only; hits the timeline projection default

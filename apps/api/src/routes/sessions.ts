@@ -48,6 +48,7 @@ import {
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEvents,
+  listSandboxLeaseHolderTargets,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,
@@ -717,9 +718,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
+    const activeLeaseSandbox = session.activeSandboxId
+      ? await getSandbox(db, workspaceId, session.activeSandboxId)
+      : null;
+    if (session.activeSandboxId && !activeLeaseSandbox) {
+      throw new HTTPException(409, {
+        message: "the active sandbox target no longer exists; re-read the session route",
+      });
+    }
+    const modalLeaseGroupId =
+      activeLeaseSandbox?.kind === "modal" ? activeLeaseSandbox.id : session.sandboxGroupId;
     const lease = await readGroupLease(
       { db, settings },
-      { workspaceId, sandboxGroupId: session.sandboxGroupId },
+      { workspaceId, sandboxGroupId: modalLeaseGroupId },
     );
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
     // Per-principal acknowledgment: A acknowledging does not consent for B. The
@@ -797,12 +808,23 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
     }
 
+    // A stream mint can be the caller that observes provider-gone and wins the
+    // replacement election. In that case its returned epoch is newer than the
+    // pre-mint lease snapshot above. Surface the replacement epoch coherently;
+    // otherwise the capability document advertises a stale fence alongside a
+    // token minted for the new box.
+    const mintedLeaseEpoch = Math.max(
+      desktopStream?.leaseEpoch ?? 0,
+      terminalStream?.leaseEpoch ?? 0,
+    );
+    const capabilityLeaseEpoch = Math.max(lease?.leaseEpoch ?? 0, mintedLeaseEpoch);
+
     const capabilities = negotiateCapabilities({
       sessionId,
       backend: session.sandboxBackend as SandboxBackend,
       os: session.sandboxOs,
-      liveness: lease?.liveness ?? "cold",
-      leaseEpoch: lease?.leaseEpoch ?? 0,
+      liveness: mintedLeaseEpoch > 0 ? "warm" : (lease?.liveness ?? "cold"),
+      leaseEpoch: capabilityLeaseEpoch,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
@@ -1039,7 +1061,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ) {
         const lease = await readGroupLease(
           { db, settings },
-          { workspaceId, sandboxGroupId: session.sandboxGroupId },
+          { workspaceId, sandboxGroupId: result.sandboxGroupId },
         );
         if (lease) {
           // The pixel cell is minted only when the caller asked for the desktop plane
@@ -1074,6 +1096,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
         }
       }
+    }
+    const mintedLeaseEpoch = Math.max(stream?.leaseEpoch ?? 0, terminal?.leaseEpoch ?? 0);
+    if (mintedLeaseEpoch > result.leaseEpoch) {
+      // `mint*Stream` may have rematerialized a provider-gone box after attach.
+      // Hand the viewer that new fence so its first heartbeat is not rejected as
+      // stale against the replacement lease.
+      result = { ...result, liveness: "warm", leaseEpoch: mintedLeaseEpoch };
     }
     return c.json(
       {
@@ -1120,16 +1149,30 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!parsed.success) {
         throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
       }
-      const alive = await heartbeatViewer(
-        { db, settings },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          sandboxGroupId: session.sandboxGroupId,
-          viewerId: c.req.param("viewerId"),
-          expectedEpoch: parsed.data.leaseEpoch,
-        },
-      );
+      const viewerId = c.req.param("viewerId");
+      const targets = await listSandboxLeaseHolderTargets(db, {
+        workspaceId,
+        subjectId: session.id,
+        kind: "viewer",
+        holderId: viewerId,
+      });
+      const matching = targets.filter((target) => target.leaseEpoch === parsed.data.leaseEpoch);
+      // Ambiguous/missing ownership fails closed. In particular, never infer the
+      // lease from the session's CURRENT active pointer: the session may have
+      // swapped after this viewer attached.
+      const alive =
+        matching.length === 1
+          ? await heartbeatViewer(
+              { db, settings },
+              {
+                accountId: grant.accountId,
+                workspaceId,
+                sandboxGroupId: matching[0]!.sandboxGroupId,
+                viewerId,
+                expectedEpoch: parsed.data.leaseEpoch,
+              },
+            )
+          : false;
       return c.json({ alive });
     },
   );
@@ -1144,14 +1187,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    await detachViewer(
-      { db, settings },
-      {
-        accountId: grant.accountId,
-        workspaceId,
-        sandboxGroupId: session.sandboxGroupId,
-        viewerId: c.req.param("viewerId"),
-      },
+    const viewerId = c.req.param("viewerId");
+    const targets = await listSandboxLeaseHolderTargets(db, {
+      workspaceId,
+      subjectId: session.id,
+      kind: "viewer",
+      holderId: viewerId,
+    });
+    await Promise.all(
+      targets.map((target) =>
+        detachViewer(
+          { db, settings },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sandboxGroupId: target.sandboxGroupId,
+            viewerId,
+          },
+        ),
+      ),
     );
     return c.body(null, 204);
   });
@@ -1173,13 +1227,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      const result = await revokeViewer(db, {
-        accountId: grant.accountId,
+      const viewerId = c.req.param("viewerId");
+      const targets = await listSandboxLeaseHolderTargets(db, {
         workspaceId,
-        sandboxGroupId: session.sandboxGroupId,
-        viewerId: c.req.param("viewerId"),
-        idleGraceMs: settings.sandboxIdleGraceMs,
+        subjectId: session.id,
+        kind: "viewer",
+        holderId: viewerId,
       });
+      const released = await Promise.all(
+        targets.map((target) =>
+          revokeViewer(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sandboxGroupId: target.sandboxGroupId,
+            viewerId,
+            idleGraceMs: settings.sandboxIdleGraceMs,
+          }),
+        ),
+      );
+      const result = released.find((value) => value !== null) ?? null;
       // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
       return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
     },

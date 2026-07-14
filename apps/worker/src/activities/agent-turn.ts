@@ -65,6 +65,7 @@ import {
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
+import { establishNamedModalTarget } from "@opengeni/core";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
@@ -175,6 +176,8 @@ import {
   acquireSelfhostedLeaseForTurn,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
+  ensureDisplayStack,
+  exposeStreamPort,
   SandboxWarmingTimeoutError,
   type ResumedTurnSandbox,
 } from "../sandbox-resume";
@@ -211,6 +214,7 @@ import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import {
   desktopCapableBackend,
   sandboxRunAs,
+  SandboxMutationAcceptanceUnknownError,
   WorkspaceModelPolicyBlockedError,
 } from "@opengeni/runtime";
 import {
@@ -663,10 +667,9 @@ export function reconcileSeedCount(
  * bring-your-own machine owns its own filesystem and must NEVER be cloned onto. So
  * we look at where the agent ACTUALLY runs, not where the session was created.
  *
- * Returns "selfhosted" ONLY when the selfhosted feature is on AND the session has
- * a non-null active pointer whose sandbox `kind` is "selfhosted". Otherwise
- * returns undefined so buildAgent falls back to the home backend — byte-for-byte
- * unchanged cloud behavior.
+ * Returns the active target's supported kind (`selfhosted` or `modal`) when the
+ * routing feature is on and the pointer names one. Otherwise returns undefined
+ * so buildAgent falls back to the home backend.
  *
  * Total + best-effort by contract: it NEVER throws (a lookup failure is logged and
  * falls back to the home default), so wiring it at turn start can't fail the turn.
@@ -692,7 +695,7 @@ export async function resolveActiveSandboxBackend(
       return undefined;
     }
     const kind = await loadSandboxKind(pointer.activeSandboxId);
-    return kind === "selfhosted" ? "selfhosted" : undefined;
+    return kind === "selfhosted" || kind === "modal" ? kind : undefined;
   } catch (error) {
     console.error(
       "active sandbox backend resolution failed (turn proceeds on home backend)",
@@ -702,15 +705,34 @@ export async function resolveActiveSandboxBackend(
   }
 }
 
+/** Convert a false epoch/holder heartbeat into one stale-handle eviction.
+ * Exported as a pure coordination seam so tests can prove the old turn aborts
+ * exactly once; DB/network failures never call this (only a resolved `false`). */
+export function evictOnFalseSandboxLeaseHeartbeat(input: {
+  alive: boolean;
+  existingFailure: SandboxLeaseSupersededError | null;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  stopHeartbeat: () => void;
+  abort: (reason: SandboxLeaseSupersededError) => void;
+}): SandboxLeaseSupersededError | null {
+  if (input.alive || input.existingFailure) return input.existingFailure;
+  const failure = new SandboxLeaseSupersededError(input.sandboxGroupId, input.leaseEpoch);
+  input.stopHeartbeat();
+  input.abort(failure);
+  return failure;
+}
+
 /**
  * Classify a persisted active-sandbox pointer for TURN-START RECONCILE (issue #341
  * invariant B). Returns the typed reason to RESET the pointer to the session HOME,
  * or null to leave it in place. STRUCTURAL unestablishability only:
  *   - no record → the pointed-at sandbox row is gone (`stale_pointer`);
- *   - an unestablishable kind (a non-group Modal sibling, or an unknown backend) per
+ *   - an unestablishable/unknown kind per
  *     the SHARED `swapTargetEstablishability` predicate (`unsupported_backend_context`);
  *   - a selfhosted sandbox with no enrollment id to address (`offline_enrollment`).
- * A selfhosted sandbox WITH an enrollment is deliberately left in place even when it
+ * A named Modal target is structurally establishable through its required target-owned
+ * closure. A selfhosted sandbox WITH an enrollment is deliberately left in place even when it
  * is momentarily offline: the machine may recover mid-turn and its ops surface
  * agent_offline lazily, so the user's explicit machine target is never abandoned for
  * a transient control-plane blip (that is #339's concern, not this one).
@@ -1283,6 +1305,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // routing proxy): held so the turn's completion can final-ack this turn's
     // settled op-stream ops AFTER the results are durably persisted.
     let machinePrimarySession: import("@opengeni/runtime").SelfhostedSession | null = null;
+    const namedModalTargets = new Map<
+      string,
+      Promise<Awaited<ReturnType<typeof establishNamedModalTarget>>>
+    >();
     let lazyOwnedSandbox: EstablishedSandboxSession | null = null;
     let turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null = null;
     // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
@@ -1299,6 +1325,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    const leaseAbortController = new AbortController();
+    let leaseHeartbeatFailure: SandboxLeaseSupersededError | null = null;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -1410,7 +1438,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           holderId: heartbeatHolderId,
           leaseTtlMs: settings.sandboxLeaseTtlMs,
           expectedEpoch: heartbeatEpoch,
-        }).catch(() => undefined);
+        })
+          .then((alive) => {
+            // A false heartbeat is a lifecycle fence, not a best-effort blip:
+            // this turn no longer owns the epoch/holder. Stop every future tick,
+            // abort the model/tool loop, and let the typed supersession catch
+            // requeue on a current worker. The old handle is released/dropped in
+            // finally and cannot keep producing model/tool/history effects.
+            leaseHeartbeatFailure = evictOnFalseSandboxLeaseHeartbeat({
+              alive,
+              existingFailure: leaseHeartbeatFailure,
+              sandboxGroupId: heartbeatGroupId,
+              leaseEpoch: heartbeatEpoch,
+              stopHeartbeat: () => {
+                if (leaseHeartbeatTimer) {
+                  clearInterval(leaseHeartbeatTimer);
+                  leaseHeartbeatTimer = undefined;
+                }
+              },
+              abort: (failure) => leaseAbortController.abort(failure),
+            });
+          })
+          .catch(() => undefined);
         void accrueWarmSeconds(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -2797,6 +2846,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted" &&
         Boolean(activeSandboxPointer?.activeSandboxId) &&
         Boolean(activeSandboxRecord?.enrollmentId);
+      const namedModalPrimary =
+        activeSandboxBackend === "modal" &&
+        activeSandboxRecord?.kind === "modal" &&
+        Boolean(activeSandboxPointer?.activeSandboxId);
       // The backend that can actually create a sandbox for this turn. In the
       // common path this is runSettings.sandboxBackend. A selfhosted home turn
       // that is NOT machine-primary falls back to the deployment cloud backend
@@ -2811,7 +2864,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : runSettings.sandboxBackend;
       await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
       const establishPolicy: "eager" | "on-demand" =
-        lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
+        lazyProvisionEnabled(settings) &&
+        !machinePrimary &&
+        !namedModalPrimary &&
+        runSettings.sandboxBackend !== "none"
           ? "on-demand"
           : "eager";
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
@@ -2855,6 +2911,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         },
       );
 
+      const namedModalTarget = async (
+        sandbox: { id: string },
+        pointer: { activeEpoch: number },
+      ) => {
+        // Re-materialization advances every session route epoch atomically with
+        // the lease epoch. Include that route epoch here too: caching only by
+        // sandbox UUID would hand the routing proxy the pre-replacement handle
+        // after its own `(activeSandboxId, activeEpoch)` cache correctly missed.
+        const cacheKey = `${sandbox.id}:${pointer.activeEpoch}`;
+        let pending = namedModalTargets.get(cacheKey);
+        if (!pending) {
+          pending = establishNamedModalTarget({
+            db,
+            settings,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxId: sandbox.id,
+            holderKind: "turn",
+            holderId: sandboxHolderId ?? dispatchId ?? `turn:${turnId}`,
+            subjectId: input.sessionId,
+            environment: sandboxEnvironment,
+            ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+              ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
+              : {}),
+            prepareReplacement: async (replacement) => {
+              await ensureDisplayStack(settings, replacement);
+              const endpoint = await exposeStreamPort(settings, replacement);
+              return { dataPlaneUrl: endpoint?.url ?? null };
+            },
+          });
+          namedModalTargets.set(cacheKey, pending);
+        }
+        return await pending;
+      };
+      const establishModalTarget = async (
+        sandbox: { id: string },
+        pointer: { activeEpoch: number },
+      ) => (await namedModalTarget(sandbox, pointer)).established.session as never;
+
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
       // takes the legacy per-run build-and-discard path — byte-for-byte today.
@@ -2880,7 +2975,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // SelfhostedSandboxClient has no bound agentId and throws. Fall the group-box
         // backend back to the deployment default cloud backend so swap-away / flag-off
         // degrade to a genuine cloud box exactly like today (home=modal did).
-        if (machinePrimary) {
+        if (namedModalPrimary) {
+          // A named Modal pointer is a first-class logical target. Establish its
+          // OWN `sandboxes.id` lease/envelope before the SDK reads session.state;
+          // never provision or consult the caller's home group as a fallback.
+          const target = await namedModalTarget(activeSandboxRecord!, activeSandboxPointer!);
+          sandboxGroupId = activeSandboxRecord!.id;
+          setupBoxSession = target.established.session;
+          resolvedSandbox = {
+            established: wrapTurnBoxWithRouting(
+              { db, settings, bus },
+              {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                environment: sandboxEnvironment,
+                // The established default here is the NAMED target, not home.
+                // A mid-turn clear-to-null is accepted but cannot silently keep
+                // serving this target; the next turn establishes home.
+                defaultIsHome: false,
+                establishModalTarget,
+              },
+              target.established,
+            ),
+            leaseEpoch: target.lease.leaseEpoch,
+            release: target.release,
+          };
+          await publishSandboxLifecycleEvents(resolvedSandbox);
+        } else if (machinePrimary) {
           // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
           // establish or lease a phantom Modal home box (today's path leased + BILLED
           // a cloud box the turn never touched). Build the SelfhostedSession DIRECTLY
@@ -2960,6 +3081,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // the detach takes effect next turn. (Lazy home-box establishment on such a
                 // clear is a deferred follow-up; issue #341.)
                 defaultIsHome: session.sandboxBackend === "selfhosted",
+                establishModalTarget,
               },
               established,
             ),
@@ -3039,6 +3161,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   environment: sandboxEnvironment,
+                  establishModalTarget,
                 },
                 resolvedSandbox.established,
               ),
@@ -3370,6 +3493,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             environment: sandboxEnvironment,
+            establishModalTarget,
           },
           {
             client: lazyClient,
@@ -3617,6 +3741,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
           runtime.runStream(agent, runInput!, modelRunSettings, {
+            signal: leaseAbortController.signal,
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
               await renewCodexLease("runtime_event");
@@ -3676,6 +3801,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           while (true) {
             const next = await nextStreamEvent(iterator, activityContext);
+            if (leaseHeartbeatFailure) {
+              throw leaseHeartbeatFailure;
+            }
             if (next.done) {
               streamDone = true;
               break;
@@ -3853,6 +3981,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         await batcher.flush();
         await stream.completed.catch(() => undefined);
+        if (leaseHeartbeatFailure) {
+          throw leaseHeartbeatFailure;
+        }
         if (responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
           const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
@@ -4124,15 +4255,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // published: a shutdown landing during setup (claim/billing, before the
       // turn visibly started) must also recover, not fail the session. In that
       // early case nothing ran, so the new attempt uses the original trigger.
-      // The turn id falls
-      // back to the workflow-claimed turn when the local lookup had not
-      // finished yet.
+      // PR #400 admits and registers the exact attempt atomically; only that
+      // durable admission can supply a turn id. If admission never completed,
+      // there is no current inference for this activity to recover.
       const recoveryTurnId = turnId;
-      // P1.2: a lease supersession during resume (a newer epoch re-established
-      // the box concurrently) is NOT a session failure. Recover the same turn
-      // so its next attempt reattaches under the current epoch.
-      if (error instanceof SandboxLeaseSupersededError && recoveryTurnId) {
+      // P1.2: a lease supersession during resume or a false epoch-fenced
+      // heartbeat is NOT a session failure. A heartbeat can arrive after model
+      // or tool progress, so require the final exact-attempt history checkpoint
+      // before asking OPE-18 to recover the same logical turn. If that checkpoint
+      // cannot commit, fail closed through the normal terminal path rather than
+      // treating incomplete conversation truth as a replay ticket.
+      const sandboxLeaseSuperseded =
+        error instanceof SandboxLeaseSupersededError ? error : leaseHeartbeatFailure;
+      if (sandboxLeaseSuperseded && recoveryTurnId) {
         try {
+          if (leaseHeartbeatFailure) {
+            await flushRuntimeBatcher();
+            await reconcileConversationTruth({ requireDurable: true });
+          }
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
@@ -4269,7 +4409,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: recoveryPlan.sessionStatus,
           activeTurnId: null,
         });
-        if (!accepted) return { status: "cancelled" };
+        if (!accepted) return claimedResult({ status: "cancelled" });
         turnMetricOutcome = "failed";
         activityStatus = recoveryPlan.activityStatus;
         // Never attach the raw SDK APIError to telemetry. Its message/provider
@@ -4285,12 +4425,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           modelOrToolProgressPersisted,
           checkpointSucceeded,
         });
-        return recoveryPlan.continueDelayMs === undefined
-          ? { status: recoveryPlan.activityStatus }
-          : {
-              status: recoveryPlan.activityStatus,
-              continueDelayMs: recoveryPlan.continueDelayMs,
-            };
+        return claimedResult(
+          recoveryPlan.continueDelayMs === undefined
+            ? { status: recoveryPlan.activityStatus }
+            : {
+                status: recoveryPlan.activityStatus,
+                continueDelayMs: recoveryPlan.continueDelayMs,
+              },
+        );
       }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues
@@ -5330,6 +5472,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
         resolvedSandbox = null; // drop the handle; the box survives the turn
       }
+      for (const pending of namedModalTargets.values()) {
+        const target = await pending.catch(() => null);
+        await target?.release().catch((releaseError) => {
+          console.error(
+            "named Modal target release failed (turn outcome unaffected)",
+            releaseError,
+          );
+        });
+      }
+      namedModalTargets.clear();
     }
   };
 }
@@ -5415,6 +5567,13 @@ export function agentRunFailurePayload(
     providerApi === "responses" ? classifyProviderInvalidContentError(error) : null;
   if (providerInvalidContent) {
     return providerInvalidContentFailurePayload(providerInvalidContent);
+  }
+  if (error instanceof SandboxMutationAcceptanceUnknownError) {
+    return {
+      error: error.message,
+      code: error.code,
+      retryable: false,
+    };
   }
   const message = safeErrorMessage(error);
   const rawStatus = safeErrorProperty(error, "status");

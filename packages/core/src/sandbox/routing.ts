@@ -20,6 +20,7 @@ import {
   NatsControlRpc,
   RoutingSandboxSession,
   type ControlRpc,
+  type ActivePointer,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
   type RoutableBackendSession,
@@ -97,7 +98,17 @@ export function routingEnabled(settings: Settings): boolean {
  */
 export function wrapChannelABoxWithRouting(
   services: ChannelARoutingServices,
-  ids: { workspaceId: string; sessionId: string },
+  ids: {
+    workspaceId: string;
+    sessionId: string;
+    /** Target-owned named Modal establisher. The caller owns/release-tracks the
+     * returned target holder for the lifetime of this API operation. */
+    establishModalTarget: (
+      sandbox: RoutableSandbox,
+      pointer: ActivePointer,
+    ) => Promise<RoutableBackendSession>;
+    defaultIsHome?: boolean;
+  },
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
@@ -118,9 +129,16 @@ export function wrapChannelABoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    establishModalTarget: ids.establishModalTarget,
+    ...(ids.defaultIsHome !== undefined ? { defaultIsHome: ids.defaultIsHome } : {}),
   });
 
   const proxy = new RoutingSandboxSession({
+    defaultResolved: {
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+    },
     readPointer: async () => {
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };

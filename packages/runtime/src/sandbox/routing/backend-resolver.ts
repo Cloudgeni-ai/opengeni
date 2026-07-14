@@ -57,10 +57,13 @@ export interface ActiveBackendResolverDeps {
   /** The relay-URL shape config for selfhosted stream endpoints. */
   relay: SelfhostedRelayConfig;
   /** Establish (resume-by-id) a NON-DEFAULT modal target's box session for a swap.
-   *  Supplied by the API/worker (a closure over the sibling sandbox's lease). When
-   *  absent, a modal swap target surfaces as unsupported (the caller validated
-   *  liveness, so this is the "modal swap not wired in this context" guard). */
-  establishModalTarget?: (sandbox: RoutableSandbox) => Promise<RoutableBackendSession>;
+   *  Production API/worker roots require this closure; the optional leaf shape is
+   *  retained only so focused resolver tests can prove fail-closed behavior when a
+   *  third-party construction context omits it. */
+  establishModalTarget?: (
+    sandbox: RoutableSandbox,
+    pointer: ActivePointer,
+  ) => Promise<RoutableBackendSession>;
   /** The selfhosted CONTROL-op timeout (ping/fs/desktop/pty) for a swap/pin target.
    *  Absent ⇒ the session's 30s default. */
   selfhostedTimeoutMs?: number;
@@ -121,7 +124,8 @@ export interface ActiveBackendResolverDeps {
  *   - `stale_pointer`               — the pointed-at sandbox row is gone (deleted/orphaned).
  *   - `offline_enrollment`          — a selfhosted target carries no enrollment/agent id to address.
  *   - `unsupported_backend_context` — a target no turn routing context can establish
- *                                     (a non-group Modal sibling; an unknown kind).
+ *                                     (an unknown kind, or a third-party resolver
+ *                                     that omitted the named-Modal closure).
  *   - `transient_establishment`     — a momentary establish failure worth a retry (reserved;
  *                                     control-plane timeouts surface as their own typed error).
  *   - `home_unavailable_this_turn`  — the pointer was cleared to the session default (home)
@@ -135,8 +139,8 @@ export type BackendUnresolvableCode =
   | "transient_establishment"
   | "home_unavailable_this_turn";
 
-/** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
- *  target with no establisher in this context). The caller maps it to a 409.
+/** Thrown when a swap target cannot be resolved (unknown sandbox/kind, or a
+ *  third-party context omitted the required named-Modal establisher). The caller maps it to a 409.
  *  Carries a typed {@link BackendUnresolvableCode} in addition to the message. */
 export class ActiveBackendUnresolvableError extends Error {
   readonly name = "ActiveBackendUnresolvableError";
@@ -158,17 +162,16 @@ export type SwapTargetEstablishability =
  * pointer commit) and turn-time ESTABLISHMENT (this resolver + `wrapTurnBoxWithRouting`).
  * Admission MUST reject any target this predicate calls unestablishable, so the
  * pointer is never committed to a backend no turn can resume (issue #341 Shape 1:
- * a Modal-sibling swap was admitted + epoch-bumped, then every following op
- * stranded because no context wires an establisher for it).
+ * a target swap was admitted + epoch-bumped, then every following op stranded
+ * because a production construction root had no matching establisher).
  *
  *  - the session's OWN group box (`isSessionGroup`) is the null/home target and is
  *    always establishable (it IS the default backend);
  *  - a `selfhosted` machine target is establishable (`buildSelfhostedBackendSession`);
  *    admission's separate liveness probe — not this predicate — gates online-ness;
- *  - a NON-group `modal` target is NOT establishable: no turn context wires
- *    `establishModalTarget` (cross-group Modal resume-by-id is a future, billing-
- *    touching feature — sandbox-routing.ts). Wiring that establisher is the ONE
- *    toggle that flips this branch; keep admission and the resolver in lockstep.
+ *  - a NON-group `modal` target is establishable through the required injected
+ *    `establishModalTarget` closure. Worker and API construction roots wire that
+ *    closure to the target's own `sandboxes.id` lease/envelope lifecycle.
  */
 export function swapTargetEstablishability(target: {
   kind: string;
@@ -181,12 +184,7 @@ export function swapTargetEstablishability(target: {
     return { ok: true };
   }
   if (target.kind === "modal") {
-    return {
-      ok: false,
-      code: "unsupported_backend_context",
-      reason:
-        "a Modal sandbox other than this session's own box cannot be established by a turn yet; swap back to the session default or attach a Connected Machine",
-    };
+    return { ok: true };
   }
   return {
     ok: false,
@@ -311,7 +309,7 @@ export function makeActiveBackendResolver(
           `modal swap target ${sandbox.id} cannot be established in this context (no establisher wired)`,
         );
       }
-      const session = await deps.establishModalTarget(sandbox);
+      const session = await deps.establishModalTarget(sandbox, pointer);
       return { session, sandboxId: sandbox.id, kind: "modal" };
     }
 

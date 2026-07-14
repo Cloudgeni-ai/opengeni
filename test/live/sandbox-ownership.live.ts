@@ -43,6 +43,7 @@ describe("P1.2 live Modal keystone re-confirm (gated)", () => {
       const established = await establishSandboxSessionFromEnvelope(settings, null, {
         sessionId: `live-keystone-${crypto.randomUUID()}`,
         backendOverride: "modal",
+        createPolicy: "disposable",
       });
       const session = established.session as {
         running?: () => Promise<boolean>;
