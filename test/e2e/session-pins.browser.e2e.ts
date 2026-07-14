@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
+import { createDb, createSession, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -29,7 +29,7 @@ const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
   signalApprovalDecision: async () => undefined,
-  signalInterrupt: async () => undefined,
+  signalSessionControl: async () => undefined,
   syncScheduledTask: async () => undefined,
   deleteScheduledTaskSchedule: async () => undefined,
   triggerScheduledTask: async () => undefined,
@@ -281,6 +281,131 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceA.close();
   }, 150_000);
 
+  test("renders one truthful queue, goal, and agents stack above the composer", async () => {
+    const desktop = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    let mobile: BrowserContext | null = null;
+    try {
+      const desktopPage = await desktop.newPage();
+      await desktopPage.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(desktopPage);
+      const manager = await createSessionThroughApi(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        "Inspect the full session-control surface",
+        {
+          goal: {
+            text: "Make queueing, goals, and agent activity completely understandable",
+            successCriteria: "The UI has one compact and truthful surface for each concept.",
+          },
+        },
+      );
+
+      // Child lineage is intentionally not caller-forgeable through the public
+      // create-session API: only a worker-signed parent grant may create it. This
+      // browser fixture seeds that trusted relationship directly, then exercises
+      // the ordinary authenticated lineage read and production UI rendering.
+      for (const index of [1, 2]) {
+        await createSession(dbClient.db, {
+          accountId: manager.accountId,
+          workspaceId,
+          initialMessage: `Trusted child agent ${index}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          parentSessionId: manager.id,
+        });
+      }
+
+      const managerUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`;
+      await desktopPage.goto(managerUrl);
+      const queue = desktopPage.getByTestId("queue-surface");
+      const goal = desktopPage.getByTestId("goal-surface");
+      const agents = desktopPage.getByTestId("composer-agents-pill");
+      const composer = desktopPage.getByLabel("Message the agent");
+      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await goal.waitFor();
+      await agents.waitFor();
+      await composer.waitFor();
+      expect(await desktopPage.getByTestId("queue-surface").count()).toBe(1);
+      expect(await desktopPage.getByTestId("composer-agents-pill").count()).toBe(1);
+
+      // Enter appends an ordinary human prompt to the one visible queue. The
+      // inert workflow client keeps both rows waiting so the browser can inspect
+      // the exact server-authoritative order.
+      await composer.fill("A second prompt queued from the composer");
+      await composer.press("Enter");
+      await queue.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await queue.getByRole("button", { name: /2 queued prompts/ }).click();
+      await queue.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuedRows = queue.getByRole("listitem");
+      expect(await queuedRows.count()).toBe(2);
+      expect(await queuedRows.nth(0).innerText()).toContain(
+        "Inspect the full session-control surface",
+      );
+      expect(await queuedRows.nth(1).innerText()).toContain(
+        "A second prompt queued from the composer",
+      );
+      const timeline = desktopPage.getByTestId("session-timeline");
+      expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
+      expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
+
+      const boxes = await Promise.all([
+        queue.boundingBox(),
+        goal.boundingBox(),
+        agents.boundingBox(),
+        composer.boundingBox(),
+      ]);
+      for (const box of boxes) expect(box).not.toBeNull();
+      expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
+      expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
+      expect(boxes[2]!.y).toBeLessThan(boxes[3]!.y);
+
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(desktopPage, theme);
+        await expectNoPageOverflow(desktopPage);
+        await expectNoAxeViolations(desktopPage, [
+          "[data-testid=queue-surface]",
+          "[data-testid=goal-surface]",
+          "[data-testid=composer-agents-pill]",
+          "textarea[aria-label='Message the agent']",
+        ]);
+        await desktopPage.screenshot({
+          path: `/tmp/opengeni-session-control-stack-desktop-${theme}.png`,
+          fullPage: true,
+        });
+      }
+
+      mobile = await configuredContext(browser, {
+        viewport: { width: 390, height: 844 },
+        hasTouch: true,
+        isMobile: true,
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const mobilePage = await mobile.newPage();
+      await mobilePage.goto(managerUrl);
+      await mobilePage.getByTestId("queue-surface").waitFor();
+      await mobilePage.getByTestId("goal-surface").waitFor();
+      await mobilePage.getByTestId("composer-agents-pill").waitFor();
+      await expectNoPageOverflow(mobilePage);
+      await expectTouchTarget(
+        mobilePage.getByTestId("queue-surface").getByRole("button", { name: /2 queued prompts/ }),
+      );
+      await expectTouchTarget(mobilePage.getByTestId("composer-agents-pill"));
+      await mobilePage.screenshot({
+        path: "/tmp/opengeni-session-control-stack-mobile.png",
+        fullPage: true,
+      });
+    } finally {
+      await mobile?.close().catch(() => undefined);
+      await desktop.close().catch(() => undefined);
+    }
+  }, 150_000);
+
   test("keeps the pin/header/rail usable at 320px in light and dark themes", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 320, height: 740 },
@@ -353,6 +478,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
       await page.keyboard.press("Escape");
       await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
+      // Radix restores focus after the drawer's close animation settles. Wait
+      // for that observable contract rather than racing the animation frame.
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
+      );
       expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
         "Open navigation",
       );
@@ -593,7 +723,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   }, 60_000);
 });
 
-type BrowserSession = { id: string; pinned: boolean; pinVersion: number };
+type BrowserSession = {
+  id: string;
+  accountId: string;
+  pinned: boolean;
+  pinVersion: number;
+};
 type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
@@ -626,9 +761,15 @@ async function createSessionThroughApi(
   apiBaseUrl: string,
   workspaceId: string,
   initialMessage: string,
+  options: {
+    goal?: {
+      text: string;
+      successCriteria?: string;
+    };
+  } = {},
 ): Promise<BrowserSession> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, initialMessage }) => {
+    async ({ apiBaseUrl, workspaceId, initialMessage, options }) => {
       const response = await fetch(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -636,6 +777,7 @@ async function createSessionThroughApi(
           initialMessage,
           model: "scripted-model",
           sandboxBackend: "none",
+          ...options,
         }),
       });
       if (!response.ok) {
@@ -643,7 +785,7 @@ async function createSessionThroughApi(
       }
       return (await response.json()) as BrowserSession;
     },
-    { apiBaseUrl, workspaceId, initialMessage },
+    { apiBaseUrl, workspaceId, initialMessage, options },
   );
 }
 

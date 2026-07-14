@@ -11,7 +11,7 @@ import {
   CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
   CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
 } from "@opengeni/codex";
-import { clientCompactionThresholdTokens } from "@opengeni/runtime";
+import { compactionThresholdTokens } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
@@ -49,17 +49,13 @@ describe("withCodexProvider", () => {
     expect(sol?.autoCompactTokenLimit).toBe(CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT);
 
     const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
-    const turnSettings = settingsWithResolvedModelContext(
-      settings,
-      resolved.provider,
-      resolved.model,
-    );
+    const turnSettings = settingsWithResolvedModelContext(settings, resolved.model);
     expect(contextInputBudgetTokens(turnSettings)).toBe(258_400);
-    const trigger = clientCompactionThresholdTokens(turnSettings);
+    const trigger = compactionThresholdTokens(turnSettings);
     expect(trigger).toBe(244_800);
     expect(trigger).toBeLessThan(contextInputBudgetTokens(turnSettings));
     // Contrast: the old 1.05M global default never fired before the cliff.
-    const globalTrigger = clientCompactionThresholdTokens({
+    const globalTrigger = compactionThresholdTokens({
       contextWindowTokens: 1_050_000,
       contextReservedOutputTokens: settings.contextReservedOutputTokens,
       contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,

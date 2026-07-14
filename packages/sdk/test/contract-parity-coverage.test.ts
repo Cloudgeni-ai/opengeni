@@ -42,7 +42,6 @@ import {
   SetWorkspaceEnvironmentVariableRequest as ContractSetVariableRequest,
   UpdateScheduledTaskRequest as ContractUpdateScheduledTaskRequest,
   UpdateSessionGoalRequest as ContractUpdateSessionGoalRequest,
-  UpdateSessionTurnRequest as ContractUpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest as ContractUpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest as ContractUpdateWorkspaceRequest,
   UsageEvent as ContractUsageEvent,
@@ -94,7 +93,6 @@ import type {
   SessionGoalStatus,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
-  UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest,
   UsageEvent,
@@ -223,9 +221,6 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptUpdateGoal = (
       value: UpdateSessionGoalRequest,
     ): z.input<typeof ContractUpdateSessionGoalRequest> => value;
-    const acceptUpdateTurn = (
-      value: UpdateSessionTurnRequest,
-    ): z.input<typeof ContractUpdateSessionTurnRequest> => value;
     const acceptCreateTask = (
       value: CreateScheduledTaskRequest,
     ): z.input<typeof ContractCreateScheduledTaskRequest> => value;
@@ -270,7 +265,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptUpdateWorkspace,
       acceptCreateApiKey,
       acceptUpdateGoal,
-      acceptUpdateTurn,
       acceptCreateTask,
       acceptUpdateTask,
       acceptCreateEnvironment,
@@ -315,11 +309,5 @@ describe("SDK / contracts parity (full coverage)", () => {
 
     const goalUpdate: UpdateSessionGoalRequest = { status: "paused", rationale: "manual review" };
     expect(ContractUpdateSessionGoalRequest.safeParse(goalUpdate).success).toBe(true);
-
-    const turnUpdate: UpdateSessionTurnRequest = {
-      prompt: "rewritten prompt",
-      reasoningEffort: "high",
-    };
-    expect(ContractUpdateSessionTurnRequest.safeParse(turnUpdate).success).toBe(true);
   });
 });

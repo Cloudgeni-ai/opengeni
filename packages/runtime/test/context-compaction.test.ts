@@ -5,24 +5,19 @@ import {
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
-  INTERNAL_RESUME_MESSAGE_MARKER,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
-  buildDeterministicFallbackCompactionHistory,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   buildSummaryItem,
-  clientCompactionThresholdTokens,
+  compactionThresholdTokens,
   clampCompactionThresholdRatio,
-  decideClientCompaction,
-  enforceInputBudget,
-  estimateTokens,
+  decideCompaction,
   findCompactionNeededError,
-  findKeepBoundary,
   isCompactionSummary,
-  isInternalResumeMessage,
+  isEphemeralInternalContext,
   isUserMessage,
   renderCompactionPromptInputForChat,
   type CompactionItem,
@@ -91,12 +86,16 @@ describe("codex-parity constants and summary marker", () => {
     expect(item[COMPACTION_SUMMARY_MARKER]).toBe(true);
     expect(item.content).toBe(`${SUMMARY_PREFIX}\nhandoff body`);
   });
+
+  test("an empty provider summary uses Codex's explicit placeholder", () => {
+    expect(buildSummaryItem("   ").content).toBe(`${SUMMARY_PREFIX}\n(no summary available)`);
+  });
 });
 
-describe("single client compaction threshold", () => {
+describe("single portable compaction threshold", () => {
   test("derives the trigger from the raw window independently of the effective ceiling", () => {
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: WINDOW,
         contextReservedOutputTokens: RESERVED_OUTPUT,
       }),
@@ -105,7 +104,7 @@ describe("single client compaction threshold", () => {
 
   test("uses 90% of a 250k raw model window by default", () => {
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: 250_000,
         contextReservedOutputTokens: 128_000,
       }),
@@ -114,17 +113,17 @@ describe("single client compaction threshold", () => {
 
   test("honors a model-catalog auto-compact limit and clamps it to 90%", () => {
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: 272_000,
         contextReservedOutputTokens: 128_000,
-        contextClientCompactThresholdTokens: 244_800,
+        contextAutoCompactThresholdTokens: 244_800,
       }),
     ).toBe(244_800);
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: 272_000,
         contextReservedOutputTokens: 128_000,
-        contextClientCompactThresholdTokens: 260_000,
+        contextAutoCompactThresholdTokens: 260_000,
       }),
     ).toBe(244_800);
   });
@@ -133,7 +132,7 @@ describe("single client compaction threshold", () => {
     expect(clampCompactionThresholdRatio(0.1)).toBe(MIN_COMPACTION_THRESHOLD_RATIO);
     expect(clampCompactionThresholdRatio(2)).toBe(MAX_COMPACTION_THRESHOLD_RATIO);
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: 1000,
         contextReservedOutputTokens: 0,
         contextCompactionThresholdRatio: 0.75,
@@ -143,7 +142,7 @@ describe("single client compaction threshold", () => {
 
   test("prefers provider-reported input tokens over the estimate", () => {
     const items = [bigUser(900_000, "x")];
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items,
       lastInputTokens: 10,
       contextWindowTokens: WINDOW,
@@ -155,7 +154,7 @@ describe("single client compaction threshold", () => {
 
   test("uses char/4 estimate only when there is no provider signal yet", () => {
     const items = [bigUser(THRESHOLD + 1, "x")];
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items,
       lastInputTokens: null,
       contextWindowTokens: WINDOW,
@@ -167,19 +166,19 @@ describe("single client compaction threshold", () => {
   });
 
   test("compacts when the token signal reaches the threshold exactly", () => {
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items: [user("history")],
       lastInputTokens: 244_800,
       contextWindowTokens: 272_000,
       contextReservedOutputTokens: 128_000,
-      contextClientCompactThresholdTokens: 244_800,
+      contextAutoCompactThresholdTokens: 244_800,
     });
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("above_threshold");
   });
 
   test("force keeps manual /compact working below the threshold", () => {
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items: [user("small")],
       lastInputTokens: 1,
       contextWindowTokens: WINDOW,
@@ -226,27 +225,20 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
   });
 
-  test("platform resume notices never become permanent user history", () => {
-    const markedResume = {
-      ...user("[TURN RESUMED AFTER CONTEXT COMPACTION] continue"),
-      providerData: { [INTERNAL_RESUME_MESSAGE_MARKER]: "context_compacted" },
+  test("ephemeral internal context never becomes permanent user history", () => {
+    const internalContext = {
+      type: "message",
+      role: "system",
+      content: "continue the same inference",
     };
-    const legacyResume = user("[TURN RESUMED AFTER WORKER RESTART] continue");
-    expect(isInternalResumeMessage(markedResume)).toBe(true);
-    expect(isInternalResumeMessage(legacyResume)).toBe(true);
+    expect(isEphemeralInternalContext(internalContext)).toBe(true);
 
     const rebuilt = buildCompactionReplacementHistory(
-      [user("real request"), markedResume, legacyResume],
+      [user("real request"), internalContext],
       "summary",
     );
     expect(rebuilt).toHaveLength(2);
     expect(rebuilt[0]).toMatchObject(user("real request"));
-
-    const fallback = buildDeterministicFallbackCompactionHistory({
-      items: [user("real request"), markedResume, legacyResume],
-      targetTokens: 2_000,
-    });
-    expect(fallback.some((item) => isInternalResumeMessage(item))).toBe(false);
   });
 
   test("drops images from retained user messages", () => {
@@ -301,22 +293,23 @@ describe("codex-parity rebuild", () => {
 });
 
 describe("provider-proof compaction transcript", () => {
-  test("renders tool calls/results to text instead of provider-validating raw SDK items", async () => {
+  test("uses the SDK Responses adapter to preserve structured history on the wire", async () => {
     let seenInput: unknown;
     const fakeClient = {
       responses: {
         create: async (request: { input?: unknown }) => {
           seenInput = request.input;
-          if (
-            Array.isArray(request.input) &&
-            request.input.some((item) => item && typeof item === "object" && "callId" in item)
-          ) {
-            throw Object.assign(
-              new Error("Missing required parameter: input[1].call_id. You provided callId."),
-              { status: 400 },
-            );
-          }
-          return { output_text: "rendered summary" };
+          return {
+            id: "resp_summary",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "structured summary" }],
+              },
+            ],
+          };
         },
       },
     };
@@ -326,80 +319,85 @@ describe("provider-proof compaction transcript", () => {
       result("call_vern"),
     ]);
 
-    const summary = await summarizeForCompaction(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
-      input,
-      { client: fakeClient as any, api: "responses", model: "scripted-model" },
-    );
+    const summary = await summarizeForCompaction(testSettings({ openaiProvider: "azure" }), input, {
+      client: fakeClient as any,
+      api: "responses",
+      model: "scripted-model",
+    });
 
-    expect(summary).toBe("rendered summary");
-    expect(typeof seenInput).toBe("string");
-    expect(seenInput).toContain("[tool_call function_call]");
-    expect(seenInput).toContain("[tool_result]");
-    expect(seenInput).not.toContain("callId");
+    expect(summary).toBe("structured summary");
+    expect(Array.isArray(seenInput)).toBe(true);
+    expect(seenInput).toContainEqual(
+      expect.objectContaining({ type: "function_call", call_id: "call_vern" }),
+    );
+    expect(seenInput).toContainEqual(
+      expect.objectContaining({ type: "function_call_output", call_id: "call_vern" }),
+    );
+    expect(JSON.stringify(seenInput)).not.toContain("callId");
   });
 
   test("passes prompt_cache_key through summarizer Responses calls when provided", async () => {
     let seenKey: unknown;
+    const usages: unknown[] = [];
     const fakeClient = {
       responses: {
         create: async (request: { prompt_cache_key?: unknown }) => {
           seenKey = request.prompt_cache_key;
-          return { output_text: "rendered summary" };
+          return {
+            id: "resp_summary",
+            usage: {
+              input_tokens: 321,
+              output_tokens: 12,
+              total_tokens: 333,
+            },
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "rendered summary" }],
+              },
+            ],
+          };
         },
       },
     };
 
     const summary = await summarizeForCompaction(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
+      testSettings({ openaiProvider: "azure" }),
       buildCompactionPromptInput([user("deploy it")]),
       {
         client: fakeClient as any,
         api: "responses",
         model: "scripted-model",
         promptCacheKey: "session-123",
+        onUsage: async (usage) => usages.push(usage),
       },
     );
 
     expect(summary).toBe("rendered summary");
     expect(seenKey).toBe("session-123");
+    expect(usages).toEqual([
+      {
+        responseId: "resp_summary",
+        usage: { inputTokens: 321, outputTokens: 12, totalTokens: 333 },
+      },
+    ]);
   });
 
-  test("hard-trimmed transcript drops oldest items and keeps the checkpoint prompt", () => {
+  test("renders the full checkpoint input without silently dropping old records", () => {
     const rendered = renderCompactionPromptInputForChat(
       buildCompactionPromptInput([
         user("old ".repeat(400)),
         assistant("middle ".repeat(400)),
         user("recent user message"),
       ]),
-      { maxEstimatedTokens: 80 },
     );
 
-    expect(rendered).not.toContain("old old");
+    expect(rendered).toContain("old old");
+    expect(rendered).toContain("middle middle");
+    expect(rendered).toContain("recent user message");
     expect(rendered).toContain("CONTEXT CHECKPOINT COMPACTION");
-  });
-});
-
-describe("deterministic fallback compaction", () => {
-  test("shrinks without a model call and middle-truncates an oversized retained user message", () => {
-    const items = [
-      { type: "message", role: "system", content: "always keep deployment instructions" },
-      bigUser(10_000, "x"),
-    ];
-
-    const fallback = buildDeterministicFallbackCompactionHistory({
-      items,
-      cause: "provider 400",
-      targetTokens: 1_000,
-    });
-
-    expect(estimateTokens(fallback)).toBeLessThan(estimateTokens(items));
-    expect(fallback.at(-1)).toMatchObject({ [COMPACTION_SUMMARY_MARKER]: true });
-    expect(String(fallback.at(-1)?.content)).toContain("Non-LLM context compaction fallback");
-    expect(fallback.some((item) => item.role === "system")).toBe(true);
-    expect(String(fallback.find((item) => item.role === "user")?.content)).toContain(
-      USER_MESSAGE_TRUNCATION_MARKER.trim(),
-    );
   });
 });
 
@@ -412,60 +410,6 @@ describe("CompactionNeededError", () => {
     });
     expect(error.signalTokens).toBe(12);
     expect(findCompactionNeededError({ cause: error })).toBe(error);
-  });
-});
-
-describe("enforceInputBudget (read-path guard backstop)", () => {
-  test("leaves an in-budget input untouched", () => {
-    const items: CompactionItem[] = [user("a"), assistant("b"), user("c"), assistant("d")];
-    const out = enforceInputBudget(items, 1_000_000);
-    expect(out.trimmed).toBe(false);
-    expect(out.items).toEqual(items);
-  });
-
-  test("trims the oldest history at a clean boundary until it fits", () => {
-    const items: CompactionItem[] = [
-      user("old turn"),
-      assistant("x".repeat(1_000_000)),
-      user("recent turn"),
-      assistant("kept"),
-    ];
-    const out = enforceInputBudget(items, 100);
-    expect(out.trimmed).toBe(true);
-    expect(out.items).toContainEqual(user("recent turn"));
-    expect(out.items).not.toContainEqual(user("old turn"));
-  });
-
-  test("accounts for trailing tokens", () => {
-    const items: CompactionItem[] = [
-      user("old"),
-      assistant("x".repeat(400)),
-      user("recent"),
-      assistant("a"),
-    ];
-    const out = enforceInputBudget(items, estimateTokens(items), 200);
-    expect(out.trimmed).toBe(true);
-  });
-
-  test("does not split tool-call pairs", () => {
-    const items: CompactionItem[] = [
-      user("old"),
-      call("c0"),
-      result("c0"),
-      assistant("x".repeat(1_000_000)),
-      user("recent"),
-      call("c1"),
-      result("c1"),
-      assistant("done"),
-    ];
-    const out = enforceInputBudget(items, 100);
-    expect(sanitizeHistoryItemsForModel(out.items)).toEqual(out.items);
-    expect(out.items.some((item) => item.callId === "c0")).toBe(false);
-    expect(out.items.filter((item) => item.callId === "c1")).toHaveLength(2);
-  });
-
-  test("findKeepBoundary returns 0 when no user boundary exists", () => {
-    expect(findKeepBoundary([assistant("a"), call("c"), result("c")], 10)).toBe(0);
   });
 });
 

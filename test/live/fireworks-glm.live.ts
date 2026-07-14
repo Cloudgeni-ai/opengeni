@@ -65,14 +65,10 @@ describe("live Fireworks GLM 5.2 (multi-provider path)", () => {
       const settings = fireworksSettings();
       const resolved = resolveTurnModel(settings, GLM_MODEL_ID);
 
-      // The model is in the registry, so it resolves (a null here would mean
-      // the worker silently fell back to the legacy global OpenAI client).
+      // The model is in the registry, so it resolves to its declared provider.
       expect(resolved).not.toBeNull();
       expect(resolved!.provider.id).toBe("fireworks");
       expect(resolved!.provider.api).toBe("chat");
-      // Registry providers always compact client-side (server-side compaction is
-      // OpenAI-platform only).
-      expect(resolved!.provider.compactionMode).toBe("client");
       expect(resolved!.configured.id).toBe(GLM_MODEL_ID);
       expect(resolved!.configured.providerId).toBe("fireworks");
       expect(resolved!.configured.hostedWebSearch).toBe(false);
@@ -95,16 +91,13 @@ describe("live Fireworks GLM 5.2 (multi-provider path)", () => {
 
       // Build the agent exactly as apps/worker/src/activities/agent-turn.ts does
       // for a registry-resolved turn: the resolved Model instance plus the
-      // provider-derived gating (client compaction, no hosted web_search, no
+      // provider-derived gating (no hosted web_search and no
       // encrypted reasoning — the chat wire API has no encrypted_content field).
       const agent = buildOpenGeniAgent({ ...settings, sandboxBackend: "none" }, [], {
         model: resolved!.model,
-        compactionMode: resolved!.provider.compactionMode,
         hostedWebSearch: resolved!.configured.hostedWebSearch,
         encryptedReasoning:
           resolved!.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-        contextWindowTokens:
-          resolved!.configured.contextWindowTokens ?? settings.contextWindowTokens,
       });
 
       // Fireworks does NOT execute the hosted web_search tool, so the agent must

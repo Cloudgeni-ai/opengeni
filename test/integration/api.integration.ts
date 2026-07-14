@@ -3,14 +3,14 @@ import {
   allAccountPermissions,
   allWorkspacePermissions,
   appendSessionEvents,
-  appendSessionHistoryItems,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   buildConnectionTokenResolver,
-  consumeSessionCompactionRequest,
+  claimNextSessionExecution,
+  isSessionCompactionRequested,
   createDb,
   createSession,
-  createTurn,
+  enqueueSessionMessageAtomically,
   createWorkspaceEnvironment,
   dbSql,
   decryptEnvironmentValue,
@@ -34,21 +34,25 @@ import {
   listUsageEvents,
   recordStripeWebhookEvent,
   recordUsageEvent,
+  registerSessionTurnDispatch,
   requireFile,
   requireSession,
   setSessionGoalStatus,
-  setSessionStatus,
   sumUsageQuantity,
   updateScheduledTask,
   updateWorkspaceSettings,
   upsertCapabilityCatalogItem,
+  withWorkspaceRls,
+  type Database,
 } from "@opengeni/db";
+import * as schema from "@opengeni/db/schema";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   signDelegatedAccessToken,
   type AccessContext,
   type Permission,
   type SessionEvent,
+  type SessionStatus,
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
@@ -74,6 +78,22 @@ import {
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
   searchDocuments,
 } from "../../packages/documents/src";
+
+async function setSessionStatus(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  status: SessionStatus,
+  activeTurnId: string | null = null,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(dbSql`
+      update sessions
+      set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${sessionId}
+    `);
+  });
+}
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -593,13 +613,20 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     const session = (await created.json()) as { id: string };
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: (await requireSession(dbClient.db, workspaceId, session.id)).accountId,
-      workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
+    const persisted = await requireSession(dbClient.db, workspaceId, session.id);
+    await withWorkspaceRls(dbClient.db, workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
         {
+          accountId: persisted.accountId,
+          workspaceId,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "earlier work" },
+        },
+        {
+          accountId: persisted.accountId,
+          workspaceId,
+          sessionId: session.id,
           position: 1,
           item: {
             type: "message",
@@ -607,7 +634,7 @@ describe("API component integration", () => {
             content: [{ type: "output_text", text: "done" }],
           },
         },
-      ],
+      ]);
     });
 
     // While a turn is in flight, clearing is refused (409) — mid-turn safety.
@@ -652,7 +679,7 @@ describe("API component integration", () => {
     expect(events.some((event) => event.type === "session.context.cleared")).toBe(true);
   });
 
-  test("POST /context/compact: queued on the client path, no-op on the server path", async () => {
+  test("POST /context/compact: records one provider-independent durable request", async () => {
     workflow = new FakeWorkflowClient();
     const workspaceId = await defaultWorkspaceId(
       createApp({
@@ -663,17 +690,15 @@ describe("API component integration", () => {
       }),
     );
 
-    // Server-managed provider (default auto+openai) -> noop, no flag set.
-    const serverApp = createApp({
+    const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
-        contextCompactionMode: "server",
       }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: workflow,
     });
-    const created = await serverApp.request(workspacePath(workspaceId, "/sessions"), {
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({ initialMessage: "compact me", model: "scripted-model" }),
       headers: { "content-type": "application/json" },
@@ -681,7 +706,7 @@ describe("API component integration", () => {
     const session = (await created.json()) as { id: string };
     await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
 
-    const noop = await serverApp.request(
+    const pending = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/context/compact`),
       {
         method: "POST",
@@ -689,31 +714,9 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       },
     );
-    expect(noop.status).toBe(200);
-    expect(((await noop.json()) as { status: string }).status).toBe("noop");
-    expect(await consumeSessionCompactionRequest(dbClient.db, workspaceId, session.id)).toBe(false);
-
-    // Client-managed (Azure) provider -> queued, durable flag set for the worker.
-    const clientApp = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        contextCompactionMode: "client",
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const queued = await clientApp.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/context/compact`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(queued.status).toBe(200);
-    expect(((await queued.json()) as { status: string }).status).toBe("queued");
-    expect(await consumeSessionCompactionRequest(dbClient.db, workspaceId, session.id)).toBe(true);
+    expect(pending.status).toBe(200);
+    expect(((await pending.json()) as { status: string }).status).toBe("pending");
+    expect(await isSessionCompactionRequested(dbClient.db, workspaceId, session.id)).toBe(true);
   });
 
   test("registers session-scoped goal MCP tools only for session-bound grants", async () => {
@@ -1782,7 +1785,12 @@ describe("API component integration", () => {
     );
     expect(accepted.status).toBe(202);
     const event = (await accepted.json()) as SessionEvent;
-    expect(event.payload).toEqual({ text: "search docs", tools: [{ kind: "mcp", id: "docs" }] });
+    expect(event.payload).toEqual({
+      text: "search docs",
+      tools: [{ kind: "mcp", id: "docs" }],
+      origin: "human",
+      delivery: "queue",
+    });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
     ]);
@@ -1913,6 +1921,8 @@ describe("API component integration", () => {
       text: "use a stronger model",
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
+      origin: "human",
+      delivery: "queue",
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -3732,7 +3742,7 @@ describe("API component integration", () => {
     expect(response.status).toBe(422);
   });
 
-  test("validates command state transitions and signals workflow", async () => {
+  test("validates message, approval, Pause, and Resume state transitions", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
@@ -3802,22 +3812,44 @@ describe("API component integration", () => {
     expect(approvalAccepted.status).toBe(202);
     expect(workflow.approvals).toHaveLength(1);
 
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "running", null);
-    const interruptAccepted = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events`),
+    const running = await claimNextSessionExecution(
+      dbClient.db,
+      workspaceId,
+      session.id,
+      `session-${session.id}`,
+    );
+    expect(running).not.toBeNull();
+    const attemptId = crypto.randomUUID();
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, workspaceId, {
+        sessionId: session.id,
+        turnId: running!.id,
+        triggerEventId: running!.triggerEventId,
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+      }),
+    ).toMatchObject({ action: "registered" });
+
+    const paused = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/control`),
       {
         method: "POST",
-        body: JSON.stringify({ type: "user.interrupt", payload: { reason: "stop" } }),
+        body: JSON.stringify({
+          mode: "pause",
+          reason: "operator pause",
+          clientEventId: `pause-${crypto.randomUUID()}`,
+        }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(interruptAccepted.status).toBe(202);
+    expect(paused.status).toBe(202);
+    expect(await paused.json()).toMatchObject({
+      controlState: "paused",
+      expectedActiveTurnId: running!.id,
+      expectedAttemptId: attemptId,
+      shouldSignalControl: true,
+    });
     expect(workflow.interrupts).toHaveLength(1);
-    // The route must hand signalInterrupt the start-or-signal args (accountId +
-    // workspaceId), not just {sessionId,eventId,workflowId}: a session that has
-    // gone idle has no running workflow execution, so the client must
-    // signalWithStart, which needs the sessionWorkflow args. Without these the
-    // interrupt 500s for any idle session (the operator-can't-stop bug).
     expect(workflow.interrupts[0]).toMatchObject({
       workspaceId,
       sessionId: session.id,
@@ -3825,20 +3857,42 @@ describe("API component integration", () => {
     });
     expect((workflow.interrupts[0] as { accountId?: unknown }).accountId).toBeTruthy();
 
-    // An interrupt on an IDLE session (no running workflow) must still be
-    // accepted (202), not 500 — the exact production failure. The route appends
-    // the event and start-or-signals regardless of session status.
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
-    const idleInterrupt = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events`),
+    const resumed = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/control`),
       {
         method: "POST",
-        body: JSON.stringify({ type: "user.interrupt", payload: { reason: "stop" } }),
+        body: JSON.stringify({
+          mode: "resume",
+          reason: "continue",
+          clientEventId: `resume-${crypto.randomUUID()}`,
+        }),
         headers: { "content-type": "application/json" },
       },
     );
-    expect(idleInterrupt.status).toBe(202);
-    expect(workflow.interrupts).toHaveLength(2);
+    expect(resumed.status).toBe(202);
+    expect(await resumed.json()).toMatchObject({ controlState: "active" });
+
+    // Pausing an idle session is still a durable control operation, but there
+    // is no running attempt to interrupt.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const idlePause = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/control`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          mode: "pause",
+          reason: "idle pause",
+          clientEventId: `idle-pause-${crypto.randomUUID()}`,
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(idlePause.status).toBe(202);
+    expect(await idlePause.json()).toMatchObject({
+      controlState: "paused",
+      shouldSignalControl: false,
+    });
+    expect(workflow.interrupts).toHaveLength(1);
 
     const malformed = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
@@ -6738,7 +6792,7 @@ describe("API component integration", () => {
       },
     );
     expect(rejected.status).toBe(409);
-    expect(await rejected.text()).toContain("cannot accept a new user message");
+    expect(await rejected.text()).toContain("Session is cancelled");
 
     const afterCredentials = await listSessionMcpServersForRun(
       dbClient.db,
@@ -7649,22 +7703,28 @@ async function createToolspaceMcpSession(
       },
     ],
   });
-  const [trigger] = await appendSessionEvents(db, grant.workspaceId, session.id, [
-    {
-      type: "user.message",
-      payload: { text: "start toolspace turn" },
-    },
-  ]);
-  if (!trigger) {
-    throw new Error("failed to create toolspace trigger event");
-  }
-  const turnId = await createTurn(db, {
+  const queued = await enqueueSessionMessageAtomically(db, {
+    accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId: session.id,
-    triggerEventId: trigger.id,
-    temporalWorkflowId: `workflow-toolspace-${crypto.randomUUID()}`,
+    actor: grant.subjectId,
+    origin: "human",
+    text: "start toolspace turn",
+    resources: [],
+    tools: [{ kind: "mcp", id: "crm" }],
+    delivery: "queue",
+    reasoningEffortFallback: "medium",
   });
-  return { session, turnId };
+  const running = await claimNextSessionExecution(
+    db,
+    grant.workspaceId,
+    session.id,
+    `session-${session.id}`,
+  );
+  if (!running || running.id !== queued.turn.id) {
+    throw new Error("failed to claim the toolspace fixture turn");
+  }
+  return { session, turnId: running.id };
 }
 
 async function readSseEvents(
@@ -7755,7 +7815,7 @@ class FakeWorkflowClient implements SessionWorkflowClient {
     this.approvals.push(input);
   }
 
-  async signalInterrupt(input: unknown): Promise<void> {
+  async signalSessionControl(input: unknown): Promise<void> {
     this.interrupts.push(input);
   }
 

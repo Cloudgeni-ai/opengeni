@@ -2,6 +2,7 @@ import {
   AcknowledgeStreamRequest,
   AttachViewerRequest,
   ClearSessionContextRequest,
+  CancelSessionQueueItemRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   FsDeleteRequest,
@@ -18,12 +19,12 @@ import {
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
-  ReorderSessionTurnsRequest,
+  SessionControlRequest,
+  SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
-  UpdateSessionTurnRequest,
   ViewerHeartbeatRequest,
   type SandboxBackend,
   type Session,
@@ -31,9 +32,9 @@ import {
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
 } from "@opengeni/contracts";
-import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
+import { streamTokenDegraded } from "@opengeni/config";
 import {
-  cancelQueuedSessionTurn,
+  cancelQueuedSessionTurnWithVersion,
   clearSessionGoal,
   clearSessionContext,
   closePtySession,
@@ -42,6 +43,7 @@ import {
   getSession,
   getSessionForSubject,
   getSessionGoal,
+  getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEvents,
@@ -49,7 +51,6 @@ import {
   listSessionsForSubject,
   listSessionTurns,
   recordStreamAcknowledgment,
-  reorderQueuedSessionTurns,
   requestSessionCompaction,
   requireSession,
   setSessionCodexPin,
@@ -63,7 +64,9 @@ import {
   revokeViewer,
   setSessionGoalStatus,
   updatePtySessionActivity,
-  updateQueuedSessionTurn,
+  requestSessionControl,
+  SessionQueueConflictError,
+  SessionContextBusyError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -89,21 +92,8 @@ import {
   type TerminalStreamMint,
 } from "../sandbox/viewer";
 import {
-  settingsWithEnabledCapabilityMcpServers,
-  settingsWithSessionMcpServerMetadata,
-} from "@opengeni/core";
-import {
-  normalizeResources,
-  validateFileResources,
-  validateGitHubRepositorySelection,
-  validateToolRefs,
-} from "@opengeni/core";
-import {
   acceptSessionUserMessage,
-  assertConfiguredModel,
-  assertWorkspaceModelPolicyAllows,
   createSessionForRequest,
-  requireQueuedTurnForApi,
   readSessionLineage,
   updateSessionTitle,
   workflowIdForSession,
@@ -406,23 +396,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "context clear requires an explicit { confirm: true }",
       });
     }
-    const session = await requireSession(db, workspaceId, sessionId);
-    // Clearing mid-turn would strand the in-flight RunState (and, in
-    // requires_action, an awaiting approval whose resume needs that blob).
-    // Refuse, mirroring the goal 409 guards.
-    if (
-      session.status === "queued" ||
-      session.status === "running" ||
-      session.status === "requires_action"
-    ) {
-      throw new HTTPException(409, {
-        message: `session is ${session.status}; cannot clear context mid-turn — stop the turn first`,
-      });
-    }
+    // The database checks this under workspace/session locks so a turn cannot
+    // start between an API precheck and the history rewrite.
     const result = await clearSessionContext(db, {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+    }).catch((error: unknown) => {
+      if (error instanceof SessionContextBusyError) {
+        throw new HTTPException(409, { message: error.message });
+      }
+      throw error;
     });
     await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
       {
@@ -439,32 +423,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/context/compact", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     CompactSessionContextRequest.parse((await c.req.json().catch(() => ({}))) ?? {});
-    // /compact is only a TRIGGER — it never duplicates the compaction engine.
-    // Client-managed (Azure) path: set a durable request flag the worker honors
-    // before the next turn (forced compaction). Server-managed provider / off:
-    // compaction is automatic or disabled, so this is an honest no-op.
-    //
-    // Integration seam with provider-aware-compaction: when that work exposes a
-    // synchronous "compact now" entry callable from the API process, this route
-    // should call it directly and return its result; until then the flag +
-    // worker maybeCompactContext(force) is the minimal honored interface.
-    const mode = resolveContextCompactionMode(settings);
-    if (mode === "client") {
-      await requestSessionCompaction(db, workspaceId, sessionId);
-      return c.json({ status: "queued", message: "Compaction will run before the next turn." });
-    }
-    if (mode === "server") {
-      return c.json({
-        status: "noop",
-        message:
-          "This session's provider compacts context automatically; no manual compaction is needed.",
-      });
-    }
-    return c.json({ status: "noop", message: "Context compaction is disabled for this session." });
+    // /compact sets one durable request. The worker clears it only in the same
+    // fenced transaction that installs replacement history, so failed or stale
+    // attempts cannot lose the request.
+    await requestSessionCompaction(db, workspaceId, sessionId);
+    await workflowClient.wakeSessionWorkflow({
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      workflowId: workflowIdForSession(sessionId),
+    });
+    return c.json({ status: "pending", message: "Compaction will run at the next safe boundary." });
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -510,94 +483,139 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/queue", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    const turnId = c.req.param("turnId");
-    await assertSessionExists(db, workspaceId, sessionId);
-    const existing = await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
-    const payload = UpdateSessionTurnRequest.parse(await c.req.json());
-    // A turn-update may switch the queued turn's model; reject one the host
-    // does not expose (omitted leaves the existing model unchanged) or one the
-    // workspace's model policy blocks.
-    assertConfiguredModel(settings, payload.model);
-    await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, payload.model);
-    const session = await requireSession(db, workspaceId, sessionId);
-    const runtimeSettings = settingsWithSessionMcpServerMetadata(
-      await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings),
-      session.mcpServers,
-    );
-    const resources =
-      payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
-    const tools =
-      payload.tools !== undefined
-        ? validateToolRefs(payload.tools, runtimeSettings)
-        : existing.tools;
-    if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
-    }
-    await validateFileResources(db, workspaceId, resources);
-    await validateGitHubRepositorySelection(db, workspaceId, [...session.resources, ...resources]);
-    const turn = await updateQueuedSessionTurn(db, workspaceId, turnId, {
-      ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
-      ...(payload.model !== undefined ? { model: payload.model } : {}),
-      ...(payload.reasoningEffort !== undefined
-        ? { reasoningEffort: payload.reasoningEffort }
-        : {}),
-      ...(payload.sandboxBackend !== undefined ? { sandboxBackend: payload.sandboxBackend } : {}),
-      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
-      resources,
-      tools,
-    });
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.updated",
-        turnId: turn.id,
-        payload: { turnId: turn.id },
-      },
-    ]);
-    return c.json(turn);
+    const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
+    if (!snapshot) throw new HTTPException(404, { message: "session not found" });
+    return c.json(snapshot);
   });
 
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/reorder", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/cancel", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const payload = CancelSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      const sessionId = c.req.param("sessionId");
+      const result = await cancelQueuedSessionTurnWithVersion(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("turnId"),
+        payload.expectedQueueVersion,
+        payload.expectedItemVersion,
+        grant.subjectId,
+        payload.reason ?? null,
+      );
+      await bus.publish(workspaceId, sessionId, result.events);
+      if (result.shouldWake) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+        });
+      }
+      return c.json(result);
+    } catch (error) {
+      throwQueueConflict(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = SessionControlRequest.parse(await c.req.json());
+    let result;
+    try {
+      result = await requestSessionControl(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        actor: grant.subjectId,
+        mode: payload.mode,
+        reason: payload.reason ?? null,
+        clientEventId: payload.clientEventId ?? null,
+        ...(payload.expectedControlState !== undefined
+          ? { expectedControlState: payload.expectedControlState }
+          : {}),
+        ...(payload.expectedControlGeneration !== undefined
+          ? { expectedControlGeneration: payload.expectedControlGeneration }
+          : {}),
+        ...(payload.expectedWorkspaceInferenceGeneration !== undefined
+          ? {
+              expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
+            }
+          : {}),
+      });
+    } catch (error) {
+      throwQueueConflict(error);
+    }
+    await bus.publish(workspaceId, sessionId, result.events);
+    const workflowId = workflowIdForSession(sessionId);
+    if (result.shouldSignalControl) {
+      await workflowClient.signalSessionControl({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        eventId: result.event.id,
+        workflowId,
+      });
+    } else if (result.shouldWake) {
+      await workflowClient.wakeSessionWorkflow({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        workflowId,
+      });
+    }
+    return c.json(
+      {
+        operationId: result.operationId,
+        event: result.event,
+        controlState: result.controlState,
+        controlGeneration: result.controlGeneration,
+        expectedActiveTurnId: result.expectedActiveTurnId,
+        expectedExecutionGeneration: result.expectedExecutionGeneration,
+        expectedAttemptId: result.expectedAttemptId,
+        deliveryEventId: result.deliveryEventId,
+        shouldSignalControl: result.shouldSignalControl,
+        shouldWake: result.shouldWake,
+      },
+      202,
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = ReorderSessionTurnsRequest.parse(await c.req.json());
-    const turns = await reorderQueuedSessionTurns(db, workspaceId, sessionId, payload.turnIds);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.updated",
-        payload: { reorderedTurnIds: payload.turnIds },
-      },
-    ]);
-    await workflowClient.wakeSessionWorkflow({
-      accountId: grant.accountId,
-      workspaceId,
-      sessionId,
-      workflowId: workflowIdForSession(sessionId),
+    const raw = await c.req.json();
+    const payload = SteerSessionMessageRequest.parse(raw);
+    const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+      text: payload.text,
+      resources: payload.resources,
+      tools: payload.tools,
+      toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
+      model: payload.model ?? null,
+      reasoningEffort: payload.reasoningEffort ?? null,
+      mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+      delivery: "steer",
+      origin: "human",
+      ...(payload.expectedControlGeneration !== undefined
+        ? { expectedControlGeneration: payload.expectedControlGeneration }
+        : {}),
+      ...(payload.expectedWorkspaceInferenceGeneration !== undefined
+        ? {
+            expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
+          }
+        : {}),
+      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     });
-    return c.json(turns);
-  });
-
-  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    const sessionId = c.req.param("sessionId");
-    const turnId = c.req.param("turnId");
-    await assertSessionExists(db, workspaceId, sessionId);
-    await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
-    const turn = await cancelQueuedSessionTurn(db, workspaceId, turnId);
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "turn.cancelled",
-        turnId: turn.id,
-        payload: { turnId: turn.id, triggerEventId: turn.triggerEventId },
-      },
-    ]);
-    return c.json(turn);
+    return c.json(result, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -639,17 +657,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(500, { message: "failed to append client event" });
     }
     const workflowId = workflowIdForSession(sessionId);
-    if (event.type === "user.approvalDecision") {
-      await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
-    } else {
-      await workflowClient.signalInterrupt({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        eventId: accepted.id,
-        workflowId,
-      });
-    }
+    await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
     return c.json(accepted, 202);
   });
 
@@ -1586,4 +1594,19 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
   }
   const payload = (value as { payload?: unknown }).payload;
   return hasOwnProperty(payload, key);
+}
+
+function throwQueueConflict(error: unknown): never {
+  if (error instanceof SessionQueueConflictError) {
+    throw new HTTPException(409, {
+      message: JSON.stringify({
+        message: error.message,
+        currentQueueVersion: error.currentQueueVersion,
+        ...(error.currentItemVersion !== undefined
+          ? { currentItemVersion: error.currentItemVersion }
+          : {}),
+      }),
+    });
+  }
+  throw error;
 }

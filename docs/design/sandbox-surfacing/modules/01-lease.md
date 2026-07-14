@@ -6,7 +6,7 @@
 
 **Scope:** the Postgres lease layer that is the *sole* enforcer of the strict-singleton-sandbox-per-session invariant. Two new tables (`sandbox_leases`, `sandbox_lease_holders`), the Drizzle schema, the exact `acquireLease`/`releaseLease`/`heartbeatLease`/`reapStaleLeaseHolders`/`drainLease`/`reArmLease` query functions as runnable SQL + Drizzle, the 4-state machine with every transition (including the uncaught-spawner-death and split-brain `lease_epoch` fence), and the boot-validated cadence invariant `reaperPeriod < viewerHolderTTL < idleTimeout`.
 
-This spec designs **on top of** the settled architecture; it does not re-litigate it. Everything below mirrors the existing in-repo lease pattern at `packages/db/src/index.ts:3077` (`claimNextQueuedTurn`), the envelope table at `packages/db/src/schema.ts:360` (`sandboxSessionEnvelopes`), the RLS migration boilerplate at `packages/db/drizzle/0005_session_goals.sql`, and the config validation block at `packages/config/src/index.ts:985`.
+This spec designs **on top of** the settled architecture; it does not re-litigate it. Everything below mirrors the existing in-repo lease pattern at `packages/db/src/index.ts:3077` (`claimNextSessionExecution`), the envelope table at `packages/db/src/schema.ts:360` (`sandboxSessionEnvelopes`), the RLS migration boilerplate at `packages/db/drizzle/0005_session_goals.sql`, and the config validation block at `packages/config/src/index.ts:985`.
 
 ---
 
@@ -315,7 +315,7 @@ States: **`cold`** (no box) · **`warming`** (a spawner is resuming/building) ·
 
 ## 4. Query functions — runnable SQL + Drizzle
 
-All live in `packages/db/src/index.ts` after `getSandboxSessionEnvelope` (`:2636`). They reuse `withWorkspaceRls` + `scopedDb.transaction` exactly as `claimNextQueuedTurn` (`:3077`) does, and raw `sql\`\`` via `tx.execute` exactly as `:3079`.
+All live in `packages/db/src/index.ts` after `getSandboxSessionEnvelope` (`:2636`). They reuse `withWorkspaceRls` + `scopedDb.transaction` exactly as `claimNextSessionExecution` (`:3077`) does, and raw `sql\`\`` via `tx.execute` exactly as `:3079`.
 
 ### 4.0 Types (add to the type block / co-locate)
 
@@ -392,7 +392,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
       `);
 
       // (2) Serialize ALL concurrent arrivals on this session's row. Plain FOR
-      // UPDATE (block, do NOT skip) — unlike claimNextQueuedTurn's SKIP LOCKED,
+      // UPDATE (block, do NOT skip) — unlike claimNextSessionExecution's SKIP LOCKED,
       // because we WANT the loser to wait and then attach, not skip.
       const [row] = await tx.execute<LeaseRow>(sql`
         select * from sandbox_leases
@@ -497,7 +497,7 @@ async function bumpAndStamp(
 }
 ```
 
-> `LeaseRow` is the snake_case raw shape; `mapLeaseRow` maps to the camelCase `LeaseSnapshot` (mirrors `mapSessionTurn` at the existing `claimNextQueuedTurn` return). Because `lease_epoch` is `integer`/int4 (NOT bigint/int8 — the lease-epoch spike fix), postgres-js returns it as a JS **number** directly, so the strict epoch-fence comparison (`row.lease_epoch !== input.expectedEpoch`) is exact with no coercion; the mapper keeps a defensive `Number(row.lease_epoch)` anyway. The `::int`/int4 `counts.*` aggregates already return numbers for the same reason.
+> `LeaseRow` is the snake_case raw shape; `mapLeaseRow` maps to the camelCase `LeaseSnapshot` (mirrors `mapSessionTurn` at the existing `claimNextSessionExecution` return). Because `lease_epoch` is `integer`/int4 (NOT bigint/int8 — the lease-epoch spike fix), postgres-js returns it as a JS **number** directly, so the strict epoch-fence comparison (`row.lease_epoch !== input.expectedEpoch`) is exact with no coercion; the mapper keeps a defensive `Number(row.lease_epoch)` anyway. The `::int`/int4 `counts.*` aggregates already return numbers for the same reason.
 
 ### 4.2 `commitWarmingToWarm` (W1) — the only `lease_epoch++` site
 
@@ -891,12 +891,12 @@ Mirror the existing db test harness. Required cases:
 ## 8. Net summary of what this module delivers
 
 - **2 tables** (`sandbox_leases` 1-per-session singleton + `sandbox_lease_holders` N-per-session idempotent refcount), DDL + Drizzle + RLS migration `0017`, FK chain and index shape copied verbatim from `sandboxSessionEnvelopes` (`schema.ts:360`).
-- **9 query functions** in `packages/db/src/index.ts` co-located with the envelope fns, every one built on the in-repo `withWorkspaceRls` + `scopedDb.transaction` + raw `sql\`\`` lease pattern (`claimNextQueuedTurn`, `:3077`).
+- **9 query functions** in `packages/db/src/index.ts` co-located with the envelope fns, every one built on the in-repo `withWorkspaceRls` + `scopedDb.transaction` + raw `sql\`\`` lease pattern (`claimNextSessionExecution`, `:3077`).
 - **The exact `acquireLease` critical section**: `INSERT … ON CONFLICT DO NOTHING` → `SELECT … FOR UPDATE` (block, not `SKIP LOCKED`) → branch (cold/warming/warm/draining) → conditional `cold→warming` CAS → `refcount`/split-holder/`expires_at` bump — the **sole** double-spawn guard.
 - **The 4-state machine** with all 9 labeled transitions including the two the base design missed (W2 uncaught-spawner-death `warming` lease-TTL→cold; D1 `draining→warm` re-arm) and the pre-emptive `lease_epoch` fence (`commitWarmingToWarm` bumps; `acquireLease`/`confirmDrainCold` validate) that makes split-brain safe and forbids `create()`-on-conflict. At refcount 0 the **stateless reaper issues the provider's existing `stop()`/terminate** (prompt cost-stop), with the provider idle-timeout as the backstop — there is no owner process, no keep-alive loop, and no per-session task queue.
 - **Heartbeat/reaper** cadences with the boot-validated `reaperPeriod < viewerHolderTTL < idleTimeout` invariant added to the existing `config/src/index.ts:985` validation block, reusing `modalTimeoutSeconds` (`:241`) as the idle horizon/backstop. Lease TTL is refreshed by the turn's existing 30s Temporal activity heartbeat (turns are still activities) and by a viewer's app-level API heartbeat — there is **no** `ownerHeartbeat` activity and **no** keep-alive knob.
 
-Key real-file anchors this builds on: `packages/db/src/schema.ts:360` (envelope table mirror), `packages/db/src/index.ts:3077` (`claimNextQueuedTurn` lease txn pattern), `packages/db/src/index.ts:2609` (`upsertSandboxSessionEnvelope`), `packages/db/drizzle/0005_session_goals.sql:25-45` (RLS+grant boilerplate), `packages/config/src/index.ts:241` (`modalTimeoutSeconds`) and `:985` (cross-field validation block).
+Key real-file anchors this builds on: `packages/db/src/schema.ts:360` (envelope table mirror), `packages/db/src/index.ts:3077` (`claimNextSessionExecution` lease txn pattern), `packages/db/src/index.ts:2609` (`upsertSandboxSessionEnvelope`), `packages/db/drizzle/0005_session_goals.sql:25-45` (RLS+grant boilerplate), `packages/config/src/index.ts:241` (`modalTimeoutSeconds`) and `:985` (cross-field validation block).
 
 ---
 
@@ -904,7 +904,7 @@ Key real-file anchors this builds on: `packages/db/src/schema.ts:360` (envelope 
 
 # Adversarial Review — Lease & Singleton State Machine spec
 
-I verified every load-bearing claim against the codebase (HEAD) and ran the suspect SQL/types against real Postgres 16 + postgres-js. Anchors mostly check out (`claimNextQueuedTurn` is at `packages/db/src/index.ts:3077`; envelope table at `schema.ts:360`; config validation block at `config/src/index.ts:985`; `0005` RLS boilerplate matches; `0017` is the correct next migration number). The architecture is sound and most SQL is valid. But there are several real bugs — two of them defeat the module's headline invariants.
+I verified every load-bearing claim against the codebase (HEAD) and ran the suspect SQL/types against real Postgres 16 + postgres-js. Anchors mostly check out (`claimNextSessionExecution` is at `packages/db/src/index.ts:3077`; envelope table at `schema.ts:360`; config validation block at `config/src/index.ts:985`; `0005` RLS boilerplate matches; `0017` is the correct next migration number). The architecture is sound and most SQL is valid. But there are several real bugs — two of them defeat the module's headline invariants.
 
 ## CRITICAL — defeats a stated invariant
 
@@ -924,7 +924,7 @@ I verified every load-bearing claim against the codebase (HEAD) and ran the susp
 
 **M3. `tx.execute<LeaseRow>(...)` puts the generic in the wrong place and types `tx` wrong.** The in-repo pattern (`index.ts:3079`) is `tx.execute(sql<{id:string}>\`...\`)` — the row type goes on the `sql` tag, not on `.execute`. `PostgresJsDatabase.execute` is not generic this way, so every `tx.execute<LeaseRow>` in the spec is a type error as written. Separately, the helper signatures `upsertHolder(tx: Database, ...)`/`bumpAndStamp(tx: Database, ...)` are wrong: inside `scopedDb.transaction` the value is a `PgTransaction`, not `Database` (the existing code casts `tx as unknown as Database`). **Fix:** move the generic onto `sql<...>` and either cast the tx or type the helpers as the transaction type.
 
-**M4. Redundant nested transaction, and an RLS-context inconsistency.** `withRlsContext`/`withWorkspaceRls` already open a transaction internally (`index.ts:94`, casts `tx` to `Database`), so the spec's `withRlsContext(db, …, async (scopedDb) => scopedDb.transaction(async (tx) => …))` opens a **nested** (savepoint) transaction. `claimNextQueuedTurn` does this too (`withWorkspaceRls(…) → scopedDb.transaction`), so it's tolerated — but it's worth stating that the outer wrapper is already transactional. More substantively: the spec mixes `withRlsContext` (needs `accountId`+`workspaceId`, used by acquire/release/heartbeat/commit) and `withWorkspaceRls` (derives `accountId`, used by reaper/readLease). That's fine, but `reapStaleLeaseHolders` and the cross-session recompute only work because the RLS predicate `workspace_rls_visible(account_id, workspace_id)` is scoped to one workspace from the GUC context — the spec should state the reaper MUST be invoked per-workspace (it says so in prose; make it a hard contract, since a cross-workspace sweep would silently see nothing under FORCE RLS).
+**M4. Redundant nested transaction, and an RLS-context inconsistency.** `withRlsContext`/`withWorkspaceRls` already open a transaction internally (`index.ts:94`, casts `tx` to `Database`), so the spec's `withRlsContext(db, …, async (scopedDb) => scopedDb.transaction(async (tx) => …))` opens a **nested** (savepoint) transaction. `claimNextSessionExecution` does this too (`withWorkspaceRls(…) → scopedDb.transaction`), so it's tolerated — but it's worth stating that the outer wrapper is already transactional. More substantively: the spec mixes `withRlsContext` (needs `accountId`+`workspaceId`, used by acquire/release/heartbeat/commit) and `withWorkspaceRls` (derives `accountId`, used by reaper/readLease). That's fine, but `reapStaleLeaseHolders` and the cross-session recompute only work because the RLS predicate `workspace_rls_visible(account_id, workspace_id)` is scoped to one workspace from the GUC context — the spec should state the reaper MUST be invoked per-workspace (it says so in prose; make it a hard contract, since a cross-workspace sweep would silently see nothing under FORCE RLS).
 
 **M5. ~~The reaper returns a dead/duplicating contract.~~ RESOLVED in the stateless-reaper revision.** Originally the reaper hardcoded `drainingReset: 0` (dead weight) and returned `drained: string[]`, re-reporting the same draining session ids every pass for some other actor to tear down. The revision drops `drainingReset`, and — under stateless workers there is no per-session owner to defer to — the reaper itself owns teardown: `drained` now carries `{ sessionId, instanceId }`, and the reaper loop issues the provider `stop()` on `instanceId` then immediately `confirmDrainCold`-CASes `draining→cold` under the epoch fence. A row only reappears next pass if `confirmDrainCold` lost to a D1 re-arm (correct: the box is still wanted), so there is no thrash.
 

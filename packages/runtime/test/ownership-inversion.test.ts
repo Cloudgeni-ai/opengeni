@@ -32,7 +32,7 @@ import {
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
-// network), history in run_state mode (default), one model call per turn cap is
+// network), one canonical history store, one model call per turn cap is
 // fine — the scripted model finishes in 2 calls (shell -> final message).
 function localSettings() {
   return testSettings({ sandboxBackend: "local", webSearchEnabled: false });

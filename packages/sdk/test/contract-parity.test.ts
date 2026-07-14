@@ -254,15 +254,11 @@ describe("SDK / contracts parity", () => {
       clientEventId: "ce-1",
       payload: { text: "hello", tools: [{ kind: "mcp", id: "documents" }] },
     };
-    const interrupt: ClientSessionEventInput = {
-      type: "user.interrupt",
-      payload: { reason: "stop" },
-    };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     };
-    for (const event of [message, interrupt, approval]) {
+    for (const event of [message, approval]) {
       expect(ClientSessionEvent.safeParse(event).success).toBe(true);
     }
   });

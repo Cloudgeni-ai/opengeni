@@ -1,4 +1,9 @@
-import { getExternalWorkflowHandle, ParentClosePolicy, startChild } from "@temporalio/workflow";
+import {
+  getExternalWorkflowHandle,
+  ParentClosePolicy,
+  startChild,
+  workflowInfo,
+} from "@temporalio/workflow";
 import { activity } from "./activities";
 import { queueChanged } from "./session";
 
@@ -17,6 +22,7 @@ export async function scheduledTaskFireWorkflow(
     workspaceId: input.workspaceId,
     taskId: input.taskId,
     triggerType: input.triggerType,
+    producerKey: workflowInfo().workflowId,
     ...(input.agentRunUsageIdempotencyKey
       ? { agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey }
       : {}),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   composeSendInput,
+  composerModeForKey,
   FILE_ONLY_MESSAGE_TEXT,
   resolveSendExtras,
   shouldSubmitOnKey,
@@ -91,5 +92,19 @@ describe("shouldSubmitOnKey", () => {
 
   test("other keys never submit", () => {
     expect(shouldSubmitOnKey({ key: "a", shiftKey: false })).toBe(false);
+  });
+});
+
+describe("composerModeForKey", () => {
+  test("plain Enter appends the prompt to the queue", () => {
+    expect(composerModeForKey({})).toBe("queue");
+  });
+
+  test("Cmd+Enter steers", () => {
+    expect(composerModeForKey({ metaKey: true })).toBe("steer");
+  });
+
+  test("Ctrl+Enter steers", () => {
+    expect(composerModeForKey({ ctrlKey: true })).toBe("steer");
   });
 });

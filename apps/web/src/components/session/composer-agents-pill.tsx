@@ -1,13 +1,12 @@
 // The composer-anchored subagent pill: a compact floating pill that sits above
 // the composer (a sibling of the goal pill), front-and-center, and expands
-// UPWARD into the shared subagent lineage popover. It replaces the old header
-// "N agents" chip — a manager watches the same tree from the input, not the far
-// top corner.
+// UPWARD into the shared subagent lineage popover. This is the one Agents
+// surface: a manager watches the tree from the input, not in duplicate chrome.
 //
 // State language: calm at rest ("3 agents") and live when any worker is running
 // (a pulsing running-tone dot + "1 running"), so a glance at the composer tells
-// you whether the fleet is working. Clicking opens the same {@link SubagentTree}
-// the header chip and the Agents dock tab render — one source of truth.
+// you whether the fleet is working. Clicking opens {@link SubagentTree} from
+// the same source of truth.
 //
 // Copy doctrine: human language only; no status enum leaks into a label.
 import type { LineageNode } from "@opengeni/sdk";
@@ -49,6 +48,7 @@ export function ComposerAgentsPill({
               "inline-flex h-8 max-w-full items-center gap-2 rounded-full border bg-surface-2/90 pl-3 pr-3.5 text-xs shadow-md backdrop-blur",
               "supports-[backdrop-filter]:bg-surface-2/75 outline-none transition-colors",
               "hover:border-border-strong focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:border-border-strong",
+              "pointer-coarse:min-h-11",
               live ? "border-status-running/40" : "border-border",
             )}
           >

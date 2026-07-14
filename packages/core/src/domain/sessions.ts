@@ -18,11 +18,11 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
-  appendSessionEventsWithLockedSessionUpdate,
   createSession,
   createSessionGoal,
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
+  enqueueSessionMessageAtomically,
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
@@ -42,6 +42,7 @@ import {
   type CreateSessionMcpServerInput,
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
+  SessionQueueConflictError,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -56,7 +57,6 @@ import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
-  mergeResourceRefs,
   mergeToolRefs,
   normalizeResources,
   validateFileResources,
@@ -645,7 +645,7 @@ export function reasoningEffortForSession(
 export async function postUserMessageTurn(input: {
   db: Database;
   bus: EventBus;
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
   settings: Settings;
   accountId: string;
   workspaceId: string;
@@ -657,10 +657,11 @@ export async function postUserMessageTurn(input: {
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
-  // Default append preserves the public API/MCP queue semantics. The operator
-  // recovery helper opts into the locked reject policy so a preflight race
-  // cannot silently append behind newly-active work.
-  queuePolicy?: "append" | "reject_conflicts";
+  delivery?: "queue" | "steer";
+  origin?: "human" | "operator";
+  actor?: string;
+  expectedControlGeneration?: number;
+  expectedWorkspaceInferenceGeneration?: number;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -669,116 +670,65 @@ export async function postUserMessageTurn(input: {
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
-  const appended = await appendSessionEventsWithLockedSessionUpdate(
-    db,
-    workspaceId,
-    sessionId,
-    async (lockedSession, lockedUpdate) => {
-      // Cancelled is the one terminal state: an explicit user act. A FAILED
-      // session stays revivable by talking to it — conversation truth lives in
-      // session_history_items, so a failed turn does not invalidate history,
-      // and the manager channel of record must always answer when spoken to.
-      // The new message transitions failed -> queued (clearing the stale
-      // activeTurnId) and the signalWithStart below starts a fresh workflow
-      // run for the completed (failed) one, exactly as for idle sessions.
-      if (lockedSession.status === "cancelled") {
-        throw new HTTPException(409, {
-          message: `session is ${lockedSession.status}; cannot accept a new user message`,
-        });
-      }
-      if (input.queuePolicy === "reject_conflicts") {
-        const pendingTurns = await lockedUpdate.listPendingSessionTurns();
-        if (
-          pendingTurns.length > 0 ||
-          lockedSession.status === "queued" ||
-          lockedSession.status === "running" ||
-          lockedSession.status === "requires_action"
-        ) {
-          throw new HTTPException(409, {
-            message: "session has active or queued work; explicit append policy required",
-          });
-        }
-      }
-      const mcpCredentialUpdates = input.mcpCredentialUpdates?.length
-        ? await lockedUpdate.updateSessionMcpServerCredentials(input.mcpCredentialUpdates)
-        : { servers: [], missingIds: [] };
-      if (mcpCredentialUpdates.missingIds.length > 0) {
-        throw new HTTPException(422, {
-          message: `unknown session MCP server id: ${mcpCredentialUpdates.missingIds[0]}`,
-        });
-      }
-      const nextResources = mergeResourceRefs(lockedSession.resources, input.resources);
-      const nextTools = mergeToolRefs(lockedSession.tools, input.tools);
-      const shouldQueueSession =
-        lockedSession.status === "idle" || lockedSession.status === "failed";
-      return {
-        events: [
-          {
-            type: "user.message",
-            payload: {
-              text: input.text,
-              ...(input.resources.length ? { resources: input.resources } : {}),
-              ...(input.tools.length ? { tools: input.tools } : {}),
-              ...(requestedModel ? { model: requestedModel } : {}),
-              ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
-              ...(mcpCredentialUpdates.servers.length
-                ? { mcpCredentialUpdates: mcpCredentialUpdates.servers }
-                : {}),
-            },
-            ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-          },
-          ...(shouldQueueSession
-            ? [{ type: "session.status.changed" as const, payload: { status: "queued" } }]
-            : []),
-        ],
-        update: {
-          resources: nextResources,
-          tools: nextTools,
-          ...(shouldQueueSession ? { status: "queued" as const, activeTurnId: null } : {}),
-        },
-      };
-    },
-  ).then(async (events) => {
-    await bus.publish(workspaceId, sessionId, events);
-    return events;
-  });
-  const accepted = appended[0];
-  if (!accepted) {
-    throw new HTTPException(500, { message: "failed to append client event" });
+  let result;
+  try {
+    result = await enqueueSessionMessageAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId,
+      actor: input.actor ?? accountId,
+      origin: input.origin ?? "human",
+      text: input.text,
+      resources: input.resources,
+      tools: input.tools,
+      model: requestedModel,
+      reasoningEffort: requestedReasoningEffort,
+      clientEventId: input.clientEventId ?? null,
+      mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+      delivery: input.delivery ?? "queue",
+      ...(input.expectedControlGeneration !== undefined
+        ? { expectedControlGeneration: input.expectedControlGeneration }
+        : {}),
+      ...(input.expectedWorkspaceInferenceGeneration !== undefined
+        ? {
+            expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
+          }
+        : {}),
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+  } catch (error) {
+    if (error instanceof SessionQueueConflictError) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    if (error instanceof Error && error.message.includes("cancelled")) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
   }
-  const workflowId = workflowIdForSession(sessionId);
-  const session = await requireSession(db, workspaceId, sessionId);
-  const turn = await enqueueSessionTurn(db, {
-    accountId,
-    workspaceId,
-    sessionId,
-    triggerEventId: accepted.id,
-    temporalWorkflowId: workflowId,
-    source: "user",
-    prompt: input.text,
-    resources: input.resources,
-    tools: input.tools,
-    model: requestedModel ?? session.model,
-    reasoningEffort:
-      requestedReasoningEffort ??
-      reasoningEffortForSession(session.metadata, settings.openaiReasoningEffort),
-    sandboxBackend: session.sandboxBackend,
-    metadata: {},
-    // A human's message jumps ahead of any queued machine child-completion
-    // notification turns — it must never wait behind a flood of "worker FAILED"
-    // notices (the burial that spent the user's stop-spree and killed his own
-    // message). Stays behind the running turn and earlier human turns.
-    preemptChildNotifications: true,
-  });
-  await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-    {
-      type: "turn.queued",
-      turnId: turn.id,
-      payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
-    },
-  ]);
-  await workflowClient.wakeSessionWorkflow({ accountId, workspaceId, sessionId, workflowId });
-  return { accepted, turn };
+  await bus.publish(workspaceId, sessionId, result.events);
+  if (result.shouldSignalControl && result.controlEvent) {
+    await workflowClient.signalSessionControl({
+      accountId,
+      workspaceId,
+      sessionId,
+      eventId: result.controlEvent.id,
+      workflowId: result.temporalWorkflowId,
+    });
+  } else if (result.shouldWake) {
+    await workflowClient.wakeSessionWorkflow({
+      accountId,
+      workspaceId,
+      sessionId,
+      workflowId: result.temporalWorkflowId,
+    });
+  }
+  return {
+    accepted: result.accepted,
+    turn: result.turn,
+  };
 }
 
 /**
@@ -1223,7 +1173,10 @@ export async function acceptSessionUserMessage(
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    queuePolicy?: "append" | "reject_conflicts";
+    delivery?: "queue" | "steer";
+    origin?: "human" | "operator";
+    expectedControlGeneration?: number;
+    expectedWorkspaceInferenceGeneration?: number;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -1280,7 +1233,17 @@ export async function acceptSessionUserMessage(
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
-    queuePolicy: input.queuePolicy ?? "append",
+    delivery: input.delivery ?? "queue",
+    origin: input.origin ?? "human",
+    actor: grant.subjectId,
+    ...(input.expectedControlGeneration !== undefined
+      ? { expectedControlGeneration: input.expectedControlGeneration }
+      : {}),
+    ...(input.expectedWorkspaceInferenceGeneration !== undefined
+      ? {
+          expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
+        }
+      : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });
   await recordWorkspaceUsage(deps, {

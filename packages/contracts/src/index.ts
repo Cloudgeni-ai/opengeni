@@ -5,6 +5,9 @@ export const SessionStatus = z.enum([
   "running",
   "idle",
   "requires_action",
+  "recovering",
+  "waiting_capacity",
+  "paused",
   "failed",
   "cancelled",
 ]);
@@ -550,6 +553,11 @@ export const Workspace = z.object({
   // validated by WorkspaceSettingsSchema; unknown keys are preserved across
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
+  inferenceState: z.enum(["active", "paused"]),
+  inferenceGeneration: z.number().int().nonnegative(),
+  inferenceReason: z.string().nullable(),
+  inferenceChangedBy: z.string().nullable(),
+  inferenceChangedAt: z.string().nullable(),
   // Workspace default rig used by session/scheduled-task create fallback.
   defaultRigId: z.string().uuid().nullable(),
   createdAt: z.string(),
@@ -1856,14 +1864,30 @@ export const SessionTurnStatus = z.enum([
   "queued",
   "running",
   "requires_action",
+  "recovering",
+  "waiting_capacity",
   "completed",
   "failed",
   "cancelled",
+  "superseded",
 ]);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
-export const SessionTurnSource = z.enum(["user", "scheduled_task", "api", "goal"]);
+export const SessionTurnSource = z.enum([
+  "user",
+  "scheduled_task",
+  "api",
+  "goal",
+  "system",
+  "compaction",
+]);
 export type SessionTurnSource = z.infer<typeof SessionTurnSource>;
+
+export const SessionControlState = z.enum(["active", "paused"]);
+export type SessionControlState = z.infer<typeof SessionControlState>;
+
+export const WorkspaceInferenceState = z.enum(["active", "paused"]);
+export type WorkspaceInferenceState = z.infer<typeof WorkspaceInferenceState>;
 
 export const SessionGoalStatus = z.enum(["active", "paused", "completed"]);
 export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
@@ -1873,7 +1897,7 @@ export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
 
 export const SessionGoalPausedReason = z.enum([
   "agent",
-  "user_interrupt",
+  "user_pause",
   "api",
   "no_progress",
   "max_auto_continuations",
@@ -1991,9 +2015,10 @@ export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextR
 
 /** Outcome of a manual /compact trigger. */
 export const CompactSessionContextResult = z.object({
-  // queued: a client-side (Azure) compaction will run before the next turn.
-  // noop:   nothing to do (server-managed provider, mode off, or no history).
-  status: z.enum(["queued", "noop"]),
+  // pending: an active/paused session will compact at its next safe boundary.
+  // completed: an idle compaction-only activity completed synchronously.
+  // noop: there is no active history to compact.
+  status: z.enum(["pending", "completed", "noop"]),
   message: z.string(),
 });
 export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
@@ -2006,7 +2031,7 @@ export const SessionTurn = z.object({
   temporalWorkflowId: z.string(),
   status: SessionTurnStatus,
   source: SessionTurnSource,
-  position: z.number().int().positive(),
+  position: z.number().int(),
   prompt: z.string().min(1),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
@@ -2016,6 +2041,12 @@ export const SessionTurn = z.object({
   // Per-turn OS override. NULL = inherit the session's sandboxOs.
   sandboxOs: SandboxOs.nullable(),
   metadata: z.record(z.string(), z.unknown()),
+  version: z.number().int().positive(),
+  executionGeneration: z.number().int().nonnegative(),
+  activeAttemptId: z.string().uuid().nullable(),
+  lineage: z.record(z.string(), z.unknown()),
+  cancelledBy: z.string().nullable(),
+  cancelReason: z.string().nullable(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
   createdAt: z.string(),
@@ -2023,21 +2054,84 @@ export const SessionTurn = z.object({
 });
 export type SessionTurn = z.infer<typeof SessionTurn>;
 
-export const UpdateSessionTurnRequest = z.object({
-  prompt: z.string().min(1).optional(),
-  resources: z.array(ResourceRef).optional(),
-  tools: z.array(ToolRef).optional(),
-  model: z.string().min(1).optional(),
-  reasoningEffort: ReasoningEffort.optional(),
-  sandboxBackend: SandboxBackend.optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+export const SessionQueueSnapshot = z.object({
+  version: z.number().int().nonnegative(),
+  controlState: SessionControlState,
+  controlGeneration: z.number().int().nonnegative(),
+  workspaceInferenceState: WorkspaceInferenceState,
+  workspaceInferenceGeneration: z.number().int().nonnegative(),
+  workspaceRunExceptionGeneration: z.number().int().nonnegative().nullable(),
+  items: z.array(SessionTurn),
 });
-export type UpdateSessionTurnRequest = z.infer<typeof UpdateSessionTurnRequest>;
+export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
-export const ReorderSessionTurnsRequest = z.object({
-  turnIds: z.array(z.string().uuid()).min(1),
+export const CancelSessionQueueItemRequest = z.object({
+  expectedQueueVersion: z.number().int().nonnegative(),
+  expectedItemVersion: z.number().int().positive(),
+  reason: z.string().min(1).optional(),
 });
-export type ReorderSessionTurnsRequest = z.infer<typeof ReorderSessionTurnsRequest>;
+export type CancelSessionQueueItemRequest = z.infer<typeof CancelSessionQueueItemRequest>;
+
+export const SessionControlRequest = z.object({
+  mode: z.enum(["pause", "resume"]),
+  reason: z.string().min(1).optional(),
+  clientEventId: z.string().min(1).optional(),
+  expectedControlState: SessionControlState.optional(),
+  expectedControlGeneration: z.number().int().nonnegative().optional(),
+  expectedWorkspaceInferenceGeneration: z.number().int().nonnegative().optional(),
+});
+export type SessionControlRequest = z.infer<typeof SessionControlRequest>;
+
+export const WorkspaceInferenceControlRequest = z.object({
+  state: WorkspaceInferenceState,
+  reason: z.string().min(1),
+  clientEventId: z.string().min(1),
+  expectedState: WorkspaceInferenceState,
+  expectedGeneration: z.number().int().nonnegative(),
+  exceptSessionIds: z.array(z.string().uuid()).default([]),
+});
+export type WorkspaceInferenceControlRequest = z.infer<typeof WorkspaceInferenceControlRequest>;
+
+export const WorkspaceInferenceControlResponse = z.object({
+  operationId: z.string().uuid(),
+  state: WorkspaceInferenceState,
+  generation: z.number().int().nonnegative(),
+  affectedSessionIds: z.array(z.string().uuid()),
+  controlSessionIds: z.array(z.string().uuid()),
+  exceptionSessionIds: z.array(z.string().uuid()),
+});
+export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenceControlResponse>;
+
+export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
+export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;
+
+export const SessionSystemUpdateKind = z.enum([
+  "child_session_update",
+  "scheduled_wake",
+  "lifecycle_event",
+  "runtime_notice",
+]);
+export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
+
+export const SessionSystemUpdateState = z.enum(["pending", "delivered", "cancelled", "failed"]);
+export type SessionSystemUpdateState = z.infer<typeof SessionSystemUpdateState>;
+
+export const SessionSystemUpdate = z.object({
+  id: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  kind: SessionSystemUpdateKind,
+  classification: SystemUpdateClassification,
+  sourceId: z.string(),
+  dedupeKey: z.string(),
+  summary: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+  lineage: z.record(z.string(), z.unknown()),
+  state: SessionSystemUpdateState,
+  deliveredTurnId: z.string().uuid().nullable(),
+  deliveredAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SessionSystemUpdate = z.infer<typeof SessionSystemUpdate>;
 
 export const VariableSetVariableName = z
   .string()
@@ -3016,9 +3110,18 @@ export const Session = z.object({
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
   // Actual input tokens of the last model call of the most recent turn; the
-  // pre-turn client-side context-compaction trigger reads it as its budget
+  // pre-turn portable context-compaction trigger reads it as its budget
   // signal. Null until a turn with usage has completed.
   lastInputTokens: z.number().int().nonnegative().nullable(),
+  queueVersion: z.number().int().nonnegative(),
+  queueHeadPosition: z.number().int(),
+  queueTailPosition: z.number().int(),
+  controlState: SessionControlState,
+  controlGeneration: z.number().int().nonnegative(),
+  controlReason: z.string().nullable(),
+  controlChangedBy: z.string().nullable(),
+  controlChangedAt: z.string().nullable(),
+  workspaceRunExceptionGeneration: z.number().int().nonnegative().nullable(),
   lastSequence: z.number().int().nonnegative(),
   // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
   // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -3077,19 +3180,21 @@ export const SessionEventType = z.enum([
   "session.created",
   "session.status.changed",
   "session.requiresAction",
+  "session.context.compaction.requested",
   "session.context.compacted",
+  "session.context.compaction.skipped",
   "session.context.cleared",
   "user.message",
-  "user.interrupt",
+  "user.pause",
   "user.approvalDecision",
   "turn.queued",
-  "turn.updated",
   "turn.started",
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
-  "turn.queue_drained",
-  "turn.preempted",
+  "turn.superseded",
+  "turn.recovery.requested",
+  "turn.capacity_waiting",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",
@@ -3114,6 +3219,18 @@ export const SessionEventType = z.enum([
   "goal.resumed",
   "goal.cleared",
   "goal.continuation",
+  "system.update.pending",
+  "system.update.delivered",
+  "session.control.paused",
+  "session.control.resumed",
+  "session.control.steer_requested",
+  "workspace.inference.paused",
+  "workspace.inference.resumed",
+  "session.queue.prompt.cancelled",
+  "session.queue.history",
+  // A terminal/stale activity callback is retained as an audit wrapper rather
+  // than being dropped or emitted as though it belonged to the current turn.
+  "turn.event.rejected_late",
   "memory.saved",
   "memory.corrected",
   // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
@@ -3895,8 +4012,32 @@ export const SessionEvent = z.object({
   occurredAt: z.string(),
   clientEventId: z.string().min(1).nullable().optional(),
   turnId: z.string().uuid().nullable().optional(),
+  turnGeneration: z.number().int().nonnegative().nullable().optional(),
+  turnAttemptId: z.string().uuid().nullable().optional(),
+  turnAssociation: z.enum(["current", "late_rejected"]).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
+
+export const SessionQueueMutationResponse = z.object({
+  snapshot: SessionQueueSnapshot,
+  events: z.array(SessionEvent),
+  shouldWake: z.boolean(),
+});
+export type SessionQueueMutationResponse = z.infer<typeof SessionQueueMutationResponse>;
+
+export const SessionControlResponse = z.object({
+  operationId: z.string().uuid(),
+  event: SessionEvent,
+  controlState: SessionControlState,
+  controlGeneration: z.number().int().nonnegative(),
+  expectedActiveTurnId: z.string().uuid().nullable(),
+  expectedExecutionGeneration: z.number().int().nonnegative().nullable(),
+  expectedAttemptId: z.string().uuid().nullable(),
+  deliveryEventId: z.string().uuid().nullable(),
+  shouldSignalControl: z.boolean(),
+  shouldWake: z.boolean(),
+});
+export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const CreateSessionRequest = withVariableSetIdAlias({
   initialMessage: z.string().min(1),
@@ -3991,11 +4132,6 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
     }),
   }),
   z.object({
-    type: z.literal("user.interrupt"),
-    clientEventId: z.string().min(1).optional(),
-    payload: z.object({ reason: z.string().optional() }).default({}),
-  }),
-  z.object({
     type: z.literal("user.approvalDecision"),
     clientEventId: z.string().min(1).optional(),
     payload: z.object({
@@ -4006,6 +4142,25 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
   }),
 ]);
 export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
+
+export const SteerSessionMessageRequest = z.object({
+  text: z.string().min(1),
+  resources: z.array(ResourceRef).default([]),
+  tools: z.array(ToolRef).default([]),
+  model: z.string().min(1).optional(),
+  reasoningEffort: ReasoningEffort.optional(),
+  clientEventId: z.string().min(1).optional(),
+  expectedControlGeneration: z.number().int().nonnegative().optional(),
+  expectedWorkspaceInferenceGeneration: z.number().int().nonnegative().optional(),
+  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+});
+export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
+
+export const SteerSessionMessageResponse = z.object({
+  accepted: SessionEvent,
+  turn: SessionTurn,
+});
+export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
 
 export const SessionBusMessage = z.object({
   workspaceId: z.string().uuid(),

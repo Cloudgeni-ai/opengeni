@@ -36,7 +36,6 @@ export function SessionHeader({
   onPin,
   sandboxSlot,
   codexSlot,
-  agentsSlot,
   leading,
 }: {
   session: Session;
@@ -54,8 +53,6 @@ export function SessionHeader({
   sandboxSlot?: ReactNode;
   /** The codex-account indicator — absent for host-credit sessions. */
   codexSlot?: ReactNode;
-  /** Legacy header home for the "N agents" chip (moved above the composer). */
-  agentsSlot?: ReactNode;
   /** Leading control (the mobile hamburger); absent on desktop. */
   leading?: ReactNode;
 }) {
@@ -92,7 +89,6 @@ export function SessionHeader({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-        <div className="hidden xl:contents">{agentsSlot}</div>
         <SessionPinButton session={session} onPin={onPin} />
         <div className="hidden items-center gap-2 md:flex">
           <ConnectionPill state={connectionState} />

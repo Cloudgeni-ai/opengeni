@@ -81,7 +81,6 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
       kind: "api-key",
       api: "chat",
       builtin: false,
-      compactionMode: "client",
     };
     const model = buildModelInstance(provider, client, FIREWORKS_MODEL);
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
@@ -95,7 +94,6 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
       kind: "api-key",
       api: "responses",
       builtin: true,
-      compactionMode: "server",
     };
     const model = buildModelInstance(provider, client, "gpt-5.6-sol");
     expect(model).toBeInstanceOf(OpenAIResponsesModel);
@@ -128,7 +126,6 @@ describe("buildProviderClient", () => {
       builtin: false,
       apiKey: "placeholder",
       baseUrl: "https://chatgpt.com/backend-api",
-      compactionMode: "client",
     };
     const client = buildProviderClient(provider, settings);
     expect(settings.openaiMaxRetries).toBeGreaterThan(0);
@@ -146,7 +143,6 @@ describe("resolveTurnModel", () => {
     expect(resolved).not.toBeNull();
     expect(resolved!.provider.id).toBe("fireworks");
     expect(resolved!.provider.api).toBe("chat");
-    expect(resolved!.provider.compactionMode).toBe("client");
     expect(resolved!.client.baseURL).toBe("https://api.fireworks.ai/inference/v1");
     expect(resolved!.model).toBeInstanceOf(OpenAIChatCompletionsModel);
     expect(resolved!.configured.id).toBe(FIREWORKS_MODEL);
@@ -182,11 +178,9 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     const resolved = resolveTurnModel(settings, FIREWORKS_MODEL)!;
     const agent = buildOpenGeniAgent(settings, [], {
       model: resolved.model,
-      compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-      contextWindowTokens: resolved.configured.contextWindowTokens,
     });
     // hostedWebSearch off → no web_search tool and no explicit tools field at all.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
@@ -195,28 +189,30 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
     ).toBeUndefined();
-    // compactionMode "client" → store is NOT forced false.
+    // Durable local compaction does not add provider-side context management.
     expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBeUndefined();
     // The provider-bound Model instance is the one passed in (chat routing).
     expect((agent as { model?: unknown }).model).toBe(resolved.model);
   });
 
-  test("the built-in responses turn keeps web_search, encrypted reasoning, and server store on", () => {
+  test("the built-in responses turn keeps web_search and encrypted reasoning without inline compaction", () => {
     const settings = multiProviderSettings();
     const resolved = resolveTurnModel(settings, "gpt-5.6-sol")!;
     const agent = buildOpenGeniAgent(settings, [], {
       model: resolved.model,
-      compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-      contextWindowTokens: resolved.configured.contextWindowTokens,
     });
     expect(webSearchHostedTools(agent)).toHaveLength(1);
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
     ).toEqual({ include: ["reasoning.encrypted_content"] });
-    expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBe(false);
+    expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBeUndefined();
+    expect(
+      (agent as { modelSettings: { providerData?: Record<string, unknown> } }).modelSettings
+        .providerData?.context_management,
+    ).toBeUndefined();
   });
 
   test("an accepted responses transport carries the stable session prompt_cache_key", () => {
@@ -224,11 +220,9 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     const resolved = resolveTurnModel(settings, "gpt-5.6-sol")!;
     const agent = buildOpenGeniAgent(settings, [], {
       model: resolved.model,
-      compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-      contextWindowTokens: resolved.configured.contextWindowTokens,
       promptCacheKey: "session-123",
     });
     expect(
@@ -244,11 +238,9 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     const resolved = resolveTurnModel(settings, FIREWORKS_MODEL)!;
     const agent = buildOpenGeniAgent(settings, [], {
       model: resolved.model,
-      compactionMode: resolved.provider.compactionMode,
       hostedWebSearch: resolved.configured.hostedWebSearch,
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-      contextWindowTokens: resolved.configured.contextWindowTokens,
     });
     expect(
       (agent as { modelSettings: { providerData?: Record<string, unknown> } }).modelSettings
@@ -256,16 +248,11 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     ).toBeUndefined();
   });
 
-  test("resolveModelProvider/configuredProviders agree on the registry provider's client gating", () => {
-    // Cross-check the config layer the runtime builds on: the resolved provider
-    // for the Fireworks model is the chat/client provider, and the built-in
-    // provider stays responses/server — the runtime never re-derives this.
+  test("resolveModelProvider/configuredProviders agree on each provider's wire API", () => {
     const settings = multiProviderSettings();
     const fireworks = resolveModelProvider(settings, FIREWORKS_MODEL);
-    expect(fireworks?.provider.compactionMode).toBe("client");
     expect(fireworks?.provider.api).toBe("chat");
     const builtin = resolveModelProvider(settings, "gpt-5.6-sol");
-    expect(builtin?.provider.compactionMode).toBe("server");
     expect(builtin?.provider.api).toBe("responses");
   });
 });

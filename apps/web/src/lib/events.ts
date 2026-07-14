@@ -82,8 +82,8 @@ export type SessionFailureSummary = {
   reason: string | null;
   /** When the most recent failure happened. */
   failedAt: string | null;
-  /** Worker-death recoveries: turns the platform re-dispatched (turn.preempted). */
-  redispatchCount: number;
+  /** Same-turn recovery attempts recorded by the control plane. */
+  recoveryCount: number;
   /** Total failed turns in the log — > 1 means the session failed before and was revived. */
   failedTurnCount: number;
 };
@@ -91,7 +91,7 @@ export type SessionFailureSummary = {
 /**
  * Failure honesty for the session header/banner: the latest failure reason
  * (run through the same provider-internal redaction as the timeline) plus
- * the re-dispatch history from worker-death recovery (`turn.preempted`).
+ * the same-turn recovery history (`turn.recovery.requested`).
  */
 export function summarizeSessionFailure(
   events: SessionEvent[],
@@ -99,11 +99,11 @@ export function summarizeSessionFailure(
 ): SessionFailureSummary {
   let reason: string | null = null;
   let failedAt: string | null = null;
-  let redispatchCount = 0;
+  let recoveryCount = 0;
   let failedTurnCount = 0;
   for (const event of events) {
-    if (event.type === "turn.preempted") {
-      redispatchCount += 1;
+    if (event.type === "turn.recovery.requested") {
+      recoveryCount += 1;
     }
     if (event.type === "turn.failed") {
       failedTurnCount += 1;
@@ -118,7 +118,7 @@ export function summarizeSessionFailure(
       failedAt = event.occurredAt;
     }
   }
-  return { reason, failedAt, redispatchCount, failedTurnCount };
+  return { reason, failedAt, recoveryCount, failedTurnCount };
 }
 
 export function reasoningSummaryText(payload: unknown): string {
@@ -249,16 +249,18 @@ export function eventLabel(type: string): string {
     "session.status.changed": "Status changed",
     "session.requiresAction": "Approval required",
     "user.message": "User message",
-    "user.interrupt": "User interrupt",
+    "user.pause": "User paused",
     "user.approvalDecision": "Approval decision",
     "turn.queued": "Turn queued",
-    "turn.queue_drained": "Queue cleared by stop",
-    "turn.updated": "Turn updated",
     "turn.started": "Turn started",
     "turn.completed": "Turn completed",
     "turn.failed": "Turn failed",
     "turn.cancelled": "Turn cancelled",
-    "turn.preempted": "Turn re-dispatched (worker restart)",
+    "turn.recovery.requested": "Turn recovery requested",
+    "session.control.paused": "Session paused",
+    "session.control.resumed": "Session resumed",
+    "session.control.steer_requested": "Steer requested",
+    "turn.event.rejected_late": "Late attempt event rejected",
     "agent.message.delta": "Assistant delta",
     "agent.message.completed": "Assistant completed",
     "agent.reasoning.delta": "Model activity",

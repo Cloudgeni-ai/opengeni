@@ -79,7 +79,7 @@ const sessionCtx: SlashCommandContext = {
     updateGoal: async () => ({}) as never,
     clearSessionContext: async () => {},
     compactSessionContext: async () => ({
-      status: "queued",
+      status: "completed",
       message: "Compaction will run before the next turn.",
     }),
   }),

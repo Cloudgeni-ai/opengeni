@@ -264,7 +264,7 @@ function goalErrorMessage(cause: unknown, action: "pause" | "resume"): string {
 
 function clearErrorMessage(cause: unknown): string {
   if (statusCode(cause) === 409) {
-    return "Can't clear context mid-turn — stop the current turn first.";
+    return "Pause the session and wait for the current inference to settle, then clear context.";
   }
   return errorMessage(cause) ?? "Could not clear context.";
 }

@@ -35,6 +35,7 @@ import {
   requireFile,
   requireScheduledTask,
   requireSession,
+  requestSessionControl,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   setSessionChildNotificationsMode,
@@ -149,15 +150,7 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // Child-completion mode has no effect while parent wakes are disabled and is
-  // meaningful only to a manager that can spawn child sessions. Do not expose
-  // an inert persistent-setting tool that invites routine setup calls.
-  if (
-    sessionId !== null &&
-    !toolspaceMode &&
-    deps.settings.childCompletionParentWakeEnabled &&
-    can("sessions:create")
-  ) {
+  if (sessionId !== null && !toolspaceMode && can("sessions:create")) {
     server.registerTool(
       "set_child_notifications_mode",
       {
@@ -643,28 +636,17 @@ function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSur
   }
 }
 
-/**
- * A turn injected by the machine to notify a manager that a spawned worker
- * reached a terminal state — either a coalesced child-notification digest turn
- * (source 'child_notification') or a legacy per-child wake (source 'user' with
- * a `childCompletion` marker). NOT a genuine human message.
- */
-export function isMachineChildNotificationTurn(turn: {
-  source: string;
-  metadata: Record<string, unknown> | null;
-}): boolean {
-  if (turn.source === "child_notification") {
-    return true;
-  }
-  return Boolean(turn.metadata && "childCompletion" in turn.metadata);
+/** Only a prompt explicitly supplied through the human/API channel may redirect a user-paused goal. */
+export function isHumanDirectedTurn(turn: { source: string }): boolean {
+  return turn.source === "user" || turn.source === "api";
 }
 
 /**
- * Sacred user pause: a goal a human stopped (pausedReason 'user_interrupt') must
+ * Sacred user pause: a goal a human paused (pausedReason 'user_pause') must
  * never be resurrected by a MACHINE turn. Child-completion notification turns
  * carry a "resume it now" nudge; without this guard the agent processing one of
  * them would call goal_set and re-arm the exact autonomous loop the user just
- * stopped (the runaway that made "stop" feel broken). A genuine user message
+ * paused (the runaway that made Pause feel broken). A genuine user message
  * still redirects freely (it is not a child-notification turn), and the
  * human-driven API resume path (PATCH /goal) is unaffected.
  *
@@ -688,13 +670,13 @@ export async function assertGoalReactivationAllowed(
     return;
   }
   const goal = await getSessionGoal(deps.db, workspaceId, sessionId);
-  if (!goal || goal.status !== "paused" || goal.pausedReason !== "user_interrupt") {
+  if (!goal || goal.status !== "paused" || goal.pausedReason !== "user_pause") {
     return;
   }
   const turn = await getSessionTurn(deps.db, workspaceId, callerTurnId);
-  if (turn && isMachineChildNotificationTurn(turn)) {
+  if (turn && !isHumanDirectedTurn(turn)) {
     throw new Error(
-      "This session was paused by the user (stop). A worker-completion turn cannot resume or replace the goal — only the user can. Report your findings for the user and stop; do not call goal_set.",
+      "This session was paused by the user. An internal turn cannot resume or replace the goal — only a new human/API prompt can. Report your findings and do not call goal_set.",
     );
   }
 }
@@ -795,7 +777,7 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed. Requires concrete evidence (what was done and how it satisfies the success criteria). This is the explicit stop signal: no further continuation turns are synthesized.",
+        "Mark the session goal as completed. Requires concrete evidence (what was done and how it satisfies the success criteria). Completion prevents further continuation turns.",
       inputSchema: { evidence: z4.string().min(1) },
     },
     async ({ evidence }) => {
@@ -824,7 +806,7 @@ function registerGoalTools(
     "goal_pause",
     {
       description:
-        "Pause the session goal with a rationale (blocked, not productive, needs human input). This is the explicit stop signal: no further continuation turns are synthesized until the goal is resumed or replaced.",
+        "Pause the session goal with a rationale (blocked, not productive, needs human input). No further continuation turns are synthesized until the goal is resumed or replaced.",
       inputSchema: { rationale: z4.string().min(1) },
     },
     async ({ rationale }) => {
@@ -1403,16 +1385,17 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Post a user message into an existing session; the session queues a turn and resumes if idle.",
+          "Post a human/operator message into an existing session. delivery='queue' (default) appends normally. delivery='steer' atomically inserts and promotes this exact item, fences the active turn, and delivers it next with no intermediate queued inference.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
+          delivery: z4.enum(["queue", "steer"]).optional(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(z4.unknown()).optional(),
         },
       },
-      async ({ sessionId, text, mcpCredentialUpdates }) => {
+      async ({ sessionId, text, delivery, mcpCredentialUpdates }) => {
         const { accepted, turn } = await acceptSessionUserMessage(
           deps,
           grant,
@@ -1421,6 +1404,8 @@ function registerWorkspaceOrchestrationTools(
           {
             text,
             toolsProvided: false,
+            delivery: delivery ?? "queue",
+            origin: "operator",
             mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
               SessionMcpCredentialUpdateInput.parse(update),
             ),
@@ -1431,41 +1416,37 @@ function registerWorkspaceOrchestrationTools(
     );
 
     server.registerTool(
-      "session_interrupt",
+      "session_pause",
       {
-        description:
-          "Interrupt a session in this workspace. mode='stop' (default) cancels the current turn AND pauses the session's active goal so it halts. mode='steer' cancels the current turn WITHOUT pausing the goal, so the session picks up its next queued turn (or, if nothing is queued, continues toward its active goal) — pair it with a preceding session_send_message to redirect a running session. Works whether the target is mid-turn or idle.",
+        description: "Pause this session. Waiting prompts stay saved and inert until Resume.",
         inputSchema: {
           sessionId: z4.string().uuid(),
-          mode: z4.enum(["stop", "steer"]).optional(),
         },
       },
-      async ({ sessionId, mode }) => {
-        await requireSession(deps.db, grant.workspaceId, sessionId);
-        const appended = await appendAndPublishEvents(
-          deps.db,
-          deps.bus,
-          grant.workspaceId,
-          sessionId,
-          [
-            {
-              type: "user.interrupt",
-              payload: mode === "steer" ? { reason: "steer" } : {},
-            },
-          ],
-        );
-        const accepted = appended[0];
-        if (!accepted) {
-          throw new Error("failed to append interrupt event");
-        }
-        await deps.workflowClient.signalInterrupt({
+      async ({ sessionId }) => {
+        const controlled = await requestSessionControl(deps.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           sessionId,
-          eventId: accepted.id,
-          workflowId: workflowIdForSession(sessionId),
+          actor: grant.subjectId,
+          mode: "pause",
+          reason: "mcp_pause",
         });
-        return json({ event: accepted });
+        await deps.bus.publish(grant.workspaceId, sessionId, controlled.events);
+        if (controlled.shouldSignalControl) {
+          await deps.workflowClient.signalSessionControl({
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            eventId: controlled.event.id,
+            workflowId: workflowIdForSession(sessionId),
+          });
+        }
+        return json({
+          event: controlled.event,
+          controlState: controlled.controlState,
+          controlGeneration: controlled.controlGeneration,
+        });
       },
     );
 

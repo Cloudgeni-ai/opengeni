@@ -58,6 +58,7 @@ import {
 } from "../src/index";
 
 import { Manifest } from "@openai/agents/sandbox";
+import { CompactionNeededError } from "../src/context-compaction";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -792,33 +793,38 @@ describe("runtime event normalization", () => {
       {
         kind: "message",
         text: "hello",
-        serializedRunState: null,
       },
     );
     expect(prepared.input).toBe("hello");
   });
 
-  test("platform resume notices reach the wire WITHOUT the internal marker", async () => {
-    // The marker must never be serialized to a provider: strict Responses
-    // backends reject unknown per-item fields — in production every turn whose
-    // input carried it died with `400 Unknown parameter:
-    // 'input[N].opengeni_internal_resume'`, and because the marker is durable
-    // in replayed history, retries could never succeed. Detection of resume
-    // notices uses STORED history plus the text-prefix fallback
-    // (isInternalResumeMessage), so the wire copy stays clean.
+  test("accepts a claimed prompt already persisted as the last history item", async () => {
+    const historyItems = [
+      { type: "message", role: "user", content: "already persisted prompt" },
+    ] as any;
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
       {
         kind: "message",
-        text: "[TURN RESUMED AFTER CONTEXT COMPACTION] Continue.",
-        internalResumeKind: "context_compacted",
+        historyItems,
+      },
+    );
+    expect(prepared.input).toEqual(historyItems);
+  });
+
+  test("delivers platform recovery context as ephemeral system input", async () => {
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        internalContext: "Continue the same inference after recovery.",
       },
     );
     expect(prepared.input).toEqual([
       {
         type: "message",
-        role: "user",
-        content: "[TURN RESUMED AFTER CONTEXT COMPACTION] Continue.",
+        role: "system",
+        content: "Continue the same inference after recovery.",
       },
     ]);
     expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
@@ -851,26 +857,6 @@ describe("runtime event normalization", () => {
     const serialized = JSON.stringify(prepared.input);
     expect(serialized).not.toContain("opengeni_internal_resume");
     expect(serialized).toContain("keep_me");
-  });
-
-  test("treats the cleared run-state sentinel as a fresh start (run_state mode /clear)", async () => {
-    // Regression (adversarial review): after /clear, in run_state history mode
-    // the message path reads the cleared sentinel blob (not a real serialized
-    // run state — it has no $schemaVersion). RunState.fromString would throw
-    // "Run state is missing schema version" and break the next turn. The reader
-    // must recognize the sentinel and start clean instead, returning the bare
-    // text exactly as a null state would.
-    const prepared = await prepareRunInput(
-      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
-      {
-        kind: "message",
-        text: "first message after clear",
-        serializedRunState: CLEARED_RUN_STATE_BLOB,
-      },
-    );
-    expect(prepared.input).toBe("first message after clear");
-    // And critically it carries no resurrected sandbox-resume descriptor.
-    expect(prepared.serializedRunStateForSandbox).toBeUndefined();
   });
 
   test("refuses an approval resume against a cleared sentinel with an honest error", async () => {
@@ -926,11 +912,7 @@ describe("runtime event normalization", () => {
     expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
   });
 
-  test("read-path budget guard trims an over-budget items-mode input before it is sent", async () => {
-    // Even after the orphan sanitizer, an assembled input can exceed the model
-    // window (pre-turn compaction is best-effort and can no-op). With a budget
-    // supplied, the guard drops the oldest turn at a clean boundary so the
-    // request that reaches the model fits — the over-budget input is never sent.
+  test("items-mode input never silently drops history outside durable compaction", async () => {
     const huge = "x".repeat(4_000_000); // ~1M token estimate, over a small test budget
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
@@ -944,33 +926,12 @@ describe("runtime event normalization", () => {
           { type: "message", role: "assistant", content: "kept" } as any,
         ],
       },
-      { inputBudgetTokens: 200_000 },
     );
     const input = prepared.input as Array<Record<string, unknown>>;
     expect(Array.isArray(input)).toBe(true);
-    // The bloated old turn was dropped; the recent turn and the new user message
-    // survive, in order.
-    expect(input.some((item) => item.content === huge)).toBe(false);
+    expect(input.some((item) => item.content === huge)).toBe(true);
     expect(input.some((item) => item.content === "recent turn")).toBe(true);
     expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
-  });
-
-  test("read-path budget guard is OFF when no budget is supplied (no behaviour change for non-opted callers)", async () => {
-    const huge = "x".repeat(4_000_000);
-    const prepared = await prepareRunInput(
-      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
-      {
-        kind: "message",
-        text: "continue",
-        historyItems: [
-          { type: "message", role: "user", content: "old turn" } as any,
-          { type: "message", role: "assistant", content: huge } as any,
-        ],
-      },
-      // no inputBudgetTokens -> guard disabled, history passes through untrimmed.
-    );
-    const input = prepared.input as Array<Record<string, unknown>>;
-    expect(input.some((item) => item.content === huge)).toBe(true);
   });
 
   test("builds agents without MCP servers by default", () => {
@@ -3926,7 +3887,6 @@ describe("provider item id stripping", () => {
     const filter = callModelInputFilterForSettings(
       testSettings({
         openaiProvider: "openai",
-        contextCompactionMode: "auto",
         contextWindowTokens: 100,
         contextReservedOutputTokens: 0,
       }),
@@ -3962,11 +3922,10 @@ describe("provider item id stripping", () => {
     expect((second.input[5] as any).output).toBe(image(5));
   });
 
-  test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {
+  test("callModelInputFilterForSettings never performs request-local history trimming", async () => {
     const clientFilter = callModelInputFilterForSettings(
       testSettings({
         openaiProvider: "azure",
-        contextCompactionMode: "client",
         contextWindowTokens: 100,
         contextReservedOutputTokens: 0,
       }),
@@ -3974,7 +3933,6 @@ describe("provider item id stripping", () => {
     const serverFilter = callModelInputFilterForSettings(
       testSettings({
         openaiProvider: "openai",
-        contextCompactionMode: "server",
         contextWindowTokens: 100,
         contextReservedOutputTokens: 0,
       }),
@@ -3997,8 +3955,45 @@ describe("provider item id stripping", () => {
       context: undefined,
     });
 
-    expect(clientOut.input).toEqual(input.slice(2));
+    expect(clientOut.input).toEqual(input);
     expect(serverOut.input).toEqual(input);
+  });
+
+  test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {
+    let requested = false;
+    let polls = 0;
+    const filter = callModelInputFilterForSettings(
+      testSettings({
+        contextWindowTokens: 100_000,
+        contextReservedOutputTokens: 0,
+      }),
+      {
+        contextCompactionRequested: async () => {
+          polls += 1;
+          return requested;
+        },
+        throwOnCompactionNeeded: true,
+      },
+    )!;
+    const args = {
+      modelData: {
+        input: [{ type: "message", role: "user", content: "small input" }] as any,
+      },
+      agent: {} as any,
+      context: undefined,
+    };
+
+    expect((await filter(args)).input).toEqual(args.modelData.input);
+    requested = true;
+    try {
+      await filter(args);
+      throw new Error("expected operator compaction request to stop the model call");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionNeededError);
+      expect((error as CompactionNeededError).trigger).toBe("operator");
+      expect((error as CompactionNeededError).signalSource).toBe("estimate");
+    }
+    expect(polls).toBe(2);
   });
 
   test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {

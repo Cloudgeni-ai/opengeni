@@ -100,7 +100,7 @@ export type ReconcileCodexCapacityWaitInput = {
 
 export type ReconcileCodexCapacityWaitResult =
   | ({ action: "waiting" } & CodexCapacityWaitRef)
-  | { action: "resumed"; turnId: string }
+  | { action: "resumed"; updateId: string }
   | { action: "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
@@ -111,10 +111,19 @@ export type RunAgentTurnInput = {
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
-  turnId?: string;
+  turnId: string;
+  attemptId: string;
 };
 
-export type RequeueTurnAfterWorkerDeathInput = {
+export type SettleSessionControlInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  triggerEventId: string;
+  workflowId: string;
+};
+
+export type RecoverTurnAfterWorkerDeathInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -123,13 +132,15 @@ export type RequeueTurnAfterWorkerDeathInput = {
   triggerEventId: string;
   workflowId: string;
   turnId: string;
+  attemptId: string;
+  dispatchId: string;
+  timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
 };
 
-export type RequeueTurnAfterWorkerDeathResult =
-  // The turn is back on the queue; the session workflow's next claim
-  // re-dispatches it on a healthy worker. `redispatches` is the total number
-  // of worker-death re-dispatches this turn has now consumed.
-  | { action: "requeued"; redispatches: number }
+export type RecoverTurnAfterWorkerDeathResult =
+  // The same current inference is now recoverable. It never enters the prompt
+  // queue; the next claim creates a new attempt for this exact turn.
+  | { action: "recovering"; redispatches: number }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.
@@ -139,7 +150,7 @@ export type RequeueTurnAfterWorkerDeathResult =
   // ceiling), so the failed attempt was worker death number redispatches + 1.
   | { action: "exceeded"; redispatches: number };
 
-export type ClaimNextQueuedTurnInput = {
+export type ClaimNextSessionExecutionInput = {
   workspaceId: string;
   sessionId: string;
   workflowId: string;
@@ -161,19 +172,12 @@ export type MaybeContinueGoalResult = {
   action: "none" | "queue" | "continue" | "paused";
 };
 
-export type PauseGoalForInterruptInput = {
-  workspaceId: string;
-  sessionId: string;
-  // The `user.interrupt` event that triggered the pause, when there is one.
-  // A steer-tagged interrupt (reason "steer") must NOT pause the goal:
-  // steering redirects the work, it does not stop it.
-  triggerEventId?: string;
-};
-
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
+  /** Stable Temporal workflow identity; retries must reuse the same source row. */
+  producerKey?: string;
   agentRunUsageIdempotencyKey?: string;
 };
 
@@ -193,10 +197,9 @@ export type IndexDocumentInput = {
 };
 
 export type RunAgentTurnResult = {
-  // "preempted": the worker hosting this turn shut down gracefully mid-turn;
-  // the activity checkpointed conversation truth, re-queued the turn, and the
-  // session workflow re-dispatches it on a healthy worker.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "preempted";
+  // "recovering": this attempt ended after durably preserving the same current
+  // inference for a new attempt. Recovery is not prompt queue work.
+  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
   // Provider backpressure pacing: when set on an idle result, the session
   // workflow holds the loop this long before admitting the next turn (an
   // active goal's continuation would otherwise immediately re-hit the limit).
@@ -211,4 +214,9 @@ export type RunAgentTurnResult = {
   // persisted in Postgres and reconstructed after workflow/worker restart.
   // The workflow must not call maybeContinueGoal while this waiter is active.
   capacityWait?: CodexCapacityWaitRef;
+  // A maintenance execution could not run (for example, every Codex account
+  // is unavailable). End this workflow run without consuming the durable
+  // request; a later prompt/control wake starts the workflow again and normal
+  // prompt claim ordering consumes the request in-turn.
+  deferredUntilWake?: boolean;
 };

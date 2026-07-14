@@ -5,9 +5,8 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
 /**
- * Compose-time delivery choice. `queue` (the default) stacks the message
- * behind the running turn — visible, editable, reorderable until claimed.
- * `steer` interrupts the running turn and injects the message now.
+ * Enter appends a prompt; Cmd/Ctrl+Enter steers it to the head and supersedes
+ * the current inference.
  */
 export type ComposerMode = "queue" | "steer";
 
@@ -20,29 +19,26 @@ export type UseComposerOptions = ClientOverride & {
    * surrounding UI state (attachment pickers, model selectors, ...).
    */
   sendExtras?: ComposerSendExtras | (() => ComposerSendExtras) | undefined;
-  /** Initial delivery mode. Defaults to `"queue"`. */
-  defaultMode?: ComposerMode | undefined;
 };
 
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
-  /** Send the draft (or an explicit text) using the current mode. */
-  send: (text?: string) => Promise<boolean>;
+  /** Send the draft (or explicit text). Queue is the default; steer is explicit. */
+  send: (text?: string, mode?: ComposerMode) => Promise<boolean>;
   sending: boolean;
   canSend: boolean;
-  /** Queue (default) vs steer — the compose-time delivery choice. */
-  mode: ComposerMode;
-  setMode: (mode: ComposerMode) => void;
-  /** Ask the agent to stop the current turn. */
-  interrupt: (reason?: string) => Promise<void>;
-  interrupting: boolean;
+  /** Pause the session without deleting its prompt queue. */
+  pause: (reason?: string) => Promise<void>;
+  pausing: boolean;
+  resume: (reason?: string) => Promise<void>;
+  resuming: boolean;
   error: Error | null;
   clearError: () => void;
 };
 
 /**
- * Draft + send + interrupt state for the chat composer — the only
+ * Draft + send + Pause/Resume state for the chat composer — the only
  * human-to-agent input surface. The draft survives a failed send (nothing is
  * more hostile than losing a typed message); each send carries a generated
  * `clientEventId` so retries stay idempotent server-side.
@@ -52,17 +48,13 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerState {
   const { client, workspaceId } = useOpenGeni(options);
-  const defaultMode = options.defaultMode ?? "queue";
   const [value, setValue] = useState("");
-  const [mode, setMode] = useState<ComposerMode>(defaultMode);
   const [sending, setSending] = useState(false);
-  const [interrupting, setInterrupting] = useState(false);
+  const [pausing, setPausing] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const pendingClientEventId = useRef<string | null>(null);
   const onSent = options.onSent;
-  // Read at send time so an in-flight send uses the mode chosen at submit.
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -78,12 +70,11 @@ export function useComposer(
       pendingClientEventId.current = null;
       setValue("");
       setError(null);
-      setMode(defaultMode);
     }
-  }, [targetKey, defaultMode]);
+  }, [targetKey]);
 
   const send = useCallback(
-    async (explicit?: string): Promise<boolean> => {
+    async (explicit?: string, delivery: ComposerMode = "queue"): Promise<boolean> => {
       const draftAtSend = value;
       const text = (explicit ?? draftAtSend).trim();
       // Resolve the extras once: a file-only message (empty text + ≥1 ready
@@ -104,7 +95,7 @@ export function useComposer(
         // carries a minimal default so the attachments still get delivered.
         const sendText = text || FILE_ONLY_MESSAGE_TEXT;
         const input = composeSendInput(sendText, pendingClientEventId.current, extras);
-        if (modeRef.current === "steer") {
+        if (delivery === "steer") {
           await client.steerMessage(workspaceId, sessionId, input);
         } else {
           await client.sendMessage(workspaceId, sessionId, input);
@@ -134,22 +125,38 @@ export function useComposer(
   // on its `attachments.uploading` flag so a message never departs mid-upload.
   const hasReadyResources = (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
 
-  const interrupt = useCallback(
+  const pause = useCallback(
     async (reason?: string): Promise<void> => {
-      if (!sessionId || interrupting) {
+      if (!sessionId || pausing) {
         return;
       }
-      setInterrupting(true);
+      setPausing(true);
       setError(null);
       try {
-        await client.interrupt(workspaceId, sessionId, reason !== undefined ? { reason } : {});
+        await client.pauseSession(workspaceId, sessionId, reason !== undefined ? { reason } : {});
       } catch (cause) {
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       } finally {
-        setInterrupting(false);
+        setPausing(false);
       }
     },
-    [client, workspaceId, sessionId, interrupting],
+    [client, workspaceId, sessionId, pausing],
+  );
+
+  const resume = useCallback(
+    async (reason?: string): Promise<void> => {
+      if (!sessionId || resuming) return;
+      setResuming(true);
+      setError(null);
+      try {
+        await client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {});
+      } catch (cause) {
+        setError(cause instanceof Error ? cause : new Error(String(cause)));
+      } finally {
+        setResuming(false);
+      }
+    },
+    [client, workspaceId, sessionId, resuming],
   );
 
   const updateValue = useCallback((next: string) => {
@@ -163,10 +170,10 @@ export function useComposer(
     send,
     sending,
     canSend: Boolean(sessionId) && !sending && (value.trim().length > 0 || hasReadyResources),
-    mode,
-    setMode,
-    interrupt,
-    interrupting,
+    pause,
+    pausing,
+    resume,
+    resuming,
     error,
     clearError: useCallback(() => setError(null), []),
   };
@@ -203,12 +210,19 @@ export function composeSendInput(
 export function shouldSubmitOnKey(event: {
   key: string;
   shiftKey: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
   nativeEvent?: { isComposing?: boolean };
 }): boolean {
   if (event.key !== "Enter" || event.shiftKey) {
     return false;
   }
   return event.nativeEvent?.isComposing !== true;
+}
+
+/** Cmd/Ctrl+Enter steers; ordinary Enter appends to the queue. */
+export function composerModeForKey(event: { metaKey?: boolean; ctrlKey?: boolean }): ComposerMode {
+  return event.metaKey || event.ctrlKey ? "steer" : "queue";
 }
 
 function generateClientEventId(): string {

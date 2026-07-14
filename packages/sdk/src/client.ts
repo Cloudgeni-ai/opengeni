@@ -87,6 +87,11 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionLineageResponse,
+  SessionMcpCredentialUpdateInput,
+  SessionQueueSnapshot,
+  SessionQueueMutationResponse,
+  SessionControlResponse,
+  WorkspaceInferenceControlResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -133,7 +138,6 @@ import type {
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
-  UpdateSessionTurnRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -178,19 +182,16 @@ export type SendMessageInput = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   clientEventId?: string;
+  expectedControlGeneration?: number;
+  expectedWorkspaceInferenceGeneration?: number;
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
 };
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
   accepted: SessionEvent;
-  /**
-   * The turn created for the message, when it could be located — usually
-   * still queued, but already claimed (running/requires_action or even
-   * finished) when the worker picked it up mid-call.
-   */
-  turn: SessionTurn | null;
-  /** True when the running turn was interrupted to make way for the message. */
-  interrupted: boolean;
+  /** The exact turn created for this message in the same server transaction. */
+  turn: SessionTurn;
 };
 
 /**
@@ -547,16 +548,17 @@ export class OpenGeniClient {
     });
   }
 
-  async interrupt(
+  async pauseSession(
     workspaceId: string,
     sessionId: string,
     options: { reason?: string; clientEventId?: string } = {},
   ): Promise<SessionEvent> {
-    return await this.sendEvent(workspaceId, sessionId, {
-      type: "user.interrupt",
-      ...(options.clientEventId !== undefined ? { clientEventId: options.clientEventId } : {}),
-      payload: options.reason !== undefined ? { reason: options.reason } : {},
-    });
+    return (
+      await this.controlSession(workspaceId, sessionId, {
+        mode: "pause",
+        ...options,
+      })
+    ).event;
   }
 
   async sendApprovalDecision(
@@ -628,33 +630,68 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  /** Edit a still-queued turn (prompt, model, resources, tools, ...). */
-  async updateQueuedTurn(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-    update: UpdateSessionTurnRequest,
-  ): Promise<SessionTurn> {
-    return await this.requestJson<SessionTurn>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
-      update,
+  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
     );
   }
 
-  /**
-   * Reorder the queued turns. `turnIds` must all reference queued turns; the
-   * server assigns positions in the given order and returns the queue.
-   */
-  async reorderQueuedTurns(
+  async cancelQueueItem(
     workspaceId: string,
     sessionId: string,
-    turnIds: string[],
-  ): Promise<SessionTurn[]> {
-    return await this.requestJson<SessionTurn[]>(
+    turnId: string,
+    request: { expectedQueueVersion: number; expectedItemVersion: number; reason?: string },
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/reorder`,
-      { turnIds },
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/cancel`,
+      request,
+    );
+  }
+
+  async controlSession(
+    workspaceId: string,
+    sessionId: string,
+    request: {
+      mode: "pause" | "resume";
+      reason?: string;
+      clientEventId?: string;
+      expectedControlState?: "active" | "paused";
+      expectedControlGeneration?: number;
+      expectedWorkspaceInferenceGeneration?: number;
+    },
+  ): Promise<SessionControlResponse> {
+    return await this.requestJson<SessionControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`,
+      request,
+    );
+  }
+
+  async resumeSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, { mode: "resume", ...options });
+  }
+
+  async setWorkspaceInferenceState(
+    workspaceId: string,
+    request: {
+      state: "active" | "paused";
+      reason: string;
+      clientEventId: string;
+      expectedState: "active" | "paused";
+      expectedGeneration: number;
+      exceptSessionIds?: string[];
+    },
+  ): Promise<WorkspaceInferenceControlResponse> {
+    return await this.requestJson<WorkspaceInferenceControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/inference-control`,
+      request,
     );
   }
 
@@ -671,73 +708,20 @@ export class OpenGeniClient {
   }
 
   /**
-   * Steer: deliver a message *now* instead of behind the queue. Sends the
-   * message, promotes its queued turn to the front, and interrupts the
-   * running turn so the session picks the steer turn up next. On a session
-   * that is not running this degrades gracefully to a plain queued message.
-   *
-   * The steer turn is located by `triggerEventId` across ALL turns (retried
-   * briefly in case the server is still materializing it) — not just the
-   * queued ones, because the worker can claim the steer turn before it is
-   * ever observed queued, and a claimed steer turn means the message is
-   * already being delivered: interrupting then would cancel the very message
-   * being steered. If the turn cannot be found while other turns are queued,
-   * the interrupt is also skipped — stopping the running turn would otherwise
-   * promote someone else's queued work over this message — and the call
-   * degrades to a plain queued send (`interrupted: false`).
+   * Steer: atomically put this prompt at the head and supersede the current
+   * inference. The client performs one request and renders server order.
    */
   async steerMessage(
     workspaceId: string,
     sessionId: string,
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
-    const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    let steerTurn: SessionTurn | null = null;
-    let queued: SessionTurn[] = [];
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      if (attempt > 0) {
-        await delay(150 * attempt);
-      }
-      const turns = await this.listTurns(workspaceId, sessionId);
-      queued = turns
-        .filter((turn) => turn.status === "queued")
-        .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
-      // Match against every turn, whatever its status: a steer turn that is
-      // already running/requires_action (or even finished) was claimed before
-      // this listing — that is delivery, not grounds for an interrupt.
-      steerTurn = turns.find((turn) => turn.triggerEventId === accepted.id) ?? null;
-      if (steerTurn) {
-        break;
-      }
-    }
-    const steerTurnQueued = steerTurn?.status === "queued";
-    if (steerTurn && steerTurnQueued && queued.length > 1) {
-      const front = steerTurn;
-      await this.reorderQueuedTurns(workspaceId, sessionId, [
-        front.id,
-        ...queued.filter((turn) => turn.id !== front.id).map((turn) => turn.id),
-      ]);
-    }
-    // Interrupting is only safe when the next claim is provably this message:
-    // either the steer turn sits queued (now at the front), or no turn
-    // materialized yet AND nothing else is queued. A steer turn observed in
-    // any non-queued state was already claimed — skip the interrupt.
-    const canDeliverNext = steerTurnQueued || (steerTurn === null && queued.length === 0);
-    const session = await this.getSession(workspaceId, sessionId);
-    // If the previously running turn already finished and the session claimed
-    // the steer turn itself, interrupting now would cancel the very message
-    // being steered. `activeTurnId` is the claim check; the residual window
-    // between this read and the interrupt landing is accepted (an interrupt
-    // can never be atomic with a status read over HTTP).
-    const steerTurnAlreadyActive = steerTurn !== null && session.activeTurnId === steerTurn.id;
-    const interrupted =
-      canDeliverNext &&
-      !steerTurnAlreadyActive &&
-      (session.status === "running" || session.status === "requires_action");
-    if (interrupted) {
-      await this.interrupt(workspaceId, sessionId, { reason: "steer" });
-    }
-    return { accepted, turn: steerTurn, interrupted };
+    const input = typeof message === "string" ? { text: message } : message;
+    return await this.requestJson<SteerMessageResult>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
+      input,
+    );
   }
 
   // --- Goals -------------------------------------------------------------------
@@ -800,12 +784,7 @@ export class OpenGeniClient {
     );
   }
 
-  /**
-   * Trigger conversation compaction now. On the client-managed (Azure) path this
-   * queues a forced compaction the worker honors before the next turn
-   * (`status:"queued"`); on a server-managed provider or when compaction is off
-   * it is a no-op (`status:"noop"`) with an explanatory message.
-   */
+  /** Request one durable portable compaction at the next safe model boundary. */
   async compactSessionContext(
     workspaceId: string,
     sessionId: string,
@@ -2258,8 +2237,4 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

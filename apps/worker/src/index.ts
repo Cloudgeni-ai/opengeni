@@ -91,8 +91,7 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
     // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
-    // which is what triggers agent-turn's graceful preempt (checkpoint run
-    // state -> turn.preempted{worker_shutdown} -> requeue) instead of a
+    // which triggers agent-turn's same-turn recovery checkpoint instead of a
     // heartbeat-timeout worker_death. Short on purpose: a long grace here
     // only delays the checkpoint window long turns actually need.
     shutdownGraceTime: "5s",
@@ -154,9 +153,9 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
 
 /**
  * Register the ONE global reaper Temporal Schedule (the sole liveness/GC/cost-stop
- * driver — P1.3 / OD-3). Gated on sandboxOwnershipEnabled: with the flag off the
- * Schedule is never created, so the lease feature is fully dark (no sweeps, no
- * terminates).
+ * driver — P1.3 / OD-3) and durable system-update outbox repair cadence. With
+ * sandbox ownership off the activity performs only bounded DB outbox repair;
+ * it never reads/terminates sandbox leases.
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
@@ -173,9 +172,6 @@ export async function registerSandboxReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  if (!settings.sandboxOwnershipEnabled) {
-    return { registered: false, close: async () => {} };
-  }
   const connection = await Connection.connect({ address: settings.temporalHost });
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
@@ -356,12 +352,12 @@ export async function startWorker() {
     // PID-1 process with no explicit handler IGNORES SIGTERM: the pod sat
     // through the entire terminationGracePeriodSeconds doing nothing, then the
     // kubelet SIGKILLed it — so agent-turn's worker-shutdown checkpoint path
-    // (turn.preempted{worker_shutdown} + run-state save) never once ran in
-    // production (forensics 2026-07-06: every observed preempt was
+    // (same-turn recovery + run-state save) never once ran in production
+    // (forensics 2026-07-06: every observed recovery was
     // reason=worker_death). This handler starts the drain the moment k8s asks:
     // shutdown() stops polling, then (per shutdownGraceTime/ForceTime above)
     // cancels in-flight activities with WORKER_SHUTDOWN so long turns
-    // checkpoint and requeue INSIDE the grace window. run() resolves once
+    // checkpoint INSIDE the grace window. run() resolves once
     // drained and the finally below closes connections cleanly.
     let shutdownRequested = false;
     const requestShutdown = (signal: string) => {

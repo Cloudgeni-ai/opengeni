@@ -6,9 +6,9 @@ import { useMutationRunner } from "./internal";
 export type UseSessionControlOptions = ClientOverride;
 
 export type UseSessionControlResult = {
-  /** Interrupt the running turn (the explicit alternative to queueing). */
-  interrupt: (reason?: string) => Promise<SessionEvent | null>;
-  interrupting: boolean;
+  pause: (reason?: string) => Promise<SessionEvent | null>;
+  resume: (reason?: string) => Promise<SessionEvent | null>;
+  controlling: boolean;
   /** Approve a pending `requires_action` approval. */
   approve: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
   /** Reject a pending `requires_action` approval. */
@@ -20,7 +20,7 @@ export type UseSessionControlResult = {
 };
 
 /**
- * Session control events: interrupt and approval decisions. Pair with
+ * Session pause/resume and approval decisions. Pair with
  * `useSessionEvents` (for `session.requiresAction` payloads carrying the
  * `approvalId`) to render an approval bar.
  */
@@ -29,19 +29,30 @@ export function useSessionControl(
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const interruptMutation = useMutationRunner();
+  const controlMutation = useMutationRunner();
   const approvalMutation = useMutationRunner();
 
-  const interrupt = useCallback(
+  const pause = useCallback(
     async (reason?: string): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
       }
-      return await interruptMutation.run(() =>
-        client.interrupt(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
+      return await controlMutation.run(() =>
+        client.pauseSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
       );
     },
-    [client, workspaceId, sessionId, interruptMutation.run],
+    [client, workspaceId, sessionId, controlMutation.run],
+  );
+
+  const resume = useCallback(
+    async (reason?: string): Promise<SessionEvent | null> => {
+      if (!sessionId) return null;
+      const result = await controlMutation.run(() =>
+        client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
+      );
+      return result?.event ?? null;
+    },
+    [client, workspaceId, sessionId, controlMutation.run],
   );
 
   const decide = useCallback(
@@ -73,15 +84,16 @@ export function useSessionControl(
     [decide],
   );
 
-  const error = approvalMutation.mutationError ?? interruptMutation.mutationError;
+  const error = approvalMutation.mutationError ?? controlMutation.mutationError;
   const clearError = useCallback(() => {
-    interruptMutation.clearMutationError();
+    controlMutation.clearMutationError();
     approvalMutation.clearMutationError();
-  }, [interruptMutation.clearMutationError, approvalMutation.clearMutationError]);
+  }, [controlMutation.clearMutationError, approvalMutation.clearMutationError]);
 
   return {
-    interrupt,
-    interrupting: interruptMutation.mutating,
+    pause,
+    resume,
+    controlling: controlMutation.mutating,
     approve,
     reject,
     responding: approvalMutation.mutating,

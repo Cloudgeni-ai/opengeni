@@ -5,7 +5,6 @@
       "id": "00000000-0000-4000-8000-000000000401",
       "occurredAt": "2026-01-02T13:00:01.000Z",
       "text": "Start with the setup.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -44,7 +43,6 @@
       "id": "00000000-0000-4000-8000-000000000407",
       "occurredAt": "2026-01-02T13:00:07.000Z",
       "text": "Actually lint before deploy.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -83,7 +81,6 @@
       "id": "00000000-0000-4000-8000-000000000405",
       "occurredAt": "2026-01-02T13:00:05.000Z",
       "text": "Queue the deploy after setup.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -100,15 +97,6 @@
       },
       "output": null,
       "raw": null
-    },
-    {
-      "kind": "user-message",
-      "id": "00000000-0000-4000-8000-000000000410",
-      "occurredAt": "2026-01-02T13:00:10.000Z",
-      "text": "Pending follow-up that has not started yet.",
-      "pending": true,
-      "resources": [],
-      "tools": []
     }
   ],
   "groups": [
@@ -119,7 +107,6 @@
         "id": "00000000-0000-4000-8000-000000000401",
         "occurredAt": "2026-01-02T13:00:01.000Z",
         "text": "Start with the setup.",
-        "pending": false,
         "resources": [],
         "tools": []
       }
@@ -177,7 +164,6 @@
         "id": "00000000-0000-4000-8000-000000000407",
         "occurredAt": "2026-01-02T13:00:07.000Z",
         "text": "Actually lint before deploy.",
-        "pending": false,
         "resources": [],
         "tools": []
       }
@@ -235,7 +221,6 @@
         "id": "00000000-0000-4000-8000-000000000405",
         "occurredAt": "2026-01-02T13:00:05.000Z",
         "text": "Queue the deploy after setup.",
-        "pending": false,
         "resources": [],
         "tools": []
       }
@@ -263,18 +248,6 @@
           "raw": null
         }
       ]
-    },
-    {
-      "kind": "item",
-      "item": {
-        "kind": "user-message",
-        "id": "00000000-0000-4000-8000-000000000410",
-        "occurredAt": "2026-01-02T13:00:10.000Z",
-        "text": "Pending follow-up that has not started yet.",
-        "pending": true,
-        "resources": [],
-        "tools": []
-      }
     }
   ],
   "facets": {
@@ -282,11 +255,11 @@
       "agent-message": 2,
       "tool-call": 3,
       "turn-end": 2,
-      "user-message": 4
+      "user-message": 3
     },
     "groupKinds": {
       "activity": 3,
-      "item": 6,
+      "item": 5,
       "turn": 2
     },
     "activityItemKinds": {

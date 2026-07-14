@@ -434,9 +434,8 @@ export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): 
  * a parse failure or a no-op returns the SAME string reference (so an unchanged
  * or non-codex run-state replays byte-for-byte).
  *
- * WHY (HOLE C — the run-state REPLAY paths). The approval-decision resume and the
- * items-mode run-state fallback replay the serialized RunState blob verbatim. That
- * blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
+ * WHY (HOLE C — approval replay). An approval decision resumes the serialized
+ * RunState blob. That blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
  * backend (bound to the freezing account/org — a foreign account 400s it) AND the
  * foreign `rs_…` reasoning ids the Responses backend validates (rejected once the
  * blob is gone). Unlike `session_history_items`, the blob carries NO per-item

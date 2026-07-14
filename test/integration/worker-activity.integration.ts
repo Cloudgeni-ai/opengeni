@@ -8,47 +8,48 @@ import {
   type DocumentServices,
 } from "../../packages/documents/src/index";
 import type { ObjectStorage } from "../../packages/storage/src/index";
+import * as dbSchema from "../../packages/db/src/schema";
 import {
   appendSessionEvents,
-  appendSessionEventsAndUpdateSession,
-  appendSessionHistoryItems,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
-  countTurnSessionHistoryItems,
-  createTurn,
+  claimNextSessionExecution,
   createDb,
   createFileUpload,
   createScheduledTask,
   createSession,
   createSessionGoal,
   createWorkspaceEnvironment,
+  dbSql,
   encryptEnvironmentValue,
+  enqueueSessionMessageAtomically,
   enablePackInstallation,
-  enqueueSessionTurn,
   registerWorkspacePack,
   setWorkspaceEnvironmentVariable,
-  finishTurn,
   getSession,
   getSessionGoal,
   getBillingBalance,
   getActiveSessionHistoryItems,
   getLatestRunState,
   getSessionHistoryItems,
-  setSessionLastInputTokens,
   listSessions,
+  listPendingSessionSystemUpdates,
   listSessionTurns,
   listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
+  registerSessionTurnDispatch,
   requireScheduledTask,
   saveRunState,
-  setSessionStatus,
   sumUsageQuantity,
   updateScheduledTask,
+  withWorkspaceRls,
+  type Database,
 } from "@opengeni/db";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, SessionStatus } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import {
@@ -56,19 +57,14 @@ import {
   MaxTurnsExceededError,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { createActivities } from "../../apps/worker/src/activities";
+import { createActivities as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  PROVIDER_BACKPRESSURE_DELAY_MS,
-  WORKER_DEATH_RESUME_TEXT,
-} from "../../apps/worker/src/activities/agent-turn";
-import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
+import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
 } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
-import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import {
   ScriptedModel,
   functionCall,
@@ -78,6 +74,22 @@ import {
   testSettings,
   type TestServices,
 } from "@opengeni/testing";
+
+async function setSessionStatus(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  status: SessionStatus,
+  activeTurnId: string | null = null,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(dbSql`
+      update sessions
+      set status = ${status}, active_turn_id = ${activeTurnId}, updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${sessionId}
+    `);
+  });
+}
 
 describe("worker activities integration", () => {
   let services: TestServices;
@@ -133,7 +145,6 @@ describe("worker activities integration", () => {
     expect(events.some((event) => event.type === "turn.completed")).toBe(true);
     expect(latestStatus(events)).toBe("idle");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-    expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).not.toBeNull();
   });
 
   test("overlays per-session MCP servers with decrypted headers before prepareTools", async () => {
@@ -309,7 +320,7 @@ describe("worker activities integration", () => {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
       signalApprovalDecision: async () => undefined,
-      signalInterrupt: async () => undefined,
+      signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
       deleteScheduledTaskSchedule: async () => undefined,
       triggerScheduledTask: async () => undefined,
@@ -400,7 +411,7 @@ describe("worker activities integration", () => {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
       signalApprovalDecision: async () => undefined,
-      signalInterrupt: async () => undefined,
+      signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
       deleteScheduledTaskSchedule: async () => undefined,
       triggerScheduledTask: async () => undefined,
@@ -730,677 +741,6 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
   });
 
-  test("context overflow before model/tool progress compacts and retries once in-activity", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "overflow then retry",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old context" } },
-        {
-          position: 1,
-          item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) },
-        },
-      ],
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "overflow then retry" } },
-    ]);
-    const model = new ScriptedModel([
-      { error: contextOverflowError("Your input exceeds the context window of this model.") },
-      { outputText: "recovered", chunks: ["recovered"] },
-    ]);
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: runtimeWithFakeCompactionSummarizer(model, "overflow recovery summary"),
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-overflow-retry",
-      }),
-    ).resolves.toEqual({ status: "idle" });
-
-    expect(model.calls).toBe(2);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
-    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-  });
-
-  test("goal continuation over threshold compacts through rendered Responses input and continues", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "goal context",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "deploy the app" } },
-        {
-          position: 1,
-          item: {
-            type: "function_call",
-            callId: "call_vern",
-            name: "opengeni__sessions_list",
-            arguments: "{}",
-          },
-        },
-        {
-          position: 2,
-          item: {
-            type: "function_call_result",
-            callId: "call_vern",
-            status: "completed",
-            output: "ok",
-          },
-        },
-        {
-          position: 3,
-          item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) },
-        },
-      ],
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "goal.continuation", payload: { text: "continue the goal" } },
-    ]);
-    const model = new ScriptedModel([{ outputText: "continued", chunks: ["continued"] }]);
-    let summarizerInput: unknown;
-    const runtime = runtimeWithCompactionClient(model, async (request) => {
-      summarizerInput = request.input;
-      if (typeof request.input !== "string") {
-        throw Object.assign(
-          new Error("Missing required parameter: input[1].call_id. You provided callId."),
-          { status: 400 },
-        );
-      }
-      return { output_text: "rendered goal continuation summary" };
-    });
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime,
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-goal-rendered-compaction",
-      }),
-    ).resolves.toEqual({ status: "idle" });
-
-    expect(model.calls).toBe(1);
-    expect(typeof summarizerInput).toBe("string");
-    expect(String(summarizerInput)).toContain("[tool_call function_call]");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
-    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-  });
-
-  test("compacted false never retries the unchanged turn", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "tiny overflow",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [{ position: 0, item: { type: "message", role: "user", content: "tiny" } }],
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "overflow but do not retry unchanged" } },
-    ]);
-    const model = new ScriptedModel([
-      { error: contextOverflowError("Your input exceeds the context window of this model.") },
-      { outputText: "must not run" },
-    ]);
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: runtimeWithFakeCompactionSummarizer(model, "summary larger than source"),
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-compacted-false-no-retry",
-      }),
-    ).resolves.toEqual({ status: "failed" });
-
-    expect(model.calls).toBe(1);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).toContain(
-      "compaction summarization failed:",
-    );
-    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).not.toContain(
-      "Context compaction needed",
-    );
-  });
-
-  test("summarizer hard failure uses deterministic fallback and the turn continues", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "fallback turn",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old fallback context" } },
-        {
-          position: 1,
-          item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) },
-        },
-      ],
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "continue after fallback" } },
-    ]);
-    const model = new ScriptedModel([
-      { outputText: "continued after fallback", chunks: ["continued"] },
-    ]);
-    let summarizerCalls = 0;
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: runtimeWithCompactionClient(model, async () => {
-        summarizerCalls += 1;
-        throw Object.assign(new Error("provider summarizer unavailable"), { status: 500 });
-      }),
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-fallback-compaction-continues",
-      }),
-    ).resolves.toEqual({ status: "idle" });
-
-    expect(summarizerCalls).toBe(2);
-    expect(model.calls).toBe(1);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(
-      active.some((row) =>
-        String((row.item as Record<string, unknown>).content).includes(
-          "Non-LLM context compaction fallback",
-        ),
-      ),
-    ).toBe(true);
-  });
-
-  test("mid-turn proactive compaction before model progress retries once in-activity", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "proactive retry",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "proactive context" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            // Compaction intentionally preserves every real user message. Put
-            // the bulk in droppable assistant output so this fixture can prove
-            // a strict active-history shrink rather than asking the worker to
-            // discard user-authored context.
-            content: [{ type: "output_text", text: "x".repeat(75_000 * 4) }],
-          },
-        },
-      ],
-    });
-    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 1);
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "continue after proactive compaction" } },
-    ]);
-    const model = new ScriptedModel([{ outputText: "recovered", chunks: ["recovered"] }]);
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: runtimeWithFakeCompactionSummarizer(model, "proactive retry summary"),
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-proactive-retry",
-      }),
-    ).resolves.toEqual({ status: "idle" });
-
-    expect(model.calls).toBe(1);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(
-      active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true),
-    ).toBe(true);
-  });
-
-  test("mid-turn proactive compaction after persisted progress AUTO-CONTINUES via a resume-notice requeue", async () => {
-    const noopWorkflowClient: SessionWorkflowClient = {
-      signalUserMessage: async () => undefined,
-      wakeSessionWorkflow: async () => undefined,
-      signalApprovalDecision: async () => undefined,
-      signalInterrupt: async () => undefined,
-      syncScheduledTask: async () => undefined,
-      deleteScheduledTaskSchedule: async () => undefined,
-      triggerScheduledTask: async () => undefined,
-    };
-    const grant = await testGrant(dbClient.db);
-    const apiSettings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      productAccessMode: "configured",
-      delegationSecret: "test-delegation-secret",
-    });
-    const app = createApp({
-      settings: apiSettings,
-      db: dbClient.db,
-      bus,
-      workflowClient: noopWorkflowClient,
-    });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
-    try {
-      const settings = testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-        mcpServers: [
-          {
-            id: "opengeni",
-            name: "OpenGeni",
-            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-            timeoutMs: undefined,
-            cacheToolsList: false,
-          },
-        ],
-      });
-      const session = await createOwnedSession(dbClient.db, grant, {
-        initialMessage: "overflow after progress",
-        resources: [],
-        tools: [{ kind: "mcp", id: "opengeni" }],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
-      });
-      await appendSessionHistoryItems(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        items: [
-          { position: 0, item: { type: "message", role: "user", content: "old context" } },
-          {
-            position: 1,
-            item: {
-              type: "message",
-              role: "assistant",
-              content: [{ type: "output_text", text: "old answer" }],
-            },
-          },
-          { position: 2, item: { type: "message", role: "user", content: "recent context" } },
-          {
-            position: 3,
-            item: {
-              type: "message",
-              role: "assistant",
-              content: [{ type: "output_text", text: "recent answer" }],
-            },
-          },
-        ],
-      });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "user.message", payload: { text: "overflow after progress" } },
-      ]);
-      const model = new ScriptedModel([
-        {
-          id: "proactive-progress-1",
-          inputTokens: 80_000,
-          output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")],
-        },
-        { outputText: "should be requeued before this call" },
-      ]);
-      const activities = createActivities({
-        settings,
-        db: dbClient.db,
-        bus,
-        runtime: runtimeWithFakeCompactionSummarizer(model, "forced recovery summary"),
-      });
-
-      await expect(
-        activities.runAgentTurn({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          triggerEventId: trigger!.id,
-          workflowId: "workflow-overflow-progress",
-        }),
-      ).resolves.toEqual({ status: "preempted" });
-
-      expect(model.calls).toBe(1);
-      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
-      // The turn auto-continues: no turn.failed — a preempted-with-notice requeue,
-      // exactly like the worker-shutdown checkpoint path.
-      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-      const preempted = events.find((event) => event.type === "turn.preempted");
-      expect(preempted?.payload).toMatchObject({
-        reason: "context_compacted",
-        resumeWithNotice: true,
-      });
-      expect(typeof (preempted?.payload as Record<string, unknown>).text).toBe("string");
-      expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
-      expect(latestStatus(events)).toBe("queued");
-      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
-      const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-      expect(
-        active.some(
-          (row) => (row.item as Record<string, unknown>).opengeni_context_summary === true,
-        ),
-      ).toBe(true);
-      expect(
-        active.every((row) => {
-          const item = row.item as Record<string, unknown>;
-          return item.type === "message" && item.role === "user";
-        }),
-      ).toBe(true);
-    } finally {
-      server.stop(true);
-    }
-  });
-
-  test("a compaction-resumed turn may compact again when active history strictly shrinks", async () => {
-    const noopWorkflowClient: SessionWorkflowClient = {
-      signalUserMessage: async () => undefined,
-      wakeSessionWorkflow: async () => undefined,
-      signalApprovalDecision: async () => undefined,
-      signalInterrupt: async () => undefined,
-      syncScheduledTask: async () => undefined,
-      deleteScheduledTaskSchedule: async () => undefined,
-      triggerScheduledTask: async () => undefined,
-    };
-    const grant = await testGrant(dbClient.db);
-    const apiSettings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      productAccessMode: "configured",
-      delegationSecret: "test-delegation-secret",
-    });
-    const app = createApp({
-      settings: apiSettings,
-      db: dbClient.db,
-      bus,
-      workflowClient: noopWorkflowClient,
-    });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
-    try {
-      const settings = testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-        contextWindowTokens: 100_000,
-        contextReservedOutputTokens: 0,
-        // This scenario is calibrated so the resumed turn's 80k-token model
-        // report sits ABOVE the proactive trigger (it tests the shrink-invariant
-        // loop guard, not the trigger default). Pin the ratio the calibration
-        // assumed instead of inheriting the production default (now 0.9, which
-        // would put the trigger at 90k and never re-compact here).
-        contextCompactionThresholdRatio: 0.6,
-        mcpServers: [
-          {
-            id: "opengeni",
-            name: "OpenGeni",
-            url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
-            timeoutMs: undefined,
-            cacheToolsList: false,
-          },
-        ],
-      });
-      const session = await createOwnedSession(dbClient.db, grant, {
-        initialMessage: "overflow after resume",
-        resources: [],
-        tools: [{ kind: "mcp", id: "opengeni" }],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
-      });
-      await appendSessionHistoryItems(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        items: [
-          { position: 0, item: { type: "message", role: "user", content: "old context" } },
-          {
-            position: 1,
-            item: {
-              type: "message",
-              role: "assistant",
-              content: [{ type: "output_text", text: "old answer".repeat(4_000) }],
-            },
-          },
-          { position: 2, item: { type: "message", role: "user", content: "recent context" } },
-          {
-            position: 3,
-            item: {
-              type: "message",
-              role: "assistant",
-              content: [{ type: "output_text", text: "recent answer".repeat(4_000) }],
-            },
-          },
-        ],
-      });
-      // The trigger IS a compaction resume. A second productive compaction must
-      // continue when it strictly reduces the finite active-history estimate;
-      // the shrink invariant, not a one-generation cap, prevents churn.
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        {
-          type: "turn.preempted",
-          payload: {
-            reason: "context_compacted",
-            resumeWithNotice: true,
-            text: "[resumed after compaction]",
-          },
-        },
-      ]);
-      const model = new ScriptedModel([
-        {
-          id: "compaction-loop-1",
-          inputTokens: 80_000,
-          output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")],
-        },
-        { outputText: "should not run" },
-      ]);
-      const activities = createActivities({
-        settings,
-        db: dbClient.db,
-        bus,
-        runtime: runtimeWithFakeCompactionSummarizer(model, "loop guard summary"),
-      });
-
-      await expect(
-        activities.runAgentTurn({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          triggerEventId: trigger!.id,
-          workflowId: "workflow-overflow-loop-guard",
-        }),
-      ).resolves.toEqual({ status: "preempted" });
-
-      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
-      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-      const compaction = events.find((event) => event.type === "session.context.compacted");
-      expect(compaction?.payload).toMatchObject({ trigger: "proactive" });
-      const compactionPayload = compaction?.payload as Record<string, unknown>;
-      expect(Number(compactionPayload.estimatedTokensAfter)).toBeLessThan(
-        Number(compactionPayload.estimatedTokensBefore),
-      );
-      // Trigger + new resume event: the second productive compaction requeues
-      // exactly once and preserves the same turn.
-      expect(events.filter((event) => event.type === "turn.preempted").length).toBe(2);
-      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
-    } finally {
-      server.stop(true);
-    }
-  });
-
-  test("a second context overflow in the same turn follows the normal failure path", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "overflow twice",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old overflow context" } },
-        {
-          position: 1,
-          item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) },
-        },
-      ],
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "overflow twice" } },
-    ]);
-    const model = new ScriptedModel([
-      { error: contextOverflowError("Your input exceeds the context window of this model.") },
-      { error: contextOverflowError("Your input exceeds the context window of this model again.") },
-    ]);
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        contextCompactionMode: "client",
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: runtimeWithFakeCompactionSummarizer(model, "first overflow recovery summary"),
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-overflow-twice",
-      }),
-    ).resolves.toEqual({ status: "failed" });
-
-    expect(model.calls).toBe(2);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
-    expect(events.some((event) => event.type === "turn.failed")).toBe(true);
-    expect(latestStatus(events)).toBe("failed");
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
-  });
-
   test("max turns exceeded idles the session instead of failing it", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -1434,11 +774,7 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     const completed = events.find((event) => event.type === "turn.completed");
-    expect(completed?.payload).toEqual({
-      output: "",
-      segmentLimit: "max_turns",
-      runStateSaved: false,
-    });
+    expect(completed?.payload).toEqual({ output: "", segmentLimit: "max_turns" });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
     expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
@@ -1483,7 +819,6 @@ describe("worker activities integration", () => {
       code: "provider_rate_limited",
       retryable: true,
       recovery: "user_message",
-      runStateSaved: false,
     });
     // The turn is truthfully failed, but a transient provider failure must
     // not kill a long-lived session: it idles and the next user message
@@ -1539,7 +874,6 @@ describe("worker activities integration", () => {
       code: "provider_rate_limited",
       retryable: true,
       recovery: "goal_continuation",
-      runStateSaved: false,
     });
     // The turn is truthfully failed, but the session stays resumable and the
     // goal remains active for the continuation loop to pick up.
@@ -1737,38 +1071,41 @@ describe("worker activities integration", () => {
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const turnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      temporalWorkflowId: "workflow-status-update-fails",
-      triggerEventId: trigger!.id,
-    });
-    const failingDb = new Proxy(dbClient.db, {
-      get(target, prop, receiver) {
-        if (prop === "transaction") {
-          return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) =>
-            await (target.transaction as any)(
-              async (tx: typeof dbClient.db) => {
-                const failingTx = new Proxy(tx, {
-                  get(txTarget, txProp, txReceiver) {
-                    if (txProp === "update") {
-                      return () => {
-                        throw new Error("status update failed");
-                      };
-                    }
-                    const value = Reflect.get(txTarget, txProp, txReceiver);
-                    return typeof value === "function" ? value.bind(txTarget) : value;
-                  },
-                }) as typeof dbClient.db;
-                return await fn(failingTx);
-              },
-              ...args,
-            );
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    }) as typeof dbClient.db;
+    const claimed = await claimNextSessionExecution(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      "workflow-status-update-fails",
+    );
+    expect(claimed).not.toBeNull();
+    let updateCalls = 0;
+    const failSecondUpdate = (targetDb: typeof dbClient.db): typeof dbClient.db =>
+      new Proxy(targetDb, {
+        get(target, prop, receiver) {
+          if (prop === "transaction") {
+            return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) =>
+              await (target.transaction as any)(
+                async (tx: typeof dbClient.db) => await fn(failSecondUpdate(tx)),
+                ...args,
+              );
+          }
+          const value = Reflect.get(target, prop, receiver);
+          if (prop === "update" && typeof value === "function") {
+            return (...args: unknown[]) => {
+              updateCalls += 1;
+              // Dispatch registration is update 1. Failing update 2 lands after
+              // the atomic start settlement inserted its events, proving that
+              // the nested transaction rolls those events back with the turn.
+              if (updateCalls === 2) {
+                throw new Error("status update failed");
+              }
+              return value.apply(target, args);
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as typeof dbClient.db;
+    const failingDb = failSecondUpdate(dbClient.db);
     const activities = createActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: failingDb,
@@ -1785,7 +1122,7 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         triggerEventId: trigger!.id,
         workflowId: "workflow-status-update-fails",
-        turnId,
+        turnId: claimed!.id,
       }),
     ).rejects.toThrow("status update failed");
 
@@ -1809,22 +1146,45 @@ describe("worker activities integration", () => {
     const [initialTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "needs approval" } },
     ]);
-    const turnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      temporalWorkflowId: workflowId,
-      triggerEventId: initialTrigger!.id,
-    });
-    await finishTurn(dbClient.db, grant.workspaceId, turnId, "requires_action");
+    const turn = await claimNextSessionExecution(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      workflowId,
+    );
+    expect(turn).not.toBeNull();
+    const initialAttemptId = crypto.randomUUID();
+    expect(
+      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: initialTrigger!.id,
+        attemptId: initialAttemptId,
+        dispatchId: `approval-fixture-${crypto.randomUUID()}`,
+      }),
+    ).toMatchObject({ action: "registered" });
     await saveRunState(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      turnId,
+      turnId: turn!.id,
+      expectedExecutionGeneration: turn!.executionGeneration,
+      expectedAttemptId: initialAttemptId,
       serializedRunState: "saved-state",
       pendingApprovals: [{ id: "approval-1" }],
     });
-    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "requires_action", turnId);
+    expect(
+      await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: initialTrigger!.id,
+        attemptId: initialAttemptId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: turn!.id,
+        events: [],
+      }),
+    ).toMatchObject({ action: "settled" });
     const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.approvalDecision", payload: { approvalId: "approval-1", decision: "approve" } },
     ]);
@@ -1868,11 +1228,11 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         triggerEventId: approvalTrigger!.id,
         workflowId,
-        turnId,
+        turnId: turn!.id,
       }),
     ).resolves.toEqual({ status: "idle" });
 
-    expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turnId });
+    expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turn!.id });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
@@ -2247,7 +1607,7 @@ describe("worker activities integration", () => {
     expect(cost?.quantity).toBeGreaterThan(1);
   });
 
-  test("dual-writes conversation items and resumes turns from them in items mode", async () => {
+  test("persists conversation items and resumes follow-up turns from them", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "remember the codeword zebra",
@@ -2260,8 +1620,7 @@ describe("worker activities integration", () => {
       { id: "items-t1", outputText: "noted: zebra", chunks: ["noted: zebra"] },
       { id: "items-t2", outputText: "the codeword is zebra", chunks: ["the codeword is zebra"] },
     ]);
-    // Turn 1 runs in legacy run_state mode: items must be dual-written anyway.
-    const runStateActivities = createActivities({
+    const firstTurnActivities = createActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -2271,7 +1630,7 @@ describe("worker activities integration", () => {
       { type: "user.message", payload: { text: "remember the codeword zebra" } },
     ]);
     await expect(
-      runStateActivities.runAgentTurn({
+      firstTurnActivities.runAgentTurn({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -2289,16 +1648,12 @@ describe("worker activities integration", () => {
       itemsAfterTurn1.map((_, index) => index),
     );
     expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
-    const blobAfterTurn1 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
-    expect(blobAfterTurn1).not.toBeNull();
 
-    // Turn 2 reads conversation truth from the items table (items mode) and
-    // writes no new blob: the model must still see the full prior turn.
+    // The follow-up reads conversation truth from the canonical items table.
     const itemsActivities = createActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
       }),
       db: dbClient.db,
       bus,
@@ -2328,8 +1683,7 @@ describe("worker activities integration", () => {
       session.id,
     );
     expect(itemsAfterTurn2.length).toBeGreaterThan(itemsAfterTurn1.length);
-    const blobAfterTurn2 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
-    expect(blobAfterTurn2?.id).toBe(blobAfterTurn1?.id);
+    expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).toBeNull();
   });
 
   test("runs a turn whose stored history carries an orphaned tool output instead of 400ing", async () => {
@@ -2346,41 +1700,39 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const turn = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      temporalWorkflowId: "workflow-orphan-seed",
-      triggerEventId: crypto.randomUUID(),
-    });
     // Seed a stored history that is corrupt exactly the way the live incidents
     // were: a valid user turn, then a function_call_result with NO matching
     // function_call anywhere in the items.
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId: turn,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
-        {
-          position: 1,
-          item: {
-            type: "function_call_result",
-            callId: "call_orphaned",
-            status: "completed",
-            output: { type: "text", text: "stale result" },
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, async (db) => {
+      await db.insert(dbSchema.sessionHistoryItems).values(
+        [
+          { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
+          {
+            position: 1,
+            item: {
+              type: "function_call_result",
+              callId: "call_orphaned",
+              status: "completed",
+              output: { type: "text", text: "stale result" },
+            },
           },
-        },
-        {
-          position: 2,
-          item: {
-            type: "message",
-            role: "assistant",
-            status: "completed",
-            content: [{ type: "output_text", text: "ack" }],
+          {
+            position: 2,
+            item: {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: "ack" }],
+            },
           },
-        },
-      ],
+        ].map(({ position, item }) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
     });
 
     const model = new ScriptedModel([
@@ -2390,7 +1742,6 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
       }),
       db: dbClient.db,
       bus,
@@ -2694,23 +2045,15 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendSessionEventsAndUpdateSession(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        [
-          {
-            type: "user.message",
-            payload: {
-              text: "search docs now",
-              tools: [{ kind: "mcp", id: "docs" }],
-            },
-          },
-        ],
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
         {
-          tools: [{ kind: "mcp", id: "docs" }],
+          type: "user.message",
+          payload: {
+            text: "search docs now",
+            tools: [{ kind: "mcp", id: "docs" }],
+          },
         },
-      );
+      ]);
       const activities = createActivities({
         settings: testSettings({
           databaseUrl: services.databaseUrl,
@@ -2746,7 +2089,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("dispatches scheduled tasks into new sessions and run history", async () => {
+  test("dispatches scheduled tasks into new sessions as typed internal updates", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
@@ -2788,14 +2131,23 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
-      "user.message",
       "session.status.changed",
-      "turn.queued",
+      "system.update.pending",
     ]);
-    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
-      text: "inspect nightly",
-      scheduledTaskId: task.id,
+    const pendingUpdates = await listPendingSessionSystemUpdates(
+      dbClient.db,
+      grant.workspaceId,
+      result.sessionId,
+    );
+    expect(pendingUpdates).toHaveLength(1);
+    expect(pendingUpdates[0]).toMatchObject({
+      kind: "scheduled_wake",
+      summary: "inspect nightly",
+      payload: { text: "inspect nightly", scheduledTaskId: task.id },
     });
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, result.sessionId)).toHaveLength(
+      0,
+    );
     const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(run).toMatchObject({
       status: "dispatched",
@@ -3017,7 +2369,14 @@ describe("worker activities integration", () => {
     expect(second.sessionId).toBe(first.sessionId);
     expect(stored.reusableSessionId).toBe(first.sessionId);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
-    expect(events.filter((event) => event.type === "user.message")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "user.message")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
+    expect(
+      await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(2);
+    expect(
+      await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
+    ).toHaveLength(0);
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
@@ -3341,1552 +2700,25 @@ describe("worker activities integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
   });
-
-  test("synthesizes billed goal continuation turns and auto-pauses on no progress", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "pursue the goal",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "service deployed and healthy",
-      successCriteria: "probe returns 200",
-      createdBy: "api",
-    });
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        goalNoProgressLimit: 1,
-        mcpServers: [
-          {
-            id: "opengeni",
-            name: "OpenGeni",
-            url: "http://127.0.0.1:65531/v1/workspaces/{workspaceId}/mcp",
-            cacheToolsList: true,
-          },
-        ],
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
-
-    const first = await activities.maybeContinueGoal({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    });
-    expect(first.action).toBe("continue");
-
-    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    const continuation = turns.find((turn) => turn.source === "goal");
-    expect(continuation).toBeTruthy();
-    expect(continuation!.status).toBe("queued");
-    expect(continuation!.temporalWorkflowId).toBe(`session-${session.id}`);
-    expect(continuation!.prompt).toContain("[GOAL CONTINUATION 1/20]");
-    expect(continuation!.prompt).toContain("service deployed and healthy");
-    expect(continuation!.prompt).toContain("probe returns 200");
-    // The first-party MCP server is forced onto continuation turns so the
-    // goal_complete/goal_pause escape hatches stay reachable.
-    expect(continuation!.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
-    expect(continuation!.metadata.autoContinuation).toBe(1);
-
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const continuationEvent = events.find((event) => event.type === "goal.continuation");
-    expect(continuationEvent).toBeTruthy();
-    expect(continuation!.triggerEventId).toBe(continuationEvent!.id);
-    expect(
-      events.some((event) => event.type === "turn.queued" && event.turnId === continuation!.id),
-    ).toBe(true);
-    const usage = await listUsageEvents(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-    });
-    expect(
-      usage.some(
-        (event) =>
-          event.eventType === "agent_run.created" && event.sourceResourceId === continuation!.id,
-      ),
-    ).toBe(true);
-
-    // While the continuation turn is queued the queue wins.
-    expect(
-      (
-        await activities.maybeContinueGoal({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          workflowId: `session-${session.id}`,
-        })
-      ).action,
-    ).toBe("queue");
-
-    // The continuation finishes without tool calls; goalNoProgressLimit 1
-    // pauses the goal on the next pass with a visible event.
-    await finishTurn(dbClient.db, grant.workspaceId, continuation!.id, "completed");
-    const second = await activities.maybeContinueGoal({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    });
-    expect(second.action).toBe("paused");
-    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
-    expect(goal?.status).toBe("paused");
-    expect(goal?.pausedReason).toBe("no_progress");
-    const afterEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const pausedEvent = afterEvents.find((event) => event.type === "goal.paused");
-    expect(pausedEvent).toBeTruthy();
-    expect((pausedEvent!.payload as { reason?: string }).reason).toBe("no_progress");
-  });
-
-  test("pauses goals on exhausted budgets without consuming continuation budget", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "budget goal",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "objective beyond the budget",
-      createdBy: "api",
-    });
-    const activities = createActivities({
-      // Managed limits with a zero credit balance block new agent runs.
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        usageLimitsMode: "managed",
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
-    const result = await activities.maybeContinueGoal({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    });
-    expect(result.action).toBe("paused");
-    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
-    expect(goal?.status).toBe("paused");
-    expect(goal?.pausedReason).toBe("limits");
-    expect(goal?.rationale).toBe("insufficient OpenGeni credits");
-    // The limits pause happened before the counter bump: no budget consumed,
-    // no continuation turn synthesized.
-    expect(goal?.autoContinuations).toBe(0);
-    expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).toHaveLength(0);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const pausedEvent = events.find((event) => event.type === "goal.paused");
-    expect((pausedEvent?.payload as { reason?: string } | undefined)?.reason).toBe("limits");
-  });
-
-  test("goal continuation preserves the latest actually-started per-turn model policy", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "legacy default",
-      resources: [],
-      metadata: { reasoningEffort: "medium" },
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "continue with the effective Codex policy",
-      createdBy: "api",
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "switch to Codex" } },
-    ]);
-    const executed = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "switch to Codex",
-      resources: [],
-      tools: [],
-      model: "codex/gpt-5.6-sol",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { turnId: executed.id, type: "turn.started", payload: { turnId: executed.id } },
-    ]);
-    await finishTurn(dbClient.db, grant.workspaceId, executed.id, "completed");
-
-    // Reproduce the incident's newer admission failure: it was claimed and
-    // finished, but never emitted turn.started, so its stale session-default
-    // model must not become the continuation policy.
-    const [rejectedTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "child completed" } },
-    ]);
-    const rejected = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: rejectedTrigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "child completed",
-      resources: [],
-      tools: [],
-      model: session.model,
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await finishTurn(dbClient.db, grant.workspaceId, rejected.id, "failed");
-    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "idle", null);
-
-    const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
-      db: dbClient.db,
-      bus,
-    });
-    const result = await activities.maybeContinueGoal({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-    });
-    expect(result.action).toBe("continue");
-    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 20);
-    const continuation = turns.find((turn) => turn.source === "goal");
-    expect(continuation?.model).toBe("codex/gpt-5.6-sol");
-    expect(continuation?.reasoningEffort).toBe("xhigh");
-  });
-
-  test("user interrupts pause active goals even when no turn is active", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "interrupt me",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "long objective",
-      createdBy: "api",
-    });
-    const [interruptEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.interrupt", payload: {} },
-    ]);
-    const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
-
-    // The interrupt landed after the turn cleared activeTurnId; the goal must
-    // still pause so the loop does not auto-continue what the user stopped.
-    await activities.interruptActiveTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: interruptEvent!.id,
-      workflowId: `session-${session.id}`,
-    });
-    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
-    expect(goal?.status).toBe("paused");
-    expect(goal?.pausedReason).toBe("user_interrupt");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const pausedEvents = events.filter((event) => event.type === "goal.paused");
-    expect(pausedEvents).toHaveLength(1);
-    expect((pausedEvents[0]!.payload as { actor?: string }).actor).toBe("user");
-
-    // Idempotent: a second interrupt pause emits no duplicate event.
-    await activities.pauseGoalForInterrupt({
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-    });
-    const after = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    expect(after.filter((event) => event.type === "goal.paused")).toHaveLength(1);
-
-    // And a paused goal declines continuation.
-    expect(
-      (
-        await activities.maybeContinueGoal({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          workflowId: `session-${session.id}`,
-        })
-      ).action,
-    ).toBe("none");
-  });
-
-  test("steer interrupts cancel the active turn without pausing the goal", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "steer me",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "long objective",
-      createdBy: "api",
-    });
-    const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
-    const workflowId = `session-${session.id}`;
-    const [messageTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "steer me" } },
-    ]);
-    await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: messageTrigger!.id,
-      temporalWorkflowId: workflowId,
-      source: "user",
-      prompt: "steer me",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "low",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    const claimed = await activities.claimNextQueuedTurn({
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      workflowId,
-    });
-    expect(claimed).not.toBeNull();
-
-    // A steer interrupt (`reason: "steer"`, sent by steerMessage) cancels the
-    // running turn to deliver the steered message next — redirection, not a
-    // stop — so the goal loop must stay active.
-    const [steerEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.interrupt", payload: { reason: "steer" } },
-    ]);
-    await activities.interruptActiveTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: steerEvent!.id,
-      workflowId,
-    });
-    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.find((turn) => turn.id === claimed!.id)?.status).toBe("cancelled");
-    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
-    expect(goal?.status).toBe("active");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    expect(events.filter((event) => event.type === "goal.paused")).toHaveLength(0);
-    expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
-
-    // The idle-path pause activity also recognizes the steer tag.
-    await activities.pauseGoalForInterrupt({
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: steerEvent!.id,
-    });
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "active",
-    );
-
-    // A plain stop (no steer tag) still pauses the goal.
-    const [stopEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.interrupt", payload: {} },
-    ]);
-    await activities.pauseGoalForInterrupt({
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: stopEvent!.id,
-    });
-    const paused = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
-    expect(paused?.status).toBe("paused");
-    expect(paused?.pausedReason).toBe("user_interrupt");
-  });
-
-  test("scheduled tasks with goals arm and re-arm session goals on dispatch", async () => {
-    const grant = await testGrant(dbClient.db);
-    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-      name: "maintain staging",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "reusable_session",
-      overlapPolicy: "skip",
-      agentConfig: {
-        prompt: "keep staging healthy",
-        resources: [],
-        tools: [],
-        metadata: {},
-        goal: { text: "staging healthy", successCriteria: "all probes green" },
-      },
-      metadata: {},
-    });
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        mcpServers: [
-          {
-            id: "opengeni",
-            name: "OpenGeni",
-            url: "http://127.0.0.1:65532/v1/workspaces/{workspaceId}/mcp",
-            cacheToolsList: true,
-          },
-        ],
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
-
-    const firstDispatch = await activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    });
-    expect(firstDispatch.action).toBe("start");
-    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
-    expect(goal?.status).toBe("active");
-    expect(goal?.createdBy).toBe("scheduled_task");
-    expect(goal?.successCriteria).toBe("all probes green");
-    const session = await getSession(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
-    expect(session?.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
-    const events = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      firstDispatch.sessionId,
-      0,
-      50,
-    );
-    expect(events.map((event) => event.type).slice(0, 3)).toEqual([
-      "session.created",
-      "goal.set",
-      "user.message",
-    ]);
-
-    // The goal paused between fires; the next fire re-arms it.
-    await activities.pauseGoalForInterrupt({
-      workspaceId: grant.workspaceId,
-      sessionId: firstDispatch.sessionId,
-    });
-    const secondDispatch = await activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    });
-    expect(secondDispatch.action).toBe("signal");
-    expect(secondDispatch.sessionId).toBe(firstDispatch.sessionId);
-    const rearmed = await getSessionGoal(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
-    expect(rearmed?.status).toBe("active");
-    expect(rearmed?.autoContinuations).toBe(0);
-    const rearmEvents = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      firstDispatch.sessionId,
-      0,
-      100,
-    );
-    const goalSetEvents = rearmEvents.filter((event) => event.type === "goal.set");
-    expect(goalSetEvents).toHaveLength(2);
-    expect((goalSetEvents[1]!.payload as { replaced?: boolean }).replaced).toBe(true);
-  });
-
-  test("runs goal continuation turns through the agent with saved context", async () => {
-    const model = new ScriptedModel([
-      { outputText: "initial work", chunks: ["initial ", "work"] },
-      { outputText: "continued work", chunks: ["continued ", "work"] },
-    ]);
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "start",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({ model }),
-    });
-    const [userTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "start" } },
-    ]);
-    expect(
-      (
-        await activities.runAgentTurn({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          triggerEventId: userTrigger!.id,
-          workflowId: "workflow-goal-continuation",
-        })
-      ).status,
-    ).toBe("idle");
-
-    const [goalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "goal.continuation", payload: { text: "[GOAL CONTINUATION 1/20] keep going" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: goalTrigger!.id,
-      temporalWorkflowId: "workflow-goal-continuation",
-      source: "goal",
-      prompt: "[GOAL CONTINUATION 1/20] keep going",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "low",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    const result = await activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: goalTrigger!.id,
-      workflowId: "workflow-goal-continuation",
-      turnId: turn.id,
-    });
-    expect(result.status).toBe("idle");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    const completions = events.filter((event) => event.type === "turn.completed");
-    expect(completions).toHaveLength(2);
-    expect((completions[1]!.payload as { output?: string }).output).toBe("continued work");
-    // The continuation reused the saved run state from the first turn.
-    expect(JSON.stringify(model.requests[1])).toContain("initial work");
-  });
-
-  test("requeueTurnAfterWorkerDeath requeues from dual-written truth and bounds crash loops", async () => {
-    const grant = await testGrant(dbClient.db);
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      sessionHistorySource: "items",
-    });
-    const activities = createActivities({
-      settings,
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "unused" }]),
-      }),
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "long job",
-      resources: [],
-      tools: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "long job" } },
-    ]);
-    const workflowId = `session-${session.id}`;
-    await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: workflowId,
-      source: "user",
-      prompt: "long job",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: settings.openaiReasoningEffort,
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    const claimScope = { workspaceId: grant.workspaceId, sessionId: session.id, workflowId };
-    const claimed = await activities.claimNextQueuedTurn(claimScope);
-    expect(claimed).not.toBeNull();
-    const turnId = claimed!.id;
-    const requeueInput = (triggerEventId: string) => ({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId,
-      workflowId,
-      turnId,
-    });
-
-    // Death before any checkpoint: the original trigger replays cleanly.
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
-      action: "requeued",
-      redispatches: 1,
-    });
-    let turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns.map((turn) => turn.status)).toEqual(["queued"]);
-    expect(turns[0]?.triggerEventId).toBe(trigger!.id);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
-    let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    let preemptions = events.filter((event) => event.type === "turn.preempted");
-    expect(preemptions).toHaveLength(1);
-    expect(preemptions[0]!.payload as Record<string, unknown>).toMatchObject({
-      reason: "worker_death",
-      resumeWithNotice: false,
-    });
-
-    // Death after the turn checkpointed conversation truth: the rerun enters
-    // through a synthesized resume notice instead of replaying input the
-    // model has already seen.
-    await activities.claimNextQueuedTurn(claimScope);
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId,
-      items: [{ position: 0, item: { type: "message", role: "user", content: "long job" } }],
-    });
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({
-      action: "requeued",
-      redispatches: 2,
-    });
-    events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    preemptions = events.filter((event) => event.type === "turn.preempted");
-    expect(preemptions).toHaveLength(2);
-    const notice = preemptions[1]!;
-    expect(notice.payload as Record<string, unknown>).toMatchObject({
-      reason: "worker_death",
-      resumeWithNotice: true,
-      text: WORKER_DEATH_RESUME_TEXT,
-    });
-    turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turns[0]?.status).toBe("queued");
-    expect(turns[0]?.triggerEventId).toBe(notice.id);
-
-    // Crash-loop guard: the counter persists on the turn row; past the
-    // ceiling the activity refuses so the workflow fails the session for real.
-    await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
-      action: "requeued",
-      redispatches: WORKER_DEATH_MAX_REDISPATCHES,
-    });
-    await activities.claimNextQueuedTurn(claimScope);
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
-      action: "exceeded",
-      redispatches: WORKER_DEATH_MAX_REDISPATCHES,
-    });
-
-    // A settled turn (the timed-out attempt was a zombie that actually
-    // finished) is left untouched.
-    await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
-    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({
-      action: "stale",
-    });
-  });
-
-  test("child completion does not enqueue parent chat work when parent wakes are disabled", async () => {
-    const grant = await testGrant(dbClient.db);
-    const manager = await makeManagerIdle(grant);
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "turn.completed", payload: { output: "durable child evidence" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-
-    const managerBefore = await getSession(dbClient.db, grant.workspaceId, manager.id);
-    const managerEventsBefore = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      0,
-      50,
-    );
-    const managerTurnsBefore = await listSessionTurns(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      50,
-    );
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        childCompletionParentWakeEnabled: false,
-      }),
-      db: dbClient.db,
-      bus,
-      wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
-        wakes.push({ sessionId, workflowId });
-      },
-    });
-
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-
-    expect((await getSession(dbClient.db, grant.workspaceId, worker.id))?.status).toBe("idle");
-    const workerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 50);
-    expect(workerEvents.some((event) => event.type === "turn.completed")).toBe(true);
-    expect(await getSession(dbClient.db, grant.workspaceId, manager.id)).toEqual(managerBefore);
-    expect(await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50)).toEqual(
-      managerEventsBefore,
-    );
-    expect(await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 50)).toEqual(
-      managerTurnsBefore,
-    );
-    expect(wakes).toEqual([]);
-  });
-
-  // Compatibility coverage for the explicitly enabled legacy parent-wake path.
-  function wakeActivities(wakes: Array<{ sessionId: string; workflowId: string }>) {
-    return createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        childCompletionParentWakeEnabled: true,
-      }),
-      db: dbClient.db,
-      bus,
-      wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
-        wakes.push({ sessionId, workflowId });
-      },
-    });
-  }
-
-  async function makeManagerIdle(grant: AccessGrant) {
-    const manager = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "orchestrate",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    // A manager that spawned a worker and is now idle awaiting it.
-    await setSessionStatus(dbClient.db, grant.workspaceId, manager.id, "idle", null);
-    return manager;
-  }
-
-  test("waking the parent: a worker that goes idle queues exactly one manager turn", async () => {
-    const grant = await testGrant(dbClient.db);
-    const manager = await makeManagerIdle(grant);
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    // Simulate the worker having done a turn: it produced events and is running
-    // when the workflow decides to idle it.
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "user.message", payload: { text: "do the work" } },
-      { type: "turn.completed", payload: { output: "done" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = wakeActivities(wakes);
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-
-    // The manager was woken: it has a queued turn and is back to queued.
-    const managerAfter = await getSession(dbClient.db, grant.workspaceId, manager.id);
-    expect(managerAfter?.status).toBe("queued");
-    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
-    expect(managerTurns).toHaveLength(1);
-    expect(managerTurns[0]?.status).toBe("queued");
-    // The wake message names the worker and reuses the user.message path.
-    const managerEvents = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      0,
-      50,
-    );
-    const wake = managerEvents.find((event) => event.type === "user.message");
-    expect(wake).toBeDefined();
-    expect(JSON.stringify(wake?.payload)).toContain(worker.id);
-    expect(JSON.stringify(wake?.payload)).toContain("gone idle");
-    // The parent workflow was signalled (signalWithStart) so an already-drained
-    // manager run gets restarted to claim the queued turn.
-    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-
-    // Idempotent: re-running the SAME terminal transition (activity retry, the
-    // workflow's idle re-check) does not enqueue a second manager turn.
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    const managerTurnsAfterRetry = await listSessionTurns(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      10,
-    );
-    expect(managerTurnsAfterRetry).toHaveLength(1);
-    expect(wakes).toHaveLength(1);
-  });
-
-  test("waking the parent preserves the latest actually-started per-turn model policy", async () => {
-    const grant = await testGrant(dbClient.db);
-    const manager = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "orchestrate",
-      resources: [],
-      metadata: { reasoningEffort: "medium" },
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [managerTrigger] = await appendOwnedEvents(dbClient.db, grant, manager.id, [
-      { type: "user.message", payload: { text: "use Codex for this work" } },
-    ]);
-    const executed = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: manager.id,
-      triggerEventId: managerTrigger!.id,
-      temporalWorkflowId: `session-${manager.id}`,
-      source: "user",
-      prompt: "use Codex for this work",
-      resources: [],
-      tools: [],
-      model: "codex/gpt-5.6-sol",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await appendOwnedEvents(dbClient.db, grant, manager.id, [
-      { turnId: executed.id, type: "turn.started", payload: { turnId: executed.id } },
-    ]);
-    await finishTurn(dbClient.db, grant.workspaceId, executed.id, "completed");
-    await setSessionStatus(dbClient.db, grant.workspaceId, manager.id, "idle", null);
-
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "turn.completed", payload: { output: "done" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = wakeActivities(wakes);
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-
-    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 20);
-    const wake = turns.find((turn) =>
-      Boolean((turn.metadata as { childCompletion?: unknown }).childCompletion),
-    );
-    expect(wake?.model).toBe("codex/gpt-5.6-sol");
-    expect(wake?.reasoningEffort).toBe("xhigh");
-    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-
-    // The existing idempotency gate still wins: a repeated terminal callback
-    // does not enqueue another wake while preserving the inherited policy.
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    const afterRetry = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 20);
-    expect(
-      afterRetry.filter((turn) =>
-        Boolean((turn.metadata as { childCompletion?: unknown }).childCompletion),
-      ),
-    ).toHaveLength(1);
-  });
-
-  test("waking the parent: a genuinely new idle-after-work episode notifies again, churn does not", async () => {
-    const grant = await testGrant(dbClient.db);
-    const manager = await makeManagerIdle(grant);
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "turn.completed", payload: { output: "batch 1" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = wakeActivities(wakes);
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    expect(wakes).toHaveLength(1);
-
-    // idle -> queued -> idle with NO intervening work (same lastSequence) does
-    // not spam: the worker is re-queued and idled again without new events.
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "queued", null);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    expect(wakes).toHaveLength(1);
-
-    // A genuinely new work episode (new events advance lastSequence) before the
-    // next idle DOES notify the manager again — managers expect to be woken on
-    // each batch of worker progress, which is correct re-entrant behavior.
-    await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "turn.completed", payload: { output: "batch 2" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
-    expect(wakes).toHaveLength(2);
-
-    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
-    expect(managerTurns).toHaveLength(2);
-  });
-
-  test("waking the parent: a failed worker wakes the manager, and a parentless session never notifies", async () => {
-    const grant = await testGrant(dbClient.db);
-    const manager = await makeManagerIdle(grant);
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "user.message", payload: { text: "do the work" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
-
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = wakeActivities(wakes);
-    await activities.failSession({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: worker.id,
-      triggerEventId: trigger!.id,
-      workflowId: `session-${worker.id}`,
-      error: "boom",
-    });
-    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-    const managerEvents = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      0,
-      50,
-    );
-    const wake = managerEvents.find((event) => event.type === "user.message");
-    expect(JSON.stringify(wake?.payload)).toContain("FAILED");
-
-    // A parentless session (a top-level session, a scheduled run) never wakes
-    // anyone: no parent_session_id, no notification, no spurious turns.
-    const lonely = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "standalone",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendOwnedEvents(dbClient.db, grant, lonely.id, [
-      { type: "turn.completed", payload: { output: "done" } },
-    ]);
-    await setSessionStatus(dbClient.db, grant.workspaceId, lonely.id, "running", null);
-    const wakesBefore = wakes.length;
-    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: lonely.id });
-    expect(wakes).toHaveLength(wakesBefore);
-  });
-
-  test("waking the parent: a worker that dies INSIDE its turn (not via failSession) still wakes the manager", async () => {
-    // The common failure path: runAgentTurn marks the session failed and
-    // returns "failed", and the session workflow exits WITHOUT calling
-    // failSession/markSessionIdle. The wake must fire from runAgentTurn too.
-    const grant = await testGrant(dbClient.db);
-    const manager = await makeManagerIdle(grant);
-    const worker = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "do the work",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-      parentSessionId: manager.id,
-    });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, worker.id, [
-      { type: "user.message", payload: { text: "do the work" } },
-    ]);
-    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
-    const activities = createActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        childCompletionParentWakeEnabled: true,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ error: new Error("worker exploded mid-turn") }]),
-      }),
-      wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
-        wakes.push({ sessionId, workflowId });
-      },
-    });
-    const result = await activities.runAgentTurn({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: worker.id,
-      triggerEventId: trigger!.id,
-      workflowId: `session-${worker.id}`,
-    });
-    expect(result.status).toBe("failed");
-    expect((await getSession(dbClient.db, grant.workspaceId, worker.id))?.status).toBe("failed");
-    // The manager was woken with a FAILED wake even though failSession never ran.
-    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
-    const managerEvents = await listSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      manager.id,
-      0,
-      50,
-    );
-    const wake = managerEvents.find((event) => event.type === "user.message");
-    expect(JSON.stringify(wake?.payload)).toContain("FAILED");
-    expect(JSON.stringify(wake?.payload)).toContain(worker.id);
-    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
-    expect(managerTurns).toHaveLength(1);
-
-    // If the activity's finally throws after the failed return, Temporal fails
-    // the activity and the workflow calls failSession on the already-failed
-    // session. That must NOT wake the manager a second time nor re-append
-    // terminal events: failSession no-ops on an already-failed session.
-    const workerEventsBefore = (
-      await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)
-    ).length;
-    await activities.failSession({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: worker.id,
-      triggerEventId: trigger!.id,
-      workflowId: `session-${worker.id}`,
-      error: "redundant failSession after in-turn failure",
-    });
-    expect(wakes).toHaveLength(1);
-    expect(await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10)).toHaveLength(1);
-    const workerEventsAfter = (
-      await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)
-    ).length;
-    expect(workerEventsAfter).toBe(workerEventsBefore);
-  });
-
-  test("maybeCompactContext compacts an over-budget Azure session into [user messages..., summary]", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "long session",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    // Two old turns with a tool-call pair each, then one recent turn. Positions
-    // are absolute and contiguous.
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        {
-          position: 1,
-          item: { type: "function_call", callId: "c0", name: "shell", arguments: "{}" },
-        },
-        {
-          position: 2,
-          item: {
-            type: "function_call_result",
-            callId: "c0",
-            status: "completed",
-            // Make the active transcript genuinely larger than its replacement.
-            // Provider-reported token signals alone are not permission to grow
-            // or fake a shrink of a tiny model-facing history.
-            output: "ok0 ".repeat(1_000),
-          },
-        },
-        {
-          position: 3,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a1" }],
-          },
-        },
-        { position: 4, item: { type: "message", role: "user", content: "old turn 2" } },
-        {
-          position: 5,
-          item: { type: "function_call", callId: "c1", name: "shell", arguments: "{}" },
-        },
-        {
-          position: 6,
-          item: {
-            type: "function_call_result",
-            callId: "c1",
-            status: "completed",
-            output: "ok1 ".repeat(1_000),
-          },
-        },
-        {
-          position: 7,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a2" }],
-          },
-        },
-        { position: 8, item: { type: "message", role: "user", content: "recent turn" } },
-        {
-          position: 9,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a3" }],
-          },
-        },
-      ],
-    });
-
-    // Azure provider -> client mode. Force a tiny keep budget so only the recent
-    // turn (positions 8..9) is kept verbatim, and a last-turn token count above
-    // the soft threshold so the trigger fires.
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      sessionHistorySource: "items",
-      openaiProvider: "azure",
-      contextCompactionMode: "auto",
-      contextWindowTokens: 1000,
-      contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.5,
-      contextKeepRecentTokens: 40,
-    });
-
-    let summarizerCalls = 0;
-    const result = await maybeCompactContext(
-      dbClient.db,
-      settings,
-      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
-      900, // last-turn input tokens, well above soft = 500
-      async (_s, messages) => {
-        summarizerCalls += 1;
-        // The summarizer sees the current active history plus Codex's checkpoint prompt.
-        expect(
-          messages.some((item) =>
-            String((item as Record<string, unknown>).content).includes("old turn 1"),
-          ),
-        ).toBe(true);
-        expect(
-          messages.some((item) =>
-            String((item as Record<string, unknown>).content).includes("old turn 2"),
-          ),
-        ).toBe(true);
-        expect(
-          messages.some((item) =>
-            String((item as Record<string, unknown>).content).includes("recent turn"),
-          ),
-        ).toBe(true);
-        expect(String((messages.at(-1) as Record<string, unknown> | undefined)?.content)).toContain(
-          "CONTEXT CHECKPOINT COMPACTION",
-        );
-        return "objective: ship; blocker: none; next: continue. Durable facts are in the notebook (pointers only).";
-      },
-    );
-
-    expect(summarizerCalls).toBe(1);
-    expect(result.compacted).toBe(true);
-
-    // Active read path now returns retained user messages followed by one
-    // summary; assistant/tool rows remain only in the audit trail.
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    const types = active.map((row) => (row.item as Record<string, unknown>).type);
-    expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
-    expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c0")).toBe(false);
-    expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c1")).toBe(false);
-    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(
-      ["old turn 1", "old turn 2", "recent turn"],
-    );
-    expect(types).not.toContain("function_call_result");
-    expect(active.every((row) => (row.item as Record<string, unknown>).role === "user")).toBe(true);
-
-    // Audit trail intact: ALL ten seeded rows still present (none overwritten),
-    // plus three retained user-message replacement rows and one summary row.
-    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.length).toBe(14);
-    expect(
-      all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true),
-    ).toHaveLength(1);
-    // Every original seeded position (0..9) survives verbatim — in particular the
-    // assistant 'a2' at position 7 that the half-step before the boundary used to
-    // overwrite is untouched.
-    for (let position = 0; position <= 9; position += 1) {
-      expect(all.some((row) => row.position === position)).toBe(true);
-    }
-    const seededAssistant = all.find((row) => row.position === 7);
-    expect(seededAssistant!.item).toMatchObject({
-      role: "assistant",
-      content: [{ type: "output_text", text: "a2" }],
-    });
-  });
-
-  test("maybeCompactContext records the summary under the current turn (per-turn count stays correct)", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "turn-count session",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    // Prefix rows belong to an OLD turn; the summary must NOT inherit that turn's
-    // id. The overwrite bug (onConflictDoUpdate set only {item, active}) left the
-    // summary stranded under the prefix row's turn_id, so the compaction turn's
-    // per-turn count (the worker-death resume-with-notice signal) miscounted.
-    const oldTurnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      temporalWorkflowId: `wf-old-${crypto.randomUUID()}`,
-      triggerEventId: crypto.randomUUID(),
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId: oldTurnId,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a1 ".repeat(1_000) }],
-          },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "old turn 2" } },
-        {
-          position: 3,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a2 ".repeat(1_000) }],
-          },
-        },
-        { position: 4, item: { type: "message", role: "user", content: "recent turn" } },
-        {
-          position: 5,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a3 ".repeat(1_000) }],
-          },
-        },
-      ],
-    });
-    const compactionTurnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      temporalWorkflowId: `wf-new-${crypto.randomUUID()}`,
-      triggerEventId: crypto.randomUUID(),
-    });
-
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      sessionHistorySource: "items",
-      openaiProvider: "azure",
-      contextCompactionMode: "auto",
-      contextWindowTokens: 1000,
-      contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.5,
-      contextKeepRecentTokens: 40,
-    });
-
-    const result = await maybeCompactContext(
-      dbClient.db,
-      settings,
-      {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        turnId: compactionTurnId,
-      },
-      900,
-      async () => "objective: ship; durable facts in the notebook (pointers only).",
-    );
-    expect(result.compacted).toBe(true);
-
-    // The summary is attributed to the compaction turn, not the prefix's old
-    // turn — so the per-turn count used by the worker-death resume decision sees
-    // exactly the one row this turn wrote.
-    expect(
-      await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, compactionTurnId),
-    ).toBe(1);
-    expect(await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, oldTurnId)).toBe(6);
-  });
-
-  test("maybeCompactContext is a no-op on the OpenAI platform (server path owns compaction there)", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "server-mode",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "u" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a" }],
-          },
-        },
-      ],
-    });
-    let called = false;
-    const result = await maybeCompactContext(
-      dbClient.db,
-      testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        openaiProvider: "openai",
-        contextCompactionMode: "auto",
-      }),
-      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
-      9_000_000,
-      async () => {
-        called = true;
-        return "x";
-      },
-    );
-    expect(result).toEqual({ compacted: false, reason: "mode_not_client" });
-    expect(called).toBe(false);
-  });
-
-  test("maybeCompactContext falls back deterministically when the summarizer hard-fails", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "summarize-fail",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old" } },
-        {
-          position: 1,
-          item: { type: "message", role: "assistant", content: "x".repeat(50_000 * 4) },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "recent" } },
-        {
-          position: 3,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a2" }],
-          },
-        },
-      ],
-    });
-    let attempts = 0;
-    const result = await maybeCompactContext(
-      dbClient.db,
-      testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        openaiProvider: "azure",
-        contextCompactionMode: "client",
-        contextWindowTokens: 1000,
-        contextReservedOutputTokens: 0,
-        contextCompactSoftFraction: 0.5,
-        contextKeepRecentTokens: 30,
-      }),
-      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
-      900,
-      async (_settings, _messages, options) => {
-        attempts += 1;
-        if (attempts === 2) {
-          expect(options?.attempt).toBe("hard_trim");
-          expect(options?.maxTranscriptTokens).toBeGreaterThan(0);
-        }
-        return null;
-      },
-    );
-    expect(result.compacted).toBe(true);
-    expect(result.compacted && result.method).toBe("fallback");
-    expect(attempts).toBe(2);
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(
-      active.some((row) =>
-        String((row.item as Record<string, unknown>).content).includes(
-          "Non-LLM context compaction fallback",
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      active.some(
-        (row) => (row.item as Record<string, unknown>).content === "x".repeat(50_000 * 4),
-      ),
-    ).toBe(false);
-  });
-
-  test("maybeCompactContext force bypasses the budget trigger (the /compact path)", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "force-compact",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a1" }],
-          },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "recent turn" } },
-        {
-          position: 3,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a2" }],
-          },
-        },
-      ],
-    });
-    // A budget so high the soft trigger would never fire on its own.
-    const settings = testSettings({
-      databaseUrl: services.databaseUrl,
-      natsUrl: services.natsUrl,
-      sessionHistorySource: "items",
-      openaiProvider: "azure",
-      contextCompactionMode: "client",
-      contextWindowTokens: 10_000_000,
-      contextReservedOutputTokens: 0,
-      contextCompactSoftFraction: 0.9,
-      contextKeepRecentTokens: 20,
-    });
-    const scope = {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-    };
-    const summarize = async () => "summary of the old prefix.";
-
-    // Without force, the tiny token count is below budget -> no-op.
-    const skipped = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, {});
-    expect(skipped.compacted).toBe(false);
-
-    // With force, it compacts despite being below budget.
-    const forced = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, {
-      force: true,
-    });
-    expect(forced.compacted).toBe(true);
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
-    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(
-      ["old turn 1", "recent turn"],
-    );
-  });
-
-  test("requireShrink rejects a stale high provider signal when active history does not shrink", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "tiny active history",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "tiny active history" } },
-      ],
-    });
-    const result = await maybeCompactContext(
-      dbClient.db,
-      testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        sessionHistorySource: "items",
-        openaiProvider: "azure",
-        contextCompactionMode: "client",
-        contextWindowTokens: 1_000_000,
-        contextReservedOutputTokens: 0,
-      }),
-      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
-      900_000, // stale provider signal is much larger than the active history
-      async () => "a replacement summary that is intentionally much larger ".repeat(500),
-      { force: true, requireShrink: true },
-    );
-
-    expect(result.compacted).toBe(false);
-    expect(!result.compacted && result.reason).toContain("did not reduce active context");
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active).toHaveLength(1);
-    expect((active[0]!.item as Record<string, unknown>).content).toBe("tiny active history");
-  });
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];
+
+function createActivities(input: Parameters<typeof createWorkerActivities>[0]) {
+  const activities = createWorkerActivities(input);
+  return {
+    ...activities,
+    runAgentTurn: async (
+      turn: Omit<Parameters<typeof activities.runAgentTurn>[0], "attemptId"> & {
+        attemptId?: string;
+      },
+    ) =>
+      await activities.runAgentTurn({
+        ...turn,
+        attemptId: turn.attemptId ?? crypto.randomUUID(),
+      }),
+  };
+}
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
 
@@ -4952,6 +2784,28 @@ async function appendOwnedEvents(
   sessionId: string,
   events: Parameters<typeof appendSessionEvents>[3],
 ) {
+  if (events.length === 1 && events[0]?.type === "user.message") {
+    const event = events[0];
+    const payload = (event.payload ?? {}) as Record<string, unknown>;
+    const accepted = await enqueueSessionMessageAtomically(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      actor: grant.subjectId,
+      origin: "human",
+      text: String(payload.text ?? ""),
+      resources: Array.isArray(payload.resources) ? (payload.resources as never[]) : [],
+      tools: Array.isArray(payload.tools) ? (payload.tools as never[]) : [],
+      ...(typeof payload.model === "string" ? { model: payload.model } : {}),
+      ...(typeof payload.reasoningEffort === "string"
+        ? { reasoningEffort: payload.reasoningEffort as "low" | "medium" | "high" | "xhigh" }
+        : {}),
+      ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+      delivery: "queue",
+      reasoningEffortFallback: "medium",
+    });
+    return [accepted.accepted];
+  }
   return await appendSessionEvents(db, grant.workspaceId, sessionId, events);
 }
 
@@ -4977,41 +2831,6 @@ async function createOwnedScheduledTask(
     workspaceId: grant.workspaceId,
     ...input,
   });
-}
-
-function contextOverflowError(message: string): Error {
-  const error = new Error(message);
-  Object.assign(error, { status: 400, code: "context_length_exceeded" });
-  return error;
-}
-
-function runtimeWithCompactionClient(
-  model: ScriptedModel,
-  create: (request: Record<string, unknown>) => Promise<Record<string, unknown>>,
-): OpenGeniRuntime {
-  const runtime = createProductionAgentRuntime({ model });
-  const fakeClient = {
-    responses: {
-      create,
-    },
-  };
-  return {
-    ...runtime,
-    resolveTurnModel: () =>
-      ({
-        provider: { kind: "api-key", api: "responses", compactionMode: "client" },
-        client: fakeClient,
-        model: {} as never,
-        configured: { id: "scripted-model", hostedWebSearch: false },
-      }) as never,
-  };
-}
-
-function runtimeWithFakeCompactionSummarizer(
-  model: ScriptedModel,
-  summary: string,
-): OpenGeniRuntime {
-  return runtimeWithCompactionClient(model, async () => ({ output_text: summary }));
 }
 
 function fakeObjectStorage(body: string): ObjectStorage {

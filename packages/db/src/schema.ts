@@ -60,6 +60,11 @@ export const workspaces = pgTable(
     // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
     // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    inferenceState: text("inference_state").notNull().default("active"),
+    inferenceGeneration: integer("inference_generation").notNull().default(0),
+    inferenceReason: text("inference_reason"),
+    inferenceChangedBy: text("inference_changed_by"),
+    inferenceChangedAt: timestamp("inference_changed_at", { withTimezone: true }),
     // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
     // created without an explicit rig ride no rig (today's behavior exactly). FK
     // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle
@@ -563,15 +568,29 @@ export const sessions = pgTable(
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
     // Actual input tokens reported for the last model call of the most recent
-    // turn. The pre-turn client-side compaction trigger reads this as its budget
+    // turn. The pre-turn portable compaction trigger reads this as its budget
     // signal (char/4 estimate is the same-turn fallback). Null until a turn with
     // usage has completed.
     lastInputTokens: integer("last_input_tokens"),
-    // Operator /compact request flag (client-side compaction path). The API sets
+    // Operator /compact request flag. The API sets
     // it true; the worker honors it BEFORE the next turn's model call by forcing
     // a compaction, then clears it. A durable flag (not a transient signal) so
     // the trigger survives a worker restart and converges before the next turn.
     compactRequested: boolean("compact_requested").notNull().default(false),
+    queueVersion: integer("queue_version").notNull().default(0),
+    queueHeadPosition: bigint("queue_head_position", { mode: "number" }).notNull().default(0),
+    queueTailPosition: bigint("queue_tail_position", { mode: "number" }).notNull().default(0),
+    controlState: text("control_state").notNull().default("active"),
+    controlGeneration: integer("control_generation").notNull().default(0),
+    controlReason: text("control_reason"),
+    controlChangedBy: text("control_changed_by"),
+    controlChangedAt: timestamp("control_changed_at", { withTimezone: true }),
+    pendingControlEventId: uuid("pending_control_event_id"),
+    pendingControlKind: text("pending_control_kind"),
+    pendingControlExpectedTurnId: uuid("pending_control_expected_turn_id"),
+    pendingControlExpectedGeneration: integer("pending_control_expected_generation"),
+    pendingControlExpectedAttemptId: uuid("pending_control_expected_attempt_id"),
+    workspaceRunExceptionGeneration: integer("workspace_run_exception_generation"),
     lastSequence: integer("last_sequence").notNull().default(0),
     // The session's PINNED Codex account (manual override from the in-session
     // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
@@ -1021,7 +1040,7 @@ export const sessionTurns = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
-    position: integer("position").notNull(),
+    position: bigint("position", { mode: "number" }).notNull(),
     prompt: text("prompt").notNull(),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -1032,6 +1051,12 @@ export const sessionTurns = pgTable(
     // constrained to the SandboxOs enum (or NULL) in migration 0018.
     sandboxOs: text("sandbox_os"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    version: integer("version").notNull().default(1),
+    executionGeneration: integer("execution_generation").notNull().default(0),
+    activeAttemptId: uuid("active_attempt_id"),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    cancelledBy: text("cancelled_by"),
+    cancelReason: text("cancel_reason"),
     // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
     // by a single conditional UPDATE at tools/call time; the row lock serializes
     // concurrent reservations so exactly `toolspaceMaxCallsPerTurn` succeed.
@@ -1052,6 +1077,137 @@ export const sessionTurns = pgTable(
       table.status,
       table.position,
     ),
+    oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+  }),
+);
+
+export const sessionSystemUpdates = pgTable(
+  "session_system_updates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    classification: text("classification").notNull().default("info"),
+    sourceId: text("source_id").notNull(),
+    dedupeKey: text("dedupe_key").notNull(),
+    summary: text("summary").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    state: text("state").notNull().default("pending"),
+    deliveredTurnId: uuid("delivered_turn_id").references(() => sessionTurns.id, {
+      onDelete: "set null",
+    }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    dedupe: uniqueIndex("session_system_updates_dedupe_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.dedupeKey,
+    ),
+    pending: index("session_system_updates_pending_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.state,
+      table.createdAt,
+    ),
+  }),
+);
+
+/**
+ * Stable idempotency record for session and workspace pause operations.
+ * `result` contains only durable IDs/state
+ * snapshots; delivery repair always revalidates those exact IDs against the
+ * current pending fence instead of consulting an unrelated newer operation.
+ */
+export const runtimeControlOperations = pgTable(
+  "runtime_control_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    scope: text("scope").notNull(),
+    targetId: uuid("target_id").notNull(),
+    clientEventId: text("client_event_id").notNull(),
+    requestedState: text("requested_state").notNull(),
+    expectedState: text("expected_state"),
+    expectedGeneration: integer("expected_generation"),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotency: uniqueIndex("runtime_control_operations_client_uq").on(
+      table.workspaceId,
+      table.clientEventId,
+    ),
+    target: index("runtime_control_operations_target_idx").on(
+      table.workspaceId,
+      table.scope,
+      table.targetId,
+      table.createdAt,
+    ),
+  }),
+);
+
+/**
+ * Durable child-terminal producer outbox. The source terminal transaction
+ * inserts this row; fan-in delivery marks it delivered inside
+ * addSessionSystemUpdateWithSourceMutation. A bounded reconciler may retry a
+ * committed row after any worker/process death without duplicating a member.
+ */
+export const sessionSystemUpdateOutbox = pgTable(
+  "session_system_update_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceSessionId: uuid("source_session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    targetSessionId: uuid("target_session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    dedupeKey: text("dedupe_key").notNull(),
+    kind: text("kind").notNull(),
+    classification: text("classification").notNull(),
+    sourceId: text("source_id").notNull(),
+    summary: text("summary").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    updateId: uuid("update_id"),
+    lastError: text("last_error"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    dedupe: uniqueIndex("session_system_update_outbox_dedupe_uq").on(
+      table.workspaceId,
+      table.dedupeKey,
+    ),
+    pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
   }),
 );
 
@@ -1073,7 +1229,7 @@ export const sessionGoals = pgTable(
     successCriteria: text("success_criteria"),
     evidence: text("evidence"), // set by goal_complete
     rationale: text("rationale"), // set by goal_pause
-    pausedReason: text("paused_reason"), // agent | user_interrupt | api | no_progress | max_auto_continuations | limits
+    pausedReason: text("paused_reason"), // agent | user_pause | api | no_progress | max_auto_continuations | limits
     createdBy: text("created_by").notNull().default("api"), // api | agent | scheduled_task
     version: integer("version").notNull().default(1), // bumped on every set/update; progress signal
     autoContinuations: integer("auto_continuations").notNull().default(0),
@@ -1139,7 +1295,7 @@ export const codexCapacityWaiters = pgTable(
     wakeRevision: integer("wake_revision").notNull().default(1),
     observedWakeRevision: integer("observed_wake_revision").notNull().default(0),
     lastWakeReason: text("last_wake_reason").notNull().default("capacity_wait_armed"),
-    resumedTurnId: uuid("resumed_turn_id"),
+    resumedUpdateId: uuid("resumed_update_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1179,6 +1335,9 @@ export const sessionEvents = pgTable(
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
     turnId: uuid("turn_id"),
+    turnGeneration: integer("turn_generation"),
+    turnAttemptId: uuid("turn_attempt_id"),
+    turnAssociation: text("turn_association"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
     payload: jsonb("payload").$type<unknown>().notNull().default({}),
@@ -1230,8 +1389,8 @@ export const agentRunStates = pgTable("agent_run_states", {
   // ChatGPT/Codex backend — account/org-bound, so a foreign blob 400s — and the
   // foreign reasoning ids the Responses backend validates; but the blob carries
   // NO per-item producer tag (those live only on session_history_items). So we
-  // stamp the freezing account here: on a resume (approval decision, or the
-  // items-mode run-state fallback) whose codex account DIFFERS from this value,
+  // stamp the freezing account here: on an approval resume whose codex account
+  // DIFFERS from this value,
   // the replay path neutralizes every reasoning item's account-bound identity
   // (encrypted_content + provider id) in the blob before it reaches the model.
   // Deliberately NO FK: provenance must OUTLIVE the account's hard-disconnect (a
@@ -1291,6 +1450,53 @@ export const sessionHistoryItems = pgTable(
       table.workspaceId,
       table.sessionId,
       table.position,
+    ),
+  }),
+);
+
+// Turn-lineage ledger for a tool call that the SDK emitted but has not yet
+// produced a durably reconciled result. The raw call item is model-facing truth
+// (not the redacted session-event projection). The attempt/generation identify
+// where the call originated, but the receipt survives an approval resume into a
+// newer attempt of the same logical turn. Turn-ending transactions
+// consume these rows atomically and append a valid interrupted result so a
+// recovered model sees an explicit unknown outcome instead of a silently
+// dropped call.
+export const sessionPendingToolCalls = pgTable(
+  "session_pending_tool_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    turnId: uuid("turn_id")
+      .notNull()
+      .references(() => sessionTurns.id, { onDelete: "cascade" }),
+    executionGeneration: integer("execution_generation").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    callId: text("call_id").notNull(),
+    callType: text("call_type").notNull(),
+    callItem: jsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    resultItem: jsonb("result_item").$type<Record<string, unknown>>(),
+    resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    turnCall: uniqueIndex("session_pending_tool_calls_turn_call_idx").on(
+      table.workspaceId,
+      table.turnId,
+      table.callId,
+    ),
+    sessionTurn: index("session_pending_tool_calls_session_turn_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
     ),
   }),
 );
@@ -1932,6 +2138,9 @@ export const scheduledTaskRuns = pgTable(
     firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
     sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
     triggerEventId: uuid("trigger_event_id"),
+    // Stable Temporal producer identity. Activity replay/re-dispatch returns
+    // the exact run instead of allocating a second schedule source row.
+    producerKey: text("producer_key"),
     error: text("error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1946,6 +2155,9 @@ export const scheduledTaskRuns = pgTable(
       table.workspaceId,
       table.sessionId,
     ),
+    producer: uniqueIndex("scheduled_task_runs_producer_key_uq")
+      .on(table.workspaceId, table.producerKey)
+      .where(sql`${table.producerKey} is not null`),
   }),
 );
 

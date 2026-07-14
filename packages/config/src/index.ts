@@ -181,38 +181,14 @@ const SettingsSchema = z.object({
   // it then acts as a hard ceiling that per-goal overrides can only lower.
   goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
   goalNoProgressLimit: z.coerce.number().int().positive().default(3),
-  // Temporary safety valve: spawned child sessions still run and retain their
-  // own durable events/goals, but terminal child episodes do not inject a
-  // synthetic user.message + turn into the parent unless explicitly enabled.
-  childCompletionParentWakeEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
-  // Where turn-input conversation history comes from (issue #35):
-  // "items" (default) = the session_history_items table (SDK-native,
-  // version-stable conversation truth); "run_state" = the legacy serialized
-  // RunState blob. Items and the sandbox envelope are dual-written
-  // unconditionally; this flag governs the read path only, so flipping back to
-  // "run_state" remains a safe rollback at any time.
-  sessionHistorySource: z.enum(["run_state", "items"]).default("items"),
-  // Provider-aware conversation context management (long-lived sessions
-  // otherwise grow unbounded until they overflow the model context window and
-  // hard-fail every turn). Resolution (see resolveContextCompactionMode):
-  //   "auto" (default) -> "server" when openaiProvider === "openai" (the
-  //     OpenAI platform Responses API honors server-side context_management),
-  //     else "client" (Azure rejects context_management with a 400, so we run
-  //     our own client-side compaction).
-  //   "server" / "client" -> force that path regardless of provider.
-  //   "off" -> neither path (legacy unbounded growth; escape hatch only).
-  contextCompactionMode: z.enum(["auto", "server", "client", "off"]).default("auto"),
-  // The model family's real context window in tokens. GPT-5.6's window is
-  // 1,050,000; until the SDK hardcoded compaction window map catches up, the
-  // SDK's DynamicCompactionPolicy may fall
-  // back to a wrong 240k. We pass an explicit StaticCompactionPolicy threshold
-  // derived from these settings on the server path, and use the same numbers to
-  // budget the client path.
+  // The model family's real context window in tokens. OpenGeni always performs
+  // one durable, portable plaintext compaction transition; there is no
+  // provider/server/off mode ladder.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
   // Optional model-catalog effective input ceiling. Codex models expose this as
   // raw context_window * effective_context_window_percent; when absent, retain
@@ -237,23 +213,9 @@ const SettingsSchema = z.object({
   // Tokens reserved for model output; subtracted from the window to get the
   // usable input budget B = contextWindowTokens - contextReservedOutputTokens.
   contextReservedOutputTokens: z.coerce.number().int().nonnegative().default(128_000),
-  // Client-path model-catalog auto-compact limit. When present it is clamped to
+  // Model-catalog auto-compact limit. When present it is clamped to
   // 90% of the raw window, matching Codex core's auto_compact_token_limit().
-  contextClientCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Server path only: explicit compact_threshold (tokens) handed to the SDK's
-  // StaticCompactionPolicy. Defaults to floor(contextWindowTokens *
-  // contextCompactionThresholdRatio) when unset.
-  contextServerCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Deprecated back-compat knobs. The threshold is now controlled by
-  // contextCompactionThresholdRatio; these remain parsed so older deployments do
-  // not fail boot when their env still contains them.
-  contextCompactSoftFraction: z.coerce.number().positive().max(1).default(0.7),
-  contextCompactHardFraction: z.coerce.number().positive().max(1).default(0.85),
-  // Deprecated for the client path; parsed for env/back-compat only.
-  contextKeepRecentTokens: z.coerce.number().int().positive().default(32_000),
-  // Parsed for back-compat. Client compaction uses the fixed 20k Codex summary
-  // buffer as its generated-summary output ceiling.
-  contextSummaryMaxTokens: z.coerce.number().int().positive().default(20_000),
+  contextAutoCompactThresholdTokens: z.coerce.number().int().positive().optional(),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -820,9 +782,9 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
  * The built-in OpenAI/Azure provider is always present and always "responses";
- * registry providers carry their own base URL / key / wire API. compactionMode
- * is "server" only for the built-in OpenAI platform provider (its Responses API
- * honors server-side context_management) and "client" for everything else.
+ * registry providers carry their own base URL / key / wire API. Compaction is
+ * not a provider capability: all providers use the same durable plaintext
+ * replacement.
  */
 export interface ResolvedModelProvider {
   id: string; // "openai" | "azure" | registry id
@@ -834,7 +796,6 @@ export interface ResolvedModelProvider {
   apiKey?: string | undefined;
   defaultQuery?: Record<string, string> | undefined;
   defaultHeaders?: Record<string, string> | undefined;
-  compactionMode: ContextCompactionMode; // "server" only for built-in OpenAI; "client" otherwise
 }
 
 /** A single exposed model + the provider that serves it. */
@@ -1043,24 +1004,12 @@ export function getSettings(): Settings {
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
-    childCompletionParentWakeEnabled: optional("OPENGENI_CHILD_COMPLETION_PARENT_WAKE_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
-    sessionHistorySource: optional("OPENGENI_SESSION_HISTORY_SOURCE"),
-    contextCompactionMode: optional("OPENGENI_CONTEXT_COMPACTION_MODE"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
     contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
-    contextClientCompactThresholdTokens: optional(
-      "OPENGENI_CONTEXT_CLIENT_COMPACT_THRESHOLD_TOKENS",
-    ),
-    contextServerCompactThresholdTokens: optional(
-      "OPENGENI_CONTEXT_SERVER_COMPACT_THRESHOLD_TOKENS",
-    ),
-    contextCompactSoftFraction: optional("OPENGENI_CONTEXT_COMPACT_SOFT_FRACTION"),
-    contextCompactHardFraction: optional("OPENGENI_CONTEXT_COMPACT_HARD_FRACTION"),
-    contextKeepRecentTokens: optional("OPENGENI_CONTEXT_KEEP_RECENT_TOKENS"),
-    contextSummaryMaxTokens: optional("OPENGENI_CONTEXT_SUMMARY_MAX_TOKENS"),
+    contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -1315,9 +1264,8 @@ function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): strin
 
 /**
  * Every provider a client may route to: the built-in OpenAI/Azure provider
- * first (id "openai"/"azure", always "responses", compactionMode from
- * resolveContextCompactionMode), then each registry provider in declaration
- * order (compactionMode "client"). Client-construction inputs are filled from
+ * first (id "openai"/"azure", always "responses"), then each registry provider
+ * in declaration order. Client-construction inputs are filled from
  * the existing flat openai/azure settings for the built-in, and from the
  * registry entry for the rest. Registry ids may not collide with the built-in
  * id — validateSettings rejects that at boot.
@@ -1329,7 +1277,6 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
     kind: "api-key",
     api: "responses",
     builtin: true,
-    compactionMode: resolveContextCompactionMode(settings),
   };
   if (settings.openaiProvider === "azure") {
     builtin.baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
@@ -1349,7 +1296,6 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       apiKey: resolveProviderApiKey(provider),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
-      compactionMode: "client",
     }),
   );
   return [builtin, ...registry];
@@ -1515,36 +1461,6 @@ export function configuredModelPricing(settings: Settings): Record<string, Model
 }
 
 /**
- * Resolved conversation-context compaction path for a run.
- *  - "server": let the OpenAI platform Responses API compact server-side (the
- *    SDK emits context_management; we pass the correct GPT-5.6 threshold).
- *  - "client": run OpenGeni's own client-side compaction (Azure and any other
- *    backend that rejects/ignores context_management).
- *  - "off": neither (legacy unbounded growth; escape hatch).
- *
- * "auto" maps to "server" on the OpenAI platform provider and "client"
- * otherwise — Azure's Responses API returns 400 unsupported_parameter for
- * context_management, so it must never take the server path.
- */
-export type ContextCompactionMode = "server" | "client" | "off";
-
-export function resolveContextCompactionMode(
-  settings: Pick<Settings, "contextCompactionMode" | "openaiProvider">,
-): ContextCompactionMode {
-  switch (settings.contextCompactionMode) {
-    case "server":
-      return "server";
-    case "client":
-      return "client";
-    case "off":
-      return "off";
-    case "auto":
-    default:
-      return settings.openaiProvider === "openai" ? "server" : "client";
-  }
-}
-
-/**
  * Usable input-token budget: an explicit model-catalog effective window when
  * available, otherwise the deployment window minus its output reserve.
  */
@@ -1561,35 +1477,12 @@ export function contextInputBudgetTokens(
 }
 
 /**
- * Server-path compact_threshold (tokens) handed to the SDK's
- * StaticCompactionPolicy: the explicit override when set, else
- * floor(raw window * threshold ratio). This is what sidesteps the SDK's wrong 240k
- * fallback for newer GPT-5.x models that are absent from its hardcoded window map.
- */
-export function contextServerCompactThreshold(
-  settings: Pick<
-    Settings,
-    | "contextWindowTokens"
-    | "contextReservedOutputTokens"
-    | "contextServerCompactThresholdTokens"
-    | "contextCompactSoftFraction"
-    | "contextCompactionThresholdRatio"
-  >,
-): number {
-  if (settings.contextServerCompactThresholdTokens) {
-    return settings.contextServerCompactThresholdTokens;
-  }
-  return Math.floor(settings.contextWindowTokens * settings.contextCompactionThresholdRatio);
-}
-
-/**
  * Apply the resolved provider/model's context policy to one turn. Registry
  * metadata is authoritative when present; deployment defaults remain the
  * fallback for models that do not declare their own limits.
  */
 export function settingsWithResolvedModelContext(
   settings: Settings,
-  provider: Pick<ResolvedModelProvider, "compactionMode">,
   model: Pick<
     ConfiguredModel,
     "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
@@ -1598,7 +1491,6 @@ export function settingsWithResolvedModelContext(
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
   return {
     ...settings,
-    contextCompactionMode: provider.compactionMode,
     contextWindowTokens,
     ...(model.effectiveContextWindowTokens === undefined
       ? {}
@@ -1610,7 +1502,7 @@ export function settingsWithResolvedModelContext(
         }),
     ...(model.autoCompactTokenLimit === undefined
       ? {}
-      : { contextClientCompactThresholdTokens: model.autoCompactTokenLimit }),
+      : { contextAutoCompactThresholdTokens: model.autoCompactTokenLimit }),
   };
 }
 

@@ -3,8 +3,14 @@ import type { Session, SessionGoal } from "@opengeni/contracts";
 import {
   getSession,
   getSessionGoal,
-  wakeParentSessionForChildCompletion,
+  addSessionSystemUpdateWithSourceMutation,
+  claimPendingSessionSystemUpdateOutbox,
+  getOrCreateSessionSystemUpdateOutbox,
+  listClaimableSessions,
+  markSessionSystemUpdateOutboxDeliveredInTransaction,
+  markSessionSystemUpdateOutboxFailed,
   type Database,
+  type SessionSystemUpdateOutboxDelivery,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { ActivityServices, WakeSessionWorkflowSignal } from "./types";
@@ -25,11 +31,10 @@ export type NotifyServices = {
  * which advances every time the child does work, so a retry of the same
  * terminal transition (activity retry, the workflow's idle re-check, the
  * runAgentTurn-failed path overlapping a workflow-level wake) is deduped while
- * a genuinely new idle-after-work episode notifies again. The parent's queued
- * turn is delivered by the DB wake; signalling the parent's workflow
- * (signalWithStart) ensures a parent whose workflow already completed gets a
- * fresh run to claim it. Failures here never fail the child: the wake is a
- * best-effort nudge layered on durable DB state.
+ * a genuinely new idle-after-work episode notifies again. The parent receives
+ * one typed internal update; signalling its workflow ensures an idle parent can
+ * coalesce and process all pending updates in one inference. Failures here never
+ * fail the child because the durable outbox remains retryable.
  *
  * Lives in its own module so both the session-state terminal activities
  * (markSessionIdle / failSession) and runAgentTurn's in-turn failure path can
@@ -50,64 +55,132 @@ export async function notifyParentOfChildTerminal(
   // per work batch and is stable across retries of that same idle transition.
   episodeKey?: string | null,
 ): Promise<void> {
-  // Temporarily disabled by default: child completion remains durable on the
-  // child session, but must not manufacture parent chat input/turn work. Keep
-  // this check before every DB read, event publish, and workflow signal so the
-  // disabled path cannot mutate or wake the parent.
-  if (!svc.settings.childCompletionParentWakeEnabled) {
-    return;
-  }
   try {
     const child = await getSession(svc.db, workspaceId, childSessionId);
     if (!child || !child.parentSessionId) {
       return;
     }
     const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
-    // Sacred user pause: if the MANAGER's own goal was stopped by the user, the
+    // Sacred user pause: if the MANAGER's own goal was paused by the user, the
     // wake must not tell it to "resume it now" — that instruction is exactly
     // what re-arms the loop the user just stopped. Suppress the resume nudge and
-    // tell the agent to stay stopped. Paired with the goal_set reactivation
+    // tell the agent to stay paused. Paired with the goal_set reactivation
     // guard so a nudge that slips through still cannot revive the goal.
-    const parentGoal = await getSessionGoal(svc.db, workspaceId, child.parentSessionId);
-    const parentGoalUserPaused =
-      parentGoal?.status === "paused" && parentGoal.pausedReason === "user_interrupt";
     const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
-    const result = await wakeParentSessionForChildCompletion(svc.db, {
+    const payload = childCompletionPayload(child, goal, terminalStatus);
+    const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
+      accountId: child.accountId,
       workspaceId,
-      parentSessionId: child.parentSessionId,
-      clientEventId,
-      childSummary: childCompletionSummary(child, goal, terminalStatus),
-      trailing: childCompletionTrailing(parentGoalUserPaused),
-      childCompletion: childCompletionPayload(child, goal, terminalStatus),
-      reasoningEffortFallback: svc.settings.openaiReasoningEffort,
+      sourceSessionId: child.id,
+      targetSessionId: child.parentSessionId,
+      kind: "child_session_update",
+      classification:
+        terminalStatus === "failed"
+          ? "failure"
+          : goal?.status === "paused"
+            ? "action_required"
+            : "success",
+      sourceId: child.id,
+      dedupeKey: clientEventId,
+      summary: childCompletionSummary(child, goal, terminalStatus),
+      payload,
+      lineage: { childSessionId: child.id, parentSessionId: child.parentSessionId },
     });
-    if (!result.delivered) {
+    if (outbox.status === "delivered") {
       return;
     }
-    await svc.bus.publish(workspaceId, child.parentSessionId, result.events);
-    // Passive (suppressed) completions are a timeline card only — there is no
-    // queued turn to run, so do NOT wake the workflow (waking would spin it up
-    // just to find nothing and idle again).
-    if (!result.passive && svc.wakeSessionWorkflow) {
-      await svc.wakeSessionWorkflow({
-        accountId: child.accountId,
-        workspaceId,
-        sessionId: child.parentSessionId,
-        workflowId: result.temporalWorkflowId,
-      });
-    }
-    svc.observability.info("Woke parent session on worker completion", {
-      childSessionId,
-      parentSessionId: child.parentSessionId,
-      terminalStatus,
-    });
+    await deliverParentSystemUpdateOutbox(svc, outbox);
   } catch (error) {
-    // A parent-wake failure must never fail the child's terminal activity.
+    // A durable pending outbox row survives this boundary. The global worker
+    // reaper retries it; child terminal settlement never depends on this turn.
     svc.observability.error("Failed to wake parent session on worker completion", {
       childSessionId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+async function deliverParentSystemUpdateOutbox(
+  svc: NotifyServices,
+  outbox: SessionSystemUpdateOutboxDelivery,
+): Promise<void> {
+  try {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      svc.db,
+      {
+        accountId: outbox.accountId,
+        workspaceId: outbox.workspaceId,
+        sessionId: outbox.targetSessionId,
+        kind: outbox.kind,
+        classification: outbox.classification,
+        sourceId: outbox.sourceId,
+        dedupeKey: outbox.dedupeKey,
+        summary: outbox.summary,
+        payload: outbox.payload,
+        lineage: outbox.lineage,
+      },
+      async (tx) => {
+        await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);
+      },
+    );
+    if (result.reason === "session_cancelled") {
+      return;
+    }
+    if (result.added && result.events.length > 0) {
+      await svc.bus.publish(outbox.workspaceId, outbox.targetSessionId, result.events);
+    }
+    if (result.shouldWake && svc.wakeSessionWorkflow) {
+      await svc.wakeSessionWorkflow({
+        accountId: outbox.accountId,
+        workspaceId: outbox.workspaceId,
+        sessionId: outbox.targetSessionId,
+        workflowId: result.temporalWorkflowId ?? `session-${outbox.targetSessionId}`,
+      });
+    }
+    svc.observability.info("Woke parent session on worker completion", {
+      childSessionId: outbox.sourceSessionId,
+      parentSessionId: outbox.targetSessionId,
+      dedupeKey: outbox.dedupeKey,
+    });
+  } catch (error) {
+    await markSessionSystemUpdateOutboxFailed(
+      svc.db,
+      outbox,
+      error instanceof Error ? error.message : String(error),
+    ).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function reconcilePendingParentSystemUpdates(
+  svc: NotifyServices,
+  limit = 100,
+): Promise<{ claimed: number; delivered: number; failed: number; wakeRepairs: number }> {
+  let wakeRepairs = 0;
+  if (svc.wakeSessionWorkflow) {
+    const repairs = await listClaimableSessions(svc.db, limit);
+    for (const repair of repairs) {
+      await svc.wakeSessionWorkflow({
+        accountId: repair.accountId,
+        workspaceId: repair.workspaceId,
+        sessionId: repair.sessionId,
+        workflowId: repair.temporalWorkflowId,
+      });
+      wakeRepairs += 1;
+    }
+  }
+  const rows = await claimPendingSessionSystemUpdateOutbox(svc.db, limit);
+  let delivered = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      await deliverParentSystemUpdateOutbox(svc, row);
+      delivered += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { claimed: rows.length, delivered, failed, wakeRepairs };
 }
 
 function childCompletionPayload(
@@ -135,10 +208,9 @@ function childCompletionPayload(
 /**
  * The worker-specific lines for one child (what happened + its goal), WITHOUT
  * the trailing "what to do next" instruction. Kept separate so N child
- * completions can be coalesced into ONE digest turn: the DB layer stores each
- * child's summary and rebuilds a single numbered digest with ONE shared
- * trailing instruction, instead of enqueuing N turns (N model runs) that a
- * human's stop button can never outrun.
+ * completions can be coalesced into one internal-update inference: the DB layer
+ * stores each child's summary and rebuilds a single numbered digest with one
+ * shared trailing instruction instead of running N model calls.
  */
 export function childCompletionSummary(
   child: Session,
@@ -175,12 +247,11 @@ export function childCompletionSummary(
 
 /**
  * The single trailing instruction appended to a child-completion (or digest)
- * wake. Suppresses the "resume it now" nudge when the manager's own goal was
- * stopped by the user — that nudge is exactly what re-arms the loop the user
- * just stopped (paired with the goal_set reactivation guard).
+ * inference. Suppresses the "resume it now" nudge when the manager's own goal
+ * was paused by the user (paired with the goal_set reactivation guard).
  */
 export function childCompletionTrailing(parentGoalUserPaused: boolean): string {
   return parentGoalUserPaused
-    ? "Read each worker's session events/notebook output for its result. This session was paused by the user — do NOT resume or replace your goal; summarize the result for the user and stop."
+    ? "Read each worker's session events/notebook output for its result. This session was paused by the user — do NOT resume or replace your goal; summarize the result for the user and remain paused."
     : "Read each worker's session events/notebook output for its result, then continue. If your own goal was paused awaiting these workers, resume it now.";
 }

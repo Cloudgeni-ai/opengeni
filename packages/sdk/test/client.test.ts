@@ -108,18 +108,18 @@ describe("OpenGeniClient", () => {
     });
   });
 
-  test("interrupt and approval decisions post typed control events", async () => {
+  test("pause uses atomic control while approval posts a typed event", async () => {
     const { client, requests } = makeClient(() =>
-      jsonResponse(makeEvent(5, "user.interrupt"), 202),
+      jsonResponse({ event: makeEvent(5, "user.pause") }, 202),
     );
-    await client.interrupt(WORKSPACE_ID, SESSION_ID, { reason: "stop" });
+    await client.pauseSession(WORKSPACE_ID, SESSION_ID, { reason: "pause" });
     await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
       approvalId: "ap-1",
       decision: "approve",
     });
     expect(JSON.parse(requests[0]!.body!)).toEqual({
-      type: "user.interrupt",
-      payload: { reason: "stop" },
+      mode: "pause",
+      reason: "pause",
     });
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       type: "user.approvalDecision",
@@ -150,12 +150,15 @@ describe("OpenGeniClient", () => {
 
   test("compactSessionContext posts to context/compact and returns the trigger result", async () => {
     const { client, requests } = makeClient(() =>
-      jsonResponse({ status: "queued", message: "Compaction will run before the next turn." }),
+      jsonResponse({
+        status: "pending",
+        message: "Compaction will run at the next safe boundary.",
+      }),
     );
     const result = await client.compactSessionContext(WORKSPACE_ID, SESSION_ID);
     expect(result).toEqual({
-      status: "queued",
-      message: "Compaction will run before the next turn.",
+      status: "pending",
+      message: "Compaction will run at the next safe boundary.",
     });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/compact`,

@@ -64,6 +64,7 @@ import {
   terminateModalSandboxById,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
+import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordCreditBalanceGauges,
   recordCreditMicros,
@@ -174,8 +175,18 @@ export function createSandboxLeaseActivities(
    * with the flag off can never terminate a box.
    */
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
-    const { db, settings, observability } = await services();
+    const service = await services();
+    const { db, settings, observability } = service;
+    const parentUpdates = await reconcilePendingParentSystemUpdates(service, 100).catch((error) => {
+      observability.warn("system-update outbox reconciliation failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { claimed: 0, delivered: 0, failed: 1, wakeRepairs: 0 };
+    });
     if (!settings.sandboxOwnershipEnabled) {
+      if (parentUpdates.claimed > 0 || parentUpdates.wakeRepairs > 0) {
+        observability.info("system-update outbox reconciled", parentUpdates);
+      }
       return {
         examined: 0,
         terminated: 0,

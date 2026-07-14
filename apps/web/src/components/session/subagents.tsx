@@ -1,13 +1,11 @@
 // The subagent-lineage surface: the shared pieces that render a session's
 // spawned workers. It is deliberately DECOUPLED from goals — a session's agent
-// tree is orthogonal to whether it carries a goal — and one compact tree
-// component ({@link SubagentTree}) backs every home:
+// tree is orthogonal to whether it carries a goal. One compact tree component
+// ({@link SubagentTree}) backs its single home:
 //   - ComposerAgentsPill (./composer-agents-pill.tsx) — the floating "N agents"
 //     pill above the composer that EXPANDS upward into the lineage popover (the
 //     glanceable, front-and-center hero); reuses {@link SubagentTree} +
 //     {@link SubagentsLabel} from here.
-//   - AgentsPanel — the persistent, roomy "Agents" right-dock tab (the deep view
-//     a manager watches while orchestrating many workers).
 // SpawnedByBreadcrumb is the inverse link a child session shows back to the
 // manager that spawned it.
 //
@@ -21,10 +19,9 @@
 import { formatRelativeTime } from "@opengeni/react";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import { BotIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
+import { BotIcon, ChevronRightIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { cn } from "@/lib/utils";
 
@@ -178,60 +175,9 @@ export function SubagentsLabel({ count }: { count: number }) {
   return (
     <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
       <BotIcon className="size-3.5" />
-      Subagents
+      Agents
       {count > 0 ? <span className="text-fg-subtle/70">· {count}</span> : null}
     </div>
-  );
-}
-
-function LineageLoading() {
-  return (
-    <p className="flex items-center gap-2 px-0.5 py-1 text-xs text-fg-subtle">
-      <Loader2Icon className="size-3.5 animate-spin" />
-      Loading lineage
-    </p>
-  );
-}
-
-/* --- the Agents dock tab (persistent, full-height home) --------------------- */
-
-/**
- * The full-height lineage tree for the right dock's "Agents" tab — the deep,
- * goal-independent workspace for a manager actively orchestrating workers, live
- * as agents spawn and change status. Presentational: the dock owns the single
- * {@link useSessionLineage} read (so the tab count and this panel stay one
- * source of truth) and feeds children in. The tab is hidden when a session has
- * no children, so the empty state here is a belt-and-suspenders fallback.
- */
-export function AgentsPanel({
-  workspaceId,
-  nodes,
-  loading,
-  onNavigate,
-}: {
-  workspaceId: string;
-  nodes: LineageNode[];
-  loading: boolean;
-  onNavigate?: (() => void) | undefined;
-}) {
-  const count = nodes.length;
-  return (
-    <ScrollArea className="h-full min-w-0">
-      <div className="min-w-0 p-2.5">
-        <SubagentsLabel count={count} />
-        {loading && count === 0 ? (
-          <div className="mt-2">
-            <LineageLoading />
-          </div>
-        ) : count === 0 ? (
-          <p className="mt-2 px-0.5 py-1 text-xs text-fg-subtle">No agents spawned yet.</p>
-        ) : (
-          <div className="mt-2">
-            <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={onNavigate} />
-          </div>
-        )}
-      </div>
-    </ScrollArea>
   );
 }
 

@@ -5,7 +5,12 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent, SessionTurn, WorkspaceEnvironment } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  SessionQueueSnapshot,
+  SessionTurn,
+  WorkspaceEnvironment,
+} from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { OpenGeniApiError } from "@opengeni/sdk";
@@ -41,6 +46,22 @@ function makeEvent(
 
 const noEvents: SessionEvent[] = [];
 
+function queueSnapshot(
+  items: SessionTurn[],
+  overrides: Partial<SessionQueueSnapshot> = {},
+): SessionQueueSnapshot {
+  return {
+    version: 1,
+    controlState: "active",
+    controlGeneration: 3,
+    workspaceInferenceState: "active",
+    workspaceInferenceGeneration: 2,
+    workspaceRunExceptionGeneration: null,
+    items,
+    ...overrides,
+  };
+}
+
 describe("useWorkspaceSessions", () => {
   test("keeps pinned rows in the historical sessions result while exposing the section", async () => {
     const pinned = { id: "pinned", pinned: true } as never;
@@ -69,51 +90,18 @@ describe("useWorkspaceSessions", () => {
 });
 
 describe("useTurnQueue", () => {
-  test("loads turns and projects queue + activeTurn", async () => {
-    const turns = [
-      fakeTurn({ id: "active", status: "running", position: 0 }),
-      fakeTurn({ id: "second", position: 2 }),
-      fakeTurn({ id: "first", position: 1 }),
-    ];
-    const client = fakeClient({ listTurns: async () => turns });
+  test("renders the authoritative server queue verbatim", async () => {
+    const turns = [fakeTurn({ id: "second", position: 2 }), fakeTurn({ id: "first", position: 1 })];
+    const client = fakeClient({ getQueue: async () => queueSnapshot(turns) });
     const hook = await renderHook(
       () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
       undefined,
     );
     await flush();
     expect(hook.result.current.loading).toBe(false);
-    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["first", "second"]);
-    expect(hook.result.current.activeTurn?.id).toBe("active");
-    await hook.unmount();
-  });
-
-  test("editTurn applies optimistically and merges the server's turn", async () => {
-    const queued = fakeTurn({ id: "edit-me", prompt: "old prompt" });
-    const updateCalls: { turnId: string; prompt?: string | undefined }[] = [];
-    const client = fakeClient({
-      listTurns: async () => [queued],
-      updateQueuedTurn: async (_ws, _session, turnId, update) => {
-        updateCalls.push({ turnId, prompt: update.prompt });
-        return {
-          ...queued,
-          prompt: update.prompt ?? queued.prompt,
-          updatedAt: "2026-06-12T01:00:00.000Z",
-        };
-      },
-    });
-    const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
-      undefined,
-    );
-    await flush();
-    let edited: SessionTurn | null = null;
-    await flushing(async () => {
-      edited = await hook.result.current.editTurn("edit-me", { prompt: "new prompt" });
-    });
-    expect(updateCalls).toEqual([{ turnId: "edit-me", prompt: "new prompt" }]);
-    expect(edited!.prompt).toBe("new prompt");
-    expect(hook.result.current.queue[0]?.prompt).toBe("new prompt");
-    expect(hook.result.current.mutationError).toBeNull();
+    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["second", "first"]);
+    expect(hook.result.current.controlGeneration).toBe(3);
+    expect(hook.result.current.workspaceInferenceGeneration).toBe(2);
     await hook.unmount();
   });
 
@@ -121,11 +109,11 @@ describe("useTurnQueue", () => {
     const queued = fakeTurn({ id: "victim", prompt: "original" });
     let listCalls = 0;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [queued];
+        return queueSnapshot([queued]);
       },
-      deleteQueuedTurn: async () => {
+      cancelQueueItem: async () => {
         throw new OpenGeniApiError(409, "turn already claimed");
       },
     });
@@ -137,58 +125,22 @@ describe("useTurnQueue", () => {
     expect(listCalls).toBe(1);
     await flushing(async () => {
       const removed = await hook.result.current.removeTurn("victim");
-      expect(removed).toBeNull();
+      expect(removed).toBe(false);
     });
     await flush();
-    // Optimistic cancel was rolled back by the refetch.
+    // The authoritative snapshot remains unchanged after the failed delete.
     expect(listCalls).toBe(2);
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["victim"]);
     expect(hook.result.current.mutationError?.message).toContain("409");
     await hook.unmount();
   });
 
-  test("reorderTurns applies optimistically before the server confirms", async () => {
-    const a = fakeTurn({ id: "a", position: 1 });
-    const b = fakeTurn({ id: "b", position: 2 });
-    let resolveReorder: ((turns: SessionTurn[]) => void) | null = null;
-    const client = fakeClient({
-      listTurns: async () => [a, b],
-      reorderQueuedTurns: async () =>
-        await new Promise<SessionTurn[]>((resolve) => {
-          resolveReorder = resolve;
-        }),
-    });
-    const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
-      undefined,
-    );
-    await flush();
-    let pending: Promise<SessionTurn[] | null> | null = null;
-    await flushing(async () => {
-      pending = hook.result.current.reorderTurns(["b", "a"]);
-      await Promise.resolve();
-    });
-    // Optimistic: queue already shows the new order while the call is in flight.
-    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["b", "a"]);
-    expect(hook.result.current.mutating).toBe(true);
-    await flushing(async () => {
-      resolveReorder!([
-        { ...b, position: 1 },
-        { ...a, position: 2 },
-      ]);
-      await pending;
-    });
-    expect(hook.result.current.queue.map((turn) => turn.id)).toEqual(["b", "a"]);
-    expect(hook.result.current.mutating).toBe(false);
-    await hook.unmount();
-  });
-
   test("turn.* events on a shared event log trigger a debounced refetch", async () => {
     let listCalls = 0;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [fakeTurn({ id: `turn-${listCalls}` })];
+        return queueSnapshot([fakeTurn({ id: `turn-${listCalls}` })]);
       },
     });
     const hook = await renderHook(
@@ -219,9 +171,9 @@ describe("useTurnQueue", () => {
     const streamedAfter: { value: number | null } = { value: null };
     let push: ((event: SessionEvent) => void) | null = null;
     const client = fakeClient({
-      listTurns: async () => {
+      getQueue: async () => {
         listCalls += 1;
-        return [fakeTurn({ id: `turn-${listCalls}` })];
+        return queueSnapshot([fakeTurn({ id: `turn-${listCalls}` })]);
       },
       getSession: async () => ({ lastSequence: 41 }) as never,
       streamEvents: (_ws, _session, options) => {
@@ -508,16 +460,32 @@ describe("useGoal", () => {
 });
 
 describe("useSessionControl", () => {
-  test("interrupt and approval decisions post the typed control events", async () => {
+  test("pause, resume, and approval decisions use the one control plane", async () => {
     const sent: unknown[] = [];
+    const response = (event: SessionEvent, controlState: "active" | "paused") => ({
+      operationId: crypto.randomUUID(),
+      event,
+      controlState,
+      controlGeneration: 1,
+      expectedActiveTurnId: null,
+      expectedExecutionGeneration: null,
+      expectedAttemptId: null,
+      deliveryEventId: null,
+      shouldSignalControl: false,
+      shouldWake: controlState === "active",
+    });
     const client = fakeClient({
-      interrupt: async (_ws, _session, options) => {
-        sent.push({ kind: "interrupt", ...options });
-        return makeEvent(1, "user.interrupt");
+      pauseSession: async (_ws, _session, options) => {
+        sent.push({ kind: "pause", ...options });
+        return makeEvent(1, "session.control.paused");
+      },
+      resumeSession: async (_ws, _session, options) => {
+        sent.push({ kind: "resume", ...options });
+        return response(makeEvent(2, "session.control.resumed"), "active");
       },
       sendApprovalDecision: async (_ws, _session, decision) => {
         sent.push({ kind: "decision", ...decision });
-        return makeEvent(2, "user.approvalDecision");
+        return makeEvent(3, "user.approvalDecision");
       },
     });
     const hook = await renderHook(
@@ -525,12 +493,14 @@ describe("useSessionControl", () => {
       undefined,
     );
     await flushing(async () => {
-      await hook.result.current.interrupt("stop now");
+      await hook.result.current.pause("stop now");
+      await hook.result.current.resume("continue");
       await hook.result.current.approve("ap-1", "looks safe");
       await hook.result.current.reject("ap-2");
     });
     expect(sent).toEqual([
-      { kind: "interrupt", reason: "stop now" },
+      { kind: "pause", reason: "stop now" },
+      { kind: "resume", reason: "continue" },
       { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
       { kind: "decision", approvalId: "ap-2", decision: "reject" },
     ]);
@@ -540,7 +510,7 @@ describe("useSessionControl", () => {
 });
 
 describe("useComposer queue-vs-steer", () => {
-  test("defaults to queue mode and sendMessage", async () => {
+  test("defaults to Send and appends through sendMessage", async () => {
     const calls: string[] = [];
     const client = fakeClient({
       sendMessage: async () => {
@@ -549,14 +519,13 @@ describe("useComposer queue-vs-steer", () => {
       },
       steerMessage: async () => {
         calls.push("steer");
-        return { accepted: makeEvent(1, "user.message"), turn: null, interrupted: false };
+        return { accepted: makeEvent(1, "user.message"), turn: fakeTurn() };
       },
     });
     const hook = await renderHook(
       () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
-    expect(hook.result.current.mode).toBe("queue");
     await flushing(async () => {
       await hook.result.current.send("queued message");
     });
@@ -564,12 +533,12 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
-  test("steer mode routes the send through steerMessage", async () => {
+  test("an explicit steer routes the send through steerMessage", async () => {
     const steered: unknown[] = [];
     const client = fakeClient({
       steerMessage: async (_ws, _session, message) => {
         steered.push(message);
-        return { accepted: makeEvent(1, "user.message"), turn: null, interrupted: true };
+        return { accepted: makeEvent(1, "user.message"), turn: fakeTurn() };
       },
     });
     const hook = await renderHook(
@@ -577,11 +546,7 @@ describe("useComposer queue-vs-steer", () => {
       undefined,
     );
     await flushing(async () => {
-      hook.result.current.setMode("steer");
-    });
-    expect(hook.result.current.mode).toBe("steer");
-    await flushing(async () => {
-      const sent = await hook.result.current.send("do this immediately");
+      const sent = await hook.result.current.send("do this immediately", "steer");
       expect(sent).toBe(true);
     });
     expect(steered).toHaveLength(1);

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { sanitizeEventPayload, sanitizeEventString } from "../src/event-payload-sanitizer";
+import {
+  sanitizeEventPayload,
+  sanitizeEventString,
+  sanitizeModelPayload,
+} from "../src/event-payload-sanitizer";
 
 const NUL = String.fromCharCode(0);
 const REPLACEMENT = "�";
@@ -197,7 +201,7 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     // The raw nested value is NOT jsonb-safe — this is what makes the INSERT throw.
     expect(isJsonbSafe(historyItem.output.text)).toBe(false);
 
-    const cleaned = sanitizeEventPayload(historyItem);
+    const cleaned = sanitizeModelPayload(historyItem);
 
     // After sanitization the nested value is jsonb-safe.
     expect(isJsonbSafe(cleaned.output.text)).toBe(true);
@@ -215,5 +219,27 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     const reparsed = JSON.parse(JSON.stringify(cleaned)) as typeof cleaned;
     expect(reparsed.output.text).toBe(`build log  chunk ${REPLACEMENT} ${VALID_PAIR} done`);
     expect(reparsed.type).toBe("function_call_result");
+  });
+
+  test("repairs invalid text without redacting model-visible tool arguments", () => {
+    const item = {
+      type: "function_call",
+      callId: "call_secret_arg",
+      name: "configure_provider",
+      arguments: {
+        token: `actual${NUL}value`,
+        headers: { authorization: "Bearer model-visible" },
+      },
+    };
+    expect(sanitizeModelPayload(item)).toEqual({
+      ...item,
+      arguments: {
+        token: "actualvalue",
+        headers: { authorization: "Bearer model-visible" },
+      },
+    });
+    expect(sanitizeEventPayload(item)).toMatchObject({
+      arguments: { token: "[redacted]", headers: "[redacted]" },
+    });
   });
 });

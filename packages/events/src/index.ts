@@ -1,6 +1,7 @@
 import type { SessionBusMessage, SessionEvent } from "@opengeni/contracts";
 import {
   appendSessionEvents,
+  appendSessionEventsForTurnAttempt,
   sessionSubject,
   type AppendEventInput,
   type Database,
@@ -23,6 +24,8 @@ export type EventLogger = {
 
 export type EventBusOptions = {
   logger?: EventLogger;
+  /** Test/host transport seam; production defaults to the nats.js connector. */
+  connect?: typeof connect;
 };
 
 const silentLogger: Required<EventLogger> = {
@@ -273,7 +276,7 @@ export async function createNatsEventBus(
     connectOptions.user = auth.user;
     connectOptions.pass = auth.pass;
   }
-  const nc = await connect(withReconnectDefaults(connectOptions));
+  const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   let connected = true;
   logConnectionStatus(nc, "event-bus", options.logger, (type) => {
     if (
@@ -381,7 +384,7 @@ export async function createResponderConnection(
   auth: NatsConnectAuth,
   subject: string,
   handler: RequestHandler,
-  options: { name?: string; logger?: EventLogger } = {},
+  options: { name?: string; logger?: EventLogger; connect?: typeof connect } = {},
 ): Promise<ResponderConnection> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
   if (options.name) {
@@ -393,7 +396,7 @@ export async function createResponderConnection(
   } else if (auth.kind === "token") {
     connectOptions.token = auth.token;
   }
-  const nc = await connect(withReconnectDefaults(connectOptions));
+  const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   logConnectionStatus(
     nc,
     options.name ? `auth-callout:${options.name}` : "auth-callout",
@@ -434,6 +437,11 @@ export type AppendPublishObserver = {
   onPublish?: (info: { durationSeconds: number; count: number }) => void;
 };
 
+export type AppendPublishOptions = AppendPublishObserver & {
+  /** Test/host persistence seam; production uses the database implementation. */
+  appendSessionEvents?: typeof appendSessionEvents;
+};
+
 /**
  * Invoke a phase-timing callback with the elapsed seconds since `startedAt` and the
  * event count, swallowing any throw so a metrics sink can never break the
@@ -463,12 +471,35 @@ export async function appendAndPublishEvents(
   workspaceId: string,
   sessionId: string,
   events: AppendEventInput[],
-  observe?: AppendPublishObserver,
+  options: AppendPublishOptions = {},
 ): Promise<SessionEvent[]> {
   const appendStartedAt = performance.now();
-  const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
-  observeSince(observe?.onAppend, appendStartedAt, appended.length);
-  // The DB append above is the durable system of record; the publish is only a
+  const appended = await (options.appendSessionEvents ?? appendSessionEvents)(
+    db,
+    workspaceId,
+    sessionId,
+    events,
+  );
+  observeSince(options.onAppend, appendStartedAt, appended.length);
+  await publishDurableSessionEvents(bus, workspaceId, sessionId, appended, options);
+  return appended;
+}
+
+/**
+ * Best-effort live fanout for events another DB helper already committed in
+ * the same transaction as related durable state. This must never append again.
+ */
+export async function publishDurableSessionEvents(
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  appended: SessionEvent[],
+  observe?: AppendPublishObserver,
+): Promise<void> {
+  if (appended.length === 0) {
+    return;
+  }
+  // The committed DB events are the durable system of record; this publish is only a
   // best-effort LIVE fan-out. Guard it so NO EventBus implementation can throw an
   // in-flight agent turn to death on a transient NATS disconnect — consumers
   // reconcile any missed live events from the durable log via the events/stream
@@ -485,7 +516,37 @@ export async function appendAndPublishEvents(
     );
   }
   observeSince(observe?.onPublish, publishStartedAt, appended.length);
-  return appended;
+}
+
+export async function appendAndPublishTurnEventsFenced(
+  db: Database,
+  bus: EventBus,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  executionGeneration: number,
+  attemptId: string,
+  events: AppendEventInput[],
+): Promise<{ events: SessionEvent[]; accepted: boolean }> {
+  const result = await appendSessionEventsForTurnAttempt(
+    db,
+    workspaceId,
+    sessionId,
+    turnId,
+    executionGeneration,
+    attemptId,
+    events,
+  );
+  if (result.events.length === 0) return result;
+  try {
+    await bus.publish(workspaceId, sessionId, result.events);
+  } catch (error) {
+    console.warn(
+      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}/${attemptId}; ${result.events.length} event(s) are durable`,
+      error,
+    );
+  }
+  return result;
 }
 
 function subscribeSession(
