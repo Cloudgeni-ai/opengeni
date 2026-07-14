@@ -170,6 +170,28 @@ describe("useWorkspaceCapture", () => {
     await hook.unmount();
   });
 
+  test("an explicit degraded capture keeps live data authoritative", async () => {
+    const client = fakeClient({
+      getWorkspaceCapture: async () => ({
+        available: false,
+        degradedReason: "repository_discovery_timed_out",
+        revision: 4,
+        capturedAt: "2026-07-08T12:00:00.000Z",
+        turnId: "turn-2",
+        leaseEpoch: 2,
+      }),
+    });
+    const hook = await renderHook(
+      () => useWorkspaceCapture(SESSION_ID, { ...ctx, client }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.available).toBe(false);
+    expect(hook.result.current.capture).toBeNull();
+    expect(hook.result.current.degradedReason).toBe("repository_discovery_timed_out");
+    await hook.unmount();
+  });
+
   test("follows manifestUrl for the rare >2MB manifest", async () => {
     const manifest = fakeManifest({ revision: 5 });
     const originalFetch = globalThis.fetch;
@@ -243,6 +265,50 @@ describe("useWorkspaceCapture", () => {
     expect(calls).toBeGreaterThanOrEqual(2);
     expect(hook.result.current.revision).toBe(4);
     expect(hook.result.current.isStale).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a newer workspace.revision.degraded announce refreshes to the degraded state", async () => {
+    let response: GetWorkspaceCaptureResponse = captureAvailable(fakeManifest({ revision: 3 }));
+    let calls = 0;
+    const client = fakeClient({
+      getWorkspaceCapture: async () => {
+        calls += 1;
+        return response;
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) =>
+        useWorkspaceCapture(SESSION_ID, { ...ctx, client, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    expect(hook.result.current.revision).toBe(3);
+
+    response = {
+      available: false,
+      degradedReason: "repository_discovery_command_failed",
+      revision: 4,
+      capturedAt: "2026-07-08T12:01:00.000Z",
+      turnId: "turn-2",
+      leaseEpoch: 2,
+    };
+    await hook.rerender({
+      events: [
+        fakeEvent(1, "workspace.revision.degraded", {
+          revision: 4,
+          turnId: "turn-2",
+          capturedAt: "2026-07-08T12:01:00.000Z",
+          leaseEpoch: 2,
+          reason: "repository_discovery_command_failed",
+        }),
+      ],
+    });
+    await flush();
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(hook.result.current.available).toBe(false);
+    expect(hook.result.current.capture).toBeNull();
+    expect(hook.result.current.degradedReason).toBe("repository_discovery_command_failed");
     await hook.unmount();
   });
 });

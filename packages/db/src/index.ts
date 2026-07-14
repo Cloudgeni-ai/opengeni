@@ -14591,8 +14591,58 @@ export async function insertWorkspaceCapture(
         )
         returning revision
       `);
-      if (rows.length === 0) return null;
-      return { revision: Number(rows[0]!.revision) };
+      const [row] = rows;
+      if (!row) return null;
+      return { revision: Number(row.revision) };
+    },
+  );
+}
+
+/**
+ * Persist an epoch-fenced degraded capture marker.
+ *
+ * Repository discovery is part of the capture's authority boundary: if the
+ * platform cannot prove discovery completed, it must not publish an
+ * authoritative-looking `available` capture with zero repositories. The
+ * marker deliberately has no manifest/blob keys, so readers fall back to the
+ * live box while still receiving an explicit degraded reason.
+ */
+export async function insertFailedWorkspaceCapture(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string | null;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    revision: number;
+    stats: Record<string, unknown>;
+  },
+): Promise<{ revision: number } | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ revision: number | string }>(sql`
+        insert into workspace_captures
+          (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
+           manifest_key, tree_index_key, blob_keys, size_bytes, stats)
+        select
+          ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
+          ${input.revision}, ${input.expectedEpoch}, 'failed',
+          null, null, '[]'::jsonb, 0, ${JSON.stringify(input.stats)}::jsonb
+        where exists (
+          select 1 from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+        )
+        returning revision
+      `);
+      const [row] = rows;
+      if (!row) return null;
+      return { revision: Number(row.revision) };
     },
   );
 }

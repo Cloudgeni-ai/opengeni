@@ -3300,6 +3300,10 @@ export const SessionEventType = z.enum([
   // must NEVER gain a rendered timeline item without regenerating the golden
   // snapshots (dossier §7.3 golden-grammar gate).
   "workspace.revision.captured",
+  // Repository discovery could not prove a complete capture. The worker
+  // persisted a failed/degraded revision marker and clients must fall back to
+  // the live box rather than trust a zero-repository snapshot.
+  "workspace.revision.degraded",
   // Connected Machine (selfhosted) op-outcome observability (failure-visibility
   // doctrine, out-of-band plane). SESSION-scoped facts only: these fire for the
   // session whose turn ran the op (the two-planes rule — machine-plane facts like
@@ -3783,6 +3787,13 @@ export const WorkspaceCaptureRepo = z.object({
 });
 export type WorkspaceCaptureRepo = z.infer<typeof WorkspaceCaptureRepo>;
 
+export const WorkspaceCaptureDegradedReason = z.enum([
+  "repository_discovery_command_failed",
+  "repository_discovery_timed_out",
+  "repository_discovery_result_limit_exceeded",
+]);
+export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
+
 // Rollup counters — carried on the row (jsonb) and the announce event so the UI
 // can reserve layout (dossier §12 no-layout-shift) before fetching the manifest.
 export const WorkspaceCaptureStats = z.object({
@@ -3831,6 +3842,15 @@ export const WorkspaceRevisionCapturedPayload = z.object({
 });
 export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
 
+export const WorkspaceRevisionDegradedPayload = z.object({
+  revision: z.number().int().nonnegative(),
+  turnId: z.string().nullable(),
+  capturedAt: z.string(),
+  leaseEpoch: z.number().int().nonnegative(),
+  reason: WorkspaceCaptureDegradedReason,
+});
+export type WorkspaceRevisionDegradedPayload = z.infer<typeof WorkspaceRevisionDegradedPayload>;
+
 // --- M2 capture READ API (dossier §10.3) -------------------------------------
 // A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
 // served inline for the ≤2MB common case (the <200ms one-round-trip paint); a
@@ -3848,7 +3868,17 @@ export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl
 // the manifest is inline (`manifest`) for the ≤2MB common case and a signed GET
 // URL (`manifestUrl`) above that. Exactly one of manifest/manifestUrl is non-null.
 export const GetWorkspaceCaptureResponse = z.discriminatedUnion("available", [
-  z.object({ available: z.literal(false) }),
+  z.object({
+    available: z.literal(false),
+    // Optional for additive compatibility with older servers. New servers set
+    // these fields when the newest durable revision is an explicit degraded
+    // marker rather than "no capture exists yet".
+    degradedReason: WorkspaceCaptureDegradedReason.nullable().optional(),
+    revision: z.number().int().nonnegative().nullable().optional(),
+    capturedAt: z.string().nullable().optional(),
+    turnId: z.string().nullable().optional(),
+    leaseEpoch: z.number().int().nonnegative().nullable().optional(),
+  }),
   z.object({
     available: z.literal(true),
     revision: z.number().int().nonnegative(),

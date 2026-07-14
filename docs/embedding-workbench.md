@@ -98,6 +98,13 @@ That is the whole integration. The dock paints instantly from the latest
 turn-end capture (no machine round-trip), then reconciles to live data when the
 box is warm, with no tab switch or layout shift in between.
 
+Repository discovery walks the workspace filesystem without a fixed nesting
+depth, recognizes both ordinary `.git` directories and linked-worktree `.git`
+files, and prunes dependency/build residue. The walk is still bounded by a
+timeout and repository-count guard. If either guard trips or discovery fails,
+OpenGeni persists and announces an explicit degraded revision instead of an
+authoritative-looking empty capture; consumers keep live files authoritative.
+
 ### Props worth knowing
 
 | Prop | Purpose |

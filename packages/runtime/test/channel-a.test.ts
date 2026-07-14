@@ -453,6 +453,90 @@ describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
     expect(status.files).toEqual([]);
   });
 
+  test("repository discovery covers the platform nested seed layout and .git files", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const seeded = await svc.terminalExec({
+      command: [
+        "mkdir -p repos/havardthun/Vern",
+        "git -C repos/havardthun/Vern init -q",
+        "git -C repos/havardthun/Vern config user.email t@t.io",
+        "git -C repos/havardthun/Vern config user.name t",
+        "git -C repos/havardthun/Vern config commit.gpgsign false",
+        "printf baseline > repos/havardthun/Vern/file.txt",
+        "git -C repos/havardthun/Vern add file.txt",
+        "git -C repos/havardthun/Vern commit -q -m baseline",
+        "git -C repos/havardthun/Vern worktree add -q ../Vern-linked -b linked",
+        "mkdir -p node_modules/ignored",
+        "git -C node_modules/ignored init -q",
+      ].join(" && "),
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(seeded.exitCode).toBe(0);
+
+    const discovery = await svc.detectReposDetailed();
+    expect(discovery).toEqual({
+      repos: ["repos/havardthun/Vern", "repos/havardthun/Vern-linked"],
+      complete: true,
+      degradedReason: null,
+    });
+  });
+
+  test("repository discovery preserves the workspace-root repository", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const seeded = await svc.terminalExec({
+      command: "git init -q .",
+      cwd: "",
+      timeoutMs: 20_000,
+      emitStream: false,
+    });
+    expect(seeded.exitCode).toBe(0);
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: [""],
+      complete: true,
+      degradedReason: null,
+    });
+  });
+
+  test("repository discovery fails closed when its command cannot complete", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({ stdout: "", stderr: "find failed", exitCode: 9 }),
+      },
+    });
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: [],
+      complete: false,
+      degradedReason: "command_failed",
+    });
+    // Capability negotiation keeps its historical best-effort compact shape.
+    expect(await svc.detectRepos()).toEqual([]);
+  });
+
+  test("repository discovery reports an explicit result-limit degradation", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: [
+            "./repos/a/one/.git",
+            "__OPENGENI_REPOSITORY_DISCOVERY_TRUNCATED__",
+            "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:0",
+          ].join("\n"),
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+    expect(await svc.detectReposDetailed()).toEqual({
+      repos: ["repos/a/one"],
+      complete: false,
+      degradedReason: "result_limit_exceeded",
+    });
+  });
+
   test("git log returns the commit chain", async () => {
     const { svc } = await makeRepoWithStagedChange();
     await svc.terminalExec({

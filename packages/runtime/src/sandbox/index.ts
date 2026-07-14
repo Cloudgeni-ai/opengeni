@@ -170,11 +170,14 @@ export {
   parsePorcelainV2,
   parseNumstatZ,
   parseUnifiedPatch,
+  REPOSITORY_DISCOVERY_LIMIT,
   type ChannelASession,
   type ChannelAExecArgs,
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type RepositoryDiscoveryDegradedReason,
+  type RepositoryDiscoveryResult,
   type NumstatEntry,
 } from "./channel-a";
 

@@ -589,6 +589,7 @@ export const SESSION_EVENT_TYPES = [
   // Workbench v2 turn-end workspace capture (announce-only; mirror of contracts
   // SessionEventType — the contract-parity test asserts sorted equality).
   "workspace.revision.captured",
+  "workspace.revision.degraded",
   // Connected Machine op-outcome observability (announce-only, quiet; mirror of
   // contracts SessionEventType — the contract-parity test asserts sorted equality).
   "machine.op.failed",
@@ -912,6 +913,10 @@ export type WorkspaceCaptureRepo = {
   status: GitFileStatus[];
   diff: GitFileDiff[];
 };
+export type WorkspaceCaptureDegradedReason =
+  | "repository_discovery_command_failed"
+  | "repository_discovery_timed_out"
+  | "repository_discovery_result_limit_exceeded";
 export type WorkspaceCaptureStats = {
   repoCount: number;
   fileCount: number;
@@ -944,10 +949,24 @@ export type WorkspaceRevisionCapturedPayload = {
   leaseEpoch: number;
   stats: WorkspaceCaptureStats;
 };
+export type WorkspaceRevisionDegradedPayload = {
+  revision: number;
+  turnId: string | null;
+  capturedAt: string;
+  leaseEpoch: number;
+  reason: WorkspaceCaptureDegradedReason;
+};
 export type WorkspaceCaptureSignedUrl = { url: string; expiresAt: string };
 // GET …/workspace/capture. Exactly one of manifest/manifestUrl is non-null.
 export type GetWorkspaceCaptureResponse =
-  | { available: false }
+  | {
+      available: false;
+      degradedReason?: WorkspaceCaptureDegradedReason | null;
+      revision?: number | null;
+      capturedAt?: string | null;
+      turnId?: string | null;
+      leaseEpoch?: number | null;
+    }
   | {
       available: true;
       revision: number;

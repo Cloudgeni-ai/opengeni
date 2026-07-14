@@ -45,6 +45,17 @@ export type WorkspaceNotification = { kind: "error" | "info"; message: string };
 export const WORKBENCH_TAB_CHANGES = "changes";
 export const WORKBENCH_TAB_FILES = "files";
 
+function captureDegradedMessage(reason: string): string {
+  switch (reason) {
+    case "repository_discovery_timed_out":
+      return "Workspace capture is incomplete because repository discovery timed out. Live files remain authoritative.";
+    case "repository_discovery_result_limit_exceeded":
+      return "Workspace capture is incomplete because the repository limit was exceeded. Live files remain authoritative.";
+    default:
+      return "Workspace capture is incomplete because repository discovery failed. Live files remain authoritative.";
+  }
+}
+
 /**
  * Decide a workspace tab from an already-local event log: the newest
  * `workspace.revision.captured` announce carries the change surface stats, so
@@ -223,6 +234,13 @@ export function useSandboxWorkspaceTabs(
   // diff when the box is not warm; a warm box always wins (live path unchanged).
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
+  const notifiedCaptureDegradedReason = useRef<string | null>(null);
+  useEffect(() => {
+    const reason = captureState.degradedReason;
+    if (!reason || notifiedCaptureDegradedReason.current === reason) return;
+    notifiedCaptureDegradedReason.current = reason;
+    onNotify?.({ kind: "error", message: captureDegradedMessage(reason) });
+  }, [captureState.degradedReason, onNotify]);
 
   const files = useSandboxFiles(sessionId, {
     events,
