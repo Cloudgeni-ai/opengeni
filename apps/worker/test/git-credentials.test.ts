@@ -31,7 +31,11 @@ describe("sandbox git credentials", () => {
         scope,
         gitCredentials: async (input) => {
           calls.push(input);
-          return { token: "ghs_brokered", workspaceId: input.workspaceId };
+          return {
+            token: "ghs_brokered",
+            workspaceId: input.workspaceId,
+            expiresAt: "2026-07-14T11:00:00Z",
+          };
         },
       },
     );
@@ -57,7 +61,35 @@ describe("sandbox git credentials", () => {
     ]);
     expect(result.gitToken).toBe("ghs_brokered");
     expect(result.gitTokens).toEqual({ github: "ghs_brokered" });
+    expect(result.gitTokenExpiresAt).toEqual({ github: "2026-07-14T11:00:00.000Z" });
     expect(Object.values(result.environment)).not.toContain("ghs_brokered");
+  });
+
+  test("rejects invalid broker expiry metadata before any token reaches the sandbox", async () => {
+    await expect(
+      sandboxEnvironmentForRun(
+        provisionedSettings(),
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+        {},
+        {
+          scope,
+          gitCredentials: async (input) => ({
+            token: "must-not-be-returned",
+            workspaceId: input.workspaceId,
+            expiresAt: "not-a-date",
+          }),
+        },
+      ),
+    ).rejects.toThrow("connection-credential provider (github) returned an invalid expiresAt");
   });
 
   test("marshals non-GitHub provider credential requests with repositoryRefs", async () => {

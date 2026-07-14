@@ -905,6 +905,7 @@ class CompactionResponsesModel extends OpenAIResponsesModel {
 }
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+export type GitCredentialTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
@@ -2810,6 +2811,11 @@ export type RunAgentStreamOptions = {
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   contextCompactionSignalTokens?: () => number | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  // Host-managed git credential renewal registration. Called only after the
+  // initial token-file seed completed on a real provisioned box. The worker
+  // owns the multi-day timer and uses this pinned, un-proxied session to
+  // atomically replace token files; runtime never mints credentials itself.
+  onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -3067,6 +3073,7 @@ export async function runAgentStream(
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       });
+      await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
@@ -3093,6 +3100,7 @@ export async function runAgentStream(
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
       ...sandboxRepositoryCloneHooksForAgent(agent),
+      ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
     ];
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
@@ -3173,6 +3181,7 @@ export async function runAgentStream(
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
           ...sandboxRepositoryCloneHooksForAgent(agent),
+          ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
         ],
         {
           environment,
@@ -4676,6 +4685,22 @@ function unionCredentialHooks(
   return [...deploymentHooks, ...rigHooks.filter((hook) => !seen.has(hook.id))];
 }
 
+function gitCredentialSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onGitCredentialSessionReady"],
+): SandboxLifecycleHook[] {
+  return callback
+    ? [
+        {
+          id: "git-credential-renewal-registration",
+          phase: "beforeAgentStart",
+          run: async (session) => {
+            await callback(session);
+          },
+        },
+      ]
+    : [];
+}
+
 function sandboxRepositoryCloneHooks(
   settings: Settings,
   resources: ResourceRef[],
@@ -4788,14 +4813,11 @@ function gitAskpassHostProviderCaseLines(
     );
 }
 
-function gitCredentialHelperCommandLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
-): string[] {
-  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+function gitCredentialTokenWriterCommandLines(): string[] {
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
-    // provision git/provider-CLI helpers at SETUP (runtime) before any clone runs.
-    // Token VALUES are supplied only by the per-exec command prefix
+    // atomically replace each provider file. Token VALUES are supplied only by
+    // the per-exec command prefix
     // (OPENGENI_GIT_*_TOKEN_SEED), never by the box/agent manifest. Helper paths
     // are stable manifest values from @opengeni/config.
     "git_provider_token_file() {",
@@ -4826,6 +4848,18 @@ function gitCredentialHelperCommandLines(
     'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
     'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
     'umask "$seed_umask"',
+  ];
+}
+
+function gitCredentialHelperCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+): string[] {
+  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+  return [
+    ...gitCredentialTokenWriterCommandLines(),
+    // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
+    // runs. Renewal updates only token files and deliberately leaves these
+    // repository-specific host mappings intact.
     'git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
     'mkdir -p "$(dirname "$git_askpass")"',
     "cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
@@ -4928,6 +4962,52 @@ function gitCredentialHelperCommandLines(
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
   ];
+}
+
+/**
+ * Build the off-manifest command used to atomically replace provider token files.
+ *
+ * Token values exist only in this one sandbox exec command. The stable askpass
+ * and provider-CLI wrappers always read the files at invocation time, so an
+ * in-flight multi-day turn observes the replacement without changing its
+ * manifest environment or rebuilding the sandbox.
+ */
+export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
+  const seedPrefix = gitTokenSeedExportPrefix(seeds);
+  if (!seedPrefix) {
+    return "";
+  }
+  return [
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialTokenWriterCommandLines(),
+  ].join("\n");
+}
+
+export async function refreshGitProviderTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  seeds: GitTokenSeeds,
+  options: { runAs?: string } = {},
+): Promise<void> {
+  const command = gitProviderTokenRefreshCommand(seeds);
+  if (!command) {
+    return;
+  }
+  const args = {
+    cmd: command,
+    workdir: "/workspace",
+    ...(options.runAs ? { runAs: options.runAs } : {}),
+    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+    maxOutputTokens: 4_000,
+  };
+  if (session.exec) {
+    assertSandboxCommandSucceeded(await session.exec(args), "Git credential refresh");
+  } else if (session.execCommand) {
+    assertSandboxCommandSucceeded(await session.execCommand(args), "Git credential refresh");
+  } else {
+    throw new Error("Sandbox session does not support command execution");
+  }
 }
 
 export function repositoryCloneCommand(

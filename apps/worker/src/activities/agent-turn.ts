@@ -84,6 +84,7 @@ import {
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
+  refreshGitProviderTokenFiles,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -96,6 +97,7 @@ import {
   type BuildAgentOptions,
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
+  type GitCredentialTokenWriterSession,
 } from "@opengeni/runtime";
 import {
   builtinProviderId,
@@ -151,9 +153,14 @@ import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintRunGitTokens,
+  mintRunGitCredentials,
   sandboxEnvironmentForRun,
+  type MintedRunGitCredentials,
 } from "./environment";
+import {
+  startGitCredentialRenewalLoop,
+  type GitCredentialRenewalController,
+} from "./git-credential-renewal";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
@@ -218,6 +225,7 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
+  type GitCredentialProvider,
   type ResourceRef,
   type SessionEventType,
   type SessionStatus,
@@ -1275,6 +1283,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    // OPE-41: the worker, not the model, owns renewal of run-scoped Git
+    // credentials for a multi-day turn. The controller is attached only after
+    // the initial seed reached a real cloud box and is drained before capture.
+    let gitCredentialRenewal: GitCredentialRenewalController | null = null;
+    let gitCredentialRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -2818,6 +2831,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
+        gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         toolspaceToken: sandboxToolspaceToken,
       } = await sandboxEnvironmentForRun(
         runSettings,
@@ -2835,6 +2849,70 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           runId: turnId,
         },
       );
+
+      const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
+        ? {
+            gitTokens: sandboxGitTokens,
+            expiresAt: sandboxGitTokenExpiresAt ?? {},
+          }
+        : undefined;
+      const attachGitCredentialRenewal = async (
+        tokenSession: GitCredentialTokenWriterSession,
+        initial: MintedRunGitCredentials | undefined,
+      ): Promise<void> => {
+        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
+        const previous = gitCredentialRenewal;
+        gitCredentialRenewal = null;
+        await previous?.stop();
+        if (gitCredentialRenewalClosed) return;
+
+        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
+        const controller = startGitCredentialRenewalLoop({
+          expectedProviders: providers,
+          initialExpiresAt: initial.expiresAt,
+          mint: async () =>
+            await mintRunGitCredentials(runSettings, turnResources, {
+              scope: connectionScope,
+              gitCredentials: connectionCredentials?.gitCredentials,
+            }),
+          write: async (tokens) => {
+            const runAs = sandboxRunAs(runSettings);
+            await refreshGitProviderTokenFiles(tokenSession, tokens, {
+              ...(runAs ? { runAs } : {}),
+            });
+          },
+          onSuccess: ({ providers: renewedProviders }) => {
+            for (const provider of renewedProviders) {
+              observability.incrementCounter({
+                name: "opengeni_git_credential_renewals_total",
+                help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                labels: { provider, outcome: "completed" },
+              });
+            }
+          },
+          onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
+            for (const provider of failedProviders) {
+              observability.incrementCounter({
+                name: "opengeni_git_credential_renewals_total",
+                help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                labels: { provider, outcome: "error" },
+              });
+            }
+            observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+              sessionId: input.sessionId,
+              turnId,
+              providers: failedProviders.join(","),
+              errorClass,
+              retryDelayMs,
+            });
+          },
+        });
+        if (gitCredentialRenewalClosed) {
+          await controller.stop();
+          return;
+        }
+        gitCredentialRenewal = controller;
+      };
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
@@ -3239,13 +3317,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
-            const lazyGitTokens =
+            const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
                 ? undefined
-                : await mintRunGitTokens(runSettings, turnResources, {
+                : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
                     gitCredentials: connectionCredentials?.gitCredentials,
                   });
+            const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -3284,6 +3363,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
               },
+            );
+            await attachGitCredentialRenewal(
+              provisioned.established.session as GitCredentialTokenWriterSession,
+              lazyGitCredentials,
             );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
@@ -3624,6 +3707,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
                     ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
                     ...(lazyOwnedSandbox ? { deferredSetup: true } : {}),
+                  },
+                }
+              : {}),
+            ...(initialGitCredentials
+              ? {
+                  onGitCredentialSessionReady: async (
+                    tokenSession: GitCredentialTokenWriterSession,
+                  ) => {
+                    await attachGitCredentialRenewal(tokenSession, initialGitCredentials);
                   },
                 }
               : {}),
@@ -5003,6 +5095,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       return { status: "failed" };
     } finally {
+      gitCredentialRenewalClosed = true;
+      const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
+      gitCredentialRenewal = null;
+      await renewalToStop?.stop();
       const durationSeconds = (performance.now() - activityStarted) / 1000;
       observability.recordWorkerActivity({
         activity: "runAgentTurn",

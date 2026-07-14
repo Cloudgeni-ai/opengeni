@@ -88,16 +88,21 @@ GitHub repository resources still arrive as the legacy shape
 repository refs can carry `provider`, `repositoryId`, `installationId`,
 `projectId`, and `connectionId`; `RepositoryResourceRef` accepts the same
 optional fields while retaining the existing `githubInstallationId` and
-`githubRepositoryId` aliases. The returned token plus scoped `workspaceId` is
-checked by the FORK-7 workspace-echo assert before the worker injects anything.
-A mismatch hard-fails before tenant B's credential can land in tenant A's run.
+`githubRepositoryId` aliases. `GitCredentials` may also return an ISO-8601
+`expiresAt`; when absent OpenGeni uses a conservative bounded refresh cadence.
+The returned token plus scoped `workspaceId` is checked by the FORK-7
+workspace-echo assert before the worker injects anything. A mismatch hard-fails
+before tenant B's credential can land in tenant A's run.
 
 The worker never writes token values into the sandbox manifest or attach-time
 environment delta. It passes current provider tokens to the runtime as
 off-manifest seeds; the sandbox setup writes them to
 `OPENGENI_GIT_CREDENTIALS_DIR/<provider>-token`, keeps
 `OPENGENI_GIT_TOKEN_FILE` as the GitHub alias, and provisions `gh`, `glab`, and
-`az` wrappers that read the current token file before each CLI invocation.
+`az` wrappers that read the current token file before each CLI invocation. For
+the lifetime of an active managed-sandbox turn, the worker proactively calls
+the same provider for every selected Git host and atomically replaces the token
+files. This renewal requires no model/MCP call and never mutates the manifest.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
 check.
