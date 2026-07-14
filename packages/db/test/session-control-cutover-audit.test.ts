@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  acquireBlankTestDatabase,
-  type BlankTestDatabase,
-} from "@opengeni/testing";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,10 +9,7 @@ import {
   reconcileSessionControlCutover,
 } from "../src/session-control-cutover-audit";
 
-const migrationsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../drizzle",
-);
+const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
@@ -40,9 +34,7 @@ beforeAll(async () => {
       );
     }
     available = false;
-    console.warn(
-      "[session-control-cutover-audit] postgres unavailable, skipping",
-    );
+    console.warn("[session-control-cutover-audit] postgres unavailable, skipping");
   }
 }, 180_000);
 
@@ -55,9 +47,7 @@ describe("session-control production cutover audit", () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });
     try {
-      const files = (await readdir(migrationsDir))
-        .filter((file) => file.endsWith(".sql"))
-        .sort();
+      const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
       const oldFiles = files.filter((file) => file < "0057_");
       await sql.unsafe(
         `create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())`,
@@ -95,13 +85,7 @@ describe("session-control production cutover audit", () => {
       const scheduledTurnId = crypto.randomUUID();
       const goalTurnId = crypto.randomUUID();
       const drainedTurnId = crypto.randomUUID();
-      const turnIds = [
-        runningTurnId,
-        queuedUserTurnId,
-        scheduledTurnId,
-        goalTurnId,
-        drainedTurnId,
-      ];
+      const turnIds = [runningTurnId, queuedUserTurnId, scheduledTurnId, goalTurnId, drainedTurnId];
       const triggerIds = turnIds.map(() => crypto.randomUUID());
       await sql`
           insert into session_turns (
@@ -182,11 +166,7 @@ describe("session-control production cutover audit", () => {
       const app = postgres(appUrl.toString(), { max: 1 });
       try {
         await expect(
-          captureSessionControlCutoverSnapshot(
-            app,
-            "baseline",
-            "2026-07-14T10:00:00.000Z",
-          ),
+          captureSessionControlCutoverSnapshot(app, "baseline", "2026-07-14T10:00:00.000Z"),
         ).rejects.toThrow("requires a superuser or BYPASSRLS role");
       } finally {
         await app.end().catch(() => undefined);
@@ -218,59 +198,29 @@ describe("session-control production cutover audit", () => {
         "migrated",
         "2026-07-14T10:01:00.000Z",
       );
-      const result = reconcileSessionControlCutover(
-        baseline,
-        migrated,
-        "migration",
-      );
+      const result = reconcileSessionControlCutover(baseline, migrated, "migration");
       expect(result.errors).toEqual([]);
       expect(result.ok).toBe(true);
 
-      const main = migrated.sessions.find(
-        (session) => session.id === sessionId,
-      );
+      const main = migrated.sessions.find((session) => session.id === sessionId);
       if (!main) throw new Error("migrated session is missing");
-      expect(main.turns.find((turn) => turn.id === runningTurnId)?.status).toBe(
-        "recovering",
-      );
-      expect(
-        main.turns.find((turn) => turn.id === queuedUserTurnId)?.status,
-      ).toBe("queued");
-      expect(
-        main.turns.find((turn) => turn.id === scheduledTurnId)?.status,
-      ).toBe("superseded");
-      expect(main.turns.find((turn) => turn.id === goalTurnId)?.status).toBe(
-        "superseded",
-      );
-      expect(
-        main.systemUpdates.some(
-          (update) => update.sourceId === scheduledTurnId,
-        ),
-      ).toBe(true);
-      const recovery = migrated.sessions.find(
-        (session) => session.id === recoverySessionId,
-      );
+      expect(main.turns.find((turn) => turn.id === runningTurnId)?.status).toBe("recovering");
+      expect(main.turns.find((turn) => turn.id === queuedUserTurnId)?.status).toBe("queued");
+      expect(main.turns.find((turn) => turn.id === scheduledTurnId)?.status).toBe("superseded");
+      expect(main.turns.find((turn) => turn.id === goalTurnId)?.status).toBe("superseded");
+      expect(main.systemUpdates.some((update) => update.sourceId === scheduledTurnId)).toBe(true);
+      const recovery = migrated.sessions.find((session) => session.id === recoverySessionId);
       if (!recovery) throw new Error("migrated recovery session is missing");
-      expect(
-        recovery.turns.find((turn) => turn.id === drainedTurnId)?.status,
-      ).toBe("recovering");
+      expect(recovery.turns.find((turn) => turn.id === drainedTurnId)?.status).toBe("recovering");
 
       const damaged = structuredClone(migrated);
-      const damagedMain = damaged.sessions.find(
-        (session) => session.id === sessionId,
-      );
+      const damagedMain = damaged.sessions.find((session) => session.id === sessionId);
       const damagedHistory = damagedMain?.history[0];
       if (!damagedHistory) throw new Error("migrated history row is missing");
       damagedHistory.active = false;
-      const rejected = reconcileSessionControlCutover(
-        baseline,
-        damaged,
-        "migration",
-      );
+      const rejected = reconcileSessionControlCutover(baseline, damaged, "migration");
       expect(rejected.ok).toBe(false);
-      expect(
-        rejected.errors.some((error) => error.includes("history row")),
-      ).toBe(true);
+      expect(rejected.errors.some((error) => error.includes("history row"))).toBe(true);
     } finally {
       await sql.end().catch(() => undefined);
     }

@@ -24,8 +24,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const flags = new Set<string>();
   for (let index = 0; index < rest.length; index += 1) {
     const current = rest[index]!;
-    if (!current.startsWith("--"))
-      throw new Error(`unexpected argument: ${current}`);
+    if (!current.startsWith("--")) throw new Error(`unexpected argument: ${current}`);
     const next = rest[index + 1];
     if (!next || next.startsWith("--")) {
       flags.add(current);
@@ -109,22 +108,15 @@ async function readJson<T>(path: string): Promise<T> {
   return parseJson<T>(await readFile(path, "utf8"), path);
 }
 
-function verifySnapshot(
-  value: SessionControlCutoverSnapshot,
-  path: string,
-): void {
+function verifySnapshot(value: SessionControlCutoverSnapshot, path: string): void {
   const { sha256: recorded, ...body } = value;
   const calculated = sha256(body);
   if (calculated !== recorded) {
-    throw new Error(
-      `${path}: snapshot checksum mismatch (${recorded} != ${calculated})`,
-    );
+    throw new Error(`${path}: snapshot checksum mismatch (${recorded} != ${calculated})`);
   }
 }
 
-async function readSnapshot(
-  path: string,
-): Promise<SessionControlCutoverSnapshot> {
+async function readSnapshot(path: string): Promise<SessionControlCutoverSnapshot> {
   const value = await readJson<SessionControlCutoverSnapshot>(path);
   verifySnapshot(value, path);
   return value;
@@ -159,9 +151,7 @@ async function capture(args: ParsedArgs): Promise<void> {
   });
   try {
     const snapshot = await sql.begin(async (transaction) => {
-      await transaction.unsafe(
-        "set transaction isolation level repeatable read, read only",
-      );
+      await transaction.unsafe("set transaction isolation level repeatable read, read only");
       return await captureSessionControlCutoverSnapshot(transaction, phase);
     });
     if (
@@ -192,11 +182,8 @@ async function reconcile(args: ParsedArgs): Promise<void> {
   const result = reconcileSessionControlCutover(baseline, observed, mode);
   await writeJson(required(args, "--output"), result);
   if (!result.ok) {
-    for (const error of result.errors)
-      process.stderr.write(`[cutover-audit] ${error}\n`);
-    throw new Error(
-      `${mode} reconciliation failed with ${result.errors.length} error(s)`,
-    );
+    for (const error of result.errors) process.stderr.write(`[cutover-audit] ${error}\n`);
+    throw new Error(`${mode} reconciliation failed with ${result.errors.length} error(s)`);
   }
   process.stderr.write(
     `[cutover-audit] ${mode}: all pre-cutover identities reconciled, sha256 ${result.sha256}\n`,
@@ -231,9 +218,7 @@ async function wake(args: ParsedArgs): Promise<void> {
         "claimable-session scan reached its hard limit; refusing a partial wake repair",
       );
     }
-    const ordered = [...rows].sort((a, b) =>
-      a.session_id.localeCompare(b.session_id),
-    );
+    const ordered = [...rows].sort((a, b) => a.session_id.localeCompare(b.session_id));
     const failures: Array<{ sessionId: string; error: string }> = [];
     const woken: string[] = [];
     if (execute) {
@@ -245,36 +230,33 @@ async function wake(args: ParsedArgs): Promise<void> {
         namespace: temporalSettingsValue.namespace,
       });
       const queue = [...ordered];
-      const workers = Array.from(
-        { length: Math.min(20, Math.max(1, queue.length)) },
-        async () => {
-          for (;;) {
-            const row = queue.shift();
-            if (!row) return;
-            try {
-              await temporal.workflow.signalWithStart("sessionWorkflow", {
-                taskQueue: temporalSettingsValue.taskQueue,
-                workflowId: row.temporal_workflow_id,
-                workflowIdReusePolicy: "ALLOW_DUPLICATE",
-                args: [
-                  {
-                    accountId: row.account_id,
-                    workspaceId: row.workspace_id,
-                    sessionId: row.session_id,
-                  },
-                ],
-                signal: "queueChanged",
-              });
-              woken.push(row.session_id);
-            } catch (error) {
-              failures.push({
-                sessionId: row.session_id,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
+      const workers = Array.from({ length: Math.min(20, Math.max(1, queue.length)) }, async () => {
+        for (;;) {
+          const row = queue.shift();
+          if (!row) return;
+          try {
+            await temporal.workflow.signalWithStart("sessionWorkflow", {
+              taskQueue: temporalSettingsValue.taskQueue,
+              workflowId: row.temporal_workflow_id,
+              workflowIdReusePolicy: "ALLOW_DUPLICATE",
+              args: [
+                {
+                  accountId: row.account_id,
+                  workspaceId: row.workspace_id,
+                  sessionId: row.session_id,
+                },
+              ],
+              signal: "queueChanged",
+            });
+            woken.push(row.session_id);
+          } catch (error) {
+            failures.push({
+              sessionId: row.session_id,
+              error: error instanceof Error ? error.message : String(error),
+            });
           }
-        },
-      );
+        }
+      });
       await Promise.all(workers);
     }
     const draft = {
@@ -347,28 +329,20 @@ async function temporalSchedules(args: ParsedArgs): Promise<void> {
     });
     let expectedResumeIds: Set<string> | null = null;
     if (action === "resume") {
-      const pauseArtifact = await readJson<SchedulePauseArtifact>(
-        required(args, "--input"),
-      );
+      const pauseArtifact = await readJson<SchedulePauseArtifact>(required(args, "--input"));
       const { sha256: recorded, ...body } = pauseArtifact;
       if (
-        pauseArtifact.contractVersion !==
-          "opengeni/session-control-cutover-schedules/v1" ||
+        pauseArtifact.contractVersion !== "opengeni/session-control-cutover-schedules/v1" ||
         pauseArtifact.action !== "pause" ||
         pauseArtifact.runId !== runId ||
         sha256(body) !== recorded ||
         !Array.isArray(pauseArtifact.changedScheduleIds) ||
         pauseArtifact.changedScheduleIds.some(
-          (id) =>
-            typeof id !== "string" ||
-            !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id),
+          (id) => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(id),
         ) ||
-        new Set(pauseArtifact.changedScheduleIds).size !==
-          pauseArtifact.changedScheduleIds.length
+        new Set(pauseArtifact.changedScheduleIds).size !== pauseArtifact.changedScheduleIds.length
       ) {
-        throw new Error(
-          "schedule pause artifact is stale, malformed, or belongs to another run",
-        );
+        throw new Error("schedule pause artifact is stale, malformed, or belongs to another run");
       }
       expectedResumeIds = new Set(pauseArtifact.changedScheduleIds);
     }
@@ -388,10 +362,7 @@ async function temporalSchedules(args: ParsedArgs): Promise<void> {
       const handle = temporal.schedule.getHandle(scheduleId);
       const before = await handle.describe();
       const wasPaused = before.state.paused;
-      if (
-        action === "pause" &&
-        schedulePauseOwnedByRun(wasPaused, before.state.note, note)
-      ) {
+      if (action === "pause" && schedulePauseOwnedByRun(wasPaused, before.state.note, note)) {
         if (!wasPaused) await handle.pause(note);
         // A retry after the pause succeeded but before its receipt was committed
         // still owns this schedule. Re-emit that ownership so the eventual resume
@@ -410,11 +381,7 @@ async function temporalSchedules(args: ParsedArgs): Promise<void> {
       if (action === "pause" && !after.state.paused) {
         throw new Error(`schedule ${scheduleId} did not acknowledge pause`);
       }
-      if (
-        action === "resume" &&
-        expectedResumeIds?.has(scheduleId) &&
-        after.state.paused
-      ) {
+      if (action === "resume" && expectedResumeIds?.has(scheduleId) && after.state.paused) {
         throw new Error(`schedule ${scheduleId} did not acknowledge resume`);
       }
       summaries.push({
@@ -425,13 +392,9 @@ async function temporalSchedules(args: ParsedArgs): Promise<void> {
       });
     }
     if (expectedResumeIds) {
-      const missing = [...expectedResumeIds].filter(
-        (id) => !listed.includes(id),
-      );
+      const missing = [...expectedResumeIds].filter((id) => !listed.includes(id));
       if (missing.length > 0) {
-        throw new Error(
-          `paused schedules disappeared before resume: ${missing.join(", ")}`,
-        );
+        throw new Error(`paused schedules disappeared before resume: ${missing.join(", ")}`);
       }
     }
     const draft = {
@@ -486,9 +449,7 @@ async function temporalWorkflows(args: ParsedArgs): Promise<void> {
       });
     }
     captured.sort(
-      (a, b) =>
-        a.workflowId.localeCompare(b.workflowId) ||
-        a.runId.localeCompare(b.runId),
+      (a, b) => a.workflowId.localeCompare(b.workflowId) || a.runId.localeCompare(b.runId),
     );
     const terminated: Array<{ workflowId: string; runId: string }> = [];
     if (action === "terminate") {
@@ -524,9 +485,7 @@ async function temporalWorkflows(args: ParsedArgs): Promise<void> {
       }
     }
     if (action === "terminate" && remaining.length > 0) {
-      throw new Error(
-        `${remaining.length} running session workflows remain after termination`,
-      );
+      throw new Error(`${remaining.length} running session workflows remain after termination`);
     }
     const draft = {
       contractVersion: "opengeni/session-control-cutover-workflows/v1",
@@ -536,9 +495,7 @@ async function temporalWorkflows(args: ParsedArgs): Promise<void> {
       capturedAt: new Date().toISOString(),
       captured,
       terminated,
-      remaining: remaining.sort((a, b) =>
-        a.workflowId.localeCompare(b.workflowId),
-      ),
+      remaining: remaining.sort((a, b) => a.workflowId.localeCompare(b.workflowId)),
     };
     const artifact = { ...draft, sha256: sha256(draft) };
     await writeJson(output, artifact);
@@ -555,12 +512,7 @@ async function responseJson(
   operation: string,
 ): Promise<Record<string, unknown>> {
   const body = await response.json().catch(() => null);
-  if (
-    !response.ok ||
-    !body ||
-    typeof body !== "object" ||
-    Array.isArray(body)
-  ) {
+  if (!response.ok || !body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error(`${operation} returned HTTP ${response.status}`);
   }
   return body as Record<string, unknown>;
@@ -571,27 +523,16 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
   const runId = safeRunId(required(args, "--run-id"));
   const model = required(args, "--model");
   if (!model.startsWith("codex/")) {
-    throw new Error(
-      "production canary model must use an existing Codex subscription",
-    );
+    throw new Error("production canary model must use an existing Codex subscription");
   }
   const apiBaseUrl = required(args, "--api-base-url").replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(apiBaseUrl))
-    throw new Error("--api-base-url must be HTTP(S)");
-  const requestedWorkspaceId =
-    args.values.get("--workspace-id")?.trim() || null;
+  if (!/^https?:\/\//.test(apiBaseUrl)) throw new Error("--api-base-url must be HTTP(S)");
+  const requestedWorkspaceId = args.values.get("--workspace-id")?.trim() || null;
   if (requestedWorkspaceId && !/^[0-9a-f-]{36}$/.test(requestedWorkspaceId)) {
     throw new Error("--workspace-id must be a UUID");
   }
-  const timeoutSeconds = Number.parseInt(
-    args.values.get("--timeout-seconds") ?? "600",
-    10,
-  );
-  if (
-    !Number.isInteger(timeoutSeconds) ||
-    timeoutSeconds < 30 ||
-    timeoutSeconds > 1_800
-  ) {
+  const timeoutSeconds = Number.parseInt(args.values.get("--timeout-seconds") ?? "600", 10);
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 30 || timeoutSeconds > 1_800) {
     throw new Error("--timeout-seconds must be between 30 and 1800");
   }
   const sql = postgres(migrationDatabaseUrl(), {
@@ -603,9 +544,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
   });
   let apiKeyId: string | null = null;
   try {
-    const candidates = (await sql.unsafe<
-      Array<{ workspace_id: string; account_id: string }>
-    >(
+    const candidates = (await sql.unsafe<Array<{ workspace_id: string; account_id: string }>>(
       `select w.id as workspace_id, w.account_id
        from workspaces w
        where w.inference_state = 'active'
@@ -636,8 +575,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
         now() + interval '15 minutes'
       ) returning id`;
     apiKeyId = inserted[0]?.id ?? null;
-    if (!apiKeyId)
-      throw new Error("failed to create the temporary canary API key");
+    if (!apiKeyId) throw new Error("failed to create the temporary canary API key");
 
     const headers = {
       authorization: `Bearer ${token}`,
@@ -662,13 +600,9 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
         }),
       },
     );
-    const created = await responseJson(
-      createResponse,
-      "canary session creation",
-    );
+    const created = await responseJson(createResponse, "canary session creation");
     const sessionId = typeof created.id === "string" ? created.id : null;
-    if (!sessionId)
-      throw new Error("canary session creation returned no session id");
+    if (!sessionId) throw new Error("canary session creation returned no session id");
 
     const deadline = Date.now() + timeoutSeconds * 1_000;
     let completedEventId: string | null = null;
@@ -692,25 +626,18 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
           event.payload && typeof event.payload === "object"
             ? (event.payload as Record<string, unknown>)
             : {};
-        if (
-          event.type === "agent.message.completed" &&
-          payload.text === canaryMarker
-        ) {
+        if (event.type === "agent.message.completed" && payload.text === canaryMarker) {
           completedEventId = typeof event.id === "string" ? event.id : null;
         }
         if (event.type === "agent.model.usage" && payload.model === model) {
           usageEventId = typeof event.id === "string" ? event.id : null;
-          observedProvider =
-            typeof payload.provider === "string" ? payload.provider : null;
-          observedModel =
-            typeof payload.model === "string" ? payload.model : null;
+          observedProvider = typeof payload.provider === "string" ? payload.provider : null;
+          observedModel = typeof payload.model === "string" ? payload.model : null;
         }
-        if (event.type === "turn.failed" || event.type === "turn.cancelled")
-          terminalFailure = true;
+        if (event.type === "turn.failed" || event.type === "turn.cancelled") terminalFailure = true;
       }
       if (completedEventId && usageEventId) break;
-      if (terminalFailure)
-        throw new Error("production Codex canary turn failed or was cancelled");
+      if (terminalFailure) throw new Error("production Codex canary turn failed or was cancelled");
       await Bun.sleep(2_000);
     }
     if (!completedEventId || !usageEventId || observedModel !== model) {
@@ -750,10 +677,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
 }
 
 async function maintenanceServer(): Promise<never> {
-  const port = Number.parseInt(
-    process.env.OPENGENI_MAINTENANCE_PORT ?? "8000",
-    10,
-  );
+  const port = Number.parseInt(process.env.OPENGENI_MAINTENANCE_PORT ?? "8000", 10);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("OPENGENI_MAINTENANCE_PORT must be a valid TCP port");
   }
@@ -769,8 +693,7 @@ async function maintenanceServer(): Promise<never> {
         {
           error: {
             code: "production_maintenance",
-            message:
-              "OpenGeni is briefly paused for a production update. Retry shortly.",
+            message: "OpenGeni is briefly paused for a production update. Retry shortly.",
           },
         },
         {
@@ -804,21 +727,13 @@ async function preflight(args: ParsedArgs): Promise<void> {
 
   const migrationPath = "packages/db/drizzle/0057_durable_queue_control.sql";
   const migrationBytes = await readFile(migrationPath);
-  const migrationSha256 = createHash("sha256")
-    .update(migrationBytes)
-    .digest("hex");
+  const migrationSha256 = createHash("sha256").update(migrationBytes).digest("hex");
   const workerPackage = parseJson<{
     devDependencies?: Record<string, string>;
-  }>(
-    await readFile("apps/worker/package.json", "utf8"),
-    "apps/worker/package.json",
-  );
-  const agentsCoreVersion =
-    workerPackage.devDependencies?.["@openai/agents-core"];
+  }>(await readFile("apps/worker/package.json", "utf8"), "apps/worker/package.json");
+  const agentsCoreVersion = workerPackage.devDependencies?.["@openai/agents-core"];
   if (!agentsCoreVersion || !/^\d+\.\d+\.\d+$/.test(agentsCoreVersion)) {
-    throw new Error(
-      "apps/worker must pin an exact @openai/agents-core version",
-    );
+    throw new Error("apps/worker must pin an exact @openai/agents-core version");
   }
 
   const schemaProbe = Bun.spawnSync({
@@ -841,10 +756,7 @@ async function preflight(args: ParsedArgs): Promise<void> {
     schemaProbe.stdout.toString(),
     "RunState schema probe",
   );
-  if (
-    typeof schema.schemaVersion !== "string" ||
-    !/^\d+\.\d+$/.test(schema.schemaVersion)
-  ) {
+  if (typeof schema.schemaVersion !== "string" || !/^\d+\.\d+$/.test(schema.schemaVersion)) {
     throw new Error("RunState schema probe returned an invalid version");
   }
 
@@ -888,18 +800,14 @@ if (import.meta.main) {
     else if (args.command === "capture") await capture(args);
     else if (args.command === "reconcile") await reconcile(args);
     else if (args.command === "wake") await wake(args);
-    else if (args.command === "temporal-schedules")
-      await temporalSchedules(args);
-    else if (args.command === "temporal-workflows")
-      await temporalWorkflows(args);
+    else if (args.command === "temporal-schedules") await temporalSchedules(args);
+    else if (args.command === "temporal-workflows") await temporalWorkflows(args);
     else if (args.command === "canary") await productionCodexCanary(args);
     else if (args.command === "maintenance-server") await maintenanceServer();
     else if (args.command === "help" || args.flags.has("--help")) usage();
     else throw new Error(`unknown command: ${args.command}`);
   } catch (error) {
-    process.stderr.write(
-      `${error instanceof Error ? error.message : String(error)}\n`,
-    );
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 1;
   }
 }
