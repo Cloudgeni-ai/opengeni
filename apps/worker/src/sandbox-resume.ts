@@ -596,8 +596,8 @@ export async function resumeBoxForTurn(
   // ATTACHED / REARMED: the box is live (or a sibling is warming it). Resume it
   // BY ID off the committed lease envelope. For an 'attached'-to-warming lease we
   // first wait for the spawner to commit warm, bounded by the explicit warming
-  // budget. A cold reset means the spawner died; requeue the turn instead of
-  // trying to enter the spawner create path from the attached branch.
+  // budget. A cold reset means the spawner died; recover the same turn instead
+  // of trying to enter the spawner create path from the attached branch.
   try {
     let leaseEpoch = acquired.lease.leaseEpoch;
     if (acquired.lease.liveness === "warming") {

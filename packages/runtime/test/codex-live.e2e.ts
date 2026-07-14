@@ -65,7 +65,6 @@ describe("codex subscription live E2E (requires a valid ~/.codex/auth.json)", ()
       api: "responses",
       builtin: false,
       baseUrl: CODEX_PROVIDER_BASE_URL,
-      compactionMode: "client",
     };
     const settings = testSettings({ codexSubscriptionEnabled: true });
     const client = buildProviderClient(provider, settings);

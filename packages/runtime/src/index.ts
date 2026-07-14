@@ -1,6 +1,5 @@
 import type {
   ConfiguredModel,
-  ContextCompactionMode,
   ModelProviderApi,
   ResolvedModelProvider,
   Settings,
@@ -8,10 +7,7 @@ import type {
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
-  contextInputBudgetTokens,
-  contextServerCompactThreshold,
   firstPartyMcpBaseUrl,
-  resolveContextCompactionMode,
   resolveModelProvider,
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
@@ -73,6 +69,7 @@ import {
   type MCPServer,
   type MCPToolErrorFunction,
   type Model,
+  type ModelRequest,
   type ModelProvider,
   type RunStreamEvent,
   type Tool,
@@ -82,9 +79,7 @@ import {
   Capabilities,
   Manifest,
   SandboxAgent,
-  StaticCompactionPolicy,
   azureBlobMount,
-  compaction,
   dir,
   file,
   filesystem,
@@ -127,17 +122,14 @@ import { installCodexToolSearch } from "./codex-tool-search";
 import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
-  INTERNAL_RESUME_MESSAGE_MARKER,
+  EPHEMERAL_INTERNAL_CONTEXT_MARKER,
   SUMMARY_BUFFER_TOKENS,
-  clientCompactionThresholdTokens,
-  enforceInputBudget,
-  estimateItemTokens,
+  compactionThresholdTokens,
   estimateTokens,
   renderCompactionPromptInputForChat,
 } from "./context-compaction";
 import {
   createSandboxClient,
-  deserializeSandboxSessionStateEnvelope,
   desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
@@ -199,17 +191,14 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 export {
   CompactionNeededError,
   buildCompactionPromptInput,
-  buildDeterministicFallbackCompactionHistory,
   buildCompactionReplacementHistory,
-  clientCompactionThresholdTokens,
+  compactionThresholdTokens,
   clampCompactionThresholdRatio,
-  decideClientCompaction,
-  enforceInputBudget,
+  decideCompaction,
   buildSummaryItem,
   findCompactionNeededError,
   isCompactionSummary,
   isUserMessage,
-  findKeepBoundary,
   estimateTokens,
   estimateItemTokens,
   renderCompactionPromptInputForChat,
@@ -221,9 +210,11 @@ export {
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
+  EPHEMERAL_INTERNAL_CONTEXT_MARKER,
+  isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { ClientCompactionDecision, CompactionItem } from "./context-compaction";
+export type { CompactionDecision, CompactionItem } from "./context-compaction";
 export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
@@ -308,15 +299,12 @@ export function ensureReadableStreamFrom(): void {
 export type AgentSegmentInput =
   | {
       kind: "message";
-      text: string;
-      // Platform-authored turn-resume notices need a user-role turn boundary
-      // for the SDK, but are marked so compaction never mistakes them for
-      // durable user intent and retains one copy per recovery forever.
-      internalResumeKind?: string;
-      serializedRunState?: string | null;
-      // Items-mode conversation truth (issue #35): when provided, turn input is
-      // built from these verbatim AgentInputItems and the stored sandbox
-      // envelope — no RunState deserialization, no SDK-version coupling.
+      /** A real human/API prompt. Omitted when resuming the same inference. */
+      text?: string;
+      /** Ephemeral platform context: system role, never conversation history. */
+      internalContext?: string;
+      // Canonical conversation truth. When omitted, this is a fresh first
+      // message; ordinary messages never deserialize an SDK RunState.
       historyItems?: AgentInputItem[] | null;
       sandboxEnvelope?: Record<string, unknown> | null;
     }
@@ -331,7 +319,6 @@ export type AgentSegmentInput =
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   sandboxSessionState?: SandboxSessionState;
-  serializedRunStateForSandbox?: string;
 };
 
 export type SandboxFileDownload = {
@@ -782,10 +769,10 @@ function recordModelCallMetric(
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
  * call against the resolved provider. `input` is the active history plus
- * Codex's checkpoint prompt. Returns the trimmed summary text, or null on any
- * failure (the caller can retry with a harder-trimmed transcript, then fall
- * back to deterministic non-LLM compaction). The call deliberately does NOT
- * request reasoning encryption, tools, or server-side compaction; it is a
+ * Codex's checkpoint prompt. Provider failures propagate to the compaction
+ * lifecycle; there is no non-model fallback that silently discards history.
+ * The call deliberately does NOT
+ * request reasoning encryption, tools, or inline provider compaction; it is a
  * self-contained summarize.
  *
  * Provider-aware: the summary always runs on the SAME provider that serves the
@@ -793,8 +780,7 @@ function recordModelCallMetric(
  * versa). `api: "chat"` providers (Fireworks) speak /v1/chat/completions, where
  * the summary is choices[0].message.content; `api: "responses"` (the default,
  * built-in OpenAI/Azure) speaks /v1/responses as before. When no client/api is
- * supplied it falls back to the built-in OpenAI/Azure Responses path so the
- * legacy global-client callers are byte-for-byte unchanged. store:false is set
+ * supplied it uses the built-in OpenAI/Azure Responses path. store:false is set
  * only on the OpenAI-platform Responses path (Azure rejects it; chat ignores it).
  */
 export async function summarizeForCompaction(
@@ -805,50 +791,58 @@ export async function summarizeForCompaction(
     api?: ModelProviderApi;
     maxOutputTokens?: number;
     model?: string;
-    maxTranscriptTokens?: number;
     promptCacheKey?: string;
+    systemInstructions?: string;
+    onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
-): Promise<string | null> {
+): Promise<string> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
-  const transcript = renderCompactionPromptInputForChat(
-    input,
-    typeof options.maxTranscriptTokens === "number" && options.maxTranscriptTokens > 0
-      ? { maxEstimatedTokens: options.maxTranscriptTokens }
-      : {},
-  );
-  try {
-    if (api === "chat") {
-      const completion = await client.chat.completions.create({
-        model,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: transcript }],
-        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-      } as any);
-      const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
-        .choices?.[0]?.message?.content;
-      const trimmed = typeof text === "string" ? text.trim() : "";
-      return trimmed.length > 0 ? trimmed : null;
-    }
-    const response = await client.responses.create({
+  if (api === "chat") {
+    const transcript = renderCompactionPromptInputForChat(input);
+    const completion = await client.chat.completions.create({
       model,
-      // store:false is the OpenAI-platform-only storeless precondition; Azure
-      // rejects it. The summarizer's resolved client is OpenAI/Azure on the
-      // built-in path (api "responses"), so gate it on the built-in provider.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      max_output_tokens: maxTokens,
-      input: transcript,
+      max_tokens: maxTokens,
+      messages: [{ role: "user", content: transcript }],
       ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
     } as any);
-    const text = extractResponseOutputText(response);
-    const trimmed = text.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch (error) {
-    console.error("context compaction summarize failed", error);
-    return null;
+    const usage = modelResponseUsageFromResponse(completion);
+    if (usage) {
+      await options.onUsage?.(usage);
+    }
+    const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
+      .choices?.[0]?.message?.content;
+    return typeof text === "string" ? text.trim() : "";
   }
+  // Use the same SDK Responses adapter as the real agent call. It converts the
+  // structured AgentInputItems (callId/providerData/etc.) to provider wire
+  // items without flattening tool history into a fake user transcript.
+  const request: ModelRequest = {
+    systemInstructions: options.systemInstructions ?? "",
+    input: input as AgentInputItem[],
+    modelSettings: {
+      maxTokens,
+      // Azure rejects store:false; the Codex subscription transport enforces
+      // it independently. The OpenAI platform path remains explicitly storeless.
+      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      ...(options.promptCacheKey
+        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
+        : {}),
+    },
+    tools: [],
+    toolsExplicitlyProvided: true,
+    outputType: "text",
+    handoffs: [],
+    tracing: false,
+  };
+  const response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  const usage = modelResponseUsageFromResponse(response);
+  if (usage) {
+    await options.onUsage?.(usage);
+  }
+  return extractResponseOutputText(response).trim();
 }
 
 /**
@@ -900,6 +894,18 @@ export function extractResponseOutputText(response: unknown): string {
   return parts.join("");
 }
 
+/**
+ * The public SDK getResponse() method is runner-facing and always opens a
+ * tracing span. Compaction is a standalone model call, so use the same SDK
+ * request conversion and Responses transport without manufacturing a runner
+ * trace solely to satisfy that wrapper.
+ */
+class CompactionResponsesModel extends OpenAIResponsesModel {
+  fetchResponse(request: ModelRequest) {
+    return this._fetchResponse(request, false);
+  }
+}
+
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 
 export type BuildAgentOptions = {
@@ -909,11 +915,6 @@ export type BuildAgentOptions = {
   // today's settings-derived behaviour when omitted, so the legacy
   // global-client callers (no model resolution) are byte-for-byte unchanged.
   //
-  // - compactionMode: the resolved context-compaction path. Drives whether the
-  //   sandbox `compaction()` capability is attached AND whether `store: false`
-  //   is set (the OpenAI-platform-only storeless precondition). Registry
-  //   providers resolve to "client", so neither is applied to them.
-  //   Default: resolveContextCompactionMode(settings).
   // - hostedWebSearch: attach the hosted web_search tool. Only the providers
   //   that actually execute it (built-in OpenAI/Azure; a registry model that
   //   opts in) should get it — Fireworks accepts the param but no-ops it, which
@@ -922,9 +923,6 @@ export type BuildAgentOptions = {
   //   providerData.include. Only the Responses API carries it; the chat wire
   //   API has no such field, so registry "chat" providers turn it off.
   //   Default: settings.openaiReasoningEncryptedContent.
-  // - contextWindowTokens: the model's effective window, used to derive the
-  //   server-path compaction threshold. A registry model can declare its own
-  //   (e.g. GLM 5.2's 1,048,576). Default: settings.contextWindowTokens.
   // - structuredToolTransport: whether the backend supports the Responses
   //   STRUCTURED/HOSTED sandbox-tool transport — the hosted `apply_patch` tool
   //   type and structured `view_image` output. The SDK's sandbox capabilities
@@ -937,10 +935,8 @@ export type BuildAgentOptions = {
   //   function `apply_patch` + text `view_image` variants it accepts. Default
   //   true (let the SDK decide from the model instance) — non-codex paths are
   //   byte-for-byte unchanged.
-  compactionMode?: ContextCompactionMode;
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
-  contextWindowTokens?: number;
   structuredToolTransport?: boolean;
   // EXPLICIT computer-use tool transport, decided where provider identity is
   // authoritative (the worker's model resolution — agent-turn.ts). Threaded into
@@ -1312,11 +1308,9 @@ export function buildOpenGeniAgent(
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
-  // resolved provider's mode/api/window/web-search instead.
-  const compactionMode = options.compactionMode ?? resolveContextCompactionMode(settings);
+  // resolved provider's api/window/web-search instead.
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
-  const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
   const providerData = {
     ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
     ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
@@ -1380,15 +1374,6 @@ export function buildOpenGeniAgent(
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
         summary: "detailed",
       },
-      // Server-side compaction (OpenAI platform) requires store=false: the
-      // server emits an opaque ENCRYPTED 'compaction' item that round-trips in
-      // the request rather than being anchored to a stored response. OpenGeni
-      // already runs storeless (provider item ids stripped, encrypted reasoning
-      // round-tripped), so this is consistent with the existing design and
-      // only set where the server compaction capability is attached. Gated on
-      // the RESOLVED compaction mode (registry providers resolve to "client",
-      // so they never carry store:false).
-      ...(compactionMode === "server" ? { store: false } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
@@ -1435,8 +1420,6 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
-      compactionMode,
-      contextWindowTokens,
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -1656,28 +1639,9 @@ function neutralizeStructuredToolTransport(
 }
 
 /**
- * Build the SandboxAgent capability set provider-aware.
- *
- * The SDK's `Capabilities.default()` force-includes `compaction()`, whose
- * sampling params emit `context_management:[{type:'compaction', …}]` to the
- * Responses transport. The OpenAI platform honors that (server-side compaction);
- * AZURE rejects it with `400 unsupported_parameter` — which is exactly the live
- * production failure on Azure today. So we MUST NOT attach the compaction
- * capability on the Azure / client / off paths.
- *
- * We rebuild the base set explicitly (`filesystem()`, `shell()`, the same
- * factories the SDK default uses) and add `compaction()` ONLY on the server
- * path, with an explicit `StaticCompactionPolicy(threshold)` so newer GPT-5.x
- * models absent from the SDK's hardcoded context-window map do not hit the wrong
- * 240k fallback. The SDK has no
- * window-registration API, so an explicit threshold is the only way to fix it.
- *
- * The resolved compaction mode and the effective context window are now passed
- * IN (the multi-provider caller resolves them per provider/model) rather than
- * re-derived from settings here. Both default to the settings-derived value so
- * callers that don't route per-model (and the existing tests) keep today's exact
- * behaviour; the effective window only changes the server-path threshold when a
- * resolved model declares its own contextWindowTokens.
+ * Build the SandboxAgent capability set explicitly. The SDK default includes
+ * its inline provider compaction capability; OpenGeni deliberately omits it
+ * because durable portable compaction owns the full history transition.
  */
 /**
  * Wrap the shell capability's `exec_command` so its execution runs inside a
@@ -1750,8 +1714,6 @@ export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
   options: {
-    compactionMode?: ContextCompactionMode;
-    contextWindowTokens?: number;
     structuredToolTransport?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
     // present, computerUse() is handed the mode directly and its tools() obeys it
@@ -1760,8 +1722,6 @@ export function buildAgentCapabilities(
     computerToolMode?: ComputerToolMode;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
-  const mode = options.compactionMode ?? resolveContextCompactionMode(settings);
-  const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
   // When the caller declares the backend does NOT support that structured/hosted
@@ -1769,8 +1729,7 @@ export function buildAgentCapabilities(
   // neutralize this capability's model binding so tools() falls to the function
   // `apply_patch` + text `view_image` variants the backend accepts — the SDK
   // handles their function_call round-trip natively, so no reimplementation.
-  // Scoped to filesystem: shell() (always function tools) and compaction() (a
-  // sampling param, dropped by the codex normalizer) are untouched.
+  // Scoped to filesystem: shell() is always a function-tool transport.
   const filesystemCapability = filesystem({
     ...(options.structuredToolTransport === false
       ? { configureTools: withStructuredViewImageFunctionResults }
@@ -1783,15 +1742,6 @@ export function buildAgentCapabilities(
     filesystemCapability,
     shell({ configureTools: withExecOpCorrelation }),
   ];
-  if (mode === "server") {
-    caps.push(
-      compaction({
-        policy: new StaticCompactionPolicy(
-          contextServerCompactThreshold({ ...settings, contextWindowTokens }),
-        ),
-      }),
-    );
-  }
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
   // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
@@ -2779,43 +2729,7 @@ class PrefixedMcpServer implements MCPServer {
 
 export type PrepareInputOptions = {
   sandboxClient?: unknown;
-  /**
-   * Usable input-token budget B (window - reserved output). When set, the
-   * assembled history is passed through `enforceInputBudget` so a single
-   * over-budget input can never be sent — the last-resort backstop behind the
-   * best-effort pre-turn compaction. Omitted (undefined) disables the guard
-   * (no behaviour change for callers that don't opt in).
-   */
-  inputBudgetTokens?: number;
 };
-
-/**
- * Apply the read-path budget guard to an assembled model input: drop the oldest
- * history at a clean turn boundary until the request fits B. Orphan-safe (only
- * cuts at user-message boundaries) and only active when a budget is supplied.
- * The trailing user message is counted against the budget but never dropped.
- */
-function guardAssembledInput(
-  history: AgentInputItem[],
-  trailing: AgentInputItem,
-  inputBudgetTokens: number | undefined,
-): AgentInputItem[] {
-  if (typeof inputBudgetTokens !== "number" || inputBudgetTokens <= 0) {
-    return [...history, trailing];
-  }
-  const trailingTokens = estimateItemTokens(trailing as unknown as Record<string, unknown>);
-  const guarded = enforceInputBudget(
-    history as unknown as Array<Record<string, unknown>>,
-    inputBudgetTokens,
-    trailingTokens,
-  );
-  if (guarded.trimmed) {
-    console.warn(
-      `read-path budget guard trimmed ${guarded.droppedCount} oldest history item(s) to fit input budget (${inputBudgetTokens} tokens); the over-budget input was NOT sent`,
-    );
-  }
-  return [...(guarded.items as unknown as AgentInputItem[]), trailing];
-}
 
 export async function prepareRunInput(
   agent: Agent<any, any>,
@@ -2823,68 +2737,51 @@ export async function prepareRunInput(
   options: PrepareInputOptions = {},
 ): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
-    const trailingMessage = {
-      type: "message",
-      role: "user",
-      content: input.text,
-      ...(input.internalResumeKind
-        ? {
-            providerData: {
-              [INTERNAL_RESUME_MESSAGE_MARKER]: input.internalResumeKind,
-            },
-          }
-        : {}),
-    } as AgentInputItem;
-    if (input.historyItems && input.historyItems.length > 0) {
-      // Items mode: conversation truth comes from the database, the sandbox
-      // recovery descriptor from its own store. The RunState blob is not
-      // touched at all on this path.
-      const sandboxSessionState = input.sandboxEnvelope
-        ? await restoredSandboxSessionStateFromEntry(input.sandboxEnvelope, options.sandboxClient)
-        : undefined;
-      // Replayed conversation truth is reloaded verbatim from the database, so
-      // it can contain a tool-call pairing the Responses API rejects (most
-      // destructively an orphaned function_call_result with no matching
-      // function_call — which 400s every turn and bricks the session until the
-      // row is hand-deleted). Sanitize the in-memory copy before it reaches the
-      // model so existing corruption self-heals and a future write-path race is
-      // non-fatal; the stored rows are never touched.
-      const sanitizedHistory = sanitizeHistoryItemsForModel(
-        input.historyItems as unknown as Array<Record<string, unknown>>,
-      ) as unknown as AgentInputItem[];
-      return {
-        // Read-path budget guard: even after the orphan sanitizer, an assembled
-        // input can exceed the model window (pre-turn compaction is best-effort
-        // and can no-op). Trim the oldest history at a clean turn boundary so an
-        // over-budget request is never sent. No-op when no budget is supplied.
-        input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
-        ...(sandboxSessionState ? { sandboxSessionState } : {}),
-      };
+    const trailingMessages: AgentInputItem[] = [];
+    if (input.internalContext?.trim()) {
+      trailingMessages.push({
+        type: "message",
+        role: "system",
+        content: input.internalContext,
+        providerData: { [EPHEMERAL_INTERNAL_CONTEXT_MARKER]: true },
+      } as AgentInputItem);
     }
-    // No prior state, or a cleared sentinel: start fresh. The clear sentinel
-    // ({@link CLEARED_RUN_STATE_BLOB}) is not a real serialized run state — it
-    // carries no $schemaVersion, so RunState.fromString would throw on it. In
-    // run_state history mode this message path is the one that reads the blob
-    // after a /clear, so recognizing the sentinel here is what keeps the next
-    // turn working (a fresh, empty context) instead of bricking on deserialize.
-    if (!input.serializedRunState || isClearedRunStateBlob(input.serializedRunState)) {
-      return { input: input.internalResumeKind ? [trailingMessage] : input.text };
+    if (input.text?.trim()) {
+      trailingMessages.push({
+        type: "message",
+        role: "user",
+        content: input.text,
+      } as AgentInputItem);
     }
-    const state = await RunState.fromString(agent, input.serializedRunState);
-    const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
-    // state.history already runs the SDK's own orphan-tool-call pruning, but
-    // applying the same sanitizer keeps the legacy run-state resume path under
-    // one invariant with the items path and is defensive against a corrupt blob.
+    if (
+      trailingMessages.length === 0 &&
+      (input.historyItems === undefined ||
+        input.historyItems === null ||
+        input.historyItems.length === 0)
+    ) {
+      throw new Error("Message input requires a user prompt or internal context");
+    }
+    // Conversation truth comes only from durable history items. Sanitize the
+    // in-memory copy before it reaches the model so a corrupt tool-call pair is
+    // non-fatal; stored audit rows remain untouched.
     const sanitizedHistory = sanitizeHistoryItemsForModel(
-      state.history as unknown as Array<Record<string, unknown>>,
+      (input.historyItems ?? []) as unknown as Array<Record<string, unknown>>,
     ) as unknown as AgentInputItem[];
+    const sandboxSessionState = input.sandboxEnvelope
+      ? await restoredSandboxSessionStateFromEntry(input.sandboxEnvelope, options.sandboxClient)
+      : undefined;
+    const assembled = [...sanitizedHistory, ...trailingMessages];
+    if (assembled.length === 0) {
+      throw new Error("Message input requires durable history or internal context");
+    }
     return {
-      // Read-path budget guard (see the items path above): keep an over-budget
-      // resumed history off the wire by trimming the oldest turns when a budget
-      // is supplied.
-      input: guardAssembledInput(sanitizedHistory, trailingMessage, options.inputBudgetTokens),
+      // Preserve the SDK's simple first-message form without creating a second
+      // history path: this is merely the zero-history representation.
+      input:
+        sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
+          ? input.text
+          : assembled,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
-      serializedRunStateForSandbox: input.serializedRunState,
     };
   }
   // An approval can only be resumed against a real saved run state. If the
@@ -2915,6 +2812,7 @@ export type RunAgentStreamOptions = {
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionRequested?: () => boolean | Promise<boolean>;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -2955,6 +2853,7 @@ export type RunAgentStreamOptions = {
 
 export type ContextRobustnessFilterOptions = {
   contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionRequested?: () => boolean | Promise<boolean>;
   throwOnCompactionNeeded?: boolean;
 };
 
@@ -3064,47 +2963,33 @@ export function contextRobustnessFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
-  const inputBudgetTokens = modelCallBudgetTokens(settings);
-  const clientCompactionMode = resolveContextCompactionMode(settings) === "client";
-  const compactionThresholdTokens = clientCompactionThresholdTokens(settings);
-  return ({ modelData }) => {
-    let input = modelData.input;
-    if (inputBudgetTokens !== undefined) {
-      const guarded = enforceInputBudget(
-        input as unknown as Array<Record<string, unknown>>,
-        inputBudgetTokens,
-      );
-      if (guarded.trimmed) {
-        console.warn(
-          `per-call budget guard trimmed ${guarded.droppedCount} oldest history item(s) to fit input budget (${inputBudgetTokens} tokens); the over-budget model call was NOT sent`,
-        );
-        input = guarded.items as unknown as AgentInputItem[];
-      }
-    }
-    if (clientCompactionMode && options.throwOnCompactionNeeded) {
+  const thresholdTokens = compactionThresholdTokens(settings);
+  return async ({ modelData }) => {
+    const input = modelData.input;
+    if (options.throwOnCompactionNeeded) {
       const reported = options.contextCompactionSignalTokens?.();
       const hasReported = typeof reported === "number" && reported > 0;
       const signalTokens = hasReported
         ? reported
         : estimateTokens(input as unknown as Array<Record<string, unknown>>);
-      if (signalTokens >= compactionThresholdTokens) {
+      if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
-          thresholdTokens: compactionThresholdTokens,
+          thresholdTokens,
+          signalSource: hasReported ? "provider" : "estimate",
+          trigger: "operator",
+        });
+      }
+      if (signalTokens >= thresholdTokens) {
+        throw new CompactionNeededError({
+          signalTokens,
+          thresholdTokens,
           signalSource: hasReported ? "provider" : "estimate",
         });
       }
     }
     return { ...modelData, input };
   };
-}
-
-function modelCallBudgetTokens(settings: Settings): number | undefined {
-  if (resolveContextCompactionMode(settings) !== "client") {
-    return undefined;
-  }
-  const budget = contextInputBudgetTokens(settings);
-  return budget > 0 ? budget : undefined;
 }
 
 /**
@@ -3125,8 +3010,9 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
- * selects it; the context-robustness guard then applies hard budget trimming
- * only on the client-compaction path and raises the proactive compaction signal.
+ * selects it; the context-robustness guard then raises the proactive durable
+ * compaction signal on the client-compaction path. It never trims history from
+ * an individual request.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -3225,9 +3111,14 @@ export async function runAgentStream(
     const ownedFilter = composeCallModelInputFilters(
       [
         callModelInputFilterForSettings(settings, {
-          throwOnCompactionNeeded: Boolean(overrides.contextCompactionSignalTokens),
+          throwOnCompactionNeeded: Boolean(
+            overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
+          ),
           ...(overrides.contextCompactionSignalTokens
             ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+            : {}),
+          ...(overrides.contextCompactionRequested
+            ? { contextCompactionRequested: overrides.contextCompactionRequested }
             : {}),
         }),
         genesisTitleInputFilter,
@@ -3296,14 +3187,7 @@ export async function runAgentStream(
         },
       )
     : undefined;
-  const sandboxSessionState =
-    prepared.sandboxSessionState ??
-    (prepared.serializedRunStateForSandbox && client
-      ? await restoredSandboxSessionState(
-          await RunState.fromString(agent, prepared.serializedRunStateForSandbox),
-          client,
-        )
-      : undefined);
+  const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
   // provider-id stripping, image/budget guard), then any per-turn filter
   // (genesis title directive). A callModelInputFilter only shapes the per-call
@@ -3312,9 +3196,14 @@ export async function runAgentStream(
   const callModelInputFilter = composeCallModelInputFilters(
     [
       callModelInputFilterForSettings(settings, {
-        throwOnCompactionNeeded: Boolean(overrides.contextCompactionSignalTokens),
+        throwOnCompactionNeeded: Boolean(
+          overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
+        ),
         ...(overrides.contextCompactionSignalTokens
           ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+          : {}),
+        ...(overrides.contextCompactionRequested
+          ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
       genesisTitleInputFilter,
@@ -4197,15 +4086,20 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
 
 export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
   const response = modelResponseFromSdkEvent(event);
+  return modelResponseUsageFromResponse(response);
+}
+
+/** Normalize usage from either a Responses or Chat Completions result. */
+export function modelResponseUsageFromResponse(response: unknown): ModelResponseUsage | null {
   const usage = usageFromResponse(response);
   if (!usage) {
     return null;
   }
   const responseId =
-    typeof response?.id === "string"
-      ? response.id
-      : typeof response?.responseId === "string"
-        ? response.responseId
+    typeof (response as { id?: unknown } | null)?.id === "string"
+      ? (response as { id: string }).id
+      : typeof (response as { responseId?: unknown } | null)?.responseId === "string"
+        ? (response as { responseId: string }).responseId
         : undefined;
   return {
     ...(responseId ? { responseId } : {}),
@@ -4229,17 +4123,32 @@ function modelResponseFromSdkEvent(event: RunStreamEvent): any {
   return null;
 }
 
-function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
-  const raw = response?.usage;
+function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | null {
+  const raw = (response as { usage?: unknown } | null)?.usage;
   if (!raw || typeof raw !== "object") {
     return null;
   }
+  const record = raw as Record<string, unknown>;
   const usage = {
-    ...numberProp(raw, "inputTokens", "inputTokens", "input_tokens"),
-    ...numberProp(raw, "outputTokens", "outputTokens", "output_tokens"),
-    ...numberProp(raw, "totalTokens", "totalTokens", "total_tokens"),
-    ...inputTokenDetailsProp(raw),
-    ...outputTokenDetailsProp(raw),
+    ...numberProp(
+      record,
+      "inputTokens",
+      "inputTokens",
+      "input_tokens",
+      "promptTokens",
+      "prompt_tokens",
+    ),
+    ...numberProp(
+      record,
+      "outputTokens",
+      "outputTokens",
+      "output_tokens",
+      "completionTokens",
+      "completion_tokens",
+    ),
+    ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
+    ...inputTokenDetailsProp(record),
+    ...outputTokenDetailsProp(record),
   };
   return Object.keys(usage).length > 0 ? usage : null;
 }
@@ -4247,15 +4156,18 @@ function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
 function numberProp(
   raw: Record<string, unknown>,
   outputKey: "inputTokens" | "outputTokens" | "totalTokens",
-  camel: string,
-  snake: string,
+  ...keys: string[]
 ): Partial<ModelResponseUsage["usage"]> {
-  const value = raw[camel] ?? raw[snake];
+  const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
   return typeof value === "number" && Number.isFinite(value) ? { [outputKey]: value } : {};
 }
 
 function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
-  const details = raw.inputTokensDetails ?? raw.input_tokens_details;
+  const details =
+    raw.inputTokensDetails ??
+    raw.input_tokens_details ??
+    raw.promptTokensDetails ??
+    raw.prompt_tokens_details;
   if (!details || typeof details !== "object") {
     return {};
   }
@@ -4266,10 +4178,13 @@ function outputTokenDetailsProp(
   raw: Record<string, unknown>,
 ): Partial<ModelResponseUsage["usage"]> {
   const details = raw.outputTokensDetails ?? raw.output_tokens_details;
-  if (!details || typeof details !== "object") {
+  const normalized = details ?? raw.completionTokensDetails ?? raw.completion_tokens_details;
+  if (!normalized || typeof normalized !== "object") {
     return {};
   }
-  return { outputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+  return {
+    outputTokensDetails: normalized as Record<string, number> | Array<Record<string, number>>,
+  };
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
@@ -4540,39 +4455,6 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
-
-async function restoredSandboxSessionState(
-  state: RunState<any, any>,
-  client: unknown,
-): Promise<SandboxSessionState | undefined> {
-  if (!client) {
-    return undefined;
-  }
-  const sandboxState = (state as any)._sandbox;
-  const entry =
-    sandboxState?.sessionsByAgent?.[sandboxState.currentAgentKey] ??
-    (sandboxState?.currentAgentKey && sandboxState?.sessionState
-      ? {
-          backendId: sandboxState.backendId,
-          currentAgentKey: sandboxState.currentAgentKey,
-          currentAgentName: sandboxState.currentAgentName,
-          sessionState: sandboxState.sessionState,
-        }
-      : undefined);
-  if (!entry) {
-    return undefined;
-  }
-  if ((client as SandboxClient).backendId !== entry.backendId) {
-    throw new Error("RunState sandbox backend does not match the configured sandbox client");
-  }
-  return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
-}
-
-// sandboxStateEntryFromRunState + restoredSandboxSessionStateFromEntry +
-// deserializeSandboxSessionStateEnvelope moved to the agent-loop-free leaf
-// ./sandbox; re-exported via `export * from "./sandbox"`. The private
-// restoredSandboxSessionState above (which takes an agent-loop RunState) calls
-// the moved deserializeSandboxSessionStateEnvelope, imported from ./sandbox.
 
 export type SandboxLifecycleHookPhase = "beforeAgentStart";
 

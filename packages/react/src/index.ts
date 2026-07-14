@@ -35,15 +35,7 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
-export {
-  useTurnQueue,
-  isTurnQueueEvent,
-  queueFromTurns,
-  activeTurnFromTurns,
-  applyTurnEdit,
-  applyTurnReorder,
-  applyTurnRemoval,
-} from "./hooks/use-turn-queue";
+export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type { UseTurnQueueOptions, UseTurnQueueResult } from "./hooks/use-turn-queue";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";

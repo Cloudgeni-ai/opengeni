@@ -39,7 +39,10 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 const CONTAINER = "opengeni-shared-test-pg";
-const PORT = 55440;
+// Keep the fixed cross-process listener outside Linux's default ephemeral client
+// range (32768-60999). A long-lived outbound HTTPS connection can otherwise own
+// the same source port and make Docker fail before PostgreSQL ever starts.
+const PORT = 61440;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const IMAGE = "pgvector/pgvector:pg16";

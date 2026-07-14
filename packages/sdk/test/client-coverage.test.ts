@@ -80,20 +80,14 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     model: "model-x",
     reasoningEffort: "medium",
     sandboxBackend: "none",
+    sandboxOs: null,
     metadata: {},
-    queueKind: "human_message",
-    origin: "human",
-    priority: 100,
     version: 1,
     executionGeneration: 0,
-    dedupeKey: null,
+    activeAttemptId: null,
     lineage: {},
-    deliveryState: "pending",
-    bundleId: null,
-    acknowledgedAt: null,
     cancelledBy: null,
     cancelReason: null,
-    promotedAt: null,
     startedAt: null,
     finishedAt: null,
     createdAt: "2026-06-12T00:00:00.000Z",
@@ -103,34 +97,6 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
 }
 
 describe("OpenGeniClient turn queue", () => {
-  test("updateQueuedTurn PATCHes the turn with the edit payload", async () => {
-    const { client, requests } = makeClient(() => jsonResponse(fakeTurn({ prompt: "new prompt" })));
-    const turn = await client.updateQueuedTurn(WORKSPACE_ID, SESSION_ID, TURN_A, {
-      prompt: "new prompt",
-      reasoningEffort: "high",
-    });
-    expect(turn.prompt).toBe("new prompt");
-    expect(requests[0]!.method).toBe("PATCH");
-    expect(requests[0]!.url).toBe(
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns/${TURN_A}`,
-    );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({
-      prompt: "new prompt",
-      reasoningEffort: "high",
-    });
-  });
-
-  test("reorderQueuedTurns POSTs turnIds and returns the new queue", async () => {
-    const queue = [fakeTurn({ id: TURN_B, position: 1 }), fakeTurn({ id: TURN_A, position: 2 })];
-    const { client, requests } = makeClient(() => jsonResponse(queue));
-    const turns = await client.reorderQueuedTurns(WORKSPACE_ID, SESSION_ID, [TURN_B, TURN_A]);
-    expect(turns.map((turn) => turn.id)).toEqual([TURN_B, TURN_A]);
-    expect(requests[0]!.url).toBe(
-      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/turns/reorder`,
-    );
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ turnIds: [TURN_B, TURN_A] });
-  });
-
   test("deleteQueuedTurn DELETEs and returns the cancelled turn", async () => {
     const { client, requests } = makeClient(() => jsonResponse(fakeTurn({ status: "cancelled" })));
     const turn = await client.deleteQueuedTurn(WORKSPACE_ID, SESSION_ID, TURN_A);
@@ -144,13 +110,10 @@ describe("OpenGeniClient turn queue", () => {
   test("steerMessage performs one atomic server request", async () => {
     const accepted = makeEvent(7, "user.message", { text: "do this now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ accepted, turn: steerTurn, interrupted: true }, 202),
-    );
+    const { client, requests } = makeClient(() => jsonResponse({ accepted, turn: steerTurn }, 202));
     const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "do this now");
     expect(result.accepted.id).toBe(accepted.id);
     expect(result.turn.id).toBe(TURN_B);
-    expect(result.interrupted).toBe(true);
     expect(requests).toHaveLength(1);
     expect(requests[0]!.method).toBe("POST");
     expect(requests[0]!.url).toBe(
@@ -162,9 +125,7 @@ describe("OpenGeniClient turn queue", () => {
   test("steerMessage forwards idempotency and generation fences", async () => {
     const accepted = makeEvent(9, "user.message", { text: "now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
-    const { client, requests } = makeClient(() =>
-      jsonResponse({ accepted, turn: steerTurn, interrupted: false }, 202),
-    );
+    const { client, requests } = makeClient(() => jsonResponse({ accepted, turn: steerTurn }, 202));
     const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, {
       text: "now",
       clientEventId: "steer-once",
@@ -172,7 +133,6 @@ describe("OpenGeniClient turn queue", () => {
       expectedWorkspaceInferenceGeneration: 4,
     });
     expect(result.turn.id).toBe(TURN_B);
-    expect(result.interrupted).toBe(false);
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       text: "now",
       clientEventId: "steer-once",

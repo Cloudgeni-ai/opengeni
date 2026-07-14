@@ -11,8 +11,7 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
-  enqueueSessionTurn,
-  applySessionTurnInterrupt,
+  addSessionSystemUpdate,
   evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
@@ -21,17 +20,11 @@ import {
   isCodexBilledTurn,
   recordUsageEvent,
   requireSession,
-  setSessionGoalLastContinuationTurn,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
-import type {
-  ActivityServices,
-  MaybeContinueGoalInput,
-  MaybeContinueGoalResult,
-  PauseGoalForInterruptInput,
-} from "./types";
+import { appendAndPublishEvents } from "@opengeni/events";
+import type { ActivityServices, MaybeContinueGoalInput, MaybeContinueGoalResult } from "./types";
 
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
   async function maybeContinueGoal(
@@ -143,52 +136,35 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       return { action: "none" };
     }
     const prompt = goalContinuationPrompt(decision.goal, decision.autoContinuation, decision.cap);
-    const [continuationEvent] = await appendAndPublishEvents(
-      db,
-      bus,
-      input.workspaceId,
-      input.sessionId,
-      [
-        {
-          type: "goal.continuation",
-          payload: {
-            goalId: decision.goal.id,
-            text: prompt,
-            autoContinuation: decision.autoContinuation,
-            maxAutoContinuations: decision.cap,
-            goalVersion: decision.goal.version,
-          },
-        },
-      ],
-    );
-    if (!continuationEvent) {
-      throw new Error("failed to append goal continuation trigger event");
-    }
-    const turn = await enqueueSessionTurn(db, {
+    const update = await addSessionSystemUpdate(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      triggerEventId: continuationEvent.id,
-      temporalWorkflowId: input.workflowId,
-      source: "goal",
-      prompt,
-      resources: [],
-      // Continuations keep the session tool surface and force the first-party
-      // server so the goal_complete/goal_pause escape hatches stay reachable.
-      tools: withFirstPartyTools(settings, session.tools),
-      model: continuationModel,
-      reasoningEffort: continuationReasoningEffort,
-      sandboxBackend: session.sandboxBackend,
-      metadata: { goalId: decision.goal.id, autoContinuation: decision.autoContinuation },
-    });
-    await setSessionGoalLastContinuationTurn(db, input.workspaceId, input.sessionId, turn.id);
-    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-      {
-        type: "turn.queued",
-        turnId: turn.id,
-        payload: { turnId: turn.id, triggerEventId: continuationEvent.id, source: turn.source },
+      kind: "lifecycle_event",
+      classification: "info",
+      sourceId: decision.goal.id,
+      dedupeKey: `goal-continuation:${decision.goal.id}:${decision.goal.version}:${decision.autoContinuation}`,
+      summary: prompt,
+      payload: {
+        type: "goal_continuation",
+        goalId: decision.goal.id,
+        goalVersion: decision.goal.version,
+        autoContinuation: decision.autoContinuation,
+        maxAutoContinuations: decision.cap,
+        prompt,
+        policy: {
+          model: continuationModel,
+          reasoningEffort: continuationReasoningEffort,
+          tools: withFirstPartyTools(settings, session.tools),
+          sandboxBackend: session.sandboxBackend,
+        },
       },
-    ]);
+      lineage: { goalId: decision.goal.id },
+    });
+    if (update.reason === "session_cancelled") return { action: "none" };
+    if (update.added && update.events.length > 0) {
+      await bus.publish(input.workspaceId, input.sessionId, update.events);
+    }
     // Continuations count as agent runs for limits/metering parity with
     // user-initiated and scheduled turns.
     await recordUsageEvent(db, {
@@ -197,57 +173,16 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       eventType: "agent_run.created",
       quantity: 1,
       unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: turn.id,
-      idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${turn.id}`,
+      sourceResourceType: "session_system_update",
+      sourceResourceId: update.update.id,
+      idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${update.update.id}`,
     });
     return { action: "continue" };
   }
 
-  async function pauseGoalForInterrupt(input: PauseGoalForInterruptInput): Promise<void> {
-    const { db, bus } = await services();
-    // Compatibility activity for older workflow histories. When an interrupt
-    // event exists, route through the authoritative session/turn settlement so
-    // goal state and durable events cannot split. An unfenced legacy call has
-    // no safe target and is deliberately an event-free no-op.
-    if (input.triggerEventId) {
-      const applied = await applySessionTurnInterrupt(
-        db,
-        input.workspaceId,
-        input.sessionId,
-        input.triggerEventId,
-      );
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, applied.events);
-      return;
-    }
-  }
-
   return {
     maybeContinueGoal,
-    pauseGoalForInterrupt,
   };
-}
-
-/**
- * True when an interrupt's trigger event is a STEER: `user.interrupt` tagged
- * `reason: "steer"`, sent by `OpenGeniClient.steerMessage`. Steering cancels
- * the running turn only to deliver the steered message next — it redirects
- * the work rather than stopping it, so an active goal keeps going. Every
- * other user interrupt (the stop button, a plain `interrupt()` call) is the
- * explicit act of stopping and pauses the goal.
- */
-export function isSteerInterrupt(
-  trigger: { type: string; payload: unknown } | null | undefined,
-): boolean {
-  if (!trigger || trigger.type !== "user.interrupt") {
-    return false;
-  }
-  const payload = trigger.payload;
-  return (
-    typeof payload === "object" &&
-    payload !== null &&
-    (payload as { reason?: unknown }).reason === "steer"
-  );
 }
 
 export function goalContinuationPrompt(

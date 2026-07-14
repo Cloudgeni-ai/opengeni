@@ -5,7 +5,6 @@
       "id": "00000000-0000-4000-8000-000000000301",
       "occurredAt": "2026-01-02T12:00:01.000Z",
       "text": "Run a build that will fail after starting activity.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -37,7 +36,6 @@
       "id": "00000000-0000-4000-8000-000000000306",
       "occurredAt": "2026-01-02T12:00:06.000Z",
       "text": "Fail before doing any activity.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -65,7 +63,6 @@
         "id": "00000000-0000-4000-8000-000000000301",
         "occurredAt": "2026-01-02T12:00:01.000Z",
         "text": "Run a build that will fail after starting activity.",
-        "pending": false,
         "resources": [],
         "tools": []
       }
@@ -114,7 +111,6 @@
         "id": "00000000-0000-4000-8000-000000000306",
         "occurredAt": "2026-01-02T12:00:06.000Z",
         "text": "Fail before doing any activity.",
-        "pending": false,
         "resources": [],
         "tools": []
       }

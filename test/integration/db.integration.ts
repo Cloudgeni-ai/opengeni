@@ -4,19 +4,11 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as dbSchema from "../../packages/db/src/schema";
 import {
+  addSessionSystemUpdate,
   appendSessionEvents,
-  appendSessionHistoryItems,
-  applySessionTurnInterrupt,
-  applySessionTurnPreemption,
   applySessionTurnSettlement,
-  applySessionTurnWorkerDeath,
-  applySessionOnlySettlement,
-  applyContextCompaction,
   bootstrapWorkspace,
-  claimNextQueuedTurn,
-  clearSessionContext,
-  consumeSessionCompactionRequest,
-  countSessionHistoryItems,
+  claimNextSessionExecution,
   createKnowledgeMemory,
   getKnowledgeMemory,
   saveWorkspaceMemory,
@@ -29,10 +21,7 @@ import {
   type MemoryEmbedder,
   createDb,
   decryptEnvironmentValue,
-  getActiveSessionHistoryItems,
   getSessionHistoryItems,
-  requestSessionCompaction,
-  setSessionLastInputTokens,
   createScheduledTask,
   createScheduledTaskRun,
   createApiKey,
@@ -41,17 +30,13 @@ import {
   createSessionWithIdempotencyKey,
   encryptEnvironmentValue,
   getSessionByCreateIdempotencyKey,
-  createTurn,
   dbSql,
   enableCapabilityInstallation,
-  enqueueSessionTurn,
+  enqueueSessionMessageAtomically,
   evaluateGoalContinuation,
-  finishTurn,
   findActiveApiKeyByHash,
-  getLatestRunState,
   getSession,
   getSessionGoal,
-  setSessionGoalLastContinuationTurn,
   setSessionGoalStatus,
   updateSessionGoal,
   upsertSessionGoal,
@@ -61,12 +46,8 @@ import {
   listSessionMcpServersForRun,
   listScheduledTaskRuns,
   listScheduledTasks,
-  getSessionTurn,
   listSessionEvents,
   registerSessionTurnDispatch,
-  saveRunState,
-  setSessionStatus,
-  settleSessionIdleWithParentOutbox,
   updateScheduledTask,
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
@@ -385,1336 +366,6 @@ describe("DB integration", () => {
     expect(plainB.createIdempotencyKey).toBeNull();
   });
 
-  test("persists run state versions and turn status transitions", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "turns",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "turns" } },
-    ]);
-    const turnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: "workflow",
-    });
-    await saveRunState(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId,
-      serializedRunState: "state-1",
-      pendingApprovals: [],
-    });
-    await saveRunState(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      turnId,
-      serializedRunState: "state-2",
-      pendingApprovals: [{ id: "approval" }],
-    });
-    const latest = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
-    expect(latest?.serializedRunState).toBe("state-2");
-    await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
-    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "idle", null);
-  });
-
-  test("atomically requeues registered running and approval attempts behind their resume trigger", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "long task",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "long task" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: "wf-preempt-db",
-      source: "user",
-      prompt: "long task",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "low",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    const claimed = await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      "wf-preempt-db",
-    );
-    expect(claimed?.id).toBe(turn.id);
-
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "preempt-dispatch-1",
-      }),
-    ).toEqual({ action: "registered", dispatchGeneration: 1 });
-    const firstPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "preempt-dispatch-1",
-      dispatchGeneration: 1,
-      reason: "worker_shutdown",
-      resumeWithNotice: true,
-      text: "resume",
-    });
-    expect(firstPreemption.action).toBe("requeued");
-    const resumeTrigger = firstPreemption.events.find((event) => event.type === "turn.preempted")!;
-    const requeued = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
-    expect(requeued?.status).toBe("queued");
-    expect(requeued?.triggerEventId).toBe(resumeTrigger.id);
-    expect(requeued?.startedAt).toBeNull();
-
-    // The next claim re-dispatches the same turn through the resume trigger.
-    const reclaimed = await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      "wf-preempt-db-2",
-    );
-    expect(reclaimed?.id).toBe(turn.id);
-    expect(reclaimed?.triggerEventId).toBe(resumeTrigger.id);
-
-    // An approval rerun re-dispatches the same turn without a fresh claim, so
-    // a shutdown there preempts a turn still marked requires_action.
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: resumeTrigger.id,
-        dispatchId: "preempt-dispatch-2",
-      }),
-    ).toEqual({ action: "registered", dispatchGeneration: 2 });
-    await finishTurn(dbClient.db, grant.workspaceId, turn.id, "requires_action");
-    const [approvalTrigger] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      [{ type: "user.approvalDecision", payload: { decision: "approve" } }],
-    );
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: approvalTrigger!.id,
-        dispatchId: "preempt-dispatch-3",
-      }),
-    ).toEqual({ action: "registered", dispatchGeneration: 3 });
-    const approvalPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: approvalTrigger!.id,
-      dispatchId: "preempt-dispatch-3",
-      dispatchGeneration: 3,
-      reason: "worker_shutdown",
-      resumeWithNotice: false,
-    });
-    expect(approvalPreemption.action).toBe("requeued");
-    const requeuedFromApproval = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
-    expect(requeuedFromApproval?.status).toBe("queued");
-    expect(requeuedFromApproval?.triggerEventId).toBe(approvalTrigger!.id);
-
-    // Terminal turns cannot be preempt-requeued and append no event.
-    await finishTurn(dbClient.db, grant.workspaceId, turn.id, "idle");
-    const terminalPreemption = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: approvalTrigger!.id,
-      dispatchId: "preempt-dispatch-3",
-      dispatchGeneration: 3,
-      reason: "context_compacted",
-      resumeWithNotice: true,
-      text: "must not append",
-    });
-    expect(terminalPreemption).toMatchObject({ action: "stale", events: [] });
-  });
-
-  test("terminal interrupt makes a late compaction preempt an event-free stale no-op", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "race terminal settlement",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "race terminal settlement" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "race terminal settlement",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const dispatch = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "terminal-race-dispatch",
-    });
-    expect(dispatch.action).toBe("registered");
-    const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.interrupt", payload: { reason: "steer" } },
-    ]);
-
-    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
-    const appDbClient = createDb(appRoleUrl);
-    try {
-      const [rolePosture] = await appDbClient.db.execute<{
-        rolsuper: boolean;
-        rolbypassrls: boolean;
-      }>(dbSql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`);
-      expect(rolePosture).toEqual({ rolsuper: false, rolbypassrls: false });
-
-      const cancelled = await applySessionTurnInterrupt(
-        appDbClient.db,
-        grant.workspaceId,
-        session.id,
-        interrupt!.id,
-      );
-      expect(cancelled.action).toBe("cancelled");
-      const sequenceAfterCancel = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-        .lastSequence;
-
-      const late = await applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "terminal-race-dispatch",
-        dispatchGeneration: 1,
-        reason: "context_compacted",
-        resumeWithNotice: true,
-        text: "resume only if the live turn still owns the session",
-      });
-      expect(late).toMatchObject({
-        action: "stale",
-        events: [],
-        turnStatus: "cancelled",
-        activeTurnId: null,
-      });
-      const settledSession = await getSession(dbClient.db, grant.workspaceId, session.id);
-      expect(settledSession?.lastSequence).toBe(sequenceAfterCancel);
-      expect(settledSession?.status).toBe("queued");
-      expect(settledSession?.activeTurnId).toBeNull();
-      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-        "cancelled",
-      );
-      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-      expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
-      expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
-      expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
-
-      const missing = await applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: crypto.randomUUID(),
-        triggerEventId: trigger!.id,
-        dispatchId: "missing-dispatch",
-        reason: "worker_shutdown",
-        resumeWithNotice: false,
-      });
-      expect(missing).toMatchObject({ action: "stale", events: [], turnStatus: null });
-      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
-        sequenceAfterCancel,
-      );
-    } finally {
-      await appDbClient.close();
-    }
-  });
-
-  test("concurrent interrupt and preempt commit exactly one coherent settlement", async () => {
-    const grant = await testGrant(dbClient.db);
-    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
-    const appDbClient = createDb(appRoleUrl);
-    try {
-      for (let attempt = 0; attempt < 12; attempt += 1) {
-        const session = await createSession(dbClient.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          initialMessage: `concurrent settlement ${attempt}`,
-          resources: [],
-          metadata: {},
-          model: "scripted-model",
-          sandboxBackend: "none",
-        });
-        const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-          { type: "user.message", payload: { text: `concurrent settlement ${attempt}` } },
-        ]);
-        const turn = await enqueueSessionTurn(dbClient.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          triggerEventId: trigger!.id,
-          temporalWorkflowId: `session-${session.id}`,
-          source: "user",
-          prompt: `concurrent settlement ${attempt}`,
-          resources: [],
-          tools: [],
-          model: "scripted-model",
-          reasoningEffort: "xhigh",
-          sandboxBackend: "none",
-          metadata: {},
-        });
-        await claimNextQueuedTurn(
-          dbClient.db,
-          grant.workspaceId,
-          session.id,
-          `session-${session.id}`,
-        );
-        const dispatchId = `concurrent-dispatch-${attempt}`;
-        expect(
-          (
-            await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-              sessionId: session.id,
-              turnId: turn.id,
-              triggerEventId: trigger!.id,
-              dispatchId,
-            })
-          ).action,
-        ).toBe("registered");
-        const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-          { type: "user.interrupt", payload: { reason: "steer" } },
-        ]);
-
-        const [control, preempt] = await Promise.all([
-          applySessionTurnInterrupt(appDbClient.db, grant.workspaceId, session.id, interrupt!.id),
-          applySessionTurnPreemption(appDbClient.db, grant.workspaceId, {
-            sessionId: session.id,
-            turnId: turn.id,
-            triggerEventId: trigger!.id,
-            dispatchId,
-            dispatchGeneration: 1,
-            reason: "context_compacted",
-            resumeWithNotice: true,
-            text: "concurrent resume",
-          }),
-        ]);
-        expect(control.action).toBe("cancelled");
-        expect(preempt.action).toBe("stale");
-        const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-        expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
-        expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
-        expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
-        expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-          "cancelled",
-        );
-        const finalSession = await getSession(dbClient.db, grant.workspaceId, session.id);
-        expect(finalSession?.status).toBe("queued");
-        expect(finalSession?.activeTurnId).toBeNull();
-      }
-    } finally {
-      await appDbClient.close();
-    }
-  });
-
-  test("a delayed interrupt event cannot cancel a newer attempt", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "stale interrupt",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [oldTrigger, staleInterrupt, currentTrigger] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      [
-        { type: "user.message", payload: { text: "old attempt" } },
-        { type: "user.interrupt", payload: { reason: "steer" } },
-        { type: "user.message", payload: { text: "current attempt" } },
-      ],
-    );
-    expect(oldTrigger).toBeDefined();
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: currentTrigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "stale interrupt",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-      .lastSequence;
-    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
-    const appDbClient = createDb(appRoleUrl);
-
-    try {
-      const stale = await applySessionTurnInterrupt(
-        appDbClient.db,
-        grant.workspaceId,
-        session.id,
-        staleInterrupt!.id,
-      );
-      expect(stale).toMatchObject({
-        action: "stale",
-        turnId: turn.id,
-        turnStatus: "running",
-        events: [],
-      });
-      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-        "running",
-      );
-      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
-        sequenceBefore,
-      );
-
-      const [currentInterrupt] = await appendSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        [{ type: "user.interrupt", payload: { reason: "steer" } }],
-      );
-      expect(
-        (
-          await applySessionTurnInterrupt(
-            appDbClient.db,
-            grant.workspaceId,
-            session.id,
-            currentInterrupt!.id,
-          )
-        ).action,
-      ).toBe("cancelled");
-    } finally {
-      await appDbClient.close();
-    }
-  });
-
-  test("a superseded dispatch cannot preempt, settle, or worker-death requeue its newer attempt", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "dispatch generation fence",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "dispatch generation fence" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "dispatch generation fence",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const first = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "dispatch-a",
-    });
-    expect(first).toEqual({ action: "registered", dispatchGeneration: 1 });
-    const requeued = await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "dispatch-a",
-      dispatchGeneration: 1,
-      reason: "context_compacted",
-      resumeWithNotice: true,
-      text: "resume generation two",
-    });
-    expect(requeued.action).toBe("requeued");
-    const resumeTrigger = requeued.events.find((event) => event.type === "turn.preempted")!;
-    expect(resumeTrigger).toBeDefined();
-
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const second = await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: resumeTrigger.id,
-      dispatchId: "dispatch-b",
-    });
-    expect(second).toEqual({ action: "registered", dispatchGeneration: 2 });
-    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-      .lastSequence;
-
-    expect(
-      await applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "dispatch-a",
-        dispatchGeneration: 1,
-        reason: "worker_shutdown",
-        resumeWithNotice: false,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-    expect(
-      await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "dispatch-a",
-        dispatchGeneration: 1,
-        turnStatus: "completed",
-        sessionStatus: "idle",
-        activeTurnId: null,
-        events: [
-          { type: "turn.completed", payload: { output: "stale" } },
-          { type: "session.status.changed", payload: { status: "idle" } },
-        ],
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "dispatch-a",
-        timeoutType: "HEARTBEAT",
-        resumeWithNotice: true,
-        text: "stale crash",
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("running");
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId).toBe(
-      turn.id,
-    );
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
-      sequenceBefore,
-    );
-
-    const completed = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: resumeTrigger.id,
-      dispatchId: "dispatch-b",
-      dispatchGeneration: 2,
-      turnStatus: "completed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [
-        { type: "turn.completed", payload: { output: "current" } },
-        { type: "session.status.changed", payload: { status: "idle" } },
-      ],
-    });
-    expect(completed.action).toBe("settled");
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-      "completed",
-    );
-  });
-
-  test("claim reconciles only missing/terminal active pointers and refuses a live pointer", async () => {
-    const grant = await testGrant(dbClient.db);
-    const makeSessionWithTurn = async (label: string) => {
-      const session = await createSession(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        initialMessage: label,
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-      });
-      const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "user.message", payload: { text: label } },
-      ]);
-      const turn = await enqueueSessionTurn(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        temporalWorkflowId: `session-${session.id}`,
-        source: "user",
-        prompt: label,
-        resources: [],
-        tools: [],
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        sandboxBackend: "none",
-        metadata: {},
-      });
-      return { session, turn, trigger: trigger! };
-    };
-
-    const missing = await makeSessionWithTurn("missing pointer");
-    await dbClient.db.execute(
-      dbSql`update sessions set status = 'running', active_turn_id = ${crypto.randomUUID()} where id = ${missing.session.id}`,
-    );
-    const reclaimedMissing = await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      missing.session.id,
-      `session-${missing.session.id}`,
-    );
-    expect(reclaimedMissing?.id).toBe(missing.turn.id);
-    expect(
-      (await getSession(dbClient.db, grant.workspaceId, missing.session.id))?.activeTurnId,
-    ).toBe(missing.turn.id);
-
-    const terminal = await makeSessionWithTurn("terminal pointer");
-    const terminalTurnId = await createTurn(dbClient.db, {
-      workspaceId: grant.workspaceId,
-      sessionId: terminal.session.id,
-      triggerEventId: terminal.trigger.id,
-      temporalWorkflowId: `session-${terminal.session.id}`,
-    });
-    await finishTurn(dbClient.db, grant.workspaceId, terminalTurnId, "idle");
-    await dbClient.db.execute(
-      dbSql`update sessions set status = 'running', active_turn_id = ${terminalTurnId} where id = ${terminal.session.id}`,
-    );
-    const reclaimedTerminal = await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      terminal.session.id,
-      `session-${terminal.session.id}`,
-    );
-    expect(reclaimedTerminal?.id).toBe(terminal.turn.id);
-
-    const live = await makeSessionWithTurn("live pointer");
-    const liveClaim = await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      live.session.id,
-      `session-${live.session.id}`,
-    );
-    expect(liveClaim?.id).toBe(live.turn.id);
-    const [queuedTrigger] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      live.session.id,
-      [{ type: "user.message", payload: { text: "behind live" } }],
-    );
-    const queuedBehindLive = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: live.session.id,
-      triggerEventId: queuedTrigger!.id,
-      temporalWorkflowId: `session-${live.session.id}`,
-      source: "user",
-      prompt: "behind live",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    expect(
-      await claimNextQueuedTurn(
-        dbClient.db,
-        grant.workspaceId,
-        live.session.id,
-        `session-${live.session.id}`,
-      ),
-    ).toBeNull();
-    expect((await getSession(dbClient.db, grant.workspaceId, live.session.id))?.activeTurnId).toBe(
-      liveClaim!.id,
-    );
-    expect(
-      (await getSessionTurn(dbClient.db, grant.workspaceId, queuedBehindLive.id))?.status,
-    ).toBe("queued");
-  });
-
-  test("heartbeat recovery requires registration; schedule-to-start cannot take over a newer attempt", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "timeout ownership",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "timeout ownership" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "timeout ownership",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "unregistered-heartbeat",
-        timeoutType: "HEARTBEAT",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "unregistered-schedule",
-        timeoutType: "SCHEDULE_TO_START",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "requeued", redispatches: 1 });
-
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "newer-registered-attempt",
-      }),
-    ).toMatchObject({ action: "registered", dispatchGeneration: 2 });
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "old-schedule-timeout",
-        timeoutType: "SCHEDULE_TO_START",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-
-    const [approval] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.approvalDecision", payload: { decision: "approve" } },
-    ]);
-    const approvalSettlement = await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "newer-registered-attempt",
-      dispatchGeneration: 2,
-      turnStatus: "requires_action",
-      sessionStatus: "requires_action",
-      activeTurnId: turn.id,
-      events: [],
-    });
-    expect(approvalSettlement.action).toBe("settled");
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: approval!.id,
-        dispatchId: "unregistered-approval-schedule",
-        timeoutType: "SCHEDULE_TO_START",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "requeued", redispatches: 2 });
-  });
-
-  test("malformed and exhausted dispatch generations fail closed without mutation", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "generation guard",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "generation guard" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "generation guard",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-      .lastSequence;
-
-    await dbClient.db.execute(
-      dbSql`update session_turns set metadata = ${JSON.stringify({ dispatchGeneration: "bad" })}::jsonb where id = ${turn.id}`,
-    );
-    await expect(
-      registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "malformed-generation",
-      }),
-    ).rejects.toThrow("Malformed turn dispatch metadata");
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
-      sequenceBefore,
-    );
-
-    await dbClient.db.execute(
-      dbSql`update session_turns set metadata = ${JSON.stringify({ dispatchGeneration: Number.MAX_SAFE_INTEGER })}::jsonb where id = ${turn.id}`,
-    );
-    await expect(
-      registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "overflow-generation",
-      }),
-    ).rejects.toThrow("generation exhausted");
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("running");
-
-    await dbClient.db.execute(
-      dbSql`update session_turns set metadata = ${JSON.stringify({
-        dispatchGeneration: 1,
-        dispatchAttempt: {
-          id: "worker-death-counter-owner",
-          generation: 1,
-          triggerEventId: trigger!.id,
-        },
-        workerDeathRedispatches: "bad",
-      })}::jsonb where id = ${turn.id}`,
-    );
-    const beforeMalformedCounter = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-      .lastSequence;
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "worker-death-counter-owner",
-        timeoutType: "HEARTBEAT",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastSequence).toBe(
-      beforeMalformedCounter,
-    );
-
-    await dbClient.db.execute(
-      dbSql`update session_turns set metadata = ${JSON.stringify({
-        dispatchGeneration: 1,
-        dispatchAttempt: {
-          id: "worker-death-counter-owner",
-          generation: 1,
-          triggerEventId: trigger!.id,
-        },
-        workerDeathRedispatches: Number.MAX_SAFE_INTEGER,
-      })}::jsonb where id = ${turn.id}`,
-    );
-    expect(
-      await applySessionTurnWorkerDeath(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "worker-death-counter-owner",
-        timeoutType: "HEARTBEAT",
-        resumeWithNotice: false,
-        maxRedispatches: 3,
-      }),
-    ).toMatchObject({ action: "stale", events: [], turnStatus: "running" });
-  });
-
-  test("interrupt goal pause, cancellation, pointer, and events commit or roll back together", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "atomic interrupt goal",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "stop safely",
-      createdBy: "api",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "atomic interrupt goal" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "atomic interrupt goal",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    const [interrupt] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.interrupt", payload: { reason: "stop" } },
-    ]);
-    const settled = await applySessionTurnInterrupt(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      interrupt!.id,
-    );
-    expect(settled.action).toBe("cancelled");
-    expect(settled.events.map((event) => event.type)).toEqual([
-      "turn.cancelled",
-      "goal.paused",
-      "session.status.changed",
-    ]);
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "paused",
-    );
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-      "cancelled",
-    );
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId).toBeNull();
-
-    const rollbackSession = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "atomic interrupt rollback",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: rollbackSession.id,
-      text: "rollback stop",
-      createdBy: "api",
-    });
-    const [rollbackTrigger] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      rollbackSession.id,
-      [{ type: "user.message", payload: { text: "atomic interrupt rollback" } }],
-    );
-    const rollbackTurn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: rollbackSession.id,
-      triggerEventId: rollbackTrigger!.id,
-      temporalWorkflowId: `session-${rollbackSession.id}`,
-      source: "user",
-      prompt: "atomic interrupt rollback",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(
-      dbClient.db,
-      grant.workspaceId,
-      rollbackSession.id,
-      `session-${rollbackSession.id}`,
-    );
-    const [rollbackInterrupt] = await appendSessionEvents(
-      dbClient.db,
-      grant.workspaceId,
-      rollbackSession.id,
-      [{ type: "user.interrupt", payload: {} }],
-    );
-    const suffix = crypto.randomUUID().replaceAll("-", "");
-    const triggerName = `ope22_goal_pause_fail_${suffix}`;
-    const functionName = `ope22_goal_pause_fail_fn_${suffix}`;
-    await applyRawSql(
-      services.databaseUrl,
-      `create function ${functionName}() returns trigger language plpgsql as $$ begin if new.session_id = '${rollbackSession.id}'::uuid then raise exception 'ope22 goal pause failure'; end if; return new; end $$; create trigger ${triggerName} before update on session_goals for each row execute function ${functionName}();`,
-    );
-    try {
-      await expect(
-        applySessionTurnInterrupt(
-          dbClient.db,
-          grant.workspaceId,
-          rollbackSession.id,
-          rollbackInterrupt!.id,
-        ),
-      ).rejects.toThrow("Failed query");
-      expect(
-        (await getSessionGoal(dbClient.db, grant.workspaceId, rollbackSession.id))?.status,
-      ).toBe("active");
-      expect((await getSessionTurn(dbClient.db, grant.workspaceId, rollbackTurn.id))?.status).toBe(
-        "running",
-      );
-      expect(
-        (await getSession(dbClient.db, grant.workspaceId, rollbackSession.id))?.activeTurnId,
-      ).toBe(rollbackTurn.id);
-      const rollbackEvents = await listSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        rollbackSession.id,
-        0,
-        100,
-      );
-      expect(rollbackEvents.filter((event) => event.type === "turn.cancelled")).toHaveLength(0);
-      expect(rollbackEvents.filter((event) => event.type === "goal.paused")).toHaveLength(0);
-    } finally {
-      await applyRawSql(
-        services.databaseUrl,
-        `drop trigger ${triggerName} on session_goals; drop function ${functionName}();`,
-      );
-    }
-  });
-
-  test("claim and preemption share one lock order without deadlock or dual active turns", async () => {
-    const grant = await testGrant(dbClient.db);
-    for (let attempt = 0; attempt < 16; attempt += 1) {
-      const session = await createSession(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        initialMessage: `lock order ${attempt}`,
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        sandboxBackend: "none",
-      });
-      const [firstTrigger, secondTrigger] = await appendSessionEvents(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        [
-          { type: "user.message", payload: { text: `active ${attempt}` } },
-          { type: "user.message", payload: { text: `queued ${attempt}` } },
-        ],
-      );
-      const enqueue = (triggerEventId: string, prompt: string) =>
-        enqueueSessionTurn(dbClient.db, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          sessionId: session.id,
-          triggerEventId,
-          temporalWorkflowId: `session-${session.id}`,
-          source: "user",
-          prompt,
-          resources: [],
-          tools: [],
-          model: "scripted-model",
-          reasoningEffort: "xhigh",
-          sandboxBackend: "none",
-          metadata: {},
-        });
-      const active = await enqueue(firstTrigger!.id, "active");
-      const queued = await enqueue(secondTrigger!.id, "queued");
-      await claimNextQueuedTurn(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        `session-${session.id}`,
-      );
-      expect(
-        (
-          await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-            sessionId: session.id,
-            turnId: active.id,
-            triggerEventId: firstTrigger!.id,
-            dispatchId: `lock-dispatch-${attempt}`,
-          })
-        ).action,
-      ).toBe("registered");
-
-      const [preempt, concurrentClaim] = await Promise.all([
-        applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-          sessionId: session.id,
-          turnId: active.id,
-          triggerEventId: firstTrigger!.id,
-          dispatchId: `lock-dispatch-${attempt}`,
-          dispatchGeneration: 1,
-          reason: "worker_shutdown",
-          resumeWithNotice: false,
-        }),
-        claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`),
-      ]);
-      expect(preempt.action).toBe("requeued");
-      const turns = await Promise.all([
-        getSessionTurn(dbClient.db, grant.workspaceId, active.id),
-        getSessionTurn(dbClient.db, grant.workspaceId, queued.id),
-      ]);
-      expect(turns.filter((turn) => turn?.status === "running")).toHaveLength(
-        concurrentClaim ? 1 : 0,
-      );
-      const finalSession = await getSession(dbClient.db, grant.workspaceId, session.id);
-      expect(finalSession?.activeTurnId).toBe(concurrentClaim?.id ?? null);
-    }
-  });
-
-  test("session-only failure and idle settlement cannot overwrite newly queued work", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "settlement queue race",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "new work wins" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "new work wins",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    const before = await getSession(dbClient.db, grant.workspaceId, session.id);
-
-    expect(
-      await applySessionOnlySettlement(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        status: "failed",
-        events: [
-          { type: "turn.failed", payload: { error: "obsolete workflow failure" } },
-          { type: "session.status.changed", payload: { status: "failed" } },
-        ],
-      }),
-    ).toEqual({ action: "stale", events: [] });
-    expect(
-      await settleSessionIdleWithParentOutbox(dbClient.db, grant.workspaceId, session.id),
-    ).toEqual({ action: "stale", episodeKey: null, events: [] });
-
-    const preserved = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(preserved?.status).toBe("queued");
-    expect(preserved?.activeTurnId).toBeNull();
-    expect(preserved?.lastSequence).toBe(before?.lastSequence);
-    expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe("queued");
-
-    const emptySession = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "legitimate idle boundary",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const idle = await settleSessionIdleWithParentOutbox(
-      dbClient.db,
-      grant.workspaceId,
-      emptySession.id,
-    );
-    expect(idle.action).toBe("settled");
-    if (idle.action === "settled") {
-      expect(idle.changed).toBe(true);
-      expect(idle.events.map((event) => event.type)).toEqual(["session.status.changed"]);
-      expect(idle.episodeKey).toBe(String(idle.events[0]!.sequence));
-    }
-    expect((await getSession(dbClient.db, grant.workspaceId, emptySession.id))?.status).toBe("idle");
-  });
-
-  test("preemption rolls back event, turn, and pointer together at injected transaction failures", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "atomic rollback",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "atomic rollback" } },
-    ]);
-    const turn = await enqueueSessionTurn(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: `session-${session.id}`,
-      source: "user",
-      prompt: "atomic rollback",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "xhigh",
-      sandboxBackend: "none",
-      metadata: {},
-    });
-    await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, `session-${session.id}`);
-    await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-      sessionId: session.id,
-      turnId: turn.id,
-      triggerEventId: trigger!.id,
-      dispatchId: "rollback-dispatch",
-    });
-    const sequenceBefore = (await getSession(dbClient.db, grant.workspaceId, session.id))!
-      .lastSequence;
-    const suffix = crypto.randomUUID().replaceAll("-", "");
-    const turnFunction = `ope22_turn_fail_${suffix}`;
-    const turnTrigger = `ope22_turn_trigger_${suffix}`;
-    const sessionFunction = `ope22_session_fail_${suffix}`;
-    const sessionTrigger = `ope22_session_trigger_${suffix}`;
-    const preempt = () =>
-      applySessionTurnPreemption(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn.id,
-        triggerEventId: trigger!.id,
-        dispatchId: "rollback-dispatch",
-        dispatchGeneration: 1,
-        reason: "context_compacted",
-        resumeWithNotice: true,
-        text: "rollback resume",
-      });
-    const assertUnchanged = async () => {
-      expect((await getSessionTurn(dbClient.db, grant.workspaceId, turn.id))?.status).toBe(
-        "running",
-      );
-      const currentSession = await getSession(dbClient.db, grant.workspaceId, session.id);
-      expect(currentSession?.status).toBe("running");
-      expect(currentSession?.activeTurnId).toBe(turn.id);
-      expect(currentSession?.lastSequence).toBe(sequenceBefore);
-      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-      expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(0);
-    };
-
-    try {
-      await applyRawSql(
-        services.databaseUrl,
-        `
-          create function ${turnFunction}() returns trigger language plpgsql as $$
-          begin
-            if new.id = '${turn.id}'::uuid and new.status = 'queued' then
-              raise exception 'ope22 injected turn failure';
-            end if;
-            return new;
-          end $$;
-          create trigger ${turnTrigger} before update on session_turns
-          for each row execute function ${turnFunction}();
-        `,
-      );
-      await expect(preempt()).rejects.toThrow("Failed query");
-      await assertUnchanged();
-      await applyRawSql(
-        services.databaseUrl,
-        `drop trigger ${turnTrigger} on session_turns; drop function ${turnFunction}();`,
-      );
-
-      await applyRawSql(
-        services.databaseUrl,
-        `
-          create function ${sessionFunction}() returns trigger language plpgsql as $$
-          begin
-            if new.id = '${session.id}'::uuid and new.status = 'queued' then
-              raise exception 'ope22 injected session failure';
-            end if;
-            return new;
-          end $$;
-          create trigger ${sessionTrigger} before update on sessions
-          for each row execute function ${sessionFunction}();
-        `,
-      );
-      await expect(preempt()).rejects.toThrow("Failed query");
-      await assertUnchanged();
-      await applyRawSql(
-        services.databaseUrl,
-        `drop trigger ${sessionTrigger} on sessions; drop function ${sessionFunction}();`,
-      );
-
-      expect((await preempt()).action).toBe("requeued");
-    } finally {
-      await applyRawSql(
-        services.databaseUrl,
-        `
-          drop trigger if exists ${turnTrigger} on session_turns;
-          drop function if exists ${turnFunction}();
-          drop trigger if exists ${sessionTrigger} on sessions;
-          drop function if exists ${sessionFunction}();
-        `,
-      );
-    }
-  });
-
   test("persists scheduled tasks and run history", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createScheduledTask(dbClient.db, {
@@ -1843,26 +494,6 @@ describe("DB integration", () => {
       sandboxBackend: "none",
     });
     const guards = { defaultMaxAutoContinuations: 5, noProgressLimit: 2 };
-    const enqueueGoalTurn = async () => {
-      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "goal.continuation", payload: { text: "continue" } },
-      ]);
-      return await enqueueSessionTurn(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: goalTrigger!.id,
-        temporalWorkflowId: "wf-goal-db",
-        source: "goal",
-        prompt: "continue",
-        resources: [],
-        tools: [],
-        model: "scripted-model",
-        reasoningEffort: "low",
-        sandboxBackend: "none",
-        metadata: {},
-      });
-    };
 
     // No goal yet.
     expect(
@@ -1882,23 +513,17 @@ describe("DB integration", () => {
     });
 
     // Queued work always wins.
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "go" } },
-    ]);
-    const queuedUserTurn = await enqueueSessionTurn(dbClient.db, {
+    const queuedUser = await enqueueSessionMessageAtomically(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: "wf-goal-db",
-      source: "user",
-      prompt: "go",
+      actor: grant.subjectId,
+      origin: "human",
+      text: "go",
       resources: [],
       tools: [],
-      model: "scripted-model",
-      reasoningEffort: "low",
-      sandboxBackend: "none",
-      metadata: {},
+      delivery: "queue",
+      reasoningEffortFallback: "low",
     });
     expect(
       (
@@ -1911,7 +536,9 @@ describe("DB integration", () => {
     ).toBe("queue");
 
     // A non-terminal requires_action turn (pending approval) blocks continuation.
-    await finishTurn(dbClient.db, grant.workspaceId, queuedUserTurn.id, "requires_action");
+    const queuedUserTurn = await claimRegisteredExecution(dbClient.db, grant, session.id);
+    expect(queuedUserTurn.turn.id).toBe(queuedUser.turn.id);
+    await settleRegisteredExecution(dbClient.db, grant, queuedUserTurn, "requires_action");
     expect(
       (
         await evaluateGoalContinuation(dbClient.db, {
@@ -1921,7 +548,20 @@ describe("DB integration", () => {
         })
       ).decision,
     ).toBe("none");
-    await finishTurn(dbClient.db, grant.workspaceId, queuedUserTurn.id, "completed");
+    const [approval] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      {
+        type: "user.approvalDecision",
+        turnId: queuedUserTurn.turn.id,
+        payload: { approvalId: "goal-test", decision: "approve" },
+      },
+    ]);
+    const resumedUserTurn = await registerTurnAttempt(
+      dbClient.db,
+      grant,
+      queuedUserTurn.turn,
+      approval!.id,
+    );
+    await settleRegisteredExecution(dbClient.db, grant, resumedUserTurn, "completed");
 
     // First continuation.
     const first = await evaluateGoalContinuation(dbClient.db, {
@@ -1934,14 +574,8 @@ describe("DB integration", () => {
     // A continuation turn that finishes without tool calls or a goal revision
     // increments the no-progress streak; noProgressLimit 2 pauses the goal.
     for (let round = 1; round <= 2; round += 1) {
-      const continuationTurn = await enqueueGoalTurn();
-      await setSessionGoalLastContinuationTurn(
-        dbClient.db,
-        grant.workspaceId,
-        session.id,
-        continuationTurn.id,
-      );
-      await finishTurn(dbClient.db, grant.workspaceId, continuationTurn.id, "completed");
+      const continuationTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+      await settleRegisteredExecution(dbClient.db, grant, continuationTurn, "completed");
       const next = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -1973,17 +607,10 @@ describe("DB integration", () => {
     });
     expect(capped).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
     // Mark progress in that continuation so the cap (not no-progress) triggers.
-    const capTurn = await enqueueGoalTurn();
-    await setSessionGoalLastContinuationTurn(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      capTurn.id,
-    );
-    await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "agent.toolCall.created", turnId: capTurn.id, payload: {} },
+    const capTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+    await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed", [
+      { type: "agent.toolCall.created", payload: {} },
     ]);
-    await finishTurn(dbClient.db, grant.workspaceId, capTurn.id, "completed");
     const atCap = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -2004,26 +631,6 @@ describe("DB integration", () => {
       sandboxBackend: "none",
     });
     const guards = { defaultMaxAutoContinuations: 10, noProgressLimit: 2 };
-    const enqueueGoalTurn = async () => {
-      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "goal.continuation", payload: { text: "continue" } },
-      ]);
-      return await enqueueSessionTurn(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: goalTrigger!.id,
-        temporalWorkflowId: "wf-goal-backpressure",
-        source: "goal",
-        prompt: "continue",
-        resources: [],
-        tools: [],
-        model: "scripted-model",
-        reasoningEffort: "low",
-        sandboxBackend: "none",
-        metadata: {},
-      });
-    };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -2042,12 +649,10 @@ describe("DB integration", () => {
     // noProgressLimit 2, but backpressure failures must not advance the
     // streak: the goal keeps continuing instead of pausing as no_progress.
     for (let round = 1; round <= 3; round += 1) {
-      const turn = await enqueueGoalTurn();
-      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
-      await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+      await settleRegisteredExecution(dbClient.db, grant, turn, "failed", [
         {
           type: "turn.failed",
-          turnId: turn.id,
           payload: {
             code: "provider_rate_limited",
             retryable: true,
@@ -2056,7 +661,6 @@ describe("DB integration", () => {
           },
         },
       ]);
-      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "failed");
       const next = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -2067,9 +671,8 @@ describe("DB integration", () => {
 
     // Ordinary empty continuations still count: two of them pause the goal.
     for (let round = 1; round <= 2; round += 1) {
-      const turn = await enqueueGoalTurn();
-      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
-      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "completed");
+      const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+      await settleRegisteredExecution(dbClient.db, grant, turn, "completed");
       const next = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -2096,26 +699,6 @@ describe("DB integration", () => {
     });
     // No deployment default: length is governed by progress/budget guards only.
     const guards = { defaultMaxAutoContinuations: null, noProgressLimit: 2 };
-    const enqueueGoalTurn = async () => {
-      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "goal.continuation", payload: { text: "continue" } },
-      ]);
-      return await enqueueSessionTurn(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: goalTrigger!.id,
-        temporalWorkflowId: "wf-goal-uncapped",
-        source: "goal",
-        prompt: "continue",
-        resources: [],
-        tools: [],
-        model: "scripted-model",
-        reasoningEffort: "low",
-        sandboxBackend: "none",
-        metadata: {},
-      });
-    };
     await createSessionGoal(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -2132,12 +715,10 @@ describe("DB integration", () => {
     });
     expect(decision).toMatchObject({ decision: "continue", autoContinuation: 1, cap: null });
     for (let round = 2; round <= 25; round += 1) {
-      const turn = await enqueueGoalTurn();
-      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
-      await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "agent.toolCall.created", turnId: turn.id, payload: {} },
+      const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+      await settleRegisteredExecution(dbClient.db, grant, turn, "completed", [
+        { type: "agent.toolCall.created", payload: {} },
       ]);
-      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "completed");
       decision = await evaluateGoalContinuation(dbClient.db, {
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -2160,17 +741,10 @@ describe("DB integration", () => {
       ...guards,
     });
     expect(bounded).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
-    const boundedTurn = await enqueueGoalTurn();
-    await setSessionGoalLastContinuationTurn(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      boundedTurn.id,
-    );
-    await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "agent.toolCall.created", turnId: boundedTurn.id, payload: {} },
+    const boundedTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
+    await settleRegisteredExecution(dbClient.db, grant, boundedTurn, "completed", [
+      { type: "agent.toolCall.created", payload: {} },
     ]);
-    await finishTurn(dbClient.db, grant.workspaceId, boundedTurn.id, "completed");
     const atCap = await evaluateGoalContinuation(dbClient.db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -3546,307 +2120,6 @@ describe("DB integration", () => {
     ).toBe(false);
   });
 
-  test("applyContextCompaction supersedes the prefix, inserts one active summary, and keeps the audit trail", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "compaction",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    // 6 items: two old turns [0..3] and a recent turn [4..5]. Boundary at the
-    // recent user message (position 4); summary goes at the freed position 3.
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a1" }],
-          },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "old turn 2" } },
-        {
-          position: 3,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a2" }],
-          },
-        },
-        { position: 4, item: { type: "message", role: "user", content: "recent turn" } },
-        {
-          position: 5,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a3" }],
-          },
-        },
-      ],
-    });
-    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 244_800);
-
-    await applyContextCompaction(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      boundaryPosition: 4,
-      // Fractional: a half-step before the kept tail. Collides with NO real row,
-      // so the real prefix row at position 3 is never overwritten.
-      summaryPosition: 3.5,
-      summaryItem: {
-        type: "message",
-        role: "user",
-        content: "[CONTEXT CHECKPOINT] SUMMARY:folded",
-        opengeni_context_summary: true,
-      },
-      replacementInputTokens: 12_345,
-    });
-
-    // Active read = [summary @3.5, recent user @4, assistant @5].
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.map((row) => row.position)).toEqual([3.5, 4, 5]);
-    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
-    expect(active[1]!.item).toMatchObject({ role: "user", content: "recent turn" });
-
-    // Audit trail preserved: every original prefix row STILL EXISTS — including
-    // position 3, the row the old (boundaryPosition - 1) placement overwrote.
-    // The summary is an ADDITIONAL row, so total count grew by exactly one.
-    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 3.5, 4, 5]);
-    expect(await countSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toBe(7);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(
-      12_345,
-    );
-
-    // The exact audit-loss regression: the original assistant 'a2' at position 3
-    // must still be retrievable verbatim after compaction (the bug overwrote it
-    // with the summary). Assert the real item survives untouched.
-    const positionThree = all.find((row) => row.position === 3);
-    expect(positionThree).toBeDefined();
-    expect(positionThree!.item).toMatchObject({
-      role: "assistant",
-      content: [{ type: "output_text", text: "a2" }],
-    });
-    expect(
-      (positionThree!.item as Record<string, unknown>).opengeni_context_summary,
-    ).toBeUndefined();
-  });
-
-  test("applyContextCompaction is idempotent on a retry (same summary position)", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "compaction-retry",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "old" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "a1" }],
-          },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "recent" } },
-      ],
-    });
-    const apply = () =>
-      applyContextCompaction(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        boundaryPosition: 2,
-        summaryPosition: 1.5,
-        summaryItem: {
-          type: "message",
-          role: "user",
-          content: "SUMMARY:s",
-          opengeni_context_summary: true,
-        },
-      });
-    await apply();
-    await apply(); // retry must not duplicate, throw, or overwrite the real row
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.map((row) => row.position)).toEqual([1.5, 2]);
-    // The retry-idempotent insert (onConflictDoNothing) must not have touched the
-    // real superseded row at position 1: it survives verbatim, exactly once.
-    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    const positionOne = all.filter((row) => row.position === 1);
-    expect(positionOne).toHaveLength(1);
-    expect(positionOne[0]!.item).toMatchObject({
-      role: "assistant",
-      content: [{ type: "output_text", text: "a1" }],
-    });
-    // Exactly one summary row total (no duplicate from the retry).
-    expect(
-      all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true),
-    ).toHaveLength(1);
-  });
-
-  test("setSessionLastInputTokens persists the pre-turn compaction signal", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "tokens",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    expect(
-      (await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens,
-    ).toBeNull();
-    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 654_321);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(
-      654_321,
-    );
-  });
-
-  test("clearSessionContext supersedes all live history, keeps the audit trail, and defeats the RunState fallback", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "clear",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "secret one" } },
-        {
-          position: 1,
-          item: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "secret two" }],
-          },
-        },
-        { position: 2, item: { type: "message", role: "user", content: "secret three" } },
-      ],
-    });
-    // A stale RunState blob carrying the old conversation — the resurrection
-    // vector clear must neutralize (run-input.ts falls back to this when the
-    // active items read is empty).
-    await saveRunState(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      serializedRunState: JSON.stringify({ history: ["secret one", "secret two"] }),
-      pendingApprovals: [],
-    });
-    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 50_000);
-
-    const result = await clearSessionContext(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-    });
-    expect(result.supersededItems).toBe(3);
-    expect(result.markerPosition).toBe(3);
-
-    // (a)+(b): the active read returns ONLY the neutral marker (length 1, not
-    // 0) so messageInput stays on the items route, away from the RunState blob.
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active).toHaveLength(1);
-    expect(active[0]!.item).toMatchObject({ role: "user", content: "[context cleared]" });
-
-    // Audit trail preserved: the three superseded rows still exist.
-    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3]);
-
-    // (c): the latest run state now reflects the clear (no old conversation).
-    const latest = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
-    expect(latest!.serializedRunState).not.toContain("secret");
-    expect(latest!.pendingApprovals).toEqual([]);
-
-    // last_input_tokens reset so the next turn's trigger starts fresh.
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(0);
-  });
-
-  test("clearSessionContext is idempotent — a re-run keeps exactly one active marker", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "clear-twice",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [{ position: 0, item: { type: "message", role: "user", content: "x" } }],
-    });
-    await clearSessionContext(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-    });
-    await clearSessionContext(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-    });
-    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active).toHaveLength(1);
-    expect(active[0]!.item).toMatchObject({ content: "[context cleared]" });
-  });
-
-  test("compaction request flag: request sets it, consume reports + clears it exactly once", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createSession(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      initialMessage: "compact-flag",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    // No request yet: consume is a no-op false.
-    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(
-      false,
-    );
-    await requestSessionCompaction(dbClient.db, grant.workspaceId, session.id);
-    // First consumer wins; a second consumer sees it already cleared.
-    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(
-      true,
-    );
-    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(
-      false,
-    );
-  });
-
   test("migration 0014 repair strips a legacy orphaned function_call_result, audits it, and spares valid pairs + dangling calls", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -3871,64 +2144,54 @@ describe("DB integration", () => {
     });
     // Legacy corruption: an orphaned function_call_result (no preceding call), a
     // valid call+result pair, and a trailing dangling call (valid mid-turn).
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      items: [
-        { position: 0, item: { type: "message", role: "user", content: "go" } },
-        {
-          position: 1,
-          item: {
-            type: "function_call_result",
-            callId: "orphan_x",
-            output: { type: "text", text: "leaked" },
-          },
+    await insertHistoryMigrationFixture(dbClient.db, grant, session.id, [
+      { position: 0, item: { type: "message", role: "user", content: "go" } },
+      {
+        position: 1,
+        item: {
+          type: "function_call_result",
+          callId: "orphan_x",
+          output: { type: "text", text: "leaked" },
         },
-        {
-          position: 2,
-          item: { type: "function_call", callId: "paired", name: "tool", arguments: "{}" },
+      },
+      {
+        position: 2,
+        item: { type: "function_call", callId: "paired", name: "tool", arguments: "{}" },
+      },
+      {
+        position: 3,
+        item: {
+          type: "function_call_result",
+          callId: "paired",
+          output: { type: "text", text: "ok" },
         },
-        {
-          position: 3,
-          item: {
-            type: "function_call_result",
-            callId: "paired",
-            output: { type: "text", text: "ok" },
-          },
-        },
-        // snake_case orphan: a result whose call_id has no earlier call.
-        {
-          position: 4,
-          item: { type: "shell_call_output", call_id: "orphan_snake", output: "leaked2" },
-        },
-        {
-          position: 5,
-          item: { type: "function_call", callId: "dangling", name: "tool", arguments: "{}" },
-        },
-      ],
-    });
+      },
+      // snake_case orphan: a result whose call_id has no earlier call.
+      {
+        position: 4,
+        item: { type: "shell_call_output", call_id: "orphan_snake", output: "leaked2" },
+      },
+      {
+        position: 5,
+        item: { type: "function_call", callId: "dangling", name: "tool", arguments: "{}" },
+      },
+    ]);
     // The other session holds a call with the SAME id as this session's orphan,
     // to prove cross-session call presence does NOT spare an orphan (scoping).
-    await appendSessionHistoryItems(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: otherSession.id,
-      items: [
-        {
-          position: 0,
-          item: { type: "function_call", callId: "orphan_x", name: "tool", arguments: "{}" },
+    await insertHistoryMigrationFixture(dbClient.db, grant, otherSession.id, [
+      {
+        position: 0,
+        item: { type: "function_call", callId: "orphan_x", name: "tool", arguments: "{}" },
+      },
+      {
+        position: 1,
+        item: {
+          type: "function_call_result",
+          callId: "orphan_x",
+          output: { type: "text", text: "ok" },
         },
-        {
-          position: 1,
-          item: {
-            type: "function_call_result",
-            callId: "orphan_x",
-            output: { type: "text", text: "ok" },
-          },
-        },
-      ],
-    });
+      },
+    ]);
 
     // Run the ACTUAL shipped migration SQL against the live DB. CREATE TABLE IF
     // NOT EXISTS and the GRANT block make re-running it (already applied in
@@ -3993,6 +2256,136 @@ describe("DB integration", () => {
     expect(auditedCallIds.sort()).toEqual(["orphan_snake", "orphan_x"]);
   });
 });
+
+type RegisteredExecution = {
+  turn: NonNullable<Awaited<ReturnType<typeof claimNextSessionExecution>>>;
+  triggerEventId: string;
+  attemptId: string;
+};
+
+async function registerTurnAttempt(
+  db: ReturnType<typeof createDb>["db"],
+  grant: AccessGrant,
+  turn: RegisteredExecution["turn"],
+  triggerEventId = turn.triggerEventId,
+): Promise<RegisteredExecution> {
+  const attemptId = crypto.randomUUID();
+  const registered = await registerSessionTurnDispatch(db, grant.workspaceId, {
+    sessionId: turn.sessionId,
+    turnId: turn.id,
+    triggerEventId,
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+  });
+  if (registered.action !== "registered") {
+    throw new Error(`goal fixture could not register turn ${turn.id}`);
+  }
+  return { turn, triggerEventId, attemptId };
+}
+
+async function claimRegisteredExecution(
+  db: ReturnType<typeof createDb>["db"],
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<RegisteredExecution> {
+  const turn = await claimNextSessionExecution(
+    db,
+    grant.workspaceId,
+    sessionId,
+    `session-${sessionId}`,
+  );
+  if (!turn) throw new Error(`goal fixture could not claim work for ${sessionId}`);
+  return await registerTurnAttempt(db, grant, turn);
+}
+
+async function claimGoalContinuationExecution(
+  db: ReturnType<typeof createDb>["db"],
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<RegisteredExecution> {
+  const goal = await getSessionGoal(db, grant.workspaceId, sessionId);
+  if (!goal || goal.status !== "active") {
+    throw new Error(`goal fixture has no active goal for ${sessionId}`);
+  }
+  const prompt = `Continue goal ${goal.id}`;
+  const update = await addSessionSystemUpdate(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    kind: "lifecycle_event",
+    classification: "info",
+    sourceId: goal.id,
+    dedupeKey: `goal-test:${goal.id}:${crypto.randomUUID()}`,
+    summary: prompt,
+    payload: {
+      type: "goal_continuation",
+      goalId: goal.id,
+      goalVersion: goal.version,
+      prompt,
+      policy: {
+        model: "scripted-model",
+        reasoningEffort: "low",
+        tools: [],
+        sandboxBackend: "none",
+      },
+    },
+    lineage: { goalId: goal.id },
+  });
+  if (update.reason === "session_cancelled") {
+    throw new Error(`goal fixture session was cancelled: ${sessionId}`);
+  }
+  const execution = await claimRegisteredExecution(db, grant, sessionId);
+  if (execution.turn.source !== "goal") {
+    throw new Error(`goal update became unexpected ${execution.turn.source} execution`);
+  }
+  return execution;
+}
+
+async function settleRegisteredExecution(
+  db: ReturnType<typeof createDb>["db"],
+  grant: AccessGrant,
+  execution: RegisteredExecution,
+  turnStatus: "completed" | "failed" | "requires_action",
+  events: Parameters<typeof applySessionTurnSettlement>[2]["events"] = [],
+): Promise<void> {
+  const requiresAction = turnStatus === "requires_action";
+  const settled = await applySessionTurnSettlement(db, grant.workspaceId, {
+    sessionId: execution.turn.sessionId,
+    turnId: execution.turn.id,
+    triggerEventId: execution.triggerEventId,
+    attemptId: execution.attemptId,
+    turnStatus,
+    sessionStatus: requiresAction ? "requires_action" : "idle",
+    activeTurnId: requiresAction ? execution.turn.id : null,
+    events,
+  });
+  if (settled.action !== "settled") {
+    throw new Error(`goal fixture could not settle turn ${execution.turn.id}`);
+  }
+}
+
+async function insertHistoryMigrationFixture(
+  db: ReturnType<typeof createDb>["db"],
+  grant: AccessGrant,
+  sessionId: string,
+  items: Array<{ position: number; item: Record<string, unknown> }>,
+): Promise<void> {
+  await withRlsContext(
+    db,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.insert(dbSchema.sessionHistoryItems).values(
+        items.map(({ position, item }) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          position,
+          item,
+        })),
+      );
+    },
+  );
+}
 
 const newCapabilityTables = [
   "pack_installations",

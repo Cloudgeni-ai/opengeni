@@ -16,7 +16,6 @@ import { join } from "node:path";
 // OPENGENI_TYPECHECK_CONCURRENCY (defaults to ~half the available cores, min 2,
 // max 8). Keep this list in sync with the per-package `typecheck` scripts.
 const projects = [
-  "scripts/operator",
   "packages/contracts",
   "packages/agent-proto",
   "packages/codex",

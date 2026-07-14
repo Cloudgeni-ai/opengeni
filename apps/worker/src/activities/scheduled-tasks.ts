@@ -4,7 +4,6 @@ import {
   createScheduledTaskRun,
   createSession,
   createSessionGoal,
-  enqueueSessionTurn,
   getBillingBalance,
   getRig,
   getVariableSet,
@@ -17,10 +16,9 @@ import {
   settleScheduledTaskRunInTransaction,
   sumUsageQuantity,
   updateScheduledTask,
-  updateScheduledTaskRun,
   upsertSessionGoal,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
@@ -65,7 +63,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         taskId: task.id,
         triggerType: input.triggerType,
         producerKey:
-          input.producerKey ?? input.agentRunUsageIdempotencyKey ?? `legacy:${crypto.randomUUID()}`,
+          input.producerKey ??
+          input.agentRunUsageIdempotencyKey ??
+          `scheduled:${crypto.randomUUID()}`,
         scheduledAt: null,
       });
       await recordUsageEvent(db, {
@@ -168,7 +168,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               reusableSessionId: session.id,
             });
           }
-          const events = await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
+          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
             {
               type: "session.created",
               payload: {
@@ -196,8 +196,19 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                   },
                 ]
               : []),
+            { type: "session.status.changed", payload: { status: "queued" } },
+          ]);
+          const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
+            db,
             {
-              type: "user.message",
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              sessionId: session.id,
+              kind: "scheduled_wake",
+              classification: "info",
+              sourceId: run.id,
+              dedupeKey: `scheduled-wake:${run.id}`,
+              summary: task.agentConfig.prompt,
               payload: scheduledUserMessagePayload(
                 task.agentConfig.prompt,
                 task.agentConfig.resources,
@@ -205,49 +216,36 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 task.id,
                 run.id,
               ),
+              lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
             },
-            { type: "session.status.changed", payload: { status: "queued" } },
-          ]);
-          const trigger = events.find((event) => event.type === "user.message");
-          if (!trigger) {
-            throw new Error("failed to append scheduled task trigger event");
+            async (tx, wakeEventId) => {
+              if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
+              await settleScheduledTaskRunInTransaction(tx, {
+                workspaceId: task.workspaceId,
+                runId: run.id,
+                sessionId: session.id,
+                triggerEventId: wakeEventId,
+                status: "dispatched",
+              });
+            },
+          );
+          if (scheduledUpdate.reason === "session_cancelled") {
+            throw new Error("new scheduled session was cancelled during dispatch");
           }
-          const turn = await enqueueSessionTurn(db, {
-            accountId: task.accountId,
-            workspaceId: task.workspaceId,
-            sessionId: session.id,
-            triggerEventId: trigger.id,
-            temporalWorkflowId: workflowId,
-            source: "scheduled_task",
-            prompt: task.agentConfig.prompt,
-            resources: task.agentConfig.resources,
-            tools: taskTools,
-            model,
-            reasoningEffort,
-            sandboxBackend,
-            metadata: {
-              scheduledTaskId: task.id,
-              scheduledTaskRunId: run.id,
-            },
-          });
-          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
-            {
-              type: "turn.queued",
-              turnId: turn.id,
-              payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
-            },
-          ]);
-          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-            status: "dispatched",
-            sessionId: session.id,
-            triggerEventId: trigger.id,
-          });
+          if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
+            await publishDurableSessionEvents(
+              bus,
+              task.workspaceId,
+              session.id,
+              scheduledUpdate.events,
+            );
+          }
           result = {
             action: "start",
             accountId: task.accountId,
             workspaceId: task.workspaceId,
             sessionId: session.id,
-            triggerEventId: trigger.id,
+            triggerEventId: scheduledUpdate.wakeEventId,
             workflowId,
           };
         } else {
@@ -305,7 +303,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 };
               },
             );
-            await bus.publish(task.workspaceId, session.id, goalEvents);
+            await publishDurableSessionEvents(bus, task.workspaceId, session.id, goalEvents);
           }
           const bundled = await addSessionSystemUpdateWithSourceMutation(
             db,
@@ -314,21 +312,6 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               workspaceId: task.workspaceId,
               sessionId: session.id,
               kind: "scheduled_wake",
-              groupingKey: `scheduled:${task.id}:${JSON.stringify({
-                prompt: task.agentConfig.prompt,
-                resources: task.agentConfig.resources,
-                tools: taskTools,
-                model,
-                reasoningEffort,
-                sandboxBackend,
-                goal: task.agentConfig.goal ?? null,
-              })}`,
-              executionPolicy: {
-                prompt: task.agentConfig.prompt,
-                model,
-                reasoningEffort,
-                sandboxBackend,
-              },
               classification: "info",
               sourceId: run.id,
               dedupeKey: `scheduled-wake:${run.id}`,
@@ -341,15 +324,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 run.id,
               ),
               lineage: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
-              resources: task.agentConfig.resources,
-              tools: taskTools,
-              reasoningEffortFallback: settings.openaiReasoningEffort,
             },
-            async (tx) => {
+            async (tx, wakeEventId) => {
+              if (!wakeEventId) throw new Error("Scheduled delivery has no wake event");
               await settleScheduledTaskRunInTransaction(tx, {
                 workspaceId: task.workspaceId,
                 runId: run.id,
                 sessionId: session.id,
+                triggerEventId: wakeEventId,
                 status: "dispatched",
               });
             },
@@ -358,17 +340,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             throw new Error(`scheduled wake was not added: ${bundled.reason}`);
           }
           if (bundled.added && bundled.events.length > 0) {
-            await bus.publish(task.workspaceId, session.id, bundled.events);
+            await publishDurableSessionEvents(bus, task.workspaceId, session.id, bundled.events);
           }
-          if (!bundled.wakeEventId) {
-            throw new Error("scheduled wake bundle has no durable trigger event identity");
-          }
-          // Optional identity enrichment after commit. A crash here is repaired
-          // by the duplicate path's exact wakeEventId; dispatched state and
-          // constituent insertion were already atomic above.
-          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-            triggerEventId: bundled.wakeEventId,
-          });
           result = {
             action: "signal",
             accountId: task.accountId,

@@ -134,7 +134,7 @@ describe("resolveProviderApiKey", () => {
 });
 
 describe("configuredProviders", () => {
-  test("built-in OpenAI provider first with server compaction, then registry providers with client compaction", () => {
+  test("returns the built-in OpenAI provider first, then registry providers", () => {
     const settings = withEnv(
       {
         OPENGENI_OPENAI_API_KEY: "sk-test",
@@ -150,7 +150,6 @@ describe("configuredProviders", () => {
       api: "responses",
       builtin: true,
       apiKey: "sk-test",
-      compactionMode: "server",
     });
     expect(providers[1]).toMatchObject({
       id: "fireworks",
@@ -159,11 +158,10 @@ describe("configuredProviders", () => {
       builtin: false,
       baseUrl: "https://api.fireworks.ai/inference/v1",
       apiKey: "fw_inline",
-      compactionMode: "client",
     });
   });
 
-  test("built-in Azure provider id/label and client compaction", () => {
+  test("returns the built-in Azure provider id and label", () => {
     const settings = withEnv(
       {
         OPENGENI_OPENAI_PROVIDER: "azure",
@@ -180,8 +178,6 @@ describe("configuredProviders", () => {
       builtin: true,
       baseUrl: "https://res.openai.azure.com/openai/v1",
       apiKey: "az-key",
-      // Azure rejects server-side context_management, so it must run client compaction.
-      compactionMode: "client",
     });
   });
 });
@@ -428,7 +424,6 @@ describe("resolveModelProvider", () => {
     expect(resolved!.provider.id).toBe("fireworks");
     expect(resolved!.provider.builtin).toBe(false);
     expect(resolved!.provider.api).toBe("chat");
-    expect(resolved!.provider.compactionMode).toBe("client");
     expect(resolved!.model.contextWindowTokens).toBe(1_048_576);
   });
 

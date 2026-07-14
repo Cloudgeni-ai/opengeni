@@ -8,7 +8,6 @@ import {
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WorkspaceInferenceControlRequest,
-  WorkspaceQueueRuntimeControlRequest,
   Workspace,
   WorkspaceMember,
   type AccessContext,
@@ -34,7 +33,6 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   setWorkspaceInferenceControl,
-  setWorkspaceQueueRuntimeControl,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -180,28 +178,27 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       clientEventId: payload.clientEventId,
       expectedState: payload.expectedState,
       expectedGeneration: payload.expectedGeneration,
+      exceptSessionIds: payload.exceptSessionIds,
     });
     for (const broadcast of result.broadcasts) {
       await deps.bus.publish(workspaceId, broadcast.sessionId, broadcast.events);
     }
-    for (const interrupt of result.interrupts) {
-      await deps.workflowClient.signalInterrupt({
-        accountId: interrupt.accountId,
+    for (const control of result.controls) {
+      await deps.workflowClient.signalSessionControl({
+        accountId: control.accountId,
         workspaceId,
-        sessionId: interrupt.sessionId,
-        eventId: interrupt.eventId,
-        workflowId: interrupt.workflowId,
+        sessionId: control.sessionId,
+        eventId: control.eventId,
+        workflowId: control.workflowId,
       });
     }
-    if (payload.state === "active") {
-      for (const sessionId of result.wakeSessionIds) {
-        await deps.workflowClient.wakeSessionWorkflow({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          workflowId: `session-${sessionId}`,
-        });
-      }
+    for (const sessionId of result.wakeSessionIds) {
+      await deps.workflowClient.wakeSessionWorkflow({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        workflowId: `session-${sessionId}`,
+      });
     }
     return c.json(
       {
@@ -209,27 +206,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         state: result.state,
         generation: result.generation,
         affectedSessionIds: result.affectedSessionIds,
-        interruptSessionIds: result.interrupts.map((entry) => entry.sessionId),
+        controlSessionIds: result.controls.map((entry) => entry.sessionId),
+        exceptionSessionIds: result.exceptionSessionIds,
       },
       202,
     );
-  });
-
-  app.post("/v1/workspaces/:workspaceId/queue-runtime-control", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const payload = WorkspaceQueueRuntimeControlRequest.parse(await c.req.json());
-    const result = await setWorkspaceQueueRuntimeControl(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      actor: grant.subjectId,
-      state: payload.state,
-      reason: payload.reason,
-      clientEventId: payload.clientEventId,
-      expectedState: payload.expectedState,
-      expectedGeneration: payload.expectedGeneration,
-    });
-    return c.json(result, 202);
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

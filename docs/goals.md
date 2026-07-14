@@ -3,9 +3,9 @@
 Agents stop prematurely. A session goal flips the default: while a goal is
 `active`, a session that finishes a turn with nothing queued does not idle out.
 Instead the session workflow synthesizes a continuation turn ("your goal is not
-done — keep working, or explicitly complete/pause it"). Stopping becomes an
-explicit act: the agent calls `opengeni__goal_complete` with evidence or
-`opengeni__goal_pause` with a rationale, or a user interrupts the session.
+done — keep working, or explicitly complete/pause it"). Pausing or finishing
+becomes an explicit act: the agent calls `opengeni__goal_complete` with evidence
+or `opengeni__goal_pause` with a rationale, or a user pauses the session.
 
 Goal state is one durable Postgres row per session (`session_goals`,
 RLS-isolated like every other workspace table). The Temporal workflow never
@@ -62,9 +62,8 @@ activity for a decision:
    `turn.started`, falling back to the session default only when no turn has
    actually run. This preserves an explicit per-turn provider/billing selection;
    a newer turn rejected during admission cannot poison the continuation policy.
-   By default that conversation comes from `session_history_items` (the
-   SDK-native memory store; see `docs/run-lifecycle.md`); the legacy run-state
-   blob path remains available behind `OPENGENI_SESSION_HISTORY_SOURCE`.
+   That conversation comes from `session_history_items`, the one SDK-native
+   model-memory store (see `docs/run-lifecycle.md`).
 
 Continuation turns are ordinary turns: they bill, meter (`agent_run.created`
 with source `session_turn`), and stream exactly like user turns. If billing or
@@ -75,13 +74,13 @@ budget pause never consumes continuation budget. Re-arming a goal (resume or
 replace) starts a fresh continuation epoch: counters and the
 previous-continuation pointers are cleared together.
 
-## Interrupts and failures
+## Pauses and failures
 
-- A user interrupt is the explicit act of stopping, so it pauses an active goal
-  (`pausedReason: "user_interrupt"`, `goal.paused` with `actor: "user"`) in both
-  interrupt paths: idle interrupt and mid-turn interrupt.
+- A user Pause also pauses an active goal (`pausedReason: "user_pause"`,
+  `goal.paused` with `actor: "user"`), whether inference is active or idle.
 - If a turn fails and the session is marked `failed`, the goal row is left
-  as-is; a failed session rejects new messages, so nothing drives the goal.
+  as-is. A new human prompt can revive the session; it does not silently resume
+  a goal that the user paused.
 - If the `maybeContinueGoal` activity itself throws, the workflow falls through
   to the normal idle shutdown rather than failing the session. This means the
   workflow can complete normally while a goal is still `active` in the
@@ -129,4 +128,3 @@ reachable even when the session was created with an empty tool list.
 | --- | --- | --- |
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default: goals are bounded by the progress and budget guards, not by count, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |
 | `OPENGENI_GOAL_NO_PROGRESS_LIMIT` | `3` | Consecutive zero-progress continuations tolerated before auto-pause. |
-| `OPENGENI_SESSION_HISTORY_SOURCE` | `items` | Conversation-memory read path: `items` (SDK-native `session_history_items`) or `run_state` (legacy blob). See `docs/run-lifecycle.md`. |

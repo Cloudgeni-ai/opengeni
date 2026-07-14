@@ -105,6 +105,33 @@ export function sanitizeEventPayload<T>(payload: T): T {
   return payload;
 }
 
+/**
+ * Make model-facing conversation data safe for Postgres without redacting it.
+ *
+ * Session events are an audit/UI projection and deliberately redact fields such
+ * as `token` and `authorization`. Conversation history is the replay source for
+ * the model, so applying event redaction there silently changes tool arguments
+ * and can make recovery diverge from the call that actually ran. This walker
+ * performs only the database-safety repair (NUL removal and UTF-16 repair).
+ */
+export function sanitizeModelPayload<T>(payload: T): T {
+  if (typeof payload === "string") {
+    return sanitizeEventString(payload) as unknown as T;
+  }
+  if (Array.isArray(payload)) {
+    return payload.map((item) => sanitizeModelPayload(item)) as unknown as T;
+  }
+  if (payload && typeof payload === "object") {
+    return Object.fromEntries(
+      Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
+        sanitizeEventString(key),
+        sanitizeModelPayload(value),
+      ]),
+    ) as unknown as T;
+  }
+  return payload;
+}
+
 function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
   if (key === "mcpServers") {
     return sanitizeSessionMcpServerList(value);

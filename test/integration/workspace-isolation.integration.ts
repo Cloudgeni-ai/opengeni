@@ -336,7 +336,7 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   async signalUserMessage(): Promise<void> {}
   async wakeSessionWorkflow(): Promise<void> {}
   async signalApprovalDecision(): Promise<void> {}
-  async signalInterrupt(): Promise<void> {}
+  async signalSessionControl(): Promise<void> {}
   async syncScheduledTask(): Promise<void> {}
   async deleteScheduledTaskSchedule(): Promise<void> {}
   async triggerScheduledTask(): Promise<void> {}

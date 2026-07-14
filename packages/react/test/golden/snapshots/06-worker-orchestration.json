@@ -4,8 +4,7 @@
       "kind": "user-message",
       "id": "00000000-0000-4000-8000-000000000601",
       "occurredAt": "2026-01-02T15:00:01.000Z",
-      "text": "Spawn a browser worker, send it a follow-up, then steer it.",
-      "pending": false,
+      "text": "Spawn a browser worker, then send it a follow-up.",
       "resources": [],
       "tools": []
     },
@@ -32,22 +31,10 @@
       "workerSessionId": "33333333-4444-4555-9666-777777777777"
     },
     {
-      "kind": "worker",
-      "id": "00000000-0000-4000-8000-000000000608",
-      "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
-      "callId": "call-worker-interrupt",
-      "occurredAt": "2026-01-02T15:00:08.000Z",
-      "action": "interrupt",
-      "status": "complete",
-      "prompt": null,
-      "workerSessionId": "33333333-4444-4555-9666-777777777777",
-      "mode": "steer"
-    },
-    {
       "kind": "turn-end",
       "id": "00000000-0000-4000-8000-000000000610-turn-end",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
-      "occurredAt": "2026-01-02T15:00:10.000Z",
+      "occurredAt": "2026-01-02T15:00:08.000Z",
       "outcome": "complete",
       "failureText": null
     }
@@ -59,8 +46,7 @@
         "kind": "user-message",
         "id": "00000000-0000-4000-8000-000000000601",
         "occurredAt": "2026-01-02T15:00:01.000Z",
-        "text": "Spawn a browser worker, send it a follow-up, then steer it.",
-        "pending": false,
+        "text": "Spawn a browser worker, then send it a follow-up.",
         "resources": [],
         "tools": []
       }
@@ -70,15 +56,15 @@
       "id": "turn-aaaaaaaa-0000-4000-8000-000000000011",
       "outcome": "complete",
       "startedAt": "2026-01-02T15:00:04.000Z",
-      "endedAt": "2026-01-02T15:00:10.000Z",
+      "endedAt": "2026-01-02T15:00:08.000Z",
       "groupCount": 1,
       "groups": [
         {
           "kind": "activity",
           "id": "activity-00000000-0000-4000-8000-000000000604",
-          "itemCount": 3,
+          "itemCount": 2,
           "itemKinds": {
-            "worker": 3
+            "worker": 2
           },
           "outcome": "complete",
           "items": [
@@ -103,18 +89,6 @@
               "status": "complete",
               "prompt": "Capture the final dashboard screenshot.",
               "workerSessionId": "33333333-4444-4555-9666-777777777777"
-            },
-            {
-              "kind": "worker",
-              "id": "00000000-0000-4000-8000-000000000608",
-              "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
-              "callId": "call-worker-interrupt",
-              "occurredAt": "2026-01-02T15:00:08.000Z",
-              "action": "interrupt",
-              "status": "complete",
-              "prompt": null,
-              "workerSessionId": "33333333-4444-4555-9666-777777777777",
-              "mode": "steer"
             }
           ]
         }
@@ -125,7 +99,7 @@
     "itemKinds": {
       "turn-end": 1,
       "user-message": 1,
-      "worker": 3
+      "worker": 2
     },
     "groupKinds": {
       "activity": 1,
@@ -133,7 +107,7 @@
       "turn": 1
     },
     "activityItemKinds": {
-      "worker": 3
+      "worker": 2
     },
     "turnOutcomes": {
       "complete": 1

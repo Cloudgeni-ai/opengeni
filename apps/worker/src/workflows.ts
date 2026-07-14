@@ -2,7 +2,7 @@ export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workfl
 export {
   approvalDecision,
   codexCapacityChanged,
-  interrupt,
+  sessionControl,
   queueChanged,
   sessionWorkflow,
   userMessage,

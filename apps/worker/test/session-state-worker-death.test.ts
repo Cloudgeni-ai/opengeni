@@ -6,7 +6,7 @@ const publishedEvents: unknown[] = [];
 const workerDeathCalls: unknown[] = [];
 let currentTurn: { id: string; status: string } | null = null;
 let workerDeathResult:
-  | { action: "requeued"; redispatches: number; events: any[] }
+  | { action: "recovering"; redispatches: number; events: any[] }
   | { action: "exceeded"; redispatches: number; events: any[] }
   | { action: "stale"; events: []; turnStatus: string | null; activeTurnId: string | null };
 
@@ -27,7 +27,6 @@ function makeActivities() {
         type: "goal.continuation",
         payload: {},
       })),
-      countTurnSessionHistoryItems: mock(async () => 0),
       countQueuedTurns: mock(async () => 0),
       applySessionTurnWorkerDeath: mock(async (...args: unknown[]) => {
         workerDeathCalls.push(args[2]);
@@ -44,42 +43,44 @@ function makeActivities() {
   );
 }
 
-async function runRequeue(timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" = "HEARTBEAT") {
-  return makeActivities().requeueTurnAfterWorkerDeath({
+async function runRecovery(timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" = "HEARTBEAT") {
+  return makeActivities().recoverTurnAfterWorkerDeath({
     accountId: "account-1",
     workspaceId: "workspace-1",
     sessionId: "session-1",
     triggerEventId: "trigger-1",
     workflowId: "workflow-1",
     turnId: "turn-1",
+    attemptId: "attempt-1",
     dispatchId: "activity-7",
     timeoutType,
   });
 }
 
-describe("requeueTurnAfterWorkerDeath: atomic dispatch fence", () => {
+describe("recoverTurnAfterWorkerDeath: atomic dispatch fence", () => {
   test("passes the exact Temporal dispatch and typed timeout", async () => {
     currentTurn = { id: "turn-1", status: "running" };
     workerDeathCalls.length = 0;
     publishedEvents.length = 0;
     workerDeathResult = {
-      action: "requeued",
+      action: "recovering",
       redispatches: 1,
-      events: [{ id: "preempted-1", type: "turn.preempted" }],
+      events: [{ id: "recovery-1", type: "turn.recovery.requested" }],
     };
 
-    expect(await runRequeue()).toEqual({ action: "requeued", redispatches: 1 });
+    expect(await runRecovery()).toEqual({ action: "recovering", redispatches: 1 });
     expect(workerDeathCalls).toEqual([
       expect.objectContaining({
         sessionId: "session-1",
         turnId: "turn-1",
         triggerEventId: "trigger-1",
+        attemptId: "attempt-1",
         dispatchId: "activity-7",
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
       }),
     ]);
-    expect(publishedEvents).toEqual([{ id: "preempted-1", type: "turn.preempted" }]);
+    expect(publishedEvents).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);
   });
 
   test("preserves schedule-to-start as the sole typed no-registration recovery", async () => {
@@ -87,11 +88,11 @@ describe("requeueTurnAfterWorkerDeath: atomic dispatch fence", () => {
     workerDeathCalls.length = 0;
     publishedEvents.length = 0;
     workerDeathResult = {
-      action: "requeued",
+      action: "recovering",
       redispatches: 1,
       events: [],
     };
-    await runRequeue("SCHEDULE_TO_START");
+    await runRecovery("SCHEDULE_TO_START");
     expect(workerDeathCalls).toEqual([
       expect.objectContaining({ timeoutType: "SCHEDULE_TO_START" }),
     ]);
@@ -100,10 +101,10 @@ describe("requeueTurnAfterWorkerDeath: atomic dispatch fence", () => {
   test("does not call the atomic helper for terminal or missing turns", async () => {
     currentTurn = { id: "turn-1", status: "completed" };
     workerDeathCalls.length = 0;
-    expect(await runRequeue()).toEqual({ action: "stale" });
+    expect(await runRecovery()).toEqual({ action: "stale" });
     expect(workerDeathCalls).toHaveLength(0);
     currentTurn = null;
-    expect(await runRequeue()).toEqual({ action: "stale" });
+    expect(await runRecovery()).toEqual({ action: "stale" });
     expect(workerDeathCalls).toHaveLength(0);
   });
 
@@ -117,7 +118,7 @@ describe("requeueTurnAfterWorkerDeath: atomic dispatch fence", () => {
       turnStatus: "running",
       activeTurnId: "turn-1",
     };
-    expect(await runRequeue()).toEqual({ action: "stale" });
+    expect(await runRecovery()).toEqual({ action: "stale" });
     expect(publishedEvents).toHaveLength(0);
   });
 
@@ -130,7 +131,7 @@ describe("requeueTurnAfterWorkerDeath: atomic dispatch fence", () => {
       redispatches: 3,
       events: [{ id: "failed-1", type: "turn.failed" }],
     };
-    expect(await runRequeue()).toEqual({ action: "exceeded", redispatches: 3 });
+    expect(await runRecovery()).toEqual({ action: "exceeded", redispatches: 3 });
     expect(publishedEvents).toEqual([{ id: "failed-1", type: "turn.failed" }]);
   });
 });

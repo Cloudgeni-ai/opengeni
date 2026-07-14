@@ -833,7 +833,7 @@ function SessionRow(props: {
             {/* Relative time is visible at rest (the list is grouped by recency),
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
-            <span className="shrink-0 text-2xs tabular-nums text-fg-muted transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
+            <span className="shrink-0 text-2xs tabular-nums text-fg transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
               {relativeTimeLabel(props.session.updatedAt)}
             </span>
           </button>

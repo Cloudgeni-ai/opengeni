@@ -119,11 +119,10 @@ export function FailedSessionBanner({
             <span className="text-fg-muted">No failure detail was recorded.</span>
           )}
           <div className="mt-1 text-xs text-fg-muted">
-            {failure.redispatchCount > 0 ? (
+            {failure.recoveryCount > 0 ? (
               <>
-                {failure.redispatchCount} turn{failure.redispatchCount === 1 ? "" : "s"} timed out
-                and {failure.redispatchCount === 1 ? "was" : "were"} retried automatically before
-                this failure.{" "}
+                {failure.recoveryCount} same-turn recovery attempt
+                {failure.recoveryCount === 1 ? "" : "s"} occurred before this failure.{" "}
               </>
             ) : null}
             {failure.failedTurnCount > 1 ? (

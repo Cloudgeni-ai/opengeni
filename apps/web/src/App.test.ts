@@ -716,9 +716,9 @@ describe("summarizeSessionFailure", () => {
     const summary = summarizeSessionFailure(
       [
         event(1, "user.message", { text: "Inspect" }),
-        event(2, "turn.preempted", { turnId: "turn-1" }),
+        event(2, "turn.recovery.requested", { turnId: "turn-1" }),
         event(3, "turn.failed", { error: "First failure" }),
-        event(4, "turn.preempted", { turnId: "turn-2" }),
+        event(4, "turn.recovery.requested", { turnId: "turn-2" }),
         event(5, "turn.failed", { error: "Provider exploded" }),
       ],
       "failed",
@@ -726,7 +726,7 @@ describe("summarizeSessionFailure", () => {
 
     expect(summary.reason).toBe("Provider exploded");
     expect(summary.failedAt).toBe(event(5, "turn.failed", {}).occurredAt);
-    expect(summary.redispatchCount).toBe(2);
+    expect(summary.recoveryCount).toBe(2);
     expect(summary.failedTurnCount).toBe(2);
   });
 
@@ -748,7 +748,7 @@ describe("summarizeSessionFailure", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
       failedAt: null,
-      redispatchCount: 0,
+      recoveryCount: 0,
       failedTurnCount: 0,
     });
   });
@@ -1327,6 +1327,15 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    queueVersion: patch.queueVersion ?? 0,
+    queueHeadPosition: patch.queueHeadPosition ?? 0,
+    queueTailPosition: patch.queueTailPosition ?? 0,
+    controlState: patch.controlState ?? "active",
+    controlGeneration: patch.controlGeneration ?? 0,
+    controlReason: patch.controlReason ?? null,
+    controlChangedBy: patch.controlChangedBy ?? null,
+    controlChangedAt: patch.controlChangedAt ?? null,
+    workspaceRunExceptionGeneration: patch.workspaceRunExceptionGeneration ?? null,
   };
 }
 

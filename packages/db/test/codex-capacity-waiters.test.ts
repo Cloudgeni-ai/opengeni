@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../src/schema";
 import {
   armCodexCapacityWait,
-  claimNextQueuedTurn,
+  claimNextSessionExecution,
   codexCapacityRefreshBackoffMs,
   createDb,
   encryptEnvironmentValue,
@@ -21,7 +21,6 @@ import {
   setSessionCodexPin,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
-  validateCodexCapacityResumeTurn,
   withCodexCapacityMutation,
   type CodexCapacityAvailabilityDecision,
   type CodexCapacitySelectionContext,
@@ -245,7 +244,7 @@ describe("OPE-21 durable Codex capacity waits", () => {
     expect(eventCount?.count).toBe(3);
   });
 
-  test("claim locks session before turn and cannot deadlock capacity settlement", async () => {
+  test("claim locks session before the pending internal update", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const credentialId = await connectCredential(ws, true);
@@ -263,15 +262,15 @@ describe("OPE-21 durable Codex capacity waits", () => {
       },
       () => availableDecision(credentialId),
     );
-    if (resumed.action !== "resumed") throw new Error("expected resumed turn");
+    if (resumed.action !== "resumed") throw new Error("expected resumed update");
 
-    let claim: ReturnType<typeof claimNextQueuedTurn> | null = null;
+    let claim: ReturnType<typeof claimNextSessionExecution> | null = null;
     await admin.begin(async (lockTx) => {
       await lockTx`
         select id from sessions
         where workspace_id = ${scenario.workspaceId} and id = ${scenario.sessionId}
         for update`;
-      claim = claimNextQueuedTurn(
+      claim = claimNextSessionExecution(
         claimDb,
         scenario.workspaceId,
         scenario.sessionId,
@@ -279,19 +278,23 @@ describe("OPE-21 durable Codex capacity waits", () => {
       );
       await waitForAppSessionLockWait();
 
-      // If claim took the queued turn before waiting for the session, this
-      // statement forms turn -> session / session -> turn and times out. The
-      // corrected session-first claim leaves the turn immediately lockable.
+      // If claim took the pending update before waiting for the session, this
+      // statement forms update -> session / session -> update and times out.
+      // The canonical session-first claim leaves the update lockable.
       await lockTx`set local lock_timeout = '250ms'`;
       const locked = await lockTx<{ id: string }[]>`
-        select id from session_turns
-        where workspace_id = ${scenario.workspaceId} and id = ${resumed.turn.id}
+        select id from session_system_updates
+        where workspace_id = ${scenario.workspaceId} and id = ${resumed.update.id}
         for update`;
-      expect(locked.map((row) => row.id)).toEqual([resumed.turn.id]);
+      expect(locked.map((row) => row.id)).toEqual([resumed.update.id]);
     });
 
     const claimed = await claim!;
-    expect(claimed?.id).toBe(resumed.turn.id);
+    expect(claimed?.source).toBe("goal");
+    const [delivered] = await admin<{ delivered_turn_id: string | null; state: string }[]>`
+      select delivered_turn_id, state from session_system_updates
+      where id = ${resumed.update.id}`;
+    expect(delivered).toEqual({ delivered_turn_id: claimed?.id ?? null, state: "delivered" });
   });
 
   test("reactive arm is fenced by the live holder, generation, and worker redispatch", async () => {
@@ -462,26 +465,29 @@ describe("OPE-21 durable Codex capacity waits", () => {
       ids: [credentialId],
     });
     const resumedResult = results.find((result) => result.action === "resumed");
-    if (resumedResult?.action !== "resumed") throw new Error("expected resumed turn");
-    expect(resumedResult.turn.metadata).toMatchObject({
-      codexCredentialPolicyHash: "accepted-policy-v1",
-      privateAcceptedScope: { credentialId },
-      codexCapacityWaiterId: armed.waiter.id,
+    if (resumedResult?.action !== "resumed") throw new Error("expected resumed update");
+    expect(resumedResult.update.payload).toMatchObject({
+      type: "goal_continuation",
+      capacityWaiterId: armed.waiter.id,
+      policy: {
+        model: "codex/gpt-5.6-sol",
+        reasoningEffort: "xhigh",
+      },
     });
-    expect(resumedResult.turn.metadata).not.toHaveProperty("workerDeathRedispatches");
-    expect(resumedResult.turn.metadata).not.toHaveProperty("codexCredentialFailovers");
     const [counts] = await admin<
-      { turns: number; continuations: number; usage: number; resumed: number }[]
+      { turns: number; continuations: number; updates: number; usage: number; resumed: number }[]
     >`
       select
         (select count(*)::int from session_turns where session_id = ${scenario.sessionId}) as turns,
         (select count(*)::int from session_events where session_id = ${scenario.sessionId}
           and type = 'goal.continuation') as continuations,
+        (select count(*)::int from session_system_updates where session_id = ${scenario.sessionId}
+          and state = 'pending') as updates,
         (select count(*)::int from usage_events where workspace_id = ${scenario.workspaceId}
           and event_type = 'agent_run.created') as usage,
         (select count(*)::int from codex_capacity_waiters where id = ${armed.waiter.id}
           and status = 'resumed') as resumed`;
-    expect(counts).toEqual({ turns: 2, continuations: 1, usage: 1, resumed: 1 });
+    expect(counts).toEqual({ turns: 1, continuations: 0, updates: 1, usage: 1, resumed: 1 });
   });
 
   test("a policy-pin CAS advances the waiter outbox in the same allocator transaction", async () => {
@@ -575,7 +581,7 @@ describe("OPE-21 durable Codex capacity waits", () => {
     expect(continuations?.count).toBe(0);
   });
 
-  test("wake-to-claim race cancels the stale resume durably and preserves user work", async () => {
+  test("a user prompt arriving after capacity wake stays ahead of the internal update", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const credentialId = await connectCredential(ws, true);
@@ -609,45 +615,35 @@ describe("OPE-21 durable Codex capacity waits", () => {
       sandboxBackend: "modal",
       metadata: {},
     });
-    const claimed = await claimNextQueuedTurn(
+    const claimed = await claimNextSessionExecution(
       dbA,
       scenario.workspaceId,
       scenario.sessionId,
       scenario.workflowId,
     );
-    expect(claimed?.id).toBe(resumed.turn.id);
-    const validation = await validateCodexCapacityResumeTurn(dbB, {
-      workspaceId: scenario.workspaceId,
-      sessionId: scenario.sessionId,
-      turnId: resumed.turn.id,
-      waiterId: armed.waiter.id,
-      generation: armed.waiter.generation,
-    });
-    expect(validation.valid).toBe(false);
-    expect(validation.events.map((event) => event.type)).toEqual([
-      "codex.capacity.superseded",
-      "turn.cancelled",
-      "session.status.changed",
-    ]);
+    expect(claimed?.id).toBe(userTurn.id);
     const [state] = await admin<
       {
-        resume_status: string;
         user_status: string;
+        update_status: string;
+        waiter_status: string;
         session_status: string;
         active_turn_id: string | null;
       }[]
     >`
       select
-        (select status from session_turns where id = ${resumed.turn.id}) as resume_status,
         (select status from session_turns where id = ${userTurn.id}) as user_status,
+        (select state from session_system_updates where id = ${resumed.update.id}) as update_status,
+        (select status from codex_capacity_waiters where id = ${armed.waiter.id}) as waiter_status,
         status as session_status,
         active_turn_id
       from sessions where id = ${scenario.sessionId}`;
     expect(state).toEqual({
-      resume_status: "cancelled",
-      user_status: "queued",
-      session_status: "queued",
-      active_turn_id: null,
+      user_status: "running",
+      update_status: "delivered",
+      waiter_status: "resumed",
+      session_status: "running",
+      active_turn_id: userTurn.id,
     });
   });
 

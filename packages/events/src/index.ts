@@ -1,7 +1,7 @@
 import type { SessionBusMessage, SessionEvent } from "@opengeni/contracts";
 import {
   appendSessionEvents,
-  appendSessionEventsForTurnGeneration,
+  appendSessionEventsForTurnAttempt,
   sessionSubject,
   type AppendEventInput,
   type Database,
@@ -525,14 +525,16 @@ export async function appendAndPublishTurnEventsFenced(
   sessionId: string,
   turnId: string,
   executionGeneration: number,
+  attemptId: string,
   events: AppendEventInput[],
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
-  const result = await appendSessionEventsForTurnGeneration(
+  const result = await appendSessionEventsForTurnAttempt(
     db,
     workspaceId,
     sessionId,
     turnId,
     executionGeneration,
+    attemptId,
     events,
   );
   if (result.events.length === 0) return result;
@@ -540,7 +542,7 @@ export async function appendAndPublishTurnEventsFenced(
     await bus.publish(workspaceId, sessionId, result.events);
   } catch (error) {
     console.warn(
-      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}; ${result.events.length} event(s) are durable`,
+      `[events] live fenced publish failed for ${workspaceId}/${sessionId}/${turnId}@${executionGeneration}/${attemptId}; ${result.events.length} event(s) are durable`,
       error,
     );
   }

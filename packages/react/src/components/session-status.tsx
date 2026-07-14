@@ -23,6 +23,24 @@ export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> 
     badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
     pulse: true,
   },
+  recovering: {
+    label: "Recovering",
+    dotClassName: "bg-og-status-running",
+    badgeClassName: "text-og-status-running border-og-status-running/30 bg-og-status-running/10",
+    pulse: true,
+  },
+  waiting_capacity: {
+    label: "Waiting for capacity",
+    dotClassName: "bg-og-status-waiting",
+    badgeClassName: "text-og-status-waiting border-og-status-waiting/35 bg-og-status-waiting/10",
+    pulse: true,
+  },
+  paused: {
+    label: "Paused",
+    dotClassName: "bg-og-status-cancelled",
+    badgeClassName: "text-og-fg-subtle border-og-border bg-og-status-cancelled/10",
+    pulse: false,
+  },
   idle: {
     label: "Idle",
     dotClassName: "bg-og-status-idle",

@@ -31,9 +31,8 @@ export type {
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
-  PauseGoalForInterruptInput,
-  RequeueTurnAfterWorkerDeathInput,
-  RequeueTurnAfterWorkerDeathResult,
+  RecoverTurnAfterWorkerDeathInput,
+  RecoverTurnAfterWorkerDeathResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
@@ -115,12 +114,6 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
   const runAgentTurn = createRunAgentTurnActivity(services);
   return {
     runAgentTurn,
-    // Legacy Temporal activity name. In-flight session workflows (which can
-    // legitimately live for days) recorded ScheduleActivityTask events as
-    // "runAgentSegment"; the name must keep resolving until those histories
-    // drain. New workflow code must use runAgentTurn; migrate the session
-    // workflow call site via patched() before removing this alias.
-    runAgentSegment: runAgentTurn,
     ...createDocumentActivities(services),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
@@ -137,16 +130,14 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
 const defaultActivities = createActivities();
 
 export const runAgentTurn = defaultActivities.runAgentTurn;
-export const runAgentSegment = defaultActivities.runAgentSegment;
 export const indexDocument = defaultActivities.indexDocument;
 export const failSession = defaultActivities.failSession;
-export const interruptActiveTurn = defaultActivities.interruptActiveTurn;
-export const requeueTurnAfterWorkerDeath = defaultActivities.requeueTurnAfterWorkerDeath;
-export const claimNextQueuedTurn = defaultActivities.claimNextQueuedTurn;
+export const settleSessionControl = defaultActivities.settleSessionControl;
+export const recoverTurnAfterWorkerDeath = defaultActivities.recoverTurnAfterWorkerDeath;
+export const claimNextSessionExecution = defaultActivities.claimNextSessionExecution;
 export const markSessionIdle = defaultActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
 export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
-export const pauseGoalForInterrupt = defaultActivities.pauseGoalForInterrupt;
 export const getCodexCapacityWait = defaultActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultActivities.reconcileCodexCapacityWait;
 export const reapSandboxLeases = defaultActivities.reapSandboxLeases;

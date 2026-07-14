@@ -9,8 +9,8 @@ const controlApplications: Array<{
   controlEventId: string;
 }> = [];
 
-describe("session-state cancellation", () => {
-  test("publishes the already-atomic durable control cancellation batch", async () => {
+describe("session-state interrupt settlement", () => {
+  test("publishes the already-atomic durable pause recovery batch", async () => {
     publishedEvents.length = 0;
     controlApplications.length = 0;
     const activities = createSessionStateActivities(
@@ -23,20 +23,20 @@ describe("session-state cancellation", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
-        applySessionControlInterrupt: mock(
+        settlePendingSessionControl: mock(
           async (_db, workspaceId: string, sessionId: string, controlEventId: string) => {
             controlApplications.push({ workspaceId, sessionId, controlEventId });
             return {
-              cancelledTurnId: "turn-1",
+              recoveringTurnId: "turn-1",
               events: [
                 {
-                  id: "event-cancelled",
+                  id: "event-recovery",
                   workspaceId,
                   sessionId,
                   sequence: 1,
-                  type: "turn.cancelled",
+                  type: "turn.recovery.requested",
                   turnId: "turn-1",
-                  payload: { triggerEventId: controlEventId },
+                  payload: { reason: "user_pause" },
                   occurredAt: "2026-07-10T00:00:00.000Z",
                   clientEventId: null,
                 },
@@ -47,7 +47,7 @@ describe("session-state cancellation", () => {
                   sequence: 2,
                   type: "session.status.changed",
                   turnId: "turn-1",
-                  payload: { status: "queued" },
+                  payload: { status: "paused" },
                   occurredAt: "2026-07-10T00:00:00.000Z",
                   clientEventId: null,
                 },
@@ -65,7 +65,7 @@ describe("session-state cancellation", () => {
       },
     );
 
-    await activities.interruptActiveTurn({
+    await activities.settleSessionControl({
       accountId: "account-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
@@ -82,13 +82,13 @@ describe("session-state cancellation", () => {
       },
     ]);
     expect(publishedEvents.map((event) => event.type)).toEqual([
-      "turn.cancelled",
+      "turn.recovery.requested",
       "session.status.changed",
     ]);
     expect(publishedEvents[0]).toMatchObject({
-      type: "turn.cancelled",
+      type: "turn.recovery.requested",
       turnId: "turn-1",
-      payload: { triggerEventId: "event-1" },
+      payload: { reason: "user_pause" },
     });
   });
 });

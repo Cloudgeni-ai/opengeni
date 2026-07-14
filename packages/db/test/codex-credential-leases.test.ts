@@ -105,10 +105,10 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
     insert into session_turns (
       id, account_id, workspace_id, session_id, trigger_event_id,
       temporal_workflow_id, status, position, prompt, model,
-      reasoning_effort, sandbox_backend
+      reasoning_effort, sandbox_backend, active_attempt_id
     ) values (
       ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
-      'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal'
+      'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', ${turnId}
     )`;
   await admin`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
   return turnId;
@@ -957,13 +957,12 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      originalTriggerEventId: crypto.randomUUID(),
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
       checkpointDurable: true,
-      resumeWithNotice: false,
-      preemptedPayload: { reason: "stale-holder-must-not-settle" },
+      recoveryPayload: { reason: "stale-holder-must-not-settle" },
       failedPayload: { error: "stale-holder-must-not-fail" },
     });
     expect(staleSettlement.action).toBe("stale");
@@ -994,17 +993,16 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      originalTriggerEventId: session!.trigger_event_id,
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
       checkpointDurable: true,
-      resumeWithNotice: true,
-      preemptedPayload: { reason: "codex_lease_lost", resumeWithNotice: true },
+      recoveryPayload: { reason: "codex_lease_lost" },
       failedPayload: { error: "must-not-fail" },
     });
-    expect(settled.action).toBe("requeued");
-    if (settled.action !== "requeued") throw new Error("expected lease-loss requeue");
+    expect(settled.action).toBe("recovering");
+    if (settled.action !== "recovering") throw new Error("expected lease-loss requeue");
     const [row] = await admin<
       { turn_status: string; session_status: string; active_turn_id: string | null }[]
     >`
@@ -1012,9 +1010,13 @@ describe("OPE-21 atomic Codex credential allocation", () => {
              s.active_turn_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
-    expect(row).toEqual({ turn_status: "queued", session_status: "queued", active_turn_id: null });
+    expect(row).toEqual({
+      turn_status: "recovering",
+      session_status: "recovering",
+      active_turn_id: turnId,
+    });
     expect(settled.events.map((event) => event.type)).toEqual([
-      "turn.preempted",
+      "turn.recovery.requested",
       "session.status.changed",
     ]);
 
@@ -1023,19 +1025,18 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      originalTriggerEventId: session!.trigger_event_id,
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
       checkpointDurable: true,
-      resumeWithNotice: false,
-      preemptedPayload: { reason: "duplicate" },
+      recoveryPayload: { reason: "duplicate" },
       failedPayload: { error: "duplicate" },
     });
     expect(duplicate.action).toBe("stale");
     const [preemptions] = await admin<{ count: number }[]>`
       select count(*)::int as count from session_events
-      where turn_id = ${turnId} and type = 'turn.preempted'`;
+      where turn_id = ${turnId} and type = 'turn.recovery.requested'`;
     expect(preemptions!.count).toBe(1);
   });
 
@@ -1054,13 +1055,12 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      originalTriggerEventId: session!.trigger_event_id,
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
       checkpointDurable: false,
-      resumeWithNotice: false,
-      preemptedPayload: { reason: "must-not-requeue" },
+      recoveryPayload: { reason: "must-not-recover" },
       failedPayload: {
         error: "checkpoint failed; replay refused",
         code: "codex_lease_checkpoint_failed",
@@ -1086,13 +1086,12 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      originalTriggerEventId: session!.trigger_event_id,
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
       checkpointDurable: false,
-      resumeWithNotice: false,
-      preemptedPayload: { reason: "duplicate" },
+      recoveryPayload: { reason: "duplicate" },
       failedPayload: { error: "duplicate" },
     });
     expect(duplicate.action).toBe("stale");
@@ -1102,7 +1101,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(failures!.count).toBe(1);
   });
 
-  test("expiry between quarantine and failover settlement still requeues the current turn", async () => {
+  test("one atomic failover settlement accepts the exact holder across lease expiry", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
     await connectCredential(ws!, "expiry-gap-a");
@@ -1134,35 +1133,16 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: turn!.session_id,
       turnId,
-      originalTriggerEventId: turn!.trigger_event_id,
-      holderId: first.holderId!,
-      generation: first.generation!,
-      maxFailovers: 2,
-      resumeWithNotice: true,
-      preemptedPayload: { reason: "expiry-gap-failover" },
-    });
-    expect(failover.action).toBe("stale");
-
-    // This is the fallback the activity now invokes before it returns
-    // `preempted`. With no successor holder and an unchanged redispatch fence,
-    // the existing lease-loss transaction proves ownership and requeues once.
-    const recovered = await settleCodexCredentialLeaseLoss(dbB, {
-      accountId: ws!.accountId,
-      workspaceId: ws!.workspaceId,
-      sessionId: turn!.session_id,
-      turnId,
-      originalTriggerEventId: turn!.trigger_event_id,
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
-      checkpointDurable: true,
-      resumeWithNotice: true,
-      preemptedPayload: { reason: "codex_lease_lost", resumeWithNotice: true },
-      failedPayload: { error: "must-not-fail" },
+      maxFailovers: 2,
+      recoveryPayload: { reason: "expiry-gap-failover" },
     });
-    expect(recovered.action).toBe("requeued");
-    expect(recovered.events.map((event) => event.type)).toEqual([
-      "turn.preempted",
+    expect(failover.action).toBe("recovering");
+    expect(failover.events.map((event) => event.type)).toEqual([
+      "turn.recovery.requested",
       "session.status.changed",
     ]);
     const [row] = await admin<
@@ -1171,11 +1151,81 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       select t.status as turn_status, s.status as session_status, s.active_turn_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
-    expect(row).toEqual({ turn_status: "queued", session_status: "queued", active_turn_id: null });
+    expect(row).toEqual({
+      turn_status: "recovering",
+      session_status: "recovering",
+      active_turn_id: turnId,
+    });
     const [preemptions] = await admin<{ count: number }[]>`
       select count(*)::int as count from session_events
-      where turn_id = ${turnId} and type = 'turn.preempted'`;
+      where turn_id = ${turnId} and type = 'turn.recovery.requested'`;
     expect(preemptions?.count).toBe(1);
+  });
+
+  test("Pause closes both Codex lease settlement gates without mutating the turn", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "paused-lease-a");
+    await connectCredential(ws!, "paused-lease-b");
+    const turnId = await seedTurn(ws!, 1);
+    const lease = await acquire(dbA, ws!, turnId);
+    const [turn] = await admin<{ session_id: string }[]>`
+      select session_id from session_turns where id = ${turnId}`;
+    await admin`
+      update sessions
+      set control_state = 'paused'
+      where workspace_id = ${ws!.workspaceId} and id = ${turn!.session_id}`;
+
+    expect(
+      await settleCodexCredentialFailover(dbA, {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        sessionId: turn!.session_id,
+        turnId,
+        attemptId: turnId,
+        holderId: lease.holderId!,
+        generation: lease.generation!,
+        expectedRedispatches: 0,
+        maxFailovers: 2,
+        recoveryPayload: { reason: "must-not-cross-pause" },
+      }),
+    ).toMatchObject({ action: "stale", events: [] });
+    expect(
+      await settleCodexCredentialLeaseLoss(dbB, {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        sessionId: turn!.session_id,
+        turnId,
+        attemptId: turnId,
+        holderId: lease.holderId!,
+        generation: lease.generation!,
+        expectedRedispatches: 0,
+        checkpointDurable: true,
+        recoveryPayload: { reason: "must-not-cross-pause" },
+        failedPayload: { error: "must-not-cross-pause" },
+      }),
+    ).toMatchObject({ action: "stale", events: [] });
+
+    const [state] = await admin<
+      {
+        turn_status: string;
+        session_status: string;
+        active_turn_id: string | null;
+        recoveries: number;
+      }[]
+    >`
+      select t.status as turn_status, s.status as session_status,
+             s.active_turn_id,
+             (select count(*)::int from session_events e
+              where e.turn_id = t.id and e.type = 'turn.recovery.requested') as recoveries
+      from session_turns t join sessions s on s.id = t.session_id
+      where t.id = ${turnId}`;
+    expect(state).toEqual({
+      turn_status: "running",
+      session_status: "running",
+      active_turn_id: turnId,
+      recoveries: 0,
+    });
   });
 
   test("lease rows remain RLS-isolated across workspaces and managed accounts", async () => {
@@ -1300,19 +1350,22 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: sessionId!,
       turnId,
-      originalTriggerEventId: crypto.randomUUID(),
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
+      expectedRedispatches: 0,
       maxFailovers: 2,
-      resumeWithNotice: true,
-      preemptedPayload: {
+      recoveryPayload: {
         reason: "codex_credential_failover",
         credentialId: first.credentialId!,
       },
     });
-    expect(settled.action).toBe("requeued");
-    if (settled.action !== "requeued") throw new Error("expected requeue");
-    const resumeEventId = settled.events[0]!.id;
+    expect(settled.action).toBe("recovering");
+    if (settled.action !== "recovering") throw new Error("expected requeue");
+    const originalTriggerEventId = (
+      await admin<{ trigger_event_id: string }[]>`
+        select trigger_event_id from session_turns where id = ${turnId}`
+    )[0]!.trigger_event_id;
     const resumed = await acquire(dbB, ws!, turnId);
     expect(resumed.credentialId).not.toBeNull();
     expect(resumed.credentialId).not.toBe(first.credentialId);
@@ -1324,8 +1377,8 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       from session_turns where id = ${turnId}`;
     expect(row).toEqual({
       id: turnId,
-      status: "queued",
-      trigger_event_id: resumeEventId,
+      status: "recovering",
+      trigger_event_id: originalTriggerEventId,
       failovers: 1,
     });
     const [count] = await admin<{ count: number }[]>`
@@ -1337,12 +1390,12 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: sessionId!,
       turnId,
-      originalTriggerEventId: crypto.randomUUID(),
+      attemptId: turnId,
       holderId: first.holderId!,
       generation: first.generation!,
+      expectedRedispatches: 0,
       maxFailovers: 2,
-      resumeWithNotice: true,
-      preemptedPayload: { reason: "duplicate" },
+      recoveryPayload: { reason: "duplicate" },
     });
     expect(duplicate.action).toBe("stale");
     const [stillOne] = await admin<{ count: number }[]>`
@@ -1350,7 +1403,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(stillOne?.count).toBe(1);
     const [preemptions] = await admin<{ count: number }[]>`
       select count(*)::int as count from session_events
-      where turn_id = ${turnId} and type = 'turn.preempted'`;
+      where turn_id = ${turnId} and type = 'turn.recovery.requested'`;
     expect(preemptions?.count).toBe(1);
   });
 

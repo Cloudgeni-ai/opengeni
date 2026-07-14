@@ -11,9 +11,7 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 A **turn** is one unit of agent work inside a session: an input (a user message,
 a goal continuation, or an approval decision) is processed until the agent
 reaches a natural stopping point. One turn runs as one non-retryable Temporal
-activity (`runAgentTurn`; the activity is also registered under its former name
-`runAgentSegment` for in-flight workflow-history compatibility — do not schedule
-the old name in new code). Inside that activity the OpenAI Agents SDK loop makes
+`runAgentTurn` activity. Inside the activity the OpenAI Agents SDK loop makes
 as many model calls and tool calls as the work needs.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
@@ -77,21 +75,16 @@ failed full turn, poll with inference, or redeem a reset/boost entitlement.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
-`runAgentTurn` forces client-side compaction through a bounded recovery
-pipeline. Compaction first summarizes a rendered transcript, retries once with a
-hard-trimmed rendered transcript on summarizer failure, then falls back to a
-deterministic non-LLM rebuild if the summarizer still fails. A
-`compacted:false` result is never a retry ticket. If no model/tool progress was
-persisted for this turn, the activity retries only after an actual compacted
-write, bounded by a per-turn recovery cap. If progress was already persisted,
-it does not replay the trigger; it requeues the turn with a compaction resume
-notice only after the persisted active-history token estimate strictly
-decreases. A later resumed turn may compact and requeue again when it makes the
-same durable shrink progress — long productive runs are not generation-capped.
+`runAgentTurn` invokes the portable Codex-local compaction path. The summarizer
+receives structured active history plus the checkpoint prompt; on context
+overflow it removes exactly one oldest input item and retries. Other failures
+propagate without changing active history. After a fenced durable replacement,
+the same activity, turn, attempt, and sandbox rebuild model input and continue;
+compaction never creates queue or recovery work.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted or impossible compaction
-fails with an error that names compaction summarization/fallback, not the
-threshold event.
+fails with an error that identifies compaction summarization, not the threshold
+event; it never installs a mechanical summary.
 
 Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
@@ -117,12 +110,13 @@ with turn status, session status/pointer, and `lastSequence` in one transaction.
 For preemption that transaction appends `turn.preempted` plus queued status,
 changes the turn back to queued, and clears the session's active pointer. A
 missing/already-terminal turn, a superseded dispatch, or a durable
-`user.interrupt` newer than the attempt returns a stale no-op and appends
-nothing. This prevents a cancelled activity that keeps running through
+pending Pause/Steer control newer than the attempt returns a stale no-op and
+appends nothing. This prevents a superseded activity that keeps running through
 compaction from publishing contradictory preemption/terminal truth and then
-failing the session on a later row CAS. Interrupt settlement uses the same lock
-order and current-trigger fence, so a delayed old workflow signal cannot cancel
-a newer turn.
+failing the session on a later row CAS. Control settlement uses the same lock
+order and current-trigger fence, so a delayed control signal cannot change a
+newer turn. Product, source, and Temporal wire semantics all use one
+`sessionControl` signal for Pause/Steer.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is
@@ -137,8 +131,8 @@ terminates that just-created sandbox before the lease can be retried.
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
 reason `WORKER_SHUTDOWN`) preempts the in-flight turn instead of failing the
-session: the activity checkpoints (final conversation-truth reconcile plus the
-sandbox envelope; legacy run-state mode captures the RunState blob), puts the
+session: the activity checkpoints the final conversation truth plus the sandbox
+envelope, puts the
 turn back on the session queue, emits a `turn.preempted` event, and completes
 with status `preempted`. The session workflow then re-dispatches the same turn
 on a healthy worker — entering through a synthesized resume notice when the
@@ -148,7 +142,7 @@ replaying the original trigger when nothing was persisted yet. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
 explicit checkpoint/resume, not an automatic Temporal retry.
 The event, turn reset, and session transition share the atomic settlement above;
-an interrupt, terminal state, or newer attempt is respected as stale rather
+a newer control generation, terminal state, or newer attempt is respected as stale rather
 than overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
@@ -157,14 +151,12 @@ runs the graceful checkpoint; it surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
 truth was still dual-written after every model response during the turn, so
-the fenced `requeueTurnAfterWorkerDeath` activity atomically puts the turn back
-on the queue and the loop re-dispatches it — through a
-synthesized `turn.preempted` resume notice (reason `worker_death`) when the
-dead attempt had persisted items for the turn, or by replaying the original
-trigger when nothing was persisted. This is still not an automatic Temporal
-retry of side-effectful work: the resumed attempt sees everything the dead
-attempt checkpointed and is told to verify in-flight side effects before
-repeating them. The dying activity never writes a competing cancellation.
+the fenced `recoverTurnAfterWorkerDeath` activity atomically marks the same
+logical turn `recovering` and the loop dispatches its next attempt. This is not
+prompt-queue work and not an automatic Temporal retry of side-effectful work:
+the resumed attempt sees everything durably checkpointed and is told to verify
+in-flight side effects before repeating them. The dying activity never writes a
+competing cancellation.
 A per-turn redispatch counter persisted on the turn row (ceiling 3) breaks
 crash loops: the transaction that exceeds the ceiling appends the failure
 events and fails the exact turn/session, and the workflow performs no second
@@ -194,13 +186,13 @@ wrong one is the classic mistake.
    Ordered, verbatim SDK `AgentInputItem` JSON, unredacted, RLS-scoped. This is
    what a new turn's input is built from. It is dual-written as the agent
    streams (reconciled after every model response and at every turn-end path)
-   so a crash loses at most the single in-flight model call. The read path is
-   selected by `OPENGENI_SESSION_HISTORY_SOURCE` (default `items`).
+   so a crash loses at most the single in-flight model call. Ordinary inference
+   has no second conversation-memory read path.
 2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
    (`requires_action`); a half-finished tool approval cannot be represented as
-   plain history items. In items mode the blob is written only for that case.
+   plain history items. The blob is written only for that case.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted

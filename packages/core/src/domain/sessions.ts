@@ -57,7 +57,6 @@ import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
-  mergeResourceRefs,
   mergeToolRefs,
   normalizeResources,
   validateFileResources,
@@ -646,7 +645,7 @@ export function reasoningEffortForSession(
 export async function postUserMessageTurn(input: {
   db: Database;
   bus: EventBus;
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalInterrupt">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
   settings: Settings;
   accountId: string;
   workspaceId: string;
@@ -658,16 +657,12 @@ export async function postUserMessageTurn(input: {
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
-  // Default append preserves the public API/MCP queue semantics. The operator
-  // recovery helper opts into the locked reject policy so a preflight race
-  // cannot silently append behind newly-active work.
-  queuePolicy?: "append" | "reject_conflicts";
   delivery?: "queue" | "steer";
   origin?: "human" | "operator";
   actor?: string;
   expectedControlGeneration?: number;
   expectedWorkspaceInferenceGeneration?: number;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn; interrupted: boolean }> {
+}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
@@ -699,7 +694,6 @@ export async function postUserMessageTurn(input: {
             expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
           }
         : {}),
-      rejectConflicts: input.queuePolicy === "reject_conflicts",
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
   } catch (error) {
@@ -715,8 +709,8 @@ export async function postUserMessageTurn(input: {
     throw error;
   }
   await bus.publish(workspaceId, sessionId, result.events);
-  if (result.shouldSignalInterrupt && result.controlEvent) {
-    await workflowClient.signalInterrupt({
+  if (result.shouldSignalControl && result.controlEvent) {
+    await workflowClient.signalSessionControl({
       accountId,
       workspaceId,
       sessionId,
@@ -734,7 +728,6 @@ export async function postUserMessageTurn(input: {
   return {
     accepted: result.accepted,
     turn: result.turn,
-    interrupted: result.shouldSignalInterrupt,
   };
 }
 
@@ -1180,13 +1173,12 @@ export async function acceptSessionUserMessage(
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    queuePolicy?: "append" | "reject_conflicts";
     delivery?: "queue" | "steer";
     origin?: "human" | "operator";
     expectedControlGeneration?: number;
     expectedWorkspaceInferenceGeneration?: number;
   },
-): Promise<{ accepted: SessionEvent; turn: SessionTurn; interrupted: boolean }> {
+): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
@@ -1227,7 +1219,7 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
-  const { accepted, turn, interrupted } = await postUserMessageTurn({
+  const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
     workflowClient,
@@ -1241,7 +1233,6 @@ export async function acceptSessionUserMessage(
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
-    queuePolicy: input.queuePolicy ?? "append",
     delivery: input.delivery ?? "queue",
     origin: input.origin ?? "human",
     actor: grant.subjectId,
@@ -1266,7 +1257,7 @@ export async function acceptSessionUserMessage(
     sourceResourceId: turn.id,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
-  return { accepted, turn, interrupted };
+  return { accepted, turn };
 }
 
 /**

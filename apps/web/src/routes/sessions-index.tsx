@@ -99,11 +99,10 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
       !context.busy &&
       !attachments.uploading &&
       computeReady,
-    // Queue-vs-steer is meaningless before the session exists.
-    mode: "queue",
-    setMode: () => {},
-    interrupt: async () => {},
-    interrupting: false,
+    pause: async () => {},
+    pausing: false,
+    resume: async () => {},
+    resuming: false,
     error: null,
     clearError: () => {},
     send: async () => {
@@ -221,6 +220,9 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
   queued: "queued",
   running: "running",
+  recovering: "running",
+  waiting_capacity: "waiting",
+  paused: "idle",
   requires_action: "waiting",
   idle: "idle",
   failed: "failed",

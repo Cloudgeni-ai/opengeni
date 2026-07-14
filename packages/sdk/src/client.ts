@@ -90,11 +90,8 @@ import type {
   SessionMcpCredentialUpdateInput,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
-  SessionSystemUpdateBundlePage,
   SessionControlResponse,
   WorkspaceInferenceControlResponse,
-  WorkspaceQueueRuntimeControlResponse,
-  StopSessionDescendantsResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -141,7 +138,6 @@ import type {
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
-  UpdateSessionTurnRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -196,8 +192,6 @@ export type SteerMessageResult = {
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
-  /** True when the running turn was interrupted to make way for the message. */
-  interrupted: boolean;
 };
 
 /**
@@ -554,14 +548,14 @@ export class OpenGeniClient {
     });
   }
 
-  async interrupt(
+  async pauseSession(
     workspaceId: string,
     sessionId: string,
     options: { reason?: string; clientEventId?: string } = {},
   ): Promise<SessionEvent> {
     return (
       await this.controlSession(workspaceId, sessionId, {
-        mode: "stop",
+        mode: "pause",
         ...options,
       })
     ).event;
@@ -643,23 +637,6 @@ export class OpenGeniClient {
     );
   }
 
-  async editQueueItem(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-    request: {
-      expectedQueueVersion: number;
-      expectedItemVersion: number;
-      update: UpdateSessionTurnRequest;
-    },
-  ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}`,
-      request,
-    );
-  }
-
   async cancelQueueItem(
     workspaceId: string,
     sessionId: string,
@@ -673,56 +650,14 @@ export class OpenGeniClient {
     );
   }
 
-  async promoteQueueItem(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-    request: { expectedQueueVersion: number; expectedItemVersion: number },
-  ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/promote`,
-      request,
-    );
-  }
-
-  async reorderQueue(
-    workspaceId: string,
-    sessionId: string,
-    request: { expectedQueueVersion: number; turnIds: string[] },
-  ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/reorder`,
-      request,
-    );
-  }
-
-  async getSystemUpdateBundle(
-    workspaceId: string,
-    sessionId: string,
-    bundleId: string,
-    options: { cursor?: number; limit?: number } = {},
-  ): Promise<SessionSystemUpdateBundlePage> {
-    return await this.requestJson<SessionSystemUpdateBundlePage>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/system-update-bundles/${bundleId}`,
-      undefined,
-      {
-        ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-      },
-    );
-  }
-
   async controlSession(
     workspaceId: string,
     sessionId: string,
     request: {
-      mode: "interrupt" | "stop" | "resume";
+      mode: "pause" | "resume";
       reason?: string;
       clientEventId?: string;
-      expectedControlState?: "active" | "session_stopped" | "workspace_killed";
+      expectedControlState?: "active" | "paused";
       expectedControlGeneration?: number;
       expectedWorkspaceInferenceGeneration?: number;
     },
@@ -734,22 +669,6 @@ export class OpenGeniClient {
     );
   }
 
-  async interruptCurrent(
-    workspaceId: string,
-    sessionId: string,
-    options: { reason?: string; clientEventId?: string } = {},
-  ): Promise<SessionControlResponse> {
-    return await this.controlSession(workspaceId, sessionId, { mode: "interrupt", ...options });
-  }
-
-  async stopSession(
-    workspaceId: string,
-    sessionId: string,
-    options: { reason?: string; clientEventId?: string } = {},
-  ): Promise<SessionControlResponse> {
-    return await this.controlSession(workspaceId, sessionId, { mode: "stop", ...options });
-  }
-
   async resumeSession(
     workspaceId: string,
     sessionId: string,
@@ -758,85 +677,21 @@ export class OpenGeniClient {
     return await this.controlSession(workspaceId, sessionId, { mode: "resume", ...options });
   }
 
-  async stopSessionDescendants(
-    workspaceId: string,
-    sessionId: string,
-    request: {
-      reason?: string;
-      includeRoot?: boolean;
-      clientEventId: string;
-      expectedWorkspaceInferenceGeneration: number;
-      expectedRootControlGeneration: number;
-    },
-  ): Promise<StopSessionDescendantsResponse> {
-    return await this.requestJson<StopSessionDescendantsResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control/descendants`,
-      request,
-    );
-  }
-
   async setWorkspaceInferenceState(
     workspaceId: string,
     request: {
-      state: "active" | "killed";
+      state: "active" | "paused";
       reason: string;
       clientEventId: string;
-      expectedState: "active" | "killed";
+      expectedState: "active" | "paused";
       expectedGeneration: number;
+      exceptSessionIds?: string[];
     },
   ): Promise<WorkspaceInferenceControlResponse> {
     return await this.requestJson<WorkspaceInferenceControlResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/inference-control`,
       request,
-    );
-  }
-
-  async setWorkspaceQueueRuntimeState(
-    workspaceId: string,
-    request: {
-      state: "legacy" | "durable_v1";
-      reason: string;
-      clientEventId: string;
-      expectedState: "legacy" | "durable_v1";
-      expectedGeneration: number;
-    },
-  ): Promise<WorkspaceQueueRuntimeControlResponse> {
-    return await this.requestJson<WorkspaceQueueRuntimeControlResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/queue-runtime-control`,
-      request,
-    );
-  }
-
-  /** Edit a still-queued turn (prompt, model, resources, tools, ...). */
-  async updateQueuedTurn(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-    update: UpdateSessionTurnRequest,
-  ): Promise<SessionTurn> {
-    return await this.requestJson<SessionTurn>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
-      update,
-    );
-  }
-
-  /**
-   * Reorder the queued turns. `turnIds` must all reference queued turns; the
-   * server assigns positions in the given order and returns the queue.
-   */
-  async reorderQueuedTurns(
-    workspaceId: string,
-    sessionId: string,
-    turnIds: string[],
-  ): Promise<SessionTurn[]> {
-    return await this.requestJson<SessionTurn[]>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/reorder`,
-      { turnIds },
     );
   }
 
@@ -853,10 +708,8 @@ export class OpenGeniClient {
   }
 
   /**
-   * Steer: atomically append a message, create and promote its exact queue
-   * item, and fence cancellation to the active turn generation observed by
-   * the server. The client performs one request; it never derives queue state
-   * from paginated turn history or races a separate reorder/interrupt call.
+   * Steer: atomically put this prompt at the head and supersede the current
+   * inference. The client performs one request and renders server order.
    */
   async steerMessage(
     workspaceId: string,
@@ -931,12 +784,7 @@ export class OpenGeniClient {
     );
   }
 
-  /**
-   * Trigger conversation compaction now. On the client-managed (Azure) path this
-   * queues a forced compaction the worker honors before the next turn
-   * (`status:"queued"`); on a server-managed provider or when compaction is off
-   * it is a no-op (`status:"noop"`) with an explanatory message.
-   */
+  /** Request one durable portable compaction at the next safe model boundary. */
   async compactSessionContext(
     workspaceId: string,
     sessionId: string,

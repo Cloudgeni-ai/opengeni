@@ -5,6 +5,7 @@ import {
   ImageIcon,
   LoaderCircleIcon,
   PaperclipIcon,
+  PlayIcon,
   RotateCwIcon,
   SquareIcon,
   XIcon,
@@ -27,7 +28,7 @@ import {
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
-import { shouldSubmitOnKey } from "../hooks/use-composer";
+import { composerModeForKey, shouldSubmitOnKey } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import { defaultCommands } from "../commands/registry";
 import {
@@ -94,7 +95,13 @@ export type ChatComposerProps = {
   onClearView?: (() => void) | undefined;
 };
 
-const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["queued", "running"]);
+const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  "queued",
+  "running",
+  "requires_action",
+  "recovering",
+  "waiting_capacity",
+]);
 
 /**
  * The chat composer — the only human-to-agent input surface. Plain chat in,
@@ -293,7 +300,7 @@ export function ChatComposer({
         // depart without them. The send button is disabled in the same state.
         return;
       }
-      void composer.send();
+      void composer.send(undefined, composerModeForKey(event));
     }
   };
 
@@ -415,8 +422,12 @@ export function ChatComposer({
             disabled={disabled}
             autoFocus={autoFocus}
             aria-label="Message the agent"
-            role={paletteEnabled && palette.open ? "combobox" : undefined}
-            aria-expanded={paletteEnabled ? palette.open : undefined}
+            aria-keyshortcuts="Enter Meta+Enter Control+Enter Shift+Enter"
+            // A multiline textarea cannot legally take the combobox role or
+            // aria-expanded. It remains a native textbox and advertises the
+            // popup as list autocomplete; controls/active-descendant exist
+            // only while the suggestion list itself exists.
+            aria-autocomplete={paletteEnabled ? "list" : undefined}
             aria-controls={paletteEnabled && palette.open ? listboxId : undefined}
             aria-activedescendant={
               paletteEnabled && palette.open
@@ -490,12 +501,12 @@ export function ChatComposer({
                 </span>
               ) : (
                 <span className="min-w-0 flex-1 px-1.5 text-og-xs text-og-fg-subtle max-sm:hidden">
-                  {hint ?? "Enter to send · Shift+Enter for a new line · / for commands"}
+                  {hint ?? "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line"}
                 </span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1.5">
                 <AnimatePresence initial={false}>
-                  {active ? (
+                  {active || status === "paused" ? (
                     <motion.button
                       key="stop"
                       type="button"
@@ -503,10 +514,16 @@ export function ChatComposer({
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.8 }}
                       transition={{ duration: 0.15, ease: "easeOut" }}
-                      onClick={() => void composer.interrupt()}
-                      disabled={composer.interrupting}
-                      aria-label="Stop the session"
-                      title="Stop: cancels the current turn, clears any queued messages, and pauses the goal"
+                      onClick={() =>
+                        void (status === "paused" ? composer.resume() : composer.pause())
+                      }
+                      disabled={composer.pausing || composer.resuming}
+                      aria-label={status === "paused" ? "Resume the session" : "Pause the session"}
+                      title={
+                        status === "paused"
+                          ? "Resume the current inference before queued prompts"
+                          : "Pause the session; queued prompts are preserved"
+                      }
                       className={cn(
                         "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
                         "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
@@ -514,8 +531,10 @@ export function ChatComposer({
                         "disabled:opacity-50",
                       )}
                     >
-                      {composer.interrupting ? (
+                      {composer.pausing || composer.resuming ? (
                         <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+                      ) : status === "paused" ? (
+                        <PlayIcon className="size-3.5 fill-current" />
                       ) : (
                         <SquareIcon className="size-3 fill-current" />
                       )}
@@ -532,6 +551,7 @@ export function ChatComposer({
                   }}
                   disabled={!canSend || disabled === true || commandDraftBlocked}
                   aria-label="Send message"
+                  title="Queue message (Enter); steer with Cmd/Ctrl+Enter"
                   className={cn(
                     "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
                     "bg-og-accent text-og-accent-fg shadow-og-sm",

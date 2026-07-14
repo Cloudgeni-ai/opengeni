@@ -10,7 +10,7 @@ import {
   type SelfhostedOpObserver,
 } from "@opengeni/runtime";
 
-export type TurnOutcome = "completed" | "failed" | "cancelled" | "preempted";
+export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type CreditBalanceGauge = { accountId: string; balanceMicros: number };

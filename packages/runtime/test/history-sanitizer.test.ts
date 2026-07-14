@@ -720,7 +720,7 @@ describe("stripReasoningEncryptedContent", () => {
 });
 
 describe("stripReasoningIdentityFromSerializedRunState", () => {
-  // The run-state REPLAY paths (approval resume + items-mode run-state fallback)
+  // The approval RunState replay path
   // replay a serialized RunState blob that has no per-item producer tag. When the
   // resuming codex account differs from the freezing one, this neutralizes EVERY
   // reasoning item's account-bound identity (encrypted_content + provider id)

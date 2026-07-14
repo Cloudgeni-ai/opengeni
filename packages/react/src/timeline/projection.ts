@@ -37,7 +37,6 @@ import type {
 /** Tool names on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
-const WORKER_INTERRUPT_TOOL = "session_interrupt";
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -110,7 +109,6 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "user-message",
           id: event.id,
           text: typeof payload.text === "string" ? payload.text : "",
-          ...(event.pendingUserMessage ? { pending: true } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
@@ -202,23 +200,6 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
-        if (name === WORKER_INTERRUPT_TOOL) {
-          // stop (default) vs steer — the target keeps its goal on steer and
-          // picks up its next queued turn (pair with session_send_message).
-          items.push({
-            kind: "worker",
-            id: event.id,
-            turnId,
-            callId,
-            action: "interrupt",
-            prompt: null,
-            workerSessionId: extractSessionRef(args),
-            mode: workerInterruptMode(args),
-            status: "running",
-            occurredAt: event.occurredAt,
-          });
-          break;
-        }
         if (name === WORKER_SPAWN_TOOL || name === WORKER_MESSAGE_TOOL) {
           items.push({
             kind: "worker",
@@ -419,6 +400,59 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "session.context.compaction.skipped": {
+        closeStreamingTail();
+        const reason = typeof payload.reason === "string" ? payload.reason : null;
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text:
+            reason === "no_history"
+              ? "Context compaction skipped because there is no active history to compact."
+              : reason === "replacement_not_smaller"
+                ? "Context compaction skipped because the generated checkpoint would not reduce the context."
+                : "Context compaction was not needed.",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
+      case "turn.recovery.requested": {
+        closeStreamingTail();
+        const reason =
+          typeof payload.reason === "string" ? payload.reason.replaceAll("_", " ") : null;
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: reason
+            ? `The current turn is recovering after ${reason}. No new prompt was queued.`
+            : "The current turn is recovering. No new prompt was queued.",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
+      case "turn.event.rejected_late": {
+        closeStreamingTail();
+        const rejectedType =
+          typeof payload.rejectedType === "string" ? payload.rejectedType : "unknown event";
+        const reason =
+          typeof payload.reason === "string"
+            ? payload.reason.replaceAll("_", " ")
+            : "attempt fence";
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "cancelled",
+          text: `Late ${rejectedType} evidence was rejected by the ${reason} and did not change the current turn.`,
+          details: { label: "Inspect rejected evidence", value: payload },
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "tool.auth_needed": {
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
@@ -443,6 +477,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.completed": {
+        // A standalone manual compaction uses the turn ledger for fencing and
+        // recovery, but it is maintenance rather than a conversational turn.
+        // The dedicated session.context.compacted notice is the complete UI
+        // truth; adding a generic turn chip would falsely make it look like an
+        // extra agent response.
+        if (payload.maintenance === "context_compaction") {
+          finalizeOpen(turnId);
+          break;
+        }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
         // "insufficient OpenGeni credits"`, `segmentLimit: "budget_exhausted"`)
         // — the engine ended the segment early, it did not finish the work.
@@ -646,8 +689,6 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
 
 /* --- helpers ---------------------------------------------------------------- */
 
-type TimelineEvent = SessionEvent & { pendingUserMessage?: true };
-
 type TurnAnchorPrescan = {
   queuedTurnByTrigger: Map<string, string>;
   startSeqByTrigger: Map<string, number>;
@@ -678,7 +719,7 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     if (event.type === "turn.started") {
       const triggerEventId =
         typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
-      if (triggerEventId) {
+      if (triggerEventId && !startSeqByTrigger.has(triggerEventId)) {
         startSeqByTrigger.set(triggerEventId, event.sequence);
       }
       if (turnId) {
@@ -686,17 +727,6 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       }
     } else if (event.type === "turn.cancelled" && turnId) {
       cancelledTurnIds.add(turnId);
-    } else if (event.type === "turn.queue_drained") {
-      // A stop drained the whole queue in one shot (one summary event carrying
-      // the cancelled ids). Treat every drained turn exactly like an
-      // individually-cancelled never-started turn so its queued anchor folds
-      // away as a calm retraction instead of lingering as still-queued.
-      const drainedTurnIds = Array.isArray(payload.drainedTurnIds) ? payload.drainedTurnIds : [];
-      for (const drainedId of drainedTurnIds) {
-        if (typeof drainedId === "string") {
-          cancelledTurnIds.add(drainedId);
-        }
-      }
     }
 
     if (turnId && event.type !== "turn.queued" && event.type !== "turn.cancelled") {
@@ -733,10 +763,9 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   return { queuedTurnByTrigger, startSeqByTrigger, cancelledBeforeStartTriggers, startedTurnIds };
 }
 
-function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): TimelineEvent[] {
+function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): SessionEvent[] {
   const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
-  const insertions = new Map<number, TimelineEvent[]>();
-  const pending: TimelineEvent[] = [];
+  const insertions = new Map<number, SessionEvent[]>();
 
   for (const event of ordered) {
     if (event.type !== "user.message") {
@@ -755,10 +784,12 @@ function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan)
       pushInsertion(insertions, startSeq, event);
       continue;
     }
-    pending.push({ ...event, pendingUserMessage: true });
+    // A waiting prompt belongs only in the prompt queue. It enters the
+    // timeline at turn.started (or the first same-turn activity fallback),
+    // never as a second queued representation.
   }
 
-  const projected: TimelineEvent[] = [];
+  const projected: SessionEvent[] = [];
   for (const event of ordered) {
     const before = insertions.get(event.sequence);
     if (before) {
@@ -768,12 +799,11 @@ function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan)
       projected.push(event);
     }
   }
-  projected.push(...pending);
   return projected;
 }
 
 function pushInsertion(
-  insertions: Map<number, TimelineEvent[]>,
+  insertions: Map<number, SessionEvent[]>,
   sequence: number,
   event: SessionEvent,
 ): void {
@@ -1203,12 +1233,6 @@ function workerPrompt(args: unknown): string | null {
     }
   }
   return null;
-}
-
-/** The interrupt mode from `session_interrupt` args; defaults to "stop". */
-function workerInterruptMode(args: unknown): "stop" | "steer" {
-  const record = asRecord(typeof args === "string" ? tryParseJson(args) : args);
-  return record.mode === "steer" ? "steer" : "stop";
 }
 
 /**

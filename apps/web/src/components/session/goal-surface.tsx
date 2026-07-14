@@ -1,9 +1,9 @@
 // The goal surface: ONE slim floating pill above the composer (Codex-style)
 // that carries the active goal at a glance — state, truncated title, live
 // elapsed — and expands to a panel with the full goal detail, autonomy
-// counters, and pause/resume. The goal is its own concern: the spawned-subagent
-// tree is DECOUPLED into ./subagents.tsx (the "Agents" dock tab + header chip),
-// so nothing here reaches for the session's lineage.
+// counters, and pause/resume. The goal is its own concern: spawned agents live
+// in their single composer-adjacent surface, so nothing here reaches for the
+// session's lineage.
 //
 // Copy doctrine: human language only. Internal status slugs (requires_action,
 // active, …) are translated to plain labels at this boundary; no enum leaks
@@ -205,7 +205,7 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
                 <span aria-hidden className="shrink-0 text-fg-subtle">
                   ·
                 </span>
-                <span className="shrink-0 tabular-nums text-fg-subtle" title="Time on this goal">
+                <span className="shrink-0 tabular-nums text-fg-muted" title="Time on this goal">
                   {elapsed}
                 </span>
               </>

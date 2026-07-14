@@ -1,224 +1,238 @@
 import {
   applyContextCompaction,
   getActiveSessionHistoryItems,
-  nextSessionHistoryPosition,
+  recordSkippedContextCompaction,
   type Database,
 } from "@opengeni/db";
 import {
   SUMMARY_BUFFER_TOKENS,
   buildCompactionPromptInput,
-  buildDeterministicFallbackCompactionHistory,
   buildCompactionReplacementHistory,
-  decideClientCompaction,
+  decideCompaction,
   estimateTokens,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
 } from "@opengeni/runtime";
-import { resolveContextCompactionMode, type Settings } from "@opengeni/config";
+import type { Settings } from "@opengeni/config";
+import type { SessionEvent } from "@opengeni/contracts";
+import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 
 export type MaybeCompactResult =
-  | { compacted: false; reason: string }
+  | {
+      compacted: false;
+      reason: string;
+      events: SessionEvent[];
+      requestConsumed: boolean;
+    }
   | {
       compacted: true;
       supersededFrom: number;
       summaryPosition: number;
       signalTokens: number;
       thresholdTokens: number;
-      method: "summary" | "fallback";
       estimatedTokensBefore: number;
       estimatedTokensAfter: number;
+      events: SessionEvent[];
     };
 
 /**
- * Pre-turn client-side context compaction (the Azure path).
+ * Durable portable context compaction, following Codex CLI's local path.
  *
- * Runs BEFORE the model call when the resolved compaction mode is "client".
+ * Runs before a fresh model call and on a same-turn compaction recovery.
  * Reads the active history rows + the most recent provider-reported input
  * tokens, applies the single Codex-parity threshold, and - when it should -
  * summarizes the active history with the Codex checkpoint prompt. The write
  * supersedes the old active rows and inserts replacement active rows:
  * all real user messages plus one summary.
  *
- * Required compactions are fail-closed on the summarizer: full rendered
- * transcript, hard-trim rendered retry, then deterministic non-LLM fallback.
- * DB errors still throw to the caller; "compacted:false" is reserved for
- * structural no-ops or impossible shrink, not summarizer failures.
+ * If the summarizer itself exceeds the context window, the oldest prompt item
+ * is removed and the same compaction call is retried, exactly like Codex local
+ * compaction. Other provider failures propagate. There is no non-model
+ * fallback and no silent request-local history trimming.
  *
- * There is no kept assistant/tool tail in client mode now. Assistant messages,
+ * There is no kept assistant/tool tail. Assistant messages,
  * tool calls/results, reasoning, and images stay only in inactive audit rows.
  */
-export type CompactionSummarizerOptions = {
-  maxTranscriptTokens?: number;
-  attempt: "full" | "hard_trim";
-};
-
-export type CompactionSummarizer = (
-  settings: Settings,
-  input: CompactionItem[],
-  options?: CompactionSummarizerOptions,
-) => Promise<string | null>;
+export type CompactionSummarizer = (settings: Settings, input: CompactionItem[]) => Promise<string>;
 
 export async function maybeCompactContext(
   db: Database,
   settings: Settings,
-  scope: { accountId: string; workspaceId: string; sessionId: string; turnId?: string | null },
+  scope: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
-  summarize: CompactionSummarizer = (s, m, o) =>
+  summarize: CompactionSummarizer = (s, m) =>
     summarizeForCompaction(s, m, {
       maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-      ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
     }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
-  options: { force?: boolean; requireShrink?: boolean } = {},
+  options: {
+    force?: boolean;
+    clearRequestedCompaction?: boolean;
+    trigger?: "auto" | "operator" | "proactive" | "overflow";
+  } = {},
 ): Promise<MaybeCompactResult> {
-  if (resolveContextCompactionMode(settings) !== "client") {
-    return { compacted: false, reason: "mode_not_client" };
-  }
-
   const active = await getActiveSessionHistoryItems(db, scope.workspaceId, scope.sessionId);
   if (active.length === 0) {
-    return { compacted: false, reason: "no_history" };
+    let requestConsumed = false;
+    if (options.clearRequestedCompaction) {
+      const skipped = await recordSkippedContextCompaction(db, {
+        ...scope,
+        expectedExecutionGeneration: scope.executionGeneration,
+        expectedAttemptId: scope.attemptId,
+        reason: "no_history",
+      });
+      if (!skipped.recorded) {
+        throw new TurnAttemptFencedError(
+          "turn attempt was fenced while consuming an empty context compaction request",
+        );
+      }
+      requestConsumed = true;
+      return {
+        compacted: false,
+        reason: "no_history",
+        events: skipped.events,
+        requestConsumed,
+      };
+    }
+    return { compacted: false, reason: "no_history", events: [], requestConsumed };
   }
 
   const items = sanitizeHistoryItemsForModel(active.map((row) => row.item) as CompactionItem[]);
-  const decision = decideClientCompaction({
+  const decision = decideCompaction({
     items,
     lastInputTokens,
     contextWindowTokens: settings.contextWindowTokens,
     contextReservedOutputTokens: settings.contextReservedOutputTokens,
-    contextClientCompactThresholdTokens: settings.contextClientCompactThresholdTokens,
+    contextAutoCompactThresholdTokens: settings.contextAutoCompactThresholdTokens,
     contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
     ...(options.force ? { force: true } : {}),
   });
   if (!decision.shouldCompact) {
-    return { compacted: false, reason: decision.reason };
-  }
-
-  const promptInput = buildCompactionPromptInput(items);
-  const estimatedTokensBefore = estimateTokens(items);
-  // A recovery compaction is allowed to auto-continue only when the ACTIVE
-  // model-facing history itself strictly shrinks. `decision.signalTokens` may
-  // come from the provider's previous request and include system/tool schema
-  // tokens that are not represented in `items`; using max(before, signal) let a
-  // replacement GROW the active history while still claiming a successful
-  // shrink. The smaller ceiling proves progress against both views and gives
-  // repeated compaction resumes a natural, symptom-based loop guard: a
-  // successful recovery monotonically reduces a finite active history; a
-  // no-shrink attempt stops instead of requeueing.
-  const shrinkCeilingTokens = Math.min(
-    estimatedTokensBefore,
-    decision.signalTokens > 0 ? decision.signalTokens : estimatedTokensBefore,
-  );
-  const requireShrink = options.requireShrink || decision.reason === "above_threshold";
-  let summarizerFailure = "summarizer returned no summary";
-  let summaryBody: string | null = null;
-
-  const fullAttempt = await runSummarizerAttempt(summarize, settings, promptInput, {
-    attempt: "full",
-  });
-  if (fullAttempt.summary) {
-    summaryBody = fullAttempt.summary;
-  } else {
-    summarizerFailure = fullAttempt.failure;
-    const hardTrimBudget = Math.max(1, Math.floor(Math.max(1, decision.thresholdTokens) * 0.5));
-    const retryAttempt = await runSummarizerAttempt(summarize, settings, promptInput, {
-      attempt: "hard_trim",
-      maxTranscriptTokens: hardTrimBudget,
-    });
-    if (retryAttempt.summary) {
-      summaryBody = retryAttempt.summary;
-    } else {
-      summarizerFailure = retryAttempt.failure || summarizerFailure;
-    }
-  }
-
-  let replacementHistory: CompactionItem[] | null = null;
-  let method: "summary" | "fallback" = "summary";
-  if (summaryBody) {
-    const summaryReplacement = buildCompactionReplacementHistory(items, summaryBody);
-    const summaryEstimate = estimateTokens(summaryReplacement);
-    if (!requireShrink || summaryEstimate < shrinkCeilingTokens) {
-      replacementHistory = summaryReplacement;
-    } else {
-      summarizerFailure = `summary replacement did not reduce active context (${summaryEstimate} >= ${shrinkCeilingTokens})`;
-    }
-  }
-
-  if (!replacementHistory) {
-    method = "fallback";
-    const fallbackTargetTokens = Math.max(
-      1,
-      Math.min(
-        Math.max(1, Math.floor(shrinkCeilingTokens * 0.5)),
-        Math.max(1, Math.floor(Math.max(1, decision.thresholdTokens) * 0.5)),
-      ),
-    );
-    replacementHistory = buildDeterministicFallbackCompactionHistory({
-      items,
-      cause: summarizerFailure,
-      targetTokens: fallbackTargetTokens,
-    });
-  }
-
-  const estimatedTokensAfter = estimateTokens(replacementHistory);
-  if (requireShrink && estimatedTokensAfter >= shrinkCeilingTokens) {
     return {
       compacted: false,
-      reason: `compaction summarization failed: fallback did not reduce active context (${estimatedTokensAfter} >= ${shrinkCeilingTokens})`,
+      reason: decision.reason,
+      events: [],
+      requestConsumed: false,
     };
   }
 
+  const estimatedTokensBefore = estimateTokens(items);
+  const summaryBody = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
+  const estimatedTokensAfter = estimateTokens(replacementHistory);
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
-    return { compacted: false, reason: `compaction summarization failed: ${summarizerFailure}` };
+    return {
+      compacted: false,
+      reason: "compaction produced no replacement history",
+      events: [],
+      requestConsumed: false,
+    };
   }
-  const nextPosition = await nextSessionHistoryPosition(db, scope.workspaceId, scope.sessionId);
-  const replacementItems = replacementHistory.slice(0, -1).map((item, index) => ({
-    position: nextPosition + index,
-    item,
-  }));
-  const summaryPosition = nextPosition + replacementItems.length;
-
-  await applyContextCompaction(db, {
+  if (estimatedTokensAfter >= estimatedTokensBefore) {
+    let requestConsumed = false;
+    if (options.clearRequestedCompaction) {
+      const skipped = await recordSkippedContextCompaction(db, {
+        ...scope,
+        expectedExecutionGeneration: scope.executionGeneration,
+        expectedAttemptId: scope.attemptId,
+        reason: "replacement_not_smaller",
+      });
+      if (!skipped.recorded) {
+        throw new TurnAttemptFencedError(
+          "turn attempt was fenced while consuming a non-shrinking context compaction request",
+        );
+      }
+      requestConsumed = true;
+      return {
+        compacted: false,
+        reason: "replacement_not_smaller",
+        events: skipped.events,
+        requestConsumed,
+      };
+    }
+    return {
+      compacted: false,
+      reason: "replacement_not_smaller",
+      events: [],
+      requestConsumed,
+    };
+  }
+  const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
     sessionId: scope.sessionId,
-    turnId: scope.turnId ?? null,
-    boundaryPosition: nextPosition,
-    replacementItems,
-    summaryPosition,
+    turnId: scope.turnId,
+    expectedExecutionGeneration: scope.executionGeneration,
+    expectedAttemptId: scope.attemptId,
+    replacementItems: replacementHistory.slice(0, -1),
     summaryItem: summaryItem as Record<string, unknown>,
     replacementInputTokens: estimatedTokensAfter,
+    ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
+    eventPayload: {
+      trigger: options.trigger ?? "auto",
+      estimatedTokensBefore,
+      estimatedTokensAfter,
+    },
   });
+  if (!applied.applied) {
+    throw new TurnAttemptFencedError(
+      `turn attempt was fenced during context compaction: ${applied.reason}`,
+    );
+  }
 
   return {
     compacted: true,
-    supersededFrom: nextPosition,
-    summaryPosition,
+    supersededFrom: applied.supersededFrom,
+    summaryPosition: applied.summaryPosition,
     signalTokens: decision.signalTokens,
     thresholdTokens: decision.thresholdTokens,
-    method,
     estimatedTokensBefore,
     estimatedTokensAfter,
+    events: applied.events,
   };
 }
 
-async function runSummarizerAttempt(
+async function summarizeWithCodexOverflowTrimming(
   summarize: CompactionSummarizer,
   settings: Settings,
-  promptInput: CompactionItem[],
-  options: CompactionSummarizerOptions,
-): Promise<{ summary: string | null; failure: string }> {
-  try {
-    const summary = await summarize(settings, promptInput, options);
-    if (summary && summary.trim().length > 0) {
-      return { summary, failure: "" };
+  activeHistory: CompactionItem[],
+): Promise<string> {
+  const compactionHistory = activeHistory.slice();
+  while (true) {
+    try {
+      return await summarize(settings, buildCompactionPromptInput(compactionHistory));
+    } catch (error) {
+      if (!isContextWindowExceeded(error) || compactionHistory.length === 0) {
+        throw error;
+      }
+      // Codex removes one oldest history item, keeps the synthesized checkpoint
+      // prompt, resets its stream retry count, and samples the summary again.
+      compactionHistory.shift();
     }
-    return { summary: null, failure: "summarizer returned no summary" };
-  } catch (error) {
-    return { summary: null, failure: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function isContextWindowExceeded(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const record = error as Record<string, unknown>;
+  const code = typeof record.code === "string" ? record.code.toLowerCase() : "";
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    code === "context_length_exceeded" ||
+    code === "context_window_exceeded" ||
+    message.includes("context window") ||
+    message.includes("maximum context length") ||
+    message.includes("too many tokens")
+  );
 }

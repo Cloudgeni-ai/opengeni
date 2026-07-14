@@ -1,7 +1,12 @@
 import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
+import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
-import { SandboxImageConflictError, SandboxLeaseSupersededError } from "@opengeni/db";
+import {
+  interruptedToolCallResult,
+  SandboxImageConflictError,
+  SandboxLeaseSupersededError,
+} from "@opengeni/db";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
@@ -19,16 +24,15 @@ import {
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
+  recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRetryRecovery,
   resolveActiveSandboxBackend,
   shouldStartOnTurnRecording,
-  WORKER_SHUTDOWN_RESUME_TEXT,
 } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
-import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -36,7 +40,13 @@ function userMessage(text: string) {
   return { type: "message", role: "user", content: text };
 }
 function functionCall(callId: string) {
-  return { type: "function_call", callId, name: "tool", arguments: "{}", status: "completed" };
+  return {
+    type: "function_call",
+    callId,
+    name: "tool",
+    arguments: "{}",
+    status: "completed",
+  };
 }
 function functionResult(callId: string) {
   return {
@@ -70,6 +80,101 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
 }
 
 describe("conversation-truth reconcile (orphaned tool output guard)", () => {
+  test("does not treat a reverse-completing parallel call batch as an append-only history", () => {
+    const user = userMessage("run A and B in parallel");
+    const callA = functionCall("call_a");
+    const callB = functionCall("call_b");
+    const resultA = functionResult("call_a");
+    const resultB = functionResult("call_b");
+
+    // B completes first. The SDK's computed history temporarily drops A, then
+    // inserts A back before the already-visible B pair once A completes. A
+    // scalar length watermark cannot represent that prefix insertion.
+    const unsafe = persistAcrossReconciles([
+      [user],
+      [user, callB, resultB],
+      [user, callA, callB, resultB, resultA],
+    ]);
+    expect(unsafe).not.toEqual([user, callA, callB, resultB, resultA]);
+
+    // The live worker's durable receipt gate deliberately skips the partial B
+    // snapshot (`allResultsRecorded === false`) and reconciles only after both
+    // raw results exist, when the SDK history is stable again.
+    const persisted = persistAcrossReconciles([[user], [user, callA, callB, resultB, resultA]]);
+    expect(persisted).toEqual([user, callA, callB, resultB, resultA]);
+  });
+
+  test("interrupted tool results are valid SDK model items without invented computer state", () => {
+    const cases = [
+      {
+        callType: "function_call",
+        callId: "function-1",
+        callItem: {
+          type: "function_call",
+          callId: "function-1",
+          name: "mutate",
+          arguments: "{}",
+          status: "in_progress",
+        },
+      },
+      {
+        callType: "shell_call",
+        callId: "shell-1",
+        callItem: {
+          type: "shell_call",
+          callId: "shell-1",
+          status: "in_progress",
+          action: { commands: ["do-something"] },
+        },
+      },
+      {
+        callType: "apply_patch_call",
+        callId: "patch-1",
+        callItem: {
+          type: "apply_patch_call",
+          callId: "patch-1",
+          status: "in_progress",
+          operation: { type: "delete_file", path: "gone.txt" },
+        },
+      },
+      {
+        callType: "tool_search_call",
+        callId: "search-1",
+        callItem: {
+          type: "tool_search_call",
+          callId: "search-1",
+          execution: "client",
+          status: "in_progress",
+          arguments: { query: "mail" },
+        },
+      },
+    ];
+    for (const entry of cases) {
+      const result = interruptedToolCallResult({
+        ...entry,
+        reason: "worker_shutdown",
+      });
+      expect(result).not.toBeNull();
+      const pair = [entry.callItem, result!] as Array<Record<string, unknown>>;
+      expect(ModelItem.array().parse(pair)).toEqual(pair);
+      expect(sanitizeHistoryItemsForModel(pair)).toEqual(pair);
+    }
+
+    expect(
+      interruptedToolCallResult({
+        callType: "computer_call",
+        callId: "computer-1",
+        callItem: {
+          type: "computer_call",
+          callId: "computer-1",
+          status: "in_progress",
+          action: { type: "screenshot" },
+        },
+        reason: "worker_shutdown",
+      }),
+    ).toBeNull();
+  });
+
   test("never persists a function_call_result whose function_call was pruned mid-batch", () => {
     // Reproduces the live orphan: a parallel tool-call batch where the SDK's
     // computed history is non-monotonic across reconciles, then an abnormal
@@ -337,14 +442,30 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // within the one execution still dedupes (idempotent), while distinct calls
     // (response-1 vs response-2) stay distinct.
     expect(
-      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+      modelUsageSourceKey({
+        responseId: null,
+        dispatchId: "act-A",
+        positionalKey: "response-1",
+      }),
     ).toBe(
-      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+      modelUsageSourceKey({
+        responseId: null,
+        dispatchId: "act-A",
+        positionalKey: "response-1",
+      }),
     );
     expect(
-      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }),
+      modelUsageSourceKey({
+        responseId: null,
+        dispatchId: "act-A",
+        positionalKey: "response-1",
+      }),
     ).not.toBe(
-      modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-2" }),
+      modelUsageSourceKey({
+        responseId: null,
+        dispatchId: "act-A",
+        positionalKey: "response-2",
+      }),
     );
   });
 
@@ -352,8 +473,67 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // Outside a Temporal activity context (local/test) there is no activityId;
     // the key falls back to the positional value rather than throwing.
     expect(
-      modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }),
+      modelUsageSourceKey({
+        responseId: null,
+        dispatchId: null,
+        positionalKey: "aggregate",
+      }),
     ).toBe("aggregate");
+  });
+});
+
+describe("completed model-call metering at ownership fences", () => {
+  test("records already-spent usage before surfacing a lost lease", async () => {
+    const order: string[] = [];
+    await expect(
+      recordCompletedModelCallBeforeOwnershipFences({
+        renewLease: async () => {
+          order.push("renew");
+        },
+        recordUsage: async () => {
+          order.push("meter");
+        },
+        leaseLost: () => true,
+        leaseLostMessage: "lease lost",
+      }),
+    ).rejects.toThrow("lease lost");
+    expect(order).toEqual(["renew", "meter"]);
+  });
+
+  test("returns only after renewal and metering when the lease remains held", async () => {
+    const order: string[] = [];
+    await recordCompletedModelCallBeforeOwnershipFences({
+      renewLease: async () => {
+        order.push("renew");
+      },
+      recordUsage: async () => {
+        order.push("meter");
+      },
+      leaseLost: () => false,
+      leaseLostMessage: "lease lost",
+    });
+    expect(order).toEqual(["renew", "meter"]);
+  });
+
+  test("persists usage before an attempt-owned signal rejects a replaced attempt", async () => {
+    const order: string[] = [];
+    await expect(
+      recordCompletedModelCallBeforeOwnershipFences({
+        renewLease: async () => {
+          order.push("renew");
+        },
+        recordUsage: async () => {
+          order.push("meter");
+        },
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        recordAttemptSignals: async () => {
+          order.push("attempt-signal");
+          throw new Error("attempt replaced");
+        },
+      }),
+    ).rejects.toThrow("attempt replaced");
+    expect(order).toEqual(["renew", "meter", "attempt-signal"]);
   });
 });
 
@@ -369,7 +549,12 @@ describe("model call usage observability", () => {
     await emitModelCallUsage({
       observability: observability as any,
       publish: async (batch) => {
-        events.push(...batch.map((event) => ({ type: event.type, payload: event.payload })));
+        events.push(
+          ...batch.map((event) => ({
+            type: event.type,
+            payload: event.payload,
+          })),
+        );
       },
       accountId: "acct-1",
       workspaceId: "ws-1",
@@ -443,7 +628,10 @@ describe("model call usage observability", () => {
       sourceKey: "resp-1",
       usage: {
         responseId: "resp-1",
-        usage: { inputTokens: 1200, inputTokensDetails: { cached_tokens: 200 } },
+        usage: {
+          inputTokens: 1200,
+          inputTokensDetails: { cached_tokens: 200 },
+        },
       },
       servingAccountHash: "abc123def456",
       accountChangedFromPrevCall: true,
@@ -747,17 +935,12 @@ describe("lazy sandbox provisioner single-flight", () => {
 describe("worker shutdown preemption", () => {
   test("classifies only WORKER_SHUTDOWN cancellations as graceful preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("WORKER_SHUTDOWN"))).toBe(true);
-    // Workflow-requested cancellation (user interrupt) keeps its existing path.
+    // Workflow-requested Pause/Steer cancellation keeps its control path.
     expect(isWorkerShutdownCancellation(new CancelledFailure("CANCELLED"))).toBe(false);
     // Server-side heartbeat timeout after a hard kill must stay terminal.
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
-  });
-
-  test("resume notice tells the agent to verify in-flight side effects", () => {
-    expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("TURN RESUMED AFTER WORKER RESTART");
-    expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("check whether it already happened");
   });
 });
 
@@ -793,22 +976,6 @@ describe("sandbox file materialization note", () => {
       downloads[1],
     ]);
     expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(downloads);
-  });
-
-  test("appends unavailable attachment details to model-facing text", () => {
-    const text = withUnavailableSandboxFilesNote(
-      "Analyze the attachment",
-      [
-        "The following attached files could not be loaded into the sandbox and are unavailable this turn:",
-        "- report.csv (Sandbox file resource download file-1 failed with exit code 2)",
-        "Continue without them or tell the user.",
-      ].join("\n"),
-    );
-
-    expect(text).toContain("Analyze the attachment");
-    expect(text).toContain("report.csv");
-    expect(text).toContain("failed with exit code 2");
-    expect(text).toContain("Continue without them or tell the user.");
   });
 });
 
@@ -852,7 +1019,10 @@ describe("context window overflow classifier", () => {
       ),
     ).toBeNull();
     expect(
-      classifyContextWindowOverflowError({ code: "rate_limit_exceeded", message: "rate limit" }),
+      classifyContextWindowOverflowError({
+        code: "rate_limit_exceeded",
+        message: "rate limit",
+      }),
     ).toBeNull();
   });
 });
@@ -951,7 +1121,9 @@ describe("transient provider error classifier", () => {
     ).toBe(false);
     expect(
       isTransientProviderError(
-        Object.assign(new Error("Our servers are currently overloaded."), { status: 404 }),
+        Object.assign(new Error("Our servers are currently overloaded."), {
+          status: 404,
+        }),
       ),
     ).toBe(false);
     // The mirror case: the SAME "connection error" body with NO status survives is

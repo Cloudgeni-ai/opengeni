@@ -34,10 +34,10 @@ function makeComposer(
     send: async () => true,
     sending: false,
     canSend: value.trim().length > 0,
-    mode: "queue",
-    setMode: () => {},
-    interrupt: async () => {},
-    interrupting: false,
+    pause: async () => {},
+    pausing: false,
+    resume: async () => {},
+    resuming: false,
     error: null,
     clearError: () => {},
     ...overrides,
@@ -48,7 +48,7 @@ const ctx: SlashCommandContext = {
   client: fakeClient({
     updateGoal: async () => ({}) as never,
     clearSessionContext: async () => {},
-    compactSessionContext: async () => ({ status: "queued", message: "queued" }),
+    compactSessionContext: async () => ({ status: "completed", message: "compacted" }),
   }),
   workspaceId: WORKSPACE_ID,
   sessionId: SESSION_ID,
@@ -82,10 +82,24 @@ describe("ChatComposer slash palette", () => {
     expect(listbox).not.toBeNull();
     const options = container.querySelectorAll('[role="option"]');
     expect(options.length).toBeGreaterThan(1);
-    // The textarea advertises combobox semantics + activedescendant while open.
+    // The native multiline textbox advertises list autocomplete and the
+    // currently active suggestion while the palette is open.
     const textarea = container.querySelector("textarea")!;
-    expect(textarea.getAttribute("aria-expanded")).toBe("true");
+    expect(textarea.getAttribute("role")).toBeNull();
+    expect(textarea.getAttribute("aria-autocomplete")).toBe("list");
+    expect(textarea.getAttribute("aria-controls")).toBeTruthy();
     expect(textarea.getAttribute("aria-activedescendant")).toBeTruthy();
+  });
+
+  test("keeps valid native textbox semantics before the palette opens", async () => {
+    const container = await mount(
+      <ChatComposer composer={makeComposer("", () => {})} commandContext={ctx} />,
+    );
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.getAttribute("role")).toBeNull();
+    expect(textarea.getAttribute("aria-autocomplete")).toBe("list");
+    expect(textarea.getAttribute("aria-controls")).toBeNull();
+    expect(textarea.getAttribute("aria-activedescendant")).toBeNull();
   });
 
   test("renders gated commands only with the permission; hides them otherwise", async () => {

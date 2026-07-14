@@ -28,7 +28,6 @@
     "db:generate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run generate",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",
-    "operator:revive-session": "bun scripts/operator/revive-session.ts",
     "typecheck": "bun scripts/typecheck.ts",
     "lint": "oxlint",
     "format": "oxfmt",

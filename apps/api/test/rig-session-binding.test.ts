@@ -70,7 +70,7 @@ function stubWorkflowClient(): SessionWorkflowClient {
     signalUserMessage: noop,
     wakeSessionWorkflow: noop,
     signalApprovalDecision: noop,
-    signalInterrupt: noop,
+    signalSessionControl: noop,
     syncScheduledTask: noop,
     deleteScheduledTaskSchedule: noop,
     triggerScheduledTask: noop,

@@ -11,10 +11,11 @@ import {
   enqueueSessionMessageAtomically,
   getSession,
   getSessionQueueSnapshot,
-  getSessionSystemUpdateBundlePage,
+  listPendingSessionSystemUpdates,
   listSessionEvents,
+  listSessionSystemUpdatesForTurn,
   listSessionTurns,
-  setWorkspaceQueueRuntimeControl,
+  registerSessionTurnDispatch,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -62,7 +63,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   }, 60_000);
 
   test(
-    "100 concurrent updates fan into one turn while one steer starts the exact human target first",
+    "100 concurrent internal updates coalesce into the urgent Steer inference without entering the prompt queue",
     async () => {
       const grant = await testGrant(dbClient.db, "fan-in-steer");
       const session = await createDurableSession(dbClient.db, grant, "fan-in then urgent steer");
@@ -86,15 +87,13 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           chunks: Array.from({ length: 10_000 }, () => "working "),
           delayMs: 10,
         },
-        { id: "fan-in-urgent", outputText: "urgent correction handled" },
-        { id: "fan-in-bundle", outputText: "system bundle consumed" },
+        { id: "fan-in-urgent", outputText: "urgent correction and internal updates handled" },
       ]);
       const settings = testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
         temporalHost: services.temporalHost,
         temporalTaskQueue: taskQueue,
-        sessionHistorySource: "items",
       });
       const workflowClient = sessionWorkflowClient(new Client({ connection }), taskQueue);
       const activities = createActivities({
@@ -140,8 +139,6 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
             result.reason !== "session_cancelled",
         );
         expect(acceptedUpdates).toHaveLength(100);
-        const bundleIds = new Set(acceptedUpdates.map((result) => result.bundle.id));
-        expect(bundleIds.size).toBe(1);
         for (const result of acceptedUpdates) {
           if (result.added && result.events.length > 0) {
             await bus.publish(grant.workspaceId, session.id, result.events);
@@ -153,10 +150,14 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           grant.workspaceId,
           session.id,
         );
-        expect(beforeSteer?.items.filter((turn) => turn.status === "running")).toHaveLength(1);
+        // The current inference is deliberately outside the visible prompt queue.
+        expect(beforeSteer?.items).toHaveLength(0);
+        expect(beforeSteer?.items.every((turn) => ["user", "api"].includes(turn.source))).toBe(
+          true,
+        );
         expect(
-          beforeSteer?.items.filter((turn) => turn.queueKind === "system_update_bundle"),
-        ).toHaveLength(1);
+          await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
+        ).toHaveLength(100);
         const urgent = await postUserMessageTurn({
           db: dbClient.db,
           bus,
@@ -173,18 +174,12 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           expectedControlGeneration: beforeSteer!.controlGeneration,
           expectedWorkspaceInferenceGeneration: beforeSteer!.workspaceInferenceGeneration,
         });
-        expect(urgent.interrupted).toBe(true);
 
         await handle.result();
-        await waitFor(
-          () => live.some((event) => event.type === "turn.preempted") || live.length > 0,
-        );
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-        const bundleTurn = turns.find((turn) => turn.queueKind === "system_update_bundle");
-        expect(bundleTurn).toBeDefined();
-        expect(turns.find((turn) => turn.id === initial.turn.id)?.status).toBe("cancelled");
+        expect(turns).toHaveLength(2);
+        expect(turns.find((turn) => turn.id === initial.turn.id)?.status).toBe("superseded");
         expect(turns.find((turn) => turn.id === urgent.turn.id)?.status).toBe("completed");
-        expect(bundleTurn?.status).toBe("completed");
 
         const events = await listSessionEvents(
           dbClient.db,
@@ -196,26 +191,26 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         const startedTurnIds = events
           .filter((event) => event.type === "turn.started")
           .map((event) => event.turnId);
-        expect(startedTurnIds).toEqual([initial.turn.id, urgent.turn.id, bundleTurn!.id]);
+        expect(startedTurnIds).toEqual([initial.turn.id, urgent.turn.id]);
         expect(
           events.filter(
-            (event) => event.type === "turn.cancelled" && event.turnId === initial.turn.id,
+            (event) => event.type === "turn.superseded" && event.turnId === initial.turn.id,
           ),
         ).toHaveLength(1);
-        expect(model.calls).toBe(3);
-        const bundlePage = await getSessionSystemUpdateBundlePage(
+        expect(model.calls).toBe(2);
+        const deliveredUpdates = await listSessionSystemUpdatesForTurn(
           dbClient.db,
           grant.workspaceId,
           session.id,
-          bundleTurn!.bundleId!,
-          0,
-          100,
+          urgent.turn.id,
         );
-        expect(bundlePage?.bundle).toMatchObject({ memberCount: 100, status: "acknowledged" });
-        expect(bundlePage?.updates).toHaveLength(100);
-        expect(bundlePage?.updates.every((update) => update.deliveryState === "acknowledged")).toBe(
-          true,
-        );
+        expect(deliveredUpdates).toHaveLength(100);
+        expect(new Set(deliveredUpdates.map((update) => update.id)).size).toBe(100);
+        expect(
+          events.filter(
+            (event) => event.type === "system.update.delivered" && event.turnId === urgent.turn.id,
+          ),
+        ).toHaveLength(1);
         expect(live.some((event) => event.id === urgent.accepted.id)).toBe(true);
         expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
           status: "idle",
@@ -231,7 +226,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   );
 
   test(
-    "a DB-committed lost wake is repaired after worker restart without a duplicate bundle turn",
+    "a DB-committed lost internal-update wake is repaired without duplicating its inference",
     async () => {
       const grant = await testGrant(dbClient.db, "lost-wake");
       const session = await createDurableSession(dbClient.db, grant, "repair a lost Temporal wake");
@@ -242,7 +237,6 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         natsUrl: services.natsUrl,
         temporalHost: services.temporalHost,
         temporalTaskQueue: taskQueue,
-        sessionHistorySource: "items",
       });
       const temporal = new Client({ connection });
       const workflowClient = sessionWorkflowClient(temporal, taskQueue);
@@ -261,12 +255,12 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       const input = systemUpdateInput(grant, session.id, "lost-wake:integration", 0);
       const committed = await addSessionSystemUpdate(dbClient.db, input);
       if (committed.reason === "session_cancelled") throw new Error("unexpected cancelled session");
-      expect(committed).toMatchObject({ added: true, wakeCreated: true, shouldWake: true });
+      expect(committed).toMatchObject({ added: true, reason: "added", shouldWake: true });
       const committedEventIds = committed.events.map((event) => event.id);
 
       // Simulate the process dying after the Postgres commit but before NATS
-      // publish / Temporal signal. A replacement worker starts from no in-memory
-      // state and a duplicate producer retry must return the existing wake.
+      // publish / Temporal signal. The replacement worker's bounded durable
+      // repair scan must start the claimable session from Postgres truth.
       const firstWorker = await integrationWorker(nativeConnection, taskQueue, activities);
       const firstRun = firstWorker.run();
       firstWorker.shutdown();
@@ -281,35 +275,59 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(duplicate).toMatchObject({
           added: false,
           reason: "duplicate",
-          wakeCreated: false,
-          shouldWake: true,
-          bundle: { id: committed.bundle.id },
-          turn: { id: committed.turn!.id },
+          shouldWake: false,
+          update: { id: committed.update.id },
           events: [],
         });
-        const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
-          taskQueue,
-          workflowId: duplicate.temporalWorkflowId,
-          workflowIdReusePolicy: "ALLOW_DUPLICATE",
-          args: [
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId: session.id,
-            },
-          ],
-          signal: "queueChanged",
-        });
-        await handle.result();
+        await activities.reapSandboxLeases();
+        let observedSession: Awaited<ReturnType<typeof getSession>> | null = null;
+        await waitFor(
+          async () => {
+            const current = await getSession(dbClient.db, grant.workspaceId, session.id);
+            observedSession = current;
+            return (
+              model.calls === 1 && (current?.status === "idle" || current?.status === "failed")
+            );
+          },
+          {
+            describe: () =>
+              JSON.stringify({
+                modelCalls: model.calls,
+                status: observedSession?.status ?? null,
+                activeTurnId: observedSession?.activeTurnId ?? null,
+              }),
+          },
+        );
+        if (observedSession?.status === "failed") {
+          const failedEvents = await listSessionEvents(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+            0,
+            500,
+          );
+          throw new Error(
+            `repaired inference failed: ${JSON.stringify(
+              failedEvents.filter((event) => event.type === "turn.failed"),
+            )}`,
+          );
+        }
 
         expect(model.calls).toBe(1);
         const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
         expect(turns).toHaveLength(1);
         expect(turns[0]).toMatchObject({
-          id: committed.turn!.id,
-          bundleId: committed.bundle.id,
+          source: "system",
           status: "completed",
         });
+        expect(
+          await listSessionSystemUpdatesForTurn(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+            turns[0]!.id,
+          ),
+        ).toHaveLength(1);
         const durable = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
         expect(committedEventIds.every((id) => durable.some((event) => event.id === id))).toBe(
           true,
@@ -326,7 +344,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
   );
 
   test(
-    "a real heartbeat-timeout atomically requeues and completes one bundle generation",
+    "a real heartbeat timeout recovers and completes the same internal-update inference",
     async () => {
       const grant = await testGrant(dbClient.db, "worker-death");
       const session = await createDurableSession(
@@ -338,8 +356,8 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         dbClient.db,
         systemUpdateInput(grant, session.id, "worker-death:integration", 0),
       );
-      if (update.reason === "session_cancelled" || !update.turn) {
-        throw new Error("expected a queued system bundle turn");
+      if (update.reason === "session_cancelled") {
+        throw new Error("expected a pending internal update");
       }
       await bus.publish(grant.workspaceId, session.id, update.events);
 
@@ -350,7 +368,6 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         natsUrl: services.natsUrl,
         temporalHost: services.temporalHost,
         temporalTaskQueue: taskQueue,
-        sessionHistorySource: "items",
       });
       const temporal = new Client({ connection });
       const workflowClient = sessionWorkflowClient(temporal, taskQueue);
@@ -364,12 +381,19 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       let dispatches = 0;
       const activities = {
         ...realActivities,
-        runAgentSegment: async (input: Parameters<typeof realActivities.runAgentSegment>[0]) => {
+        runAgentTurn: async (input: Parameters<typeof realActivities.runAgentTurn>[0]) => {
           dispatches += 1;
           if (dispatches === 1) {
+            await registerSessionTurnDispatch(dbClient.db, input.workspaceId, {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              triggerEventId: input.triggerEventId,
+              attemptId: input.attemptId,
+              dispatchId: currentActivityContext()!.info.activityId,
+            });
             return await hangWithoutHeartbeating();
           }
-          return await realActivities.runAgentSegment(input);
+          return await realActivities.runAgentTurn(input);
         },
       };
       const worker = await integrationWorker(nativeConnection, taskQueue, activities);
@@ -381,7 +405,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       try {
         const handle = await temporal.workflow.signalWithStart("sessionWorkflow", {
           taskQueue,
-          workflowId: update.temporalWorkflowId,
+          workflowId: update.temporalWorkflowId ?? `session-${session.id}`,
           workflowIdReusePolicy: "ALLOW_DUPLICATE",
           args: [
             {
@@ -398,29 +422,28 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         expect(model.calls).toBe(1);
         const [turn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
         expect(turn).toMatchObject({
-          id: update.turn.id,
+          source: "system",
           status: "completed",
-          bundleId: update.bundle.id,
           executionGeneration: 2,
         });
         const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
-        const preemptions = events.filter((event) => event.type === "turn.preempted");
-        expect(preemptions).toHaveLength(1);
-        expect(preemptions[0]?.payload).toMatchObject({
+        const recoveries = events.filter((event) => event.type === "turn.recovery.requested");
+        expect(recoveries).toHaveLength(1);
+        expect(recoveries[0]?.payload).toMatchObject({
           reason: "worker_death",
           redispatches: 1,
         });
         expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
         expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-        expect(live.some((event) => event.id === preemptions[0]?.id)).toBe(true);
-        const page = await getSessionSystemUpdateBundlePage(
-          dbClient.db,
-          grant.workspaceId,
-          session.id,
-          update.bundle.id,
-        );
-        expect(page?.bundle.status).toBe("acknowledged");
-        expect(page?.updates.every((member) => member.deliveryState === "acknowledged")).toBe(true);
+        expect(live.some((event) => event.id === recoveries[0]?.id)).toBe(true);
+        expect(
+          await listSessionSystemUpdatesForTurn(
+            dbClient.db,
+            grant.workspaceId,
+            session.id,
+            turn!.id,
+          ),
+        ).toHaveLength(1);
       } finally {
         unsubscribe();
         worker.shutdown();
@@ -481,7 +504,7 @@ async function createDurableSession(
   grant: AccessGrant,
   initialMessage: string,
 ) {
-  const session = await createSession(db, {
+  return await createSession(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     initialMessage,
@@ -491,17 +514,6 @@ async function createDurableSession(
     model: "scripted-model",
     sandboxBackend: "none",
   });
-  await setWorkspaceQueueRuntimeControl(db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    actor: grant.subjectId,
-    state: "durable_v1",
-    reason: "integration worker fleet supports durable queue",
-    clientEventId: `integration-cutover-${crypto.randomUUID()}`,
-    expectedState: "legacy",
-    expectedGeneration: 0,
-  });
-  return session;
 }
 
 function systemUpdateInput(
@@ -548,7 +560,7 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
         signal: "queueChanged",
       });
     },
-    signalInterrupt: async (input: {
+    signalSessionControl: async (input: {
       accountId: string;
       workspaceId: string;
       sessionId: string;
@@ -566,7 +578,7 @@ function sessionWorkflowClient(temporal: Client, taskQueue: string) {
             sessionId: input.sessionId,
           },
         ],
-        signal: "interrupt",
+        signal: "sessionControl",
         signalArgs: [input.eventId],
       });
     },

@@ -35,15 +35,10 @@ export type SessionWorkflowClient = {
     eventId: string;
     workflowId: string;
   }) => Promise<void>;
-  // Interrupt must reach the workflow whether or not an execution is currently
-  // running: a long-lived session that has gone idle (its workflow returned
-  // after markSessionIdle) has NO running execution, so a plain
-  // getHandle().signal() throws WorkflowNotFoundError -> a 500 that leaves an
-  // operator unable to stop a session. signalWithStart start-or-signals, so it
-  // needs the session-workflow args (accountId/workspaceId) to start a fresh
-  // run when none is live; the buffered `interrupt` signal is then honored by
-  // the workflow's idle-interrupt path (pause goal + mark idle).
-  signalInterrupt: (input: {
+  // A durable Pause/Steer control must reach the workflow even when its previous
+  // run returned idle. signalWithStart either delivers to the live workflow or
+  // starts the session workflow with the control already buffered.
+  signalSessionControl: (input: {
     accountId: string;
     workspaceId: string;
     sessionId: string;
@@ -127,6 +122,6 @@ export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
   "settings" | "db" | "bus"
 > & {
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalInterrupt">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
   objectStorage: ObjectStorageDependency;
 };

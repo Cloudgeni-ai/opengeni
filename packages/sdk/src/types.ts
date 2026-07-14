@@ -8,6 +8,9 @@ export type SessionStatus =
   | "running"
   | "idle"
   | "requires_action"
+  | "recovering"
+  | "waiting_capacity"
+  | "paused"
   | "failed"
   | "cancelled";
 
@@ -394,12 +397,15 @@ export type Session = {
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
-  queueVersion?: number;
-  controlState?: "active" | "session_stopped" | "workspace_killed";
-  controlGeneration?: number;
-  controlReason?: string | null;
-  controlChangedBy?: string | null;
-  controlChangedAt?: string | null;
+  queueVersion: number;
+  queueHeadPosition: number;
+  queueTailPosition: number;
+  controlState: "active" | "paused";
+  controlGeneration: number;
+  controlReason: string | null;
+  controlChangedBy: string | null;
+  controlChangedAt: string | null;
+  workspaceRunExceptionGeneration: number | null;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -444,29 +450,20 @@ export type SessionTurnStatus =
   | "queued"
   | "running"
   | "requires_action"
+  | "recovering"
+  | "waiting_capacity"
   | "completed"
   | "failed"
-  | "cancelled";
-
-export type SessionTurnSource = "user" | "scheduled_task" | "api" | "goal" | "system";
-
-export type SessionQueueItemKind =
-  | "human_message"
-  | "operator_instruction"
-  | "child_session_update"
-  | "scheduled_wake"
-  | "goal_continuation"
-  | "runtime_notice"
-  | "system_update_bundle";
-
-export type SessionQueueItemOrigin = "human" | "operator" | "system";
-
-export type SessionQueueDeliveryState =
-  | "pending"
-  | "delivered"
-  | "acknowledged"
   | "cancelled"
-  | "failed";
+  | "superseded";
+
+export type SessionTurnSource =
+  | "user"
+  | "scheduled_task"
+  | "api"
+  | "goal"
+  | "system"
+  | "compaction";
 
 export type SessionTurn = {
   id: string;
@@ -483,20 +480,14 @@ export type SessionTurn = {
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
+  sandboxOs: SandboxOs | null;
   metadata: Record<string, unknown>;
-  queueKind?: SessionQueueItemKind;
-  origin?: SessionQueueItemOrigin;
-  priority?: number;
-  version?: number;
-  executionGeneration?: number;
-  dedupeKey?: string | null;
-  lineage?: Record<string, unknown>;
-  deliveryState?: SessionQueueDeliveryState;
-  bundleId?: string | null;
-  acknowledgedAt?: string | null;
+  version: number;
+  executionGeneration: number;
+  activeAttemptId: string | null;
+  lineage: Record<string, unknown>;
   cancelledBy?: string | null;
   cancelReason?: string | null;
-  promotedAt?: string | null;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;
@@ -507,19 +498,21 @@ export const SESSION_EVENT_TYPES = [
   "session.created",
   "session.status.changed",
   "session.requiresAction",
+  "session.context.compaction.requested",
   "session.context.compacted",
+  "session.context.compaction.skipped",
   "session.context.cleared",
   "user.message",
-  "user.interrupt",
+  "user.pause",
   "user.approvalDecision",
   "turn.queued",
-  "turn.updated",
   "turn.started",
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
-  "turn.queue_drained",
-  "turn.preempted",
+  "turn.superseded",
+  "turn.recovery.requested",
+  "turn.capacity_waiting",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",
@@ -544,19 +537,15 @@ export const SESSION_EVENT_TYPES = [
   "goal.resumed",
   "goal.cleared",
   "goal.continuation",
-  "system.update.bundle",
-  "system.update.bundle.updated",
-  "session.control.stopped",
+  "system.update.pending",
+  "system.update.delivered",
+  "session.control.paused",
   "session.control.resumed",
-  "session.control.interrupt_requested",
   "session.control.steer_requested",
-  "workspace.inference.killed",
+  "workspace.inference.paused",
   "workspace.inference.resumed",
-  "workspace.queue_runtime.changed",
-  "session.queue.item.edited",
-  "session.queue.item.cancelled",
-  "session.queue.item.promoted",
-  "session.queue.reordered",
+  "session.queue.prompt.cancelled",
+  "session.queue.history",
   "turn.event.rejected_late",
   "memory.saved",
   "memory.corrected",
@@ -631,6 +620,7 @@ export type SessionEvent = {
   clientEventId?: string | null | undefined;
   turnId?: string | null | undefined;
   turnGeneration?: number | null | undefined;
+  turnAttemptId?: string | null | undefined;
   turnAssociation?: "current" | "late_rejected" | null | undefined;
 };
 
@@ -1396,16 +1386,11 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
-  inferenceState?: "active" | "killed";
+  inferenceState?: "active" | "paused";
   inferenceGeneration?: number;
   inferenceReason?: string | null;
   inferenceChangedBy?: string | null;
   inferenceChangedAt?: string | null;
-  queueRuntimeState?: "legacy" | "durable_v1";
-  queueRuntimeGeneration?: number;
-  queueRuntimeReason?: string | null;
-  queueRuntimeChangedBy?: string | null;
-  queueRuntimeChangedAt?: string | null;
   defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1536,32 +1521,20 @@ export type UpdateSessionRequest = {
 
 /** Outcome of a manual /compact trigger. */
 export type CompactSessionContextResult = {
-  /**
-   * queued: a client-side (Azure) compaction will run before the next turn.
-   * noop:   nothing to do (server-managed provider, mode off, or no history).
-   */
-  status: "queued" | "noop";
+  /** pending waits for the current safe boundary; completed ran while idle. */
+  status: "pending" | "completed" | "noop";
   message: string;
 };
 
 // --- Turn queue --------------------------------------------------------------
 
-export type UpdateSessionTurnRequest = {
-  prompt?: string | undefined;
-  resources?: ResourceRef[] | undefined;
-  tools?: ToolRef[] | undefined;
-  model?: string | undefined;
-  reasoningEffort?: ReasoningEffort | undefined;
-  sandboxBackend?: SandboxBackend | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
 export type SessionQueueSnapshot = {
   version: number;
-  controlState: "active" | "session_stopped" | "workspace_killed";
+  controlState: "active" | "paused";
   controlGeneration: number;
-  workspaceInferenceState: "active" | "killed";
+  workspaceInferenceState: "active" | "paused";
   workspaceInferenceGeneration: number;
+  workspaceRunExceptionGeneration: number | null;
   items: SessionTurn[];
 };
 
@@ -1573,25 +1546,11 @@ export type SessionSystemUpdateKind =
   | "lifecycle_event"
   | "runtime_notice";
 
-export type SessionSystemUpdateBundleStatus =
-  | "queued"
-  | "running"
-  | "acknowledged"
-  | "cancelled"
-  | "failed";
-
-export type SessionSystemUpdateExecutionPolicy = {
-  model: string;
-  reasoningEffort: ReasoningEffort;
-  sandboxBackend: SandboxBackend;
-  prompt: string;
-};
+export type SessionSystemUpdateState = "pending" | "delivered" | "cancelled" | "failed";
 
 export type SessionSystemUpdate = {
   id: string;
-  bundleId: string;
-  bundleGeneration: number;
-  ordinal: number;
+  sessionId: string;
   kind: SessionSystemUpdateKind;
   classification: SystemUpdateClassification;
   sourceId: string;
@@ -1599,66 +1558,32 @@ export type SessionSystemUpdate = {
   summary: string;
   payload: Record<string, unknown>;
   lineage: Record<string, unknown>;
-  deliveryState: SessionQueueDeliveryState;
+  state: SessionSystemUpdateState;
+  deliveredTurnId: string | null;
   deliveredAt: string | null;
-  acknowledgedAt: string | null;
   createdAt: string;
-};
-
-export type SessionSystemUpdateBundle = {
-  id: string;
-  sessionId: string;
-  generation: number;
-  groupKey: string;
-  executionPolicy: SessionSystemUpdateExecutionPolicy | null;
-  status: SessionSystemUpdateBundleStatus;
-  version: number;
-  memberCount: number;
-  payloadBytes: number;
-  overflow: boolean;
-  wakeTurnId: string | null;
-  claimedAt: string | null;
-  acknowledgedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type SessionSystemUpdateBundlePage = {
-  bundle: SessionSystemUpdateBundle;
-  updates: SessionSystemUpdate[];
-  nextCursor: number | null;
 };
 
 export type SessionControlResponse = {
   operationId: string;
   event: SessionEvent;
-  controlState: "active" | "session_stopped" | "workspace_killed";
+  controlState: "active" | "paused";
   controlGeneration: number;
   expectedActiveTurnId: string | null;
   expectedExecutionGeneration: number | null;
+  expectedAttemptId: string | null;
   deliveryEventId: string | null;
-  shouldSignalInterrupt: boolean;
+  shouldSignalControl: boolean;
   shouldWake: boolean;
 };
 
 export type WorkspaceInferenceControlResponse = {
   operationId: string;
-  state: "active" | "killed";
+  state: "active" | "paused";
   generation: number;
   affectedSessionIds: string[];
-  interruptSessionIds: string[];
-};
-
-export type StopSessionDescendantsResponse = {
-  operationId: string;
-  affectedSessionIds: string[];
-  interruptSessionIds: string[];
-};
-
-export type WorkspaceQueueRuntimeControlResponse = {
-  operationId: string;
-  state: "legacy" | "durable_v1";
-  generation: number;
+  controlSessionIds: string[];
+  exceptionSessionIds: string[];
 };
 
 export type SessionQueueMutationResponse = {
@@ -2582,12 +2507,6 @@ export type UserMessageEventInput = {
   };
 };
 
-export type UserInterruptEventInput = {
-  type: "user.interrupt";
-  clientEventId?: string | undefined;
-  payload?: { reason?: string | undefined } | undefined;
-};
-
 export type UserApprovalDecisionEventInput = {
   type: "user.approvalDecision";
   clientEventId?: string | undefined;
@@ -2599,10 +2518,7 @@ export type UserApprovalDecisionEventInput = {
 };
 
 /** Control/user events a client may POST to a session's event log. */
-export type ClientSessionEventInput =
-  | UserMessageEventInput
-  | UserInterruptEventInput
-  | UserApprovalDecisionEventInput;
+export type ClientSessionEventInput = UserMessageEventInput | UserApprovalDecisionEventInput;
 
 // ── Bring-your-own-compute: Machines dashboard + per-machine metrics (M10) ────
 // Hand-written mirrors of the `@opengeni/contracts` MetricSample / MachineView /

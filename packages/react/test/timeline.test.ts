@@ -326,8 +326,39 @@ describe("buildTimeline", () => {
     });
   });
 
-  test("a queued user message stays pending at the end until the queued turn starts", () => {
-    const pendingItems = buildTimeline([
+  test("a recovered turn keeps its prompt anchored at the first attempt start", () => {
+    const items = buildTimeline([
+      eventAt(2, "user.message", { text: "Recover this work" }, { turnId: null }),
+      eventAt(
+        4,
+        "turn.queued",
+        { turnId: "turn-a", triggerEventId: "evt-2", source: "user" },
+        { turnId: "turn-a" },
+      ),
+      eventAt(5, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(
+        8,
+        "agent.message.completed",
+        { text: "Durable output from the first attempt." },
+        { turnId: "turn-a" },
+      ),
+      eventAt(10, "turn.recovery.requested", { reason: "worker_shutdown" }, { turnId: "turn-a" }),
+      eventAt(12, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+    ]);
+
+    const promptIndex = items.findIndex(
+      (item) => item.kind === "user-message" && item.text === "Recover this work",
+    );
+    const durableOutputIndex = items.findIndex(
+      (item) =>
+        item.kind === "agent-message" && item.text === "Durable output from the first attempt.",
+    );
+    expect(promptIndex).toBeGreaterThanOrEqual(0);
+    expect(durableOutputIndex).toBeGreaterThan(promptIndex);
+  });
+
+  test("a queued user message stays out of the timeline until the queued turn starts", () => {
+    const waitingItems = buildTimeline([
       eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
       eventAt(
         4,
@@ -345,10 +376,12 @@ describe("buildTimeline", () => {
         { turnId: "turn-b" },
       ),
     ]);
-    expect(pendingItems.at(-1)).toMatchObject({
-      kind: "user-message",
-      text: "Queued follow-up",
-      pending: true,
+    expect(
+      waitingItems.find((item) => item.kind === "user-message" && item.text === "Queued follow-up"),
+    ).toBeUndefined();
+    expect(waitingItems.at(-1)).toMatchObject({
+      kind: "agent-message",
+      text: "Still working.",
     });
 
     const anchoredItems = buildTimeline([
@@ -386,7 +419,6 @@ describe("buildTimeline", () => {
     );
     expect(followUpIndex).toBeGreaterThan(-1);
     expect(turnBIndex).toBeGreaterThan(followUpIndex);
-    expect(anchoredItems[followUpIndex]).not.toHaveProperty("pending");
   });
 
   test("a queued user message cancelled before start is omitted without touching a running turn", () => {
@@ -473,7 +505,6 @@ describe("buildTimeline", () => {
     ]);
     expect(items.map((item) => item.kind)).toEqual(["user-message", "user-message", "tool-call"]);
     expect(items[1]).toMatchObject({ kind: "user-message", text: "Crash-resumed follow-up" });
-    expect(items[1]).not.toHaveProperty("pending");
   });
 
   test("user messages carry their attached resources and requested tools", () => {
@@ -619,46 +650,6 @@ describe("buildTimeline", () => {
     expect(item.prompt).toBe("Status?");
   });
 
-  test("session_interrupt becomes a distinct interrupt worker item (default stop mode)", () => {
-    reset();
-    const items = buildTimeline([
-      event("agent.toolCall.created", {
-        id: "call-1",
-        name: "session_interrupt",
-        arguments: { sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d" },
-      }),
-    ]);
-    const item = items[0] as WorkerItem;
-    expect(item.kind).toBe("worker");
-    expect(item.action).toBe("interrupt");
-    expect(item.mode).toBe("stop");
-    expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
-    expect(item.status).toBe("running");
-  });
-
-  test("session_interrupt with mode 'steer' carries the steer mode and settles on its output", () => {
-    reset();
-    const items = buildTimeline([
-      event("agent.toolCall.created", {
-        id: "call-1",
-        name: "session_interrupt",
-        arguments: JSON.stringify({
-          sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
-          mode: "steer",
-        }),
-      }),
-      event("agent.toolCall.output", {
-        id: "call-1",
-        output: { content: [{ type: "text", text: "{}" }] },
-      }),
-    ]);
-    const item = items[0] as WorkerItem;
-    expect(item.action).toBe("interrupt");
-    expect(item.mode).toBe("steer");
-    expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
-    expect(item.status).toBe("complete");
-  });
-
   test("groups sandbox operations by name and appends command output deltas", () => {
     reset();
     const items = buildTimeline([
@@ -699,6 +690,71 @@ describe("buildTimeline", () => {
       tone: "waiting",
       text: "Context compacted from approximately 288,000 to 23,091 tokens.",
     });
+  });
+
+  test("renders standalone compaction as maintenance, not an extra chat turn", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compacted", {
+        estimatedTokensBefore: 288_000,
+        estimatedTokensAfter: 23_091,
+      }),
+      event("turn.completed", {
+        maintenance: "context_compaction",
+        result: "compacted",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "notice" });
+    expect(items.some((item) => item.kind === "turn-end")).toBe(false);
+  });
+
+  test("shows why an operator compaction request was skipped", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "replacement_not_smaller" }),
+      event("turn.completed", {
+        maintenance: "context_compaction",
+        result: "replacement_not_smaller",
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "waiting",
+        text: "Context compaction skipped because the generated checkpoint would not reduce the context.",
+      }),
+    ]);
+  });
+
+  test("shows same-turn recovery without pretending it is queued work", () => {
+    reset();
+    const items = buildTimeline([event("turn.recovery.requested", { reason: "worker_shutdown" })]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "waiting",
+        text: "The current turn is recovering after worker shutdown. No new prompt was queued.",
+      }),
+    ]);
+  });
+
+  test("keeps rejected zombie evidence visible and inspectable", () => {
+    reset();
+    const payload = {
+      rejectedType: "agent.toolCall.output",
+      rejectedPayload: { id: "call-1", output: "finished too late" },
+      reason: "attempt_changed",
+    };
+    const items = buildTimeline([event("turn.event.rejected_late", payload)]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "notice",
+        tone: "cancelled",
+        text: expect.stringContaining("Late agent.toolCall.output evidence was rejected"),
+        details: { label: "Inspect rejected evidence", value: payload },
+      }),
+    ]);
   });
 
   test("routine repository-clone operations never render", () => {
@@ -1808,56 +1864,5 @@ describe("buildTimeline — memory writes", () => {
     const activities = collectActivityGroups(groups);
     expect(activities).toHaveLength(1);
     expect(activities[0]!.items.map((item) => item.kind)).toEqual(["tool-call", "memory"]);
-  });
-});
-
-describe("turn.queue_drained (stop-drains-the-queue)", () => {
-  const userItems = (items: ReturnType<typeof buildTimeline>) =>
-    items.filter((item) => item.kind === "user-message");
-
-  test("a drained queued turn is retracted exactly like an individually-cancelled one", () => {
-    reset();
-    const msgCancel = event("user.message", { text: "hi" }, { turnId: null });
-    const cancelled = buildTimeline([
-      msgCancel,
-      event(
-        "turn.queued",
-        { turnId: "turn-9", triggerEventId: msgCancel.id },
-        { turnId: "turn-9" },
-      ),
-      event("turn.cancelled", {}, { turnId: "turn-9" }),
-    ]);
-
-    reset();
-    const msgDrain = event("user.message", { text: "hi" }, { turnId: null });
-    const drained = buildTimeline([
-      msgDrain,
-      event("turn.queued", { turnId: "turn-9", triggerEventId: msgDrain.id }, { turnId: "turn-9" }),
-      event(
-        "turn.queue_drained",
-        { drainedCount: 1, drainedTurnIds: ["turn-9"] },
-        { turnId: null },
-      ),
-    ]);
-
-    // Same disposition: the drained queued message folds away just like a
-    // cancelled one, so the timeline reflects the stop honestly.
-    expect(userItems(drained).length).toBe(userItems(cancelled).length);
-  });
-
-  test("a queue_drained that does not name a turn leaves it queued", () => {
-    reset();
-    const msg = event("user.message", { text: "hi" }, { turnId: null });
-    const items = buildTimeline([
-      msg,
-      event("turn.queued", { turnId: "turn-9", triggerEventId: msg.id }, { turnId: "turn-9" }),
-      event(
-        "turn.queue_drained",
-        { drainedCount: 1, drainedTurnIds: ["turn-OTHER"] },
-        { turnId: null },
-      ),
-    ]);
-    // turn-9 was not drained, so its queued message survives.
-    expect(userItems(items).length).toBe(1);
   });
 });

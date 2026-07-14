@@ -1,166 +1,129 @@
 # Conversation context compaction
 
-OpenGeni runs long-lived agent sessions whose `session_history_items` can grow
-past the model context window. Compaction is provider-aware:
+OpenGeni has one compaction mechanism: durable, portable plaintext compaction
+that follows the local compaction path in Codex CLI 0.144.3. It is used for
+OpenAI, Azure, Codex subscriptions, and registry providers. There is no
+provider-side mode, off switch, compatibility ladder, request-local history
+trim, or deterministic non-model fallback.
 
-- **OpenAI platform / server mode** keeps using the Responses API server-side
-  `context_management` path. This path is intentionally unchanged.
-- **Azure and registry-provider / client mode** uses OpenGeni's local
-  compaction. The Codex-subscription registry models use the same catalog token
-  policy and local-checkpoint rebuild semantics as Codex CLI, while retaining
-  OpenGeni's durable audit rows and strict-shrink recovery guard.
+Portable plaintext is required for the Codex subscription pool. A session can
+move between independently authenticated ChatGPT subscriptions, while Codex's
+remote encrypted compaction item is tied to the provider/account that created
+it. Persisting that opaque item would make a later subscription unable to
+recover the compacted assistant/tool history.
 
-Code wins over this document. The main files are:
+The implementation lives in:
 
-- `packages/config/src/index.ts` - mode and window settings.
-- `packages/runtime/src/context-compaction.ts` - client threshold, Codex prompt
-  constants, rebuild helpers, typed `CompactionNeededError`, and the read-path
-  budget guard.
-- `packages/runtime/src/index.ts` - tool-less summarizer call and per-model-call
-  input filter.
-- `apps/worker/src/activities/context-compaction.ts` - DB orchestrator for
-  client compaction.
-- `apps/worker/src/activities/agent-turn.ts` - turn-start check, manual
-  `/compact`, per-call proactive recovery, and provider overflow recovery.
-- `packages/db/src/index.ts` - `applyContextCompaction`,
-  `getActiveSessionHistoryItems`, `setSessionLastInputTokens`, and
-  `nextSessionHistoryPosition`.
+- `packages/runtime/src/context-compaction.ts`: thresholds, upstream prompt and
+  prefix, rebuild rules, and the typed compaction signal.
+- `packages/runtime/src/index.ts`: the tool-less summarizer and per-call signal.
+- `apps/worker/src/activities/context-compaction.ts`: summarizer retry and the
+  fenced durable replacement.
+- `apps/worker/src/activities/agent-turn.ts`: pre-call and same-turn recovery.
+- `packages/db/src/index.ts`: the atomic history replacement and token signal.
 
-## Mode Resolution
+## Token limits
 
-`contextCompactionMode` (`OPENGENI_CONTEXT_COMPACTION_MODE`) accepts:
+Each resolved model can declare three distinct values:
 
-| mode | result |
+| value | purpose |
 | --- | --- |
-| `auto` | `server` when `openaiProvider === "openai"`, otherwise `client` |
-| `server` | force server-side compaction |
-| `client` | force client-side compaction |
-| `off` | no compaction |
+| raw context window | basis for automatic compaction |
+| effective input window | provider-safe input ceiling |
+| automatic compaction limit | proactive checkpoint trigger |
 
-The server path still uses `contextServerCompactThresholdTokens` when set,
-otherwise `floor(contextWindowTokens * contextCompactionThresholdRatio)`.
-`contextCompactionThresholdRatio` is configured with
-`OPENGENI_COMPACTION_THRESHOLD_RATIO`, defaults to `0.9`, and is clamped to
-`[0.3, 0.9]`.
+If a model has no explicit automatic limit, OpenGeni uses
+`floor(rawWindow * contextCompactionThresholdRatio)`. The ratio defaults to
+0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
+window, matching Codex core.
 
-## Client Trigger
+The Codex subscription catalog verified with Codex CLI 0.144.3 on 2026-07-13
+has:
 
-Client mode compacts when the signal reaches (not only exceeds) one threshold:
+| quantity | tokens |
+| --- | ---: |
+| raw context window | 272,000 |
+| effective input window (95%) | 258,400 |
+| automatic compaction limit (90%) | 244,800 |
 
-```
-signal >= contextClientCompactThresholdTokens
-```
+The signal prefers provider-reported input usage from the exact current turn
+attempt. Before the first provider usage exists, it estimates serialized input
+at roughly four characters per token. Attempt fencing prevents a stale worker
+from overwriting the signal used by the current attempt.
 
-When a resolved model does not declare an explicit limit, the right-hand side
-is `floor(contextWindowTokens * contextCompactionThresholdRatio)`. An explicit
-model limit is clamped to 90% of the raw window, matching Codex core.
+## What the summarizer sees
 
-Codex subscription model metadata is pinned to the live Codex CLI 0.144.1
-catalog fetched on 2026-07-13:
+The compaction model receives:
 
-| quantity | derivation | tokens |
-| --- | --- | ---: |
-| raw context window | catalog `context_window` | 272,000 |
-| effective input ceiling | raw × catalog `effective_context_window_percent` (95%) | 258,400 |
-| automatic compaction trigger | raw × 90% (`auto_compact_token_limit` fallback) | 244,800 |
+1. the current active model history as structured items;
+2. one final user message containing Codex's checkpoint prompt;
+3. the same system instructions as the running agent;
+4. no tools and no provider-side context-management policy.
 
-These are deliberately distinct. The turn-start and per-call compaction checks
-use 244,800; the read/per-call hard input guard uses 258,400. The worker applies
-the resolved model settings to the agent build, pre-turn history read,
-summarizer, and every streamed model call, so a Codex turn cannot accidentally
-inherit the deployment's 1.05M OpenAI/Azure defaults.
+Responses providers use the Agents SDK's structured Responses conversion, so
+tool calls/results remain real protocol items on the wire. Chat providers use a
+plain-text adapter because Chat Completions has a different item protocol.
 
-The signal prefers provider-reported input tokens:
+If the summarizer request exceeds the context window, OpenGeni removes exactly
+one oldest history item and retries, retaining the checkpoint prompt. It repeats
+until the request fits or only the prompt remains. Other provider errors
+propagate and do not mutate active history. An empty model summary becomes
+Codex's explicit `(no summary available)` placeholder.
 
-- Turn-start compaction reads `sessions.last_input_tokens`, which is persisted
-  from provider usage.
-- Mid-turn proactive compaction reads the most recent provider usage observed in
-  the current activity.
-- `chars / 4` estimation is only the pre-first-call fallback when no provider
-  signal exists yet.
+## Durable replacement
 
-The old client soft/hard fraction pair and `contextKeepRecentTokens` no longer
-drive client compaction. Those config keys remain parsed for environment
-back-compat, but both client and server default thresholds now use
-`contextCompactionThresholdRatio`. `contextSummaryMaxTokens` is also parsed for
-back-compat; client compaction uses the fixed `SUMMARY_BUFFER_TOKENS` output
-ceiling.
+The replacement history is:
 
-## Client Rebuild
+1. the newest real user messages that fit one cumulative 20,000-token budget,
+   in chronological order;
+2. one user-role summary item prefixed with Codex's `summary_prefix.md` text and
+   marked `opengeni_context_summary: true`.
 
-The checkpoint summarizer call is tool-less and receives a rendered transcript
-string, not raw SDK/Responses history items. The transcript is built from:
+Prior summaries, platform-authored ephemeral context, and images are not kept
+as user boundaries. Assistant messages, reasoning, tool calls, and tool results
+leave the active model history but remain in inactive audit rows.
 
-1. Current active history.
-2. One synthesized user message containing Codex CLI's
-   `prompts/templates/compact/prompt.md` text verbatim.
+The generated replacement must estimate strictly smaller than the active input.
+One transaction locks workspace, session, and turn; verifies
+`turnId + executionGeneration + attemptId`; supersedes every old active row;
+inserts the replacement at fresh whole-number positions; updates
+`last_input_tokens`; records `session.context.compacted`; and clears a manual
+compaction request when applicable. A stale attempt can do none of those writes.
 
-Rendering all providers to text deliberately avoids provider tool-call protocol
-validation during summarization; SDK-vs-wire item drift such as `callId` vs
-`call_id` cannot reject a compaction request.
+## Turn behavior
 
-The model output is wrapped with Codex CLI's `summary_prefix.md` text verbatim
-and stored as one plain user `message` item with
-`opengeni_context_summary: true`.
+Before a fresh user or goal inference, the worker checks the durable token
+signal and any manual compaction request. During an inference, the per-model-call
+filter raises `CompactionNeededError` when the threshold is reached. A provider
+context-window rejection enters the same path.
 
-The local checkpoint replacement history is:
+The successful summarizer response reports usage through the same durable,
+idempotency-keyed `agent.model.usage` and billing-ledger path as an ordinary
+model call, owned by the current execution attempt. Codex subscription
+allowance headers use the same per-account request context and remain separate
+from OpenGeni token billing.
 
-1. The newest real user messages that fit one **20k-token cumulative budget**,
-   in chronological order. Prior summaries and platform-authored resume notices
-   are excluded.
-2. The oldest retained boundary message is truncated when only part of that
-   20k budget remains; this is not a 20k allowance per message.
-3. One summary item appended last.
+Both paths compact and restart sampling inside the same activity, turn,
+attempt, and sandbox. Compaction never creates a prompt-queue row, a recovery
+message, a new logical turn, or another sandbox. The model then sees the durable
+replacement history and continues the work.
 
-Assistant messages, tool calls/results, reasoning items, and images are removed
-from active history. They are not deleted: the compaction DB transaction marks
-the old active rows inactive and inserts replacement active rows, preserving the
-audit trail. The same transaction replaces the stale pre-compaction
-`last_input_tokens` signal with the new active-history estimate, so a
-re-dispatched activity cannot immediately recompact the replacement based on
-the superseded request's token count.
+If summarization fails, the turn ends with an honest
+`context_compaction_failed` result. OpenGeni does not continue with silently
+trimmed input and does not install a mechanical fallback summary.
 
-If the full rendered summarizer call fails or returns no summary, OpenGeni
-retries the summarizer once with a hard-trimmed transcript that drops the oldest
-rendered items and keeps the checkpoint prompt. If that also fails, OpenGeni
-performs a deterministic non-LLM fallback compaction: keep initial instruction
-messages and the most recent user messages that fit a strict fallback budget,
-middle-truncate any oversized retained message, and append a mechanical
-fallback summary item. A required compaction therefore writes a smaller active
-history whenever a DB write is possible.
+Manual `/compact` sets one durable idempotent request. During active inference,
+the worker observes it at the next model boundary and retries sampling in the
+same logical turn after replacement. While idle, the request creates one
+born-running `source="compaction"` maintenance execution on the existing turn
+ledger. That execution is not conversational work and is never a prompt-queue
+row; it exists to own model allocation, attempt fencing, recovery, and
+settlement, and it never prepares tools or a sandbox.
 
-## Turn Flows
-
-Turn-start client compaction runs before reading history for a fresh
-`user.message` or `goal.continuation` turn. Manual `/compact` sets the existing
-durable request flag and forces this same rebuild on the next turn.
-
-The per-model-call filter still performs the existing input budget guard. In
-client mode, when the single threshold is crossed mid-turn, it throws
-`CompactionNeededError`. `agent-turn.ts` handles that error through the same
-recovery loop as provider context-window overflow:
-
-- If no model/tool progress was persisted, compact and retry inside the same
-  activity, bounded by a per-turn recovery cap.
-- If progress was persisted, compact and requeue the turn with a resume notice
-  (`reason: "context_compacted"`) only when the persisted active-history token
-  estimate strictly decreases.
-- A turn that already resumed from compaction may compact and requeue again when
-  it makes the same durable shrink progress. This supports legitimate long runs
-  without a generation cap; a no-shrink result falls back to idle, so unchanged
-  history cannot churn.
-- A `compacted:false` result is never treated as success. The turn reports
-  `compaction summarization failed: ...` instead of retrying unchanged or
-  surfacing a misleading `Context compaction needed` threshold error.
-
-Provider context-window overflow remains a reactive safety path and reuses the
-same compaction/retry/requeue logic.
-
-## Read-Path Guard
-
-`enforceInputBudget` remains a request-local airbag. For a model with an
-explicit effective window it uses that ceiling; otherwise it uses
-`contextWindowTokens - contextReservedOutputTokens`. It can drop the oldest
-history at a clean user-message boundary so an oversized input is not sent. It
-does not create summaries and does not mutate the DB. It exists behind the
-real compaction path as a last-resort guard.
+The exact attempt that successfully installs the replacement clears the request
+in the same transaction. If there is no active history, or the generated
+checkpoint is not strictly smaller, the exact attempt instead records
+`session.context.compaction.skipped` with that reason and clears the request in
+one transaction without changing history. A failed, paused, recovered, or
+superseded attempt cannot lose the request or publish a current compaction
+result.
