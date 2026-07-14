@@ -6,9 +6,7 @@ describe("production cutover operator retry ownership", () => {
     const note = "OpenGeni production maintenance opengeni-cutover-main";
     expect(schedulePauseOwnedByRun(false, null, note)).toBe(true);
     expect(schedulePauseOwnedByRun(true, note, note)).toBe(true);
-    expect(schedulePauseOwnedByRun(true, "manual operator pause", note)).toBe(
-      false,
-    );
+    expect(schedulePauseOwnedByRun(true, "manual operator pause", note)).toBe(false);
     expect(schedulePauseOwnedByRun(true, null, note)).toBe(false);
   });
 });
