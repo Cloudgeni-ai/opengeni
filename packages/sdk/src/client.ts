@@ -248,13 +248,22 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<Session[]> {
+    // Search was added with the pin-aware page endpoint. An older API silently
+    // ignores unknown query parameters on the historical array endpoint, which
+    // would turn a search into a plausible-looking unfiltered result. Route
+    // searches through listSessionPage so its rolling-version shape check can
+    // fail explicitly on an older server; retain the array endpoint for every
+    // pre-existing call shape.
+    if (options.search?.trim()) {
+      const page = await this.listSessionPage(workspaceId, options);
+      return [...page.pinned, ...page.sessions];
+    }
     return await this.requestJson<Session[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
       {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.search?.trim() ? { search: options.search.trim() } : {}),
         ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
         options.parentSessionId !== undefined
           ? {
