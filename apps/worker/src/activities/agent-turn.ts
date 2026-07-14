@@ -1,7 +1,7 @@
 import {
   applySessionTurnSettlement,
   requestSessionTurnRecovery,
-  claimNextSessionExecution as claimNextSessionExecutionDb,
+  claimSessionWorkForAttempt,
   applyCreditDebitUpToBalance,
   getBillingBalance,
   getRigName,
@@ -12,7 +12,6 @@ import {
   requireFile,
   getSessionEvent,
   getSessionGoal,
-  getSessionTurn,
   getLatestRunState,
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
@@ -38,7 +37,6 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
-  registerSessionTurnDispatch,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
   clearDurablePendingSessionToolCalls,
@@ -219,6 +217,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
   type ResourceRef,
+  type SessionEvent,
   type SessionEventType,
   type SessionStatus,
 } from "@opengeni/contracts";
@@ -462,7 +461,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-) => Promise<void>;
+) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
@@ -481,6 +480,7 @@ export async function emitModelCallUsage(input: {
   // the session's previous call — the account-switch hypothesis for cache misses.
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
+  emittedSourceKeys?: Set<string>;
 }): Promise<void> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -489,7 +489,37 @@ export async function emitModelCallUsage(input: {
   if (!usage || typeof usage !== "object") {
     return;
   }
+  if (input.emittedSourceKeys?.has(input.sourceKey)) return;
   const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  const appended = await input.publish?.(
+    [
+      {
+        type: "agent.model.usage",
+        payload: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          sourceKey: input.sourceKey,
+          ...telemetry,
+        },
+      },
+    ],
+    true,
+  );
+  input.emittedSourceKeys?.add(input.sourceKey);
+  const authoritative = appended?.events.some(
+    (event) =>
+      event.type === "agent.model.usage" &&
+      event.turnAssociation === "current" &&
+      event.payload !== null &&
+      typeof event.payload === "object" &&
+      (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
+  );
+  if (!authoritative) return;
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -512,35 +542,7 @@ export async function emitModelCallUsage(input: {
         : {}),
     });
   } catch {
-    // Usage observability is best-effort.
-  }
-  try {
-    await input.publish?.(
-      [
-        {
-          type: "agent.model.usage",
-          payload: {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            provider: input.provider,
-            providerApi: input.providerApi,
-            model: input.model,
-            sourceKey: input.sourceKey,
-            ...telemetry,
-          },
-        },
-      ],
-      true,
-    );
-  } catch (error) {
-    input.observability.warn("model call usage event publish failed", {
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      sourceKey: input.sourceKey,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    // Durable event + billing already committed; logging is best-effort only.
   }
 }
 
@@ -1101,12 +1103,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
       "opengeni.workflow_id": input.workflowId,
-      "opengeni.trigger_event_id": input.triggerEventId,
+      "opengeni.trigger_kind": input.trigger.kind,
     });
     let activityStatus: RunAgentTurnResult["status"] | "unknown" = "unknown";
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let turnId: string | undefined;
+    let triggerEventId: string | undefined;
+    const claimedResult = (
+      result: Omit<
+        Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
+        "turnId" | "attemptId"
+      >,
+    ): RunAgentTurnResult => {
+      if (!turnId) throw new Error("Claimed activity result produced before turn admission");
+      return { ...result, turnId, attemptId: input.attemptId } as RunAgentTurnResult;
+    };
     // The Connected Machine op observer for this turn: meters every op AND buffers
     // the eventable ones (infra failures + healed recoveries) as machine.op.* session
     // events, drained (awaited) at turn end in the finally below. ONE instance shared
@@ -1300,12 +1312,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    let publish:
-      | ((
-          events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
-          immediate?: boolean,
-        ) => Promise<void>)
-      | null = null;
+    let publish: TurnEventPublisher | null = null;
     let settle:
       | ((input: {
           events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
@@ -1619,42 +1626,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
-      let turn = input.turnId
-        ? await getSessionTurn(db, input.workspaceId, input.turnId)
-        : await claimNextSessionExecutionDb(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            input.workflowId,
-          );
-      if (!turn) {
-        activityStatus = "cancelled";
-        turnMetricOutcome = "cancelled";
-        return { status: "cancelled" };
-      }
-      // The workflow input is the execution trigger. It equals the turn's
-      // prompt trigger on a normal/recovery run and advances to a newer
-      // user.approvalDecision on an approval resume. Dispatch registration
-      // validates and durably records that advancement under the turn lock.
-      const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
-      if (!trigger) {
-        throw new Error(`Trigger event not found: ${input.triggerEventId}`);
-      }
-      triggerType = trigger.type;
-      turnId = turn.id;
-      executionGeneration = turn.executionGeneration;
-      const registeredDispatch = await registerSessionTurnDispatch(db, input.workspaceId, {
+      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
         sessionId: input.sessionId,
-        turnId,
-        triggerEventId: trigger.id,
+        workflowId: input.workflowId,
         attemptId: input.attemptId,
         dispatchId,
+        trigger: input.trigger,
       });
-      if (registeredDispatch.action === "stale") {
-        activityStatus = "cancelled";
-        turnMetricOutcome = "cancelled";
-        return { status: "cancelled" };
+      if (claim.action === "unclaimed") {
+        activityStatus = "unclaimed";
+        return { status: "unclaimed", reason: claim.reason };
       }
+      const turn = claim.turn;
+      turnId = turn.id;
+      triggerEventId = turn.triggerEventId;
+      const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
+      if (!trigger) {
+        throw new Error(`Trigger event not found: ${triggerEventId}`);
+      }
+      triggerType = trigger.type;
+      executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -1727,6 +1718,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // one exactly like production.
       codexLeaseHolderId = dispatchId;
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const emittedModelUsageSourceKeys = new Set<string>();
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -1759,6 +1751,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (immediate) {
           await Bun.sleep(0);
         }
+        return appended;
       };
       settle = async (inputSettlement) => {
         const inputs = inputSettlement.events.map((event) => ({
@@ -1771,7 +1764,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const result = await applySessionTurnSettlement(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId: turnId!,
-          triggerEventId: input.triggerEventId,
+          triggerEventId: triggerEventId!,
           attemptId: input.attemptId,
           turnStatus: inputSettlement.turnStatus,
           sessionStatus: inputSettlement.sessionStatus,
@@ -1806,7 +1799,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             { type: "session.status.changed", payload: { status: "running" } },
             {
               type: "turn.started",
-              payload: { triggerEventId: input.triggerEventId },
+              payload: { triggerEventId },
             },
           ],
           turnStatus: "running",
@@ -1814,7 +1807,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           activeTurnId: turnId,
         }))
       ) {
-        return { status: "cancelled" };
+        return claimedResult({ status: "cancelled" });
       }
       turnStartedPublished = true;
 
@@ -2096,11 +2089,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeTurnId: null,
               }))
             ) {
-              return { status: "cancelled" };
+              return claimedResult({ status: "cancelled" });
             }
             turnMetricOutcome = "cancelled";
             activityStatus = "idle";
-            return { status: "idle", deferredUntilWake: true };
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
             () => null,
@@ -2131,7 +2124,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               turnMetricOutcome = "failed";
               activityStatus = "idle";
-              return {
+              return claimedResult({
                 status: "idle",
                 capacityWait: {
                   waiterId: armed.waiter.id,
@@ -2139,7 +2132,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                   wakeRevision: armed.waiter.wakeRevision,
                 },
-              };
+              });
             }
           }
           if (
@@ -2161,11 +2154,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeTurnId: null,
             }))
           ) {
-            return { status: "cancelled" };
+            return claimedResult({ status: "cancelled" });
           }
           turnMetricOutcome = "failed";
           activityStatus = "idle";
-          return { status: "idle" };
+          return claimedResult({ status: "idle" });
         }
 
         if (rotationDecision.kind === "allCapped" && turnId) {
@@ -2191,11 +2184,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeTurnId: null,
               }))
             ) {
-              return { status: "cancelled" };
+              return claimedResult({ status: "cancelled" });
             }
             turnMetricOutcome = "cancelled";
             activityStatus = "idle";
-            return { status: "idle", deferredUntilWake: true };
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
           // Every eligible account is capped/cooling (and a usage refresh did NOT
           // surface a reset): idle the turn AT THE BOUNDARY (no wasted model/sandbox
@@ -2246,7 +2239,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
               turnMetricOutcome = "failed";
               activityStatus = "idle";
-              return {
+              return claimedResult({
                 status: "idle",
                 capacityWait: {
                   waiterId: armed.waiter.id,
@@ -2254,7 +2247,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                   wakeRevision: armed.waiter.wakeRevision,
                 },
-              };
+              });
             }
           }
           if (
@@ -2280,19 +2273,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeTurnId: null,
             }))
           ) {
-            return { status: "cancelled" };
+            return claimedResult({ status: "cancelled" });
           }
           turnMetricOutcome = "failed";
           activityStatus = "idle";
           // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
           // resumeMs even if a future change made it 0 — never a tight re-dispatch.
-          return goalActive
-            ? {
-                status: "idle",
-                continueDelayMs: resumeMs,
-                idleUntilReset: true,
-              }
-            : { status: "idle" };
+          return claimedResult(
+            goalActive
+              ? {
+                  status: "idle",
+                  continueDelayMs: resumeMs,
+                  idleUntilReset: true,
+                }
+              : { status: "idle" },
+          );
         }
         if (effectiveCodexCredentialId) {
           const priorAccountId = sessionCodex?.lastCredentialId ?? null;
@@ -2527,6 +2522,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               priorSessionCredentialId: priorSessionCodexCredentialId,
               isFirstCallOfTurn: compactionUsageCount === 1,
             });
+            await recordModelUsageAndDebitCredits(settings, db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              model: resolvedModel?.configured.id ?? turn.model,
+              isCodexTurn,
+              usage: usage.usage,
+              sourceKey,
+              observability,
+            });
             await emitModelCallUsage({
               observability,
               publish,
@@ -2541,17 +2547,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               usage,
               servingAccountHash: responseAccountCtx.servingAccountHash,
               accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-            });
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
-              usage: usage.usage,
-              sourceKey,
-              observability,
+              emittedSourceKeys: emittedModelUsageSourceKeys,
             });
           },
         });
@@ -2658,11 +2654,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "completed";
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
 
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
@@ -2759,7 +2755,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           activeSandboxPointer,
           (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
-          publish ?? undefined,
+          publish
+            ? async (events) => {
+                await publish!(events);
+              }
+            : undefined,
         );
         activeSandboxPointer = reconciled.pointer;
         activeSandboxRecord = reconciled.record;
@@ -3661,7 +3661,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
-            let modelUsageEventContext: Record<string, unknown> | null = null;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               await recordCompletedModelCallBeforeOwnershipFences({
@@ -3682,9 +3681,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     priorSessionCredentialId: priorSessionCodexCredentialId,
                     isFirstCallOfTurn: responseUsageCount === 1,
                   });
+                  await recordModelUsageAndDebitCredits(settings, db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    model: turn.model,
+                    isCodexTurn,
+                    usage: responseUsage.usage,
+                    sourceKey: responseSourceKey,
+                    observability,
+                  });
                   await emitModelCallUsage({
                     observability,
-                    publish: null,
+                    publish,
                     accountId: input.accountId,
                     workspaceId: input.workspaceId,
                     sessionId: input.sessionId,
@@ -3696,17 +3706,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     usage: responseUsage,
                     servingAccountHash: responseAccountCtx.servingAccountHash,
                     accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+                    emittedSourceKeys: emittedModelUsageSourceKeys,
                   });
-                  modelUsageEventContext = {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                    providerApi: resolvedModel?.provider.api ?? "responses",
-                    model: turn.model,
-                    sourceKey: responseSourceKey,
-                  };
                   const observed = responseUsage.usage?.inputTokens;
                   if (typeof observed === "number" && observed > 0) {
                     recordModelInputTokens(observability, streamProvider, observed);
@@ -3717,17 +3718,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   recordModelCacheTokens(observability, streamProvider, {
                     cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
                     promptTokens: responseUsage.usage?.inputTokens,
-                  });
-                  await recordModelUsageAndDebitCredits(settings, db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    model: turn.model,
-                    isCodexTurn,
-                    usage: responseUsage.usage,
-                    sourceKey: responseSourceKey,
-                    observability,
                   });
                 },
                 recordAttemptSignals: async () => {
@@ -3833,18 +3823,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
-              // Assigned inside the awaited metering closure above. TypeScript's
-              // control-flow analysis does not propagate closure writes, so take
-              // an explicit post-await snapshot for the usage-event enrichment.
-              const usageEventContext = modelUsageEventContext as Record<string, unknown> | null;
-              if (
-                event.type === "agent.model.usage" &&
-                usageEventContext &&
-                event.payload &&
-                typeof event.payload === "object"
-              ) {
-                event.payload = { ...usageEventContext, ...event.payload };
-              }
               streamTiming.onEvent(event.type);
               await batcher.push(event);
             }
@@ -3913,6 +3891,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 usage: { usage: aggregateUsage },
                 servingAccountHash: aggregateAccountCtx.servingAccountHash,
                 accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+                emittedSourceKeys: emittedModelUsageSourceKeys,
               });
             },
             recordAttemptSignals: async () => {
@@ -3952,10 +3931,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeTurnId,
             }))
           ) {
-            return { status: "cancelled" };
+            return claimedResult({ status: "cancelled" });
           }
           activityStatus = "requires_action";
-          return { status: "requires_action" };
+          return claimedResult({ status: "requires_action" });
         }
 
         const finalOutput = String(stream.finalOutput ?? "");
@@ -3988,7 +3967,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
@@ -4002,7 +3981,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       };
 
       await prepareRunAttemptInput();
@@ -4095,12 +4074,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeTurnId: null,
               }))
             ) {
-              return { status: "cancelled" };
+              return claimedResult({ status: "cancelled" });
             }
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = attemptError;
-            return { status: "idle" };
+            return claimedResult({ status: "idle" });
           }
           // Codex parity: compaction remains inside the same logical turn and
           // the same activity. Rebuild the model-visible history from the
@@ -4129,7 +4108,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // The turn id falls
       // back to the workflow-claimed turn when the local lookup had not
       // finished yet.
-      const recoveryTurnId = turnId ?? input.turnId;
+      const recoveryTurnId = turnId;
       // P1.2: a lease supersession during resume (a newer epoch re-established
       // the box concurrently) is NOT a session failure. Recover the same turn
       // so its next attempt reattaches under the current epoch.
@@ -4138,14 +4117,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
-            triggerEventId: input.triggerEventId,
+            triggerEventId: triggerEventId!,
             attemptId: input.attemptId,
             reason: "sandbox_lease_superseded",
           });
           if (recovery.action === "stale") {
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
-            return { status: "cancelled" };
+            return claimedResult({ status: "cancelled" });
           }
           await publishDurableSessionEvents(
             bus,
@@ -4155,7 +4134,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
-          return { status: "recovering" };
+          return claimedResult({ status: "recovering" });
         } catch (recoveryError) {
           console.error("sandbox lease supersession recovery failed", recoveryError);
           throw recoveryError;
@@ -4175,14 +4154,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
             sessionId: input.sessionId,
             turnId: recoveryTurnId,
-            triggerEventId: input.triggerEventId,
+            triggerEventId: triggerEventId!,
             attemptId: input.attemptId,
             reason: "worker_shutdown",
           });
           if (recovery.action === "stale") {
             activityStatus = "cancelled";
             turnMetricOutcome = "cancelled";
-            return { status: "cancelled" };
+            return claimedResult({ status: "cancelled" });
           }
           await publishDurableSessionEvents(
             bus,
@@ -4192,7 +4171,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           activityStatus = "recovering";
           turnMetricOutcome = "recovering";
-          return { status: "recovering" };
+          return claimedResult({ status: "recovering" });
         } catch (recoveryError) {
           // The database transition is atomic. If it could not commit, surface
           // the failure so Temporal can retry on a healthy worker; never mutate
@@ -4209,7 +4188,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // control transaction. Return locally; no Temporal cancellation and no
         // competing turn/session settlement is needed.
         turnMetricOutcome = "cancelled";
-        return { status: "cancelled" };
+        return claimedResult({ status: "cancelled" });
       }
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";
@@ -4251,7 +4230,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
@@ -4265,7 +4244,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       const settleLostCodexAttempt = async (
         lostTurnId: string,
@@ -4299,7 +4278,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           expectedRedispatches: redispatchesAtDispatch,
           checkpointDurable,
           recoveryPayload: {
-            triggerEventId: input.triggerEventId,
+            triggerEventId: triggerEventId!,
             reason: "codex_lease_lost",
             credentialId: effectiveCodexCredentialId,
           },
@@ -4336,11 +4315,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "failed",
             `turn:${lostTurnId}`,
           );
-          return { status: "failed" };
+          return claimedResult({ status: "failed" });
         }
         activityStatus = "recovering";
         turnMetricOutcome = "recovering";
-        return { status: "recovering" };
+        return claimedResult({ status: "recovering" });
       };
 
       // A missing/expired/superseded lease is an execution-ownership failure,
@@ -4501,7 +4480,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               expectedRedispatches: redispatchesAtDispatch,
               maxFailovers: Math.max(1, accounts.length),
               recoveryPayload: {
-                triggerEventId: input.triggerEventId,
+                triggerEventId: triggerEventId!,
                 reason: "codex_credential_failover",
                 credentialId: effectiveCodexCredentialId,
                 failureKind: codexCredentialFailure.kind,
@@ -4535,7 +4514,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               });
               activityStatus = "recovering";
               turnMetricOutcome = "recovering";
-              return { status: "recovering" };
+              return claimedResult({ status: "recovering" });
             }
             if (settlement.action === "stale") {
               // One transaction proves both exact-holder recovery (including a
@@ -4543,7 +4522,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // rejection. A stale activity performs no second settlement.
               activityStatus = "recovering";
               turnMetricOutcome = "recovering";
-              return { status: "recovering" };
+              return claimedResult({ status: "recovering" });
             }
           }
         }
@@ -4798,7 +4777,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = error;
-            return {
+            return claimedResult({
               status: "idle",
               capacityWait: {
                 waiterId: armed.waiter.id,
@@ -4806,7 +4785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                 wakeRevision: armed.waiter.wakeRevision,
               },
-            };
+            });
           }
         }
         if (
@@ -4829,7 +4808,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "failed";
         activityStatus = "idle";
@@ -4844,11 +4823,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // slow-retry floor, and once consecutive failovers exceed the account count + margin
             // the circuit breaker returns a fixed MANDATORY idle (idleUntilReset) — never a 0-delay
             // hot loop against a capped backend + DB.
-            return {
+            return claimedResult({
               status: "idle",
               continueDelayMs: rotationResumeMs,
               ...(rotationResumeIdleUntilReset ? { idleUntilReset: true } : {}),
-            };
+            });
           }
           // All-capped: clamp to [MIN_IDLE_MS, max] — a POSITIVE, BOUNDED hold (never 0,
           // so session.ts can never tight-loop). The post-idle continuation re-dispatch
@@ -4863,13 +4842,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   CODEX_USAGE_LIMIT_MAX_RESUME_MS,
                 )
               : CODEX_USAGE_LIMIT_MAX_RESUME_MS;
-          return {
+          return claimedResult({
             status: "idle",
             continueDelayMs: resumeMs,
             ...(allCappedResetAt ? { idleUntilReset: true } : {}),
-          };
+          });
         }
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       // Budget/limit exhaustion between model calls is account state, not an
       // agent failure: idle the session for goal-bearing and goal-less runs
@@ -4897,7 +4876,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "completed";
         await recordUsageEvent(db, {
@@ -4911,7 +4890,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       // A retryable provider/MCP failure is transient external backpressure,
       // not a session failure: the in-client retry budget is already
@@ -4949,17 +4928,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             activeTurnId: null,
           }))
         ) {
-          return { status: "cancelled" };
+          return claimedResult({ status: "cancelled" });
         }
         turnMetricOutcome = "failed";
         activityStatus = "idle";
         activityError = error;
-        return {
+        return claimedResult({
           status: "idle",
           ...(recoveryRouting.continueDelayMs !== undefined
             ? { continueDelayMs: recoveryRouting.continueDelayMs }
             : {}),
-        };
+        });
       }
       activityStatus = "failed";
       activityError = error;
@@ -4984,7 +4963,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           activeTurnId: null,
         }))
       ) {
-        return { status: "cancelled" };
+        return claimedResult({ status: "cancelled" });
       }
       turnMetricOutcome = "failed";
       // The common failure path ends here: runAgentTurn marks the session
@@ -5001,7 +4980,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         "failed",
         `turn:${turnId}`,
       );
-      return { status: "failed" };
+      return claimedResult({ status: "failed" });
     } finally {
       const durationSeconds = (performance.now() - activityStarted) / 1000;
       observability.recordWorkerActivity({
@@ -5122,7 +5101,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           db,
           objectStorage,
           settings,
-          publish,
+          publish: publish
+            ? async (events) => {
+                await publish!(events);
+              }
+            : null,
           session: setupBoxSession as ChannelASession,
           leaseEpoch: resolvedSandbox.leaseEpoch,
           sandboxGroupId,

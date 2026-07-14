@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../src/schema";
 import {
   armCodexCapacityWait,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   codexCapacityRefreshBackoffMs,
   createDb,
   encryptEnvironmentValue,
@@ -53,6 +53,22 @@ type CapacityScenario = Workspace & {
   goalId: string;
   workflowId: string;
 };
+
+async function claimTestTurn(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  workflowId: string,
+) {
+  const result = await claimSessionWorkForAttempt(db, workspaceId, {
+    sessionId,
+    workflowId,
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  return result.action === "claimed" ? result.turn : null;
+}
 
 async function freshWorkspace(): Promise<Workspace> {
   const [account] = await admin<{ id: string }[]>`
@@ -264,18 +280,13 @@ describe("OPE-21 durable Codex capacity waits", () => {
     );
     if (resumed.action !== "resumed") throw new Error("expected resumed update");
 
-    let claim: ReturnType<typeof claimNextSessionExecution> | null = null;
+    let claim: ReturnType<typeof claimTestTurn> | null = null;
     await admin.begin(async (lockTx) => {
       await lockTx`
         select id from sessions
         where workspace_id = ${scenario.workspaceId} and id = ${scenario.sessionId}
         for update`;
-      claim = claimNextSessionExecution(
-        claimDb,
-        scenario.workspaceId,
-        scenario.sessionId,
-        scenario.workflowId,
-      );
+      claim = claimTestTurn(claimDb, scenario.workspaceId, scenario.sessionId, scenario.workflowId);
       await waitForAppSessionLockWait();
 
       // If claim took the pending update before waiting for the session, this
@@ -615,7 +626,7 @@ describe("OPE-21 durable Codex capacity waits", () => {
       sandboxBackend: "modal",
       metadata: {},
     });
-    const claimed = await claimNextSessionExecution(
+    const claimed = await claimTestTurn(
       dbA,
       scenario.workspaceId,
       scenario.sessionId,

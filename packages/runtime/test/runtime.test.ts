@@ -127,7 +127,7 @@ describe("runtime event normalization", () => {
     });
   });
 
-  test("extracts model usage from streamed response completion events", () => {
+  test("extracts streamed usage without manufacturing a durable event", () => {
     const event = {
       type: "raw_model_stream_event",
       data: {
@@ -156,21 +156,10 @@ describe("runtime event normalization", () => {
         outputTokensDetails: { reasoning_tokens: 2 },
       },
     });
-    expect(normalizeSdkEvent(event)).toEqual([
-      {
-        type: "agent.model.usage",
-        payload: {
-          responseId: "resp-1",
-          inputTokens: 10,
-          outputTokens: 5,
-          cachedTokens: 3,
-          reasoningTokens: 2,
-        },
-      },
-    ]);
+    expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
-  test("extracts model usage from raw Responses completion events", () => {
+  test("extracts raw Responses usage without manufacturing a durable event", () => {
     const event = new RunRawModelStreamEvent({
       type: "model",
       providerData: {
@@ -202,18 +191,7 @@ describe("runtime event normalization", () => {
         outputTokensDetails: { reasoning_tokens: 6 },
       },
     });
-    expect(normalizeSdkEvent(event)).toEqual([
-      {
-        type: "agent.model.usage",
-        payload: {
-          responseId: "resp-2",
-          inputTokens: 20,
-          outputTokens: 8,
-          cachedTokens: 4,
-          reasoningTokens: 6,
-        },
-      },
-    ]);
+    expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
   test("normalizes model-call usage telemetry fields defensively", () => {

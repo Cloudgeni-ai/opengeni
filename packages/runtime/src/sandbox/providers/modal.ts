@@ -74,10 +74,11 @@ export const modalProvider: ProviderRegistration = {
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
       exposedPorts,
       env: environment,
-      // The Modal JS SDK's sandbox default command already sleeps until timeout
-      // or explicit termination. Do not let the Agents extension stamp a separate
-      // hardcoded sleep command; OPENGENI_MODAL_TIMEOUT_SECONDS owns lifetime.
-      useSleepCmd: false,
+      // A registry image's own CMD is not a sandbox keepalive contract (for
+      // example, python:3.12-slim can exit immediately). Keep the provider's
+      // control process alive so exec/resume remains available; Modal's hard
+      // timeout and explicit OpenGeni teardown still own the box lifetime.
+      useSleepCmd: true,
     };
     // gap-fill (module 03 §4.1): these SDK options were previously unmapped.
     // ALWAYS pin idleTimeoutMs (sandbox-file-persistence): an UNSET idle timeout

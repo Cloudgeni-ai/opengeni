@@ -1338,6 +1338,8 @@ export const sessionEvents = pgTable(
     turnGeneration: integer("turn_generation"),
     turnAttemptId: uuid("turn_attempt_id"),
     turnAssociation: text("turn_association"),
+    duplicateOfEventId: uuid("duplicate_of_event_id"),
+    duplicateReason: text("duplicate_reason"),
     sequence: integer("sequence").notNull(),
     type: text("type").notNull(),
     payload: jsonb("payload").$type<unknown>().notNull().default({}),

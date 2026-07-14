@@ -4014,7 +4014,9 @@ export const SessionEvent = z.object({
   turnId: z.string().uuid().nullable().optional(),
   turnGeneration: z.number().int().nonnegative().nullable().optional(),
   turnAttemptId: z.string().uuid().nullable().optional(),
-  turnAssociation: z.enum(["current", "late_rejected"]).nullable().optional(),
+  turnAssociation: z.enum(["current", "late_rejected", "duplicate"]).nullable().optional(),
+  duplicateOfEventId: z.string().uuid().nullable().optional(),
+  duplicateReason: z.string().min(1).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
 

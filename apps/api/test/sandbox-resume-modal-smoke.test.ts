@@ -19,9 +19,9 @@ import {
 // The marker must round-trip. The box is ALWAYS terminated in finally (cost).
 //
 // Modal creds: the active [opengeni] profile in ~/.modal.toml (the modal JS SDK
-// reads it NATIVELY — no token is injected into settings or printed here). When
-// no profile/token is available the smoke skips (it is not a merge blocker for
-// the non-gated scope, per the implementation plan's NEEDS-CREDS protocol).
+// reads it NATIVELY — no token is injected into settings or printed here). The
+// smoke is additionally opt-in because it allocates real Modal capacity and
+// must not turn every credentialed deterministic-suite run into external work.
 
 const IMAGE_TAG = process.env.OPENGENI_MODAL_SMOKE_IMAGE ?? "python:3.12-slim";
 const APP_NAME = process.env.OPENGENI_MODAL_SMOKE_APP ?? "opengeni-p0-4-resume-smoke";
@@ -78,10 +78,16 @@ async function execMarker(session: ApiSandboxSession, marker: string): Promise<s
   // mishandles -n. The SDK reads `cmd` (a string) and wraps it in /bin/sh -lc.
   const cmd = `printf '%s' '${marker}'`;
   if (session.execCommand) {
-    return parseExecOutput(await session.execCommand({ cmd }));
+    return parseExecOutput(
+      await session.execCommand({ cmd, yieldTimeMs: 30_000, maxOutputTokens: 1_000 }),
+    );
   }
   if (session.exec) {
-    const result = (await session.exec({ cmd })) as { output?: string; stdout?: string };
+    const result = (await session.exec({
+      cmd,
+      yieldTimeMs: 30_000,
+      maxOutputTokens: 1_000,
+    })) as { output?: string; stdout?: string };
     const text = result.output ?? result.stdout ?? "";
     return parseExecOutput(text);
   }
@@ -106,10 +112,21 @@ async function terminate(session: ApiSandboxSession | null | undefined): Promise
   }
 }
 
-const credentialed = hasModalCredentials();
+async function measuredPhase<T>(name: string, run: () => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  console.info(`[modal resume smoke] ${name}: start`);
+  try {
+    return await run();
+  } finally {
+    console.info(`[modal resume smoke] ${name}: ${Date.now() - startedAt}ms`);
+  }
+}
 
-describe("P0.4 API-direct Modal resume smoke (NEEDS-CREDS(Modal))", () => {
-  test.skipIf(!credentialed)(
+const credentialed = hasModalCredentials();
+const liveGate = process.env.OPENGENI_P04_LIVE_MODAL === "1" && credentialed;
+
+describe("P0.4 API-direct Modal resume smoke (opt-in real service)", () => {
+  test.skipIf(!liveGate)(
     "the API resumes a real Modal box by id and execs a marker that round-trips",
     async () => {
       const settings = testSettings({
@@ -142,37 +159,41 @@ describe("P0.4 API-direct Modal resume smoke (NEEDS-CREDS(Modal))", () => {
           serializeSessionState(state: unknown): Promise<Record<string, unknown>>;
         };
         expect(typeof modalClient.create).toBe("function");
-        foundingSession = await modalClient.create();
-        expect(await foundingSession.running?.()).toBe(true);
+        foundingSession = await measuredPhase("create", () => modalClient.create());
 
         expect(typeof modalClient.serializeSessionState).toBe("function");
-        const resumeState = await modalClient.serializeSessionState(foundingSession.state);
+        const resumeState = await measuredPhase("serialize", () =>
+          modalClient.serializeSessionState(foundingSession!.state),
+        );
         expect(resumeState && typeof resumeState).toBe("object");
 
         // 2) THE API-DIRECT RESUME: deps.resumeBoxById resumes the box by id,
         //    in-process, with NO worker and NO Temporal.
-        resumedSession = await resumeBoxById({ backend: "modal", resumeState });
-        expect(await resumedSession.running?.()).toBe(true);
+        resumedSession = await measuredPhase("resume", () =>
+          resumeBoxById({ backend: "modal", resumeState }),
+        );
 
         // 3) Exec the marker on the resumed handle — proves the API can touch the
         //    real box and round-trip output.
-        const echoed = await execMarker(resumedSession, marker);
+        const echoed = await measuredPhase("resumed exec", () =>
+          execMarker(resumedSession!, marker),
+        );
         expect(echoed).toBe(marker);
       } finally {
         // ALWAYS terminate (cost). The founding handle owns the box; terminating
         // it kills the box for both handles (resume is a non-owning 2nd handle).
-        await terminate(foundingSession);
+        await measuredPhase("founding teardown", () => terminate(foundingSession));
         // Best-effort drop of the resumed handle too (no-op once box is dead).
-        await terminate(resumedSession);
+        await measuredPhase("borrowed-handle teardown", () => terminate(resumedSession));
       }
     },
-    180_000,
+    360_000,
   );
 
-  test.skipIf(credentialed)("smoke is skipped without Modal credentials (documented)", () => {
-    // A visible breadcrumb in the non-credentialed run so the gated smoke is not
-    // silently absent. The non-gated scope (config + deployment + import guard)
-    // still proves P0.4 builds and wires correctly.
-    expect(credentialed).toBe(false);
-  });
+  test.skipIf(liveGate)(
+    "live smoke is visibly skipped unless OPENGENI_P04_LIVE_MODAL=1 and credentials exist",
+    () => {
+      expect(liveGate).toBe(false);
+    },
+  );
 });

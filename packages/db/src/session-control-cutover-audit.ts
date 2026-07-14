@@ -132,6 +132,12 @@ export type CutoverInvariantCounts = {
   queuedMachineTurns: number;
   activeOpaqueCompactionItems: number;
   invalidActiveTurnPointers: number;
+  runningTurnsWithoutAttempt: number;
+  attemptOwnedNonRunningTurns: number;
+  duplicateCurrentUsageSources: number;
+  invalidDuplicateUsageAssociations: number;
+  enrollableSessions: number;
+  workerDeathRedispatchExhausted: number;
 };
 
 export type SessionControlCutoverSnapshot = {
@@ -228,6 +234,11 @@ async function columnExists(sql: postgres.Sql, table: string, column: string): P
   return booleanValue(rows[0]?.present);
 }
 
+async function functionExists(sql: postgres.Sql, signature: string): Promise<boolean> {
+  const rows = await sql<Row[]>`select to_regprocedure(${signature}) is not null as present`;
+  return booleanValue(rows[0]?.present);
+}
+
 async function unsafeRows(sql: postgres.Sql, query: string): Promise<Row[]> {
   return (await sql.unsafe<Row[]>(query)) as unknown as Row[];
 }
@@ -316,6 +327,15 @@ export async function captureSessionControlCutoverSnapshot(
   const hasWorkspaceControl = await columnExists(sql, "workspaces", "inference_state");
   const hasUpdates = await tableExists(sql, "session_system_updates");
   const hasPendingTools = await tableExists(sql, "session_pending_tool_calls");
+  const hasUsageDuplicateAssociation = await columnExists(
+    sql,
+    "session_events",
+    "duplicate_of_event_id",
+  );
+  const hasEnrollableScan = await functionExists(
+    sql,
+    "opengeni_private.list_enrollable_sessions(integer)",
+  );
   const hasFrozenCredential = await columnExists(
     sql,
     "agent_run_states",
@@ -593,6 +613,48 @@ export async function captureSessionControlCutoverSnapshot(
     `select count(*)::integer as count from session_history_items
      where active = true and item ->> 'type' in ('compaction','compaction_summary')`,
   );
+  const ownershipRows = hasAttempts
+    ? await unsafeRows(
+        sql,
+        `select
+          count(*) filter (where status = 'running' and active_attempt_id is null)::integer
+            as running_without_attempt,
+          count(*) filter (where status <> 'running' and active_attempt_id is not null)::integer
+            as owned_non_running
+         from session_turns`,
+      )
+    : [{ running_without_attempt: 0, owned_non_running: 0 }];
+  const usageRows = hasUsageDuplicateAssociation
+    ? await unsafeRows(
+        sql,
+        `select
+          (select count(*)::integer from (
+             select workspace_id, session_id, turn_id, payload ->> 'sourceKey'
+             from session_events
+             where type = 'agent.model.usage' and turn_association = 'current'
+               and turn_id is not null and nullif(payload ->> 'sourceKey', '') is not null
+             group by workspace_id, session_id, turn_id, payload ->> 'sourceKey'
+             having count(*) > 1
+           ) duplicate_sources) as duplicate_current_sources,
+          (select count(*)::integer from session_events
+             where type = 'agent.model.usage' and turn_association = 'duplicate'
+               and (duplicate_of_event_id is null or duplicate_reason is null))
+            as invalid_duplicate_associations`,
+      )
+    : [{ duplicate_current_sources: 0, invalid_duplicate_associations: 0 }];
+  const enrollableRows = hasEnrollableScan
+    ? await unsafeRows(
+        sql,
+        `select count(*)::integer as count
+         from opengeni_private.list_enrollable_sessions(10000)`,
+      )
+    : [{ count: 0 }];
+  const casualtyRows = await unsafeRows(
+    sql,
+    `select count(*)::integer as count from session_events
+     where type = 'turn.failed'
+       and payload ->> 'code' = 'worker_death_redispatch_exhausted'`,
+  );
 
   const draft = {
     contractVersion: SESSION_CONTROL_CUTOVER_CONTRACT,
@@ -606,6 +668,27 @@ export async function captureSessionControlCutoverSnapshot(
       queuedMachineTurns,
       activeOpaqueCompactionItems: numberValue(opaqueRows[0]?.count ?? 0, "opaque count"),
       invalidActiveTurnPointers,
+      runningTurnsWithoutAttempt: numberValue(
+        ownershipRows[0]?.running_without_attempt ?? 0,
+        "running turns without attempt",
+      ),
+      attemptOwnedNonRunningTurns: numberValue(
+        ownershipRows[0]?.owned_non_running ?? 0,
+        "attempt-owned non-running turns",
+      ),
+      duplicateCurrentUsageSources: numberValue(
+        usageRows[0]?.duplicate_current_sources ?? 0,
+        "duplicate current usage sources",
+      ),
+      invalidDuplicateUsageAssociations: numberValue(
+        usageRows[0]?.invalid_duplicate_associations ?? 0,
+        "invalid duplicate usage associations",
+      ),
+      enrollableSessions: numberValue(enrollableRows[0]?.count ?? 0, "enrollable sessions"),
+      workerDeathRedispatchExhausted: numberValue(
+        casualtyRows[0]?.count ?? 0,
+        "worker death redispatch casualties",
+      ),
     },
     identityCount: sessions.reduce(
       (count, session) =>
@@ -681,6 +764,18 @@ export function reconcileSessionControlCutover(
   }
   if (observed.invariants.invalidActiveTurnPointers !== 0) {
     errors.push("observed snapshot has invalid active-turn pointers");
+  }
+  if (observed.invariants.runningTurnsWithoutAttempt !== 0) {
+    errors.push("observed snapshot has running turns without registered attempts");
+  }
+  if (observed.invariants.attemptOwnedNonRunningTurns !== 0) {
+    errors.push("observed snapshot has non-running turns with attempt owners");
+  }
+  if (observed.invariants.duplicateCurrentUsageSources !== 0) {
+    errors.push("observed snapshot has duplicate current usage sources");
+  }
+  if (observed.invariants.invalidDuplicateUsageAssociations !== 0) {
+    errors.push("observed snapshot has invalid duplicate usage associations");
   }
 
   const observedWorkspaces = new Map(

@@ -621,7 +621,9 @@ export type SessionEvent = {
   turnId?: string | null | undefined;
   turnGeneration?: number | null | undefined;
   turnAttemptId?: string | null | undefined;
-  turnAssociation?: "current" | "late_rejected" | null | undefined;
+  turnAssociation?: "current" | "late_rejected" | "duplicate" | null | undefined;
+  duplicateOfEventId?: string | null | undefined;
+  duplicateReason?: string | null | undefined;
 };
 
 export type ToolAuthNeededPayload = {

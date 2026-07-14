@@ -24,7 +24,9 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
-              app.kubernetes.io/component: worker
+            matchExpressions:
+              - key: opengeni.ai/worker-role
+                operator: Exists
       ports:
         - protocol: TCP
           port: {{ .Values.nats.clientPort }}

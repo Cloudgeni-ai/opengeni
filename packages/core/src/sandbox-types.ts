@@ -42,9 +42,9 @@ export type ApiSandboxSession = {
 
 export type ApiSandboxClient = {
   backendId: string;
-  deserializeSessionState?(state: Record<string, unknown>): Promise<unknown>;
-  resume?(state: unknown, options?: unknown): Promise<ApiSandboxSession>;
-  delete?(state: unknown): Promise<void>;
+  deserializeSessionState?(state: Record<string, unknown>): Promise<Record<string, unknown>>;
+  resume?(state: Record<string, unknown>, options?: unknown): Promise<ApiSandboxSession>;
+  delete?(state: Record<string, unknown>): Promise<void>;
 };
 
 export type ResumeBoxByIdInput = {

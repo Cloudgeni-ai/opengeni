@@ -51,7 +51,7 @@
     "@temporalio/workflow": "^1.17.0"
   },
   "devDependencies": {
-    "@openai/agents-core": "0.11.6",
+    "@openai/agents-core": "0.13.3",
     "@opengeni/testing": "workspace:*",
     "postgres": "^3.4.9",
     "tsup": "^8.5.0",

@@ -35,6 +35,7 @@ import {
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurnWithVersion,
+  acceptSessionApprovalDecision,
   clearSessionGoal,
   clearSessionContext,
   closePtySession,
@@ -52,7 +53,6 @@ import {
   listSessionTurns,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  requireSession,
   setSessionCodexPin,
   withCodexCapacityMutation,
   setSessionPin,
@@ -71,7 +71,11 @@ import {
   workspaceCaptureAtRevision,
   type AppendEventInput,
 } from "@opengeni/db";
-import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  coalesceSessionEventDeltas,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { z } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
@@ -639,27 +643,30 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(accepted, 202);
     }
 
-    const session = await requireSession(db, workspaceId, sessionId);
-    if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
-      throw new HTTPException(409, {
-        message: `session is ${session.status}; no approval is pending`,
-      });
-    }
-    const eventsToAppend: AppendEventInput[] = [
-      {
-        type: event.type,
+    if (event.type === "user.approvalDecision") {
+      const accepted = await acceptSessionApprovalDecision(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
         payload: event.payload,
-        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      },
-    ];
-    const appended = await appendAndPublishEvents(db, bus, workspaceId, sessionId, eventsToAppend);
-    const accepted = appended[0];
-    if (!accepted) {
-      throw new HTTPException(500, { message: "failed to append client event" });
+        clientEventId: event.clientEventId ?? null,
+      });
+      if (accepted.action === "conflict") {
+        throw new HTTPException(409, {
+          message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
+        });
+      }
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
+      const workflowId = workflowIdForSession(sessionId);
+      await workflowClient.signalApprovalDecision({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        eventId: accepted.event.id,
+        workflowId,
+      });
+      return c.json(accepted.event, 202);
     }
-    const workflowId = workflowIdForSession(sessionId);
-    await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
-    return c.json(accepted, 202);
   });
 
   // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────

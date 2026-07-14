@@ -42,6 +42,42 @@ export type StartedProcess = {
   stop: () => Promise<void>;
 };
 
+export type StartedE2eWorkerTopology = {
+  control: StartedProcess;
+  turns: StartedProcess;
+  logs: () => string;
+  ready: () => boolean;
+  stop: () => Promise<void>;
+};
+
+/** Start the same isolated control/turn worker topology used in production. */
+export async function startE2eWorkerTopology(options: {
+  cwd: string;
+  env: Record<string, string | undefined>;
+}): Promise<StartedE2eWorkerTopology> {
+  const [control, turns] = await Promise.all([
+    startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+      ...options,
+      env: { ...options.env, OPENGENI_WORKER_ROLE: "control" },
+    }),
+    startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+      ...options,
+      env: { ...options.env, OPENGENI_WORKER_ROLE: "turn" },
+    }),
+  ]);
+  return {
+    control,
+    turns,
+    logs: () => `[control]\n${control.logs()}\n[turns]\n${turns.logs()}`,
+    ready: () =>
+      control.logs().includes("OpenGeni control test worker listening") &&
+      turns.logs().includes("OpenGeni turn test worker listening"),
+    stop: async () => {
+      await Promise.allSettled([control.stop(), turns.stop()]);
+    },
+  };
+}
+
 export async function startProcess(
   args: string[],
   options: {

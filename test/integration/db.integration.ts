@@ -8,7 +8,7 @@ import {
   appendSessionEvents,
   applySessionTurnSettlement,
   bootstrapWorkspace,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   createKnowledgeMemory,
   getKnowledgeMemory,
   saveWorkspaceMemory,
@@ -47,7 +47,6 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEvents,
-  registerSessionTurnDispatch,
   updateScheduledTask,
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
@@ -555,12 +554,10 @@ describe("DB integration", () => {
         payload: { approvalId: "goal-test", decision: "approve" },
       },
     ]);
-    const resumedUserTurn = await registerTurnAttempt(
-      dbClient.db,
-      grant,
-      queuedUserTurn.turn,
-      approval!.id,
-    );
+    const resumedUserTurn = await claimRegisteredExecution(dbClient.db, grant, session.id, {
+      kind: "approval",
+      triggerEventId: approval!.id,
+    });
     await settleRegisteredExecution(dbClient.db, grant, resumedUserTurn, "completed");
 
     // First continuation.
@@ -2258,44 +2255,32 @@ describe("DB integration", () => {
 });
 
 type RegisteredExecution = {
-  turn: NonNullable<Awaited<ReturnType<typeof claimNextSessionExecution>>>;
+  turn: Extract<
+    Awaited<ReturnType<typeof claimSessionWorkForAttempt>>,
+    { action: "claimed" }
+  >["turn"];
   triggerEventId: string;
   attemptId: string;
 };
-
-async function registerTurnAttempt(
-  db: ReturnType<typeof createDb>["db"],
-  grant: AccessGrant,
-  turn: RegisteredExecution["turn"],
-  triggerEventId = turn.triggerEventId,
-): Promise<RegisteredExecution> {
-  const attemptId = crypto.randomUUID();
-  const registered = await registerSessionTurnDispatch(db, grant.workspaceId, {
-    sessionId: turn.sessionId,
-    turnId: turn.id,
-    triggerEventId,
-    attemptId,
-    dispatchId: `dispatch-${crypto.randomUUID()}`,
-  });
-  if (registered.action !== "registered") {
-    throw new Error(`goal fixture could not register turn ${turn.id}`);
-  }
-  return { turn, triggerEventId, attemptId };
-}
 
 async function claimRegisteredExecution(
   db: ReturnType<typeof createDb>["db"],
   grant: AccessGrant,
   sessionId: string,
+  trigger: Parameters<typeof claimSessionWorkForAttempt>[2]["trigger"] = { kind: "next" },
 ): Promise<RegisteredExecution> {
-  const turn = await claimNextSessionExecution(
-    db,
-    grant.workspaceId,
+  const attemptId = crypto.randomUUID();
+  const result = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId,
-    `session-${sessionId}`,
-  );
-  if (!turn) throw new Error(`goal fixture could not claim work for ${sessionId}`);
-  return await registerTurnAttempt(db, grant, turn);
+    workflowId: `session-${sessionId}`,
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger,
+  });
+  if (result.action !== "claimed") {
+    throw new Error(`goal fixture could not claim work for ${sessionId}: ${result.reason}`);
+  }
+  return { turn: result.turn, triggerEventId: result.turn.triggerEventId, attemptId };
 }
 
 async function claimGoalContinuationExecution(

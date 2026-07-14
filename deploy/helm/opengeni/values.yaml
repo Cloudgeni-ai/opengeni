@@ -185,12 +185,6 @@ api:
 
 worker:
   enabled: true
-  replicaCount: 2
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
   image:
     repository: opengeni-worker
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -199,13 +193,56 @@ worker:
     pullPolicy: IfNotPresent
   command: []
   containerPort: 8001
-  resources:
-    requests:
-      cpu: 500m
-      memory: 1Gi
-    limits:
-      cpu: "2"
-      memory: 4Gi
+  control:
+    replicaCount: 2
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: null
+      customMetrics: []
+      behavior: {}
+  turns:
+    replicaCount: 4
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: false
+      minReplicas: 4
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: null
+      customMetrics: []
+      behavior: {}
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 1000
@@ -250,27 +287,9 @@ worker:
       periodSeconds: 20
       timeoutSeconds: 2
       failureThreshold: 3
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
   service:
     type: ClusterIP
     port: 8001
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 20
-    targetCPUUtilizationPercentage: 70
-    # The worker is memory bound (each pod holds the full in-turn history for
-    # every session it runs), so CPU alone is a poor scaling signal — pods OOM
-    # long before CPU saturates. Set a memory target to scale on the pressure
-    # that actually matters; keep it high (headroom) and pair with a scaleDown
-    # stabilization window in `behavior` so a transient dip never evicts a pod
-    # mid-turn. Left null here so the default (disabled) install is unchanged;
-    # managed profiles opt in.
-    targetMemoryUtilizationPercentage: null
-    customMetrics: []
-    behavior: {}
 
 web:
   enabled: true

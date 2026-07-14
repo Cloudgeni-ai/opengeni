@@ -1,14 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   bootstrapWorkspace,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   getActiveSessionHistoryItems,
   getSessionTurn,
   isSessionCompactionRequested,
   listSessionEvents,
-  registerSessionTurnDispatch,
   requestSessionCompaction,
   withWorkspaceRls,
 } from "@opengeni/db";
@@ -20,8 +19,27 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { createActivities } from "../src/activities";
+import { createActivityTestHarness } from "../src/activities";
 import { maybeCompactContext } from "../src/activities/context-compaction";
+
+async function claimCompactionForAttempt(
+  db: Parameters<typeof claimSessionWorkForAttempt>[0],
+  workspaceId: string,
+  sessionId: string,
+  attemptId: string,
+) {
+  const result = await claimSessionWorkForAttempt(db, workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (result.action !== "claimed") {
+    throw new Error(`Expected compaction claim, got ${result.reason}`);
+  }
+  return result.turn;
+}
 
 describe("standalone context compaction execution", () => {
   let shared: SharedTestDatabase;
@@ -89,13 +107,6 @@ describe("standalone context compaction execution", () => {
       ]);
     });
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
-    const turn = await claimNextSessionExecution(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      `session-${session.id}`,
-    );
-    expect(turn?.source).toBe("compaction");
 
     let compactionCalls = 0;
     let forbiddenRuntimeCalls = 0;
@@ -152,7 +163,7 @@ describe("standalone context compaction execution", () => {
       subscribe: async function* () {},
       close: async () => undefined,
     } as unknown as EventBus;
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings: testSettings({
         databaseUrl: shared.appUrl,
         openaiModel: "scripted-compactor",
@@ -163,25 +174,26 @@ describe("standalone context compaction execution", () => {
       runtime,
     });
 
+    const attemptId = crypto.randomUUID();
     const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      triggerEventId: turn!.triggerEventId,
       workflowId: `session-${session.id}`,
-      turnId: turn!.id,
-      attemptId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
     });
 
-    expect(result).toEqual({ status: "idle" });
+    expect(result).toMatchObject({ status: "idle", attemptId });
+    if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
+    const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
+    expect(turn?.source).toBe("compaction");
     expect(compactionCalls).toBe(1);
     expect(forbiddenRuntimeCalls).toBe(0);
     expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
       false,
     );
-    expect((await getSessionTurn(client.db, grant.workspaceId!, turn!.id))?.status).toBe(
-      "completed",
-    );
+    expect(turn?.status).toBe("completed");
     const activeHistory = await getActiveSessionHistoryItems(
       client.db,
       grant.workspaceId!,
@@ -255,22 +267,13 @@ describe("standalone context compaction execution", () => {
       );
     });
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
-    const turn = await claimNextSessionExecution(
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
+      attemptId,
     );
-    const attemptId = crypto.randomUUID();
-    expect(
-      await registerSessionTurnDispatch(client.db, grant.workspaceId!, {
-        sessionId: session.id,
-        turnId: turn!.id,
-        triggerEventId: turn!.triggerEventId,
-        attemptId,
-        dispatchId: `dispatch-${crypto.randomUUID()}`,
-      }),
-    ).toMatchObject({ action: "registered" });
 
     const outcome = await maybeCompactContext(
       client.db,
@@ -340,22 +343,13 @@ describe("standalone context compaction execution", () => {
       });
     });
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
-    const turn = await claimNextSessionExecution(
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
       client.db,
       grant.workspaceId!,
       session.id,
-      `session-${session.id}`,
+      attemptId,
     );
-    const attemptId = crypto.randomUUID();
-    expect(
-      await registerSessionTurnDispatch(client.db, grant.workspaceId!, {
-        sessionId: session.id,
-        turnId: turn!.id,
-        triggerEventId: turn!.triggerEventId,
-        attemptId,
-        dispatchId: `dispatch-${crypto.randomUUID()}`,
-      }),
-    ).toMatchObject({ action: "registered" });
 
     const inputLengths: number[] = [];
     const overflow = Object.assign(new Error("maximum context length exceeded"), {

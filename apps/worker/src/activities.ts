@@ -31,13 +31,15 @@ export type {
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
-  RecoverTurnAfterWorkerDeathInput,
-  RecoverTurnAfterWorkerDeathResult,
+  RecoverDispatchInput,
+  RecoverDispatchResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
 
-export function createActivities(dependencies: ActivityDependencies = {}) {
+function createActivityServices(
+  dependencies: ActivityDependencies,
+): () => Promise<ActivityServices> {
   let servicesPromise: Promise<ActivityServices> | null = null;
 
   async function services(): Promise<ActivityServices> {
@@ -111,9 +113,11 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     return servicesPromise;
   }
 
-  const runAgentTurn = createRunAgentTurnActivity(services);
+  return services;
+}
+
+function controlActivities(services: () => Promise<ActivityServices>) {
   return {
-    runAgentTurn,
     ...createDocumentActivities(services),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
@@ -127,20 +131,35 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
   };
 }
 
-const defaultActivities = createActivities();
+export function createControlActivities(dependencies: ActivityDependencies = {}) {
+  return controlActivities(createActivityServices(dependencies));
+}
 
-export const runAgentTurn = defaultActivities.runAgentTurn;
-export const indexDocument = defaultActivities.indexDocument;
-export const failSession = defaultActivities.failSession;
-export const settleSessionControl = defaultActivities.settleSessionControl;
-export const recoverTurnAfterWorkerDeath = defaultActivities.recoverTurnAfterWorkerDeath;
-export const claimNextSessionExecution = defaultActivities.claimNextSessionExecution;
-export const markSessionIdle = defaultActivities.markSessionIdle;
-export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
-export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
-export const getCodexCapacityWait = defaultActivities.getCodexCapacityWait;
-export const reconcileCodexCapacityWait = defaultActivities.reconcileCodexCapacityWait;
-export const reapSandboxLeases = defaultActivities.reapSandboxLeases;
-export const reapExpiredFileUploads = defaultActivities.reapExpiredFileUploads;
-export const verifyRigChange = defaultActivities.verifyRigChange;
-export const verifyRigVersion = defaultActivities.verifyRigVersion;
+export function createTurnActivities(dependencies: ActivityDependencies = {}) {
+  return { runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)) };
+}
+
+/** Direct activity harness for tests; production workers always choose one role. */
+export function createActivityTestHarness(dependencies: ActivityDependencies = {}) {
+  const services = createActivityServices(dependencies);
+  return { runAgentTurn: createRunAgentTurnActivity(services), ...controlActivities(services) };
+}
+
+const defaultControlActivities = createControlActivities();
+const defaultTurnActivities = createTurnActivities();
+
+export const runAgentTurn = defaultTurnActivities.runAgentTurn;
+export const indexDocument = defaultControlActivities.indexDocument;
+export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
+export const settleSessionControl = defaultControlActivities.settleSessionControl;
+export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const markSessionIdle = defaultControlActivities.markSessionIdle;
+export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
+export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
+export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
+export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
+export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const verifyRigChange = defaultControlActivities.verifyRigChange;
+export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

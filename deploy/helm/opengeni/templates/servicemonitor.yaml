@@ -25,31 +25,33 @@ spec:
       scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
 {{- end }}
 {{- if and .Values.worker.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- range $role := list "control" "turns" }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "opengeni.fullname" . }}-worker
+  name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
   labels:
-    {{- include "opengeni.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
-    {{- with ((.Values.observability).serviceMonitor).labels }}
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $role }}
+    {{- with (($.Values.observability).serviceMonitor).labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with ((.Values.observability).serviceMonitor).annotations }}
+  {{- with (($.Values.observability).serviceMonitor).annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   selector:
     matchLabels:
-      {{- include "opengeni.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: worker
+      {{- include "opengeni.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: worker-{{ $role }}
   endpoints:
     - port: http
-      path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
-      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
-      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
+      path: {{ (($.Values.observability).metrics).path | default "/metrics" | quote }}
+      interval: {{ (($.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ (($.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
+{{- end }}
 {{- end }}
 {{- if and .Values.relay.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 ---

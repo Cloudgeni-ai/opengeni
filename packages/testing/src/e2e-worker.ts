@@ -7,11 +7,16 @@ import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/ag
 import { functionCall, ScriptedModel, type ScriptedModelStep } from "./scripted-model";
 
 const settings = getSettings();
+const role = process.env.OPENGENI_WORKER_ROLE;
+if (role !== "control" && role !== "turn") {
+  throw new Error("OPENGENI_WORKER_ROLE must be 'control' or 'turn' for the E2E worker");
+}
 const dbClient = createDb(settings.databaseUrl);
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });
 const { worker, connection } = await createOpenGeniWorker({
+  role,
   settings,
   activityDependencies: {
     settings,
@@ -21,7 +26,7 @@ const { worker, connection } = await createOpenGeniWorker({
   },
 });
 
-console.log(`OpenGeni test worker listening on ${settings.temporalTaskQueue}`);
+console.log(`OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue}`);
 try {
   await worker.run();
 } finally {

@@ -1,47 +1,44 @@
-{{- if and .Values.worker.enabled ((.Values.worker).autoscaling).enabled }}
+{{- range $role := list "control" "turns" }}
+{{- $config := index $.Values.worker $role }}
+{{- if and $.Values.worker.enabled $config.autoscaling.enabled }}
+{{- if ne $role "control" }}
+---
+{{- end }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "opengeni.fullname" . }}-worker
+  name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
   labels:
-    {{- include "opengeni.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $role }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "opengeni.fullname" . }}-worker
-  minReplicas: {{ ((.Values.worker).autoscaling).minReplicas }}
-  maxReplicas: {{ ((.Values.worker).autoscaling).maxReplicas }}
+    name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
+  minReplicas: {{ $config.autoscaling.minReplicas }}
+  maxReplicas: {{ $config.autoscaling.maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ ((.Values.worker).autoscaling).targetCPUUtilizationPercentage }}
-    {{- if ((.Values.worker).autoscaling).targetMemoryUtilizationPercentage }}
-    # The worker is MEMORY bound, not CPU bound: each pod holds the full
-    # in-turn conversation history for every session it runs, so pods approach
-    # the memory limit (and OOM) long before CPU saturates. Memory is the
-    # signal that actually tracks the pressure; keep the target high (headroom)
-    # and pair it with the scaleDown stabilization in `behavior` so a transient
-    # dip never evicts a pod mid-turn.
+          averageUtilization: {{ $config.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if $config.autoscaling.targetMemoryUtilizationPercentage }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ ((.Values.worker).autoscaling).targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ $config.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
-    {{- with ((.Values.worker).autoscaling).customMetrics }}
-    # Optional custom/external metrics (needs a Prometheus adapter). A
-    # session-count or Temporal task-queue-backlog metric tracks worker load
-    # better than CPU; wire it here once the adapter is available.
+    {{- with $config.autoscaling.customMetrics }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with ((.Values.worker).autoscaling).behavior }}
+  {{- with $config.autoscaling.behavior }}
   behavior:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+{{- end }}
 {{- end }}
