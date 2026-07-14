@@ -495,9 +495,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/cancel", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
     const payload = CancelSessionQueueItemRequest.parse(await c.req.json());
     try {
-      const sessionId = c.req.param("sessionId");
       const result = await cancelQueuedSessionTurnWithVersion(
         db,
         workspaceId,
