@@ -825,9 +825,38 @@ describe("runtime event normalization", () => {
         type: "message",
         role: "system",
         content: "Continue the same inference after recovery.",
-        providerData: { opengeni_ephemeral_internal_context: true },
       },
     ]);
+    expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
+  });
+
+  test("replayed history items are stripped of the internal resume marker (the prod 400)", async () => {
+    // Reproduces the outage shape: a PRIOR turn's resume message persisted with
+    // the marker in providerData; replaying it must not leak the key to the
+    // wire, while unrelated providerData keys survive.
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          {
+            type: "message",
+            role: "user",
+            content: "[TURN RESUMED AFTER WORKER RESTART] Continue.",
+            providerData: { opengeni_internal_resume: "worker_restart", keep_me: "yes" },
+          } as never,
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "ok" }],
+          } as never,
+        ],
+      },
+    );
+    const serialized = JSON.stringify(prepared.input);
+    expect(serialized).not.toContain("opengeni_internal_resume");
+    expect(serialized).toContain("keep_me");
   });
 
   test("refuses an approval resume against a cleared sentinel with an honest error", async () => {

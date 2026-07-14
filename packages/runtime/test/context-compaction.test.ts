@@ -5,7 +5,6 @@ import {
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
-  EPHEMERAL_INTERNAL_CONTEXT_MARKER,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_PREFIX,
@@ -231,7 +230,6 @@ describe("codex-parity rebuild", () => {
       type: "message",
       role: "system",
       content: "continue the same inference",
-      providerData: { [EPHEMERAL_INTERNAL_CONTEXT_MARKER]: true },
     };
     expect(isEphemeralInternalContext(internalContext)).toBe(true);
 

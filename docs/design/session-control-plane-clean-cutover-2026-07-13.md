@@ -9,7 +9,7 @@
 
 # OpenGeni session control-plane clean cutover
 
-Status: accepted implementation plan, pending code review and production proof  
+Status: accepted implementation plan, pending code review and production proof
 Scope: prompt queue, steer, session/workspace pause, current-inference recovery,
 internal updates, goals, compaction, timeline UI, worker deploy continuity, and
 removal of superseded runtime paths.

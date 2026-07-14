@@ -17,7 +17,6 @@ export type CompactionItem = Record<string, unknown>;
  * next rebuild can exclude old summaries from the retained user-message set.
  */
 export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
-export const EPHEMERAL_INTERNAL_CONTEXT_MARKER = "opengeni_ephemeral_internal_context";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
 // A single cumulative budget for all retained real user messages, matching
@@ -85,16 +84,7 @@ export function isCompactionSummary(item: unknown): boolean {
 
 /** Platform-authored system context exists for one inference and is never persisted. */
 export function isEphemeralInternalContext(item: unknown): boolean {
-  if (!item || typeof item !== "object") {
-    return false;
-  }
-  const record = item as Record<string, unknown>;
-  const providerData = record.providerData;
-  return Boolean(
-    providerData &&
-    typeof providerData === "object" &&
-    (providerData as Record<string, unknown>)[EPHEMERAL_INTERNAL_CONTEXT_MARKER] === true,
-  );
+  return itemType(item) === "message" && itemRole(item) === "system";
 }
 
 /**

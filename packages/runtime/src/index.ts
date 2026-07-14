@@ -122,7 +122,6 @@ import { installCodexToolSearch } from "./codex-tool-search";
 import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
-  EPHEMERAL_INTERNAL_CONTEXT_MARKER,
   SUMMARY_BUFFER_TOKENS,
   compactionThresholdTokens,
   estimateTokens,
@@ -210,7 +209,6 @@ export {
   MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
-  EPHEMERAL_INTERNAL_CONTEXT_MARKER,
   isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
@@ -2743,7 +2741,6 @@ export async function prepareRunInput(
         type: "message",
         role: "system",
         content: input.internalContext,
-        providerData: { [EPHEMERAL_INTERNAL_CONTEXT_MARKER]: true },
       } as AgentInputItem);
     }
     if (input.text?.trim()) {

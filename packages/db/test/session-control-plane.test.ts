@@ -1208,10 +1208,12 @@ describe("clean session control plane", () => {
     );
 
     expect(
-      (await listUsageEvents(client.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId!,
-      })).filter((event) => event.idempotencyKey === `usage:model.tokens:${turn!.id}:${sourceKey}`),
+      (
+        await listUsageEvents(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+        })
+      ).filter((event) => event.idempotencyKey === `usage:model.tokens:${turn!.id}:${sourceKey}`),
     ).toHaveLength(1);
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.lastInputTokens).not.toBe(
       321,
