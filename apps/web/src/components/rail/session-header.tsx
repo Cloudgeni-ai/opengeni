@@ -11,7 +11,7 @@ import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { LockIcon, PanelRightIcon, PencilIcon, PinIcon } from "lucide-react";
-import { useId, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { SpawnedByBreadcrumb } from "@/components/session/subagents";
@@ -133,7 +133,6 @@ function SessionPinButton({
 }) {
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
-  const announcementId = useId();
   return (
     <>
       <Button
@@ -141,7 +140,6 @@ function SessionPinButton({
         variant={session.pinned ? "secondary" : "ghost"}
         size="icon-sm"
         aria-label={session.pinned ? "Unpin session" : "Pin session"}
-        aria-describedby={announcement ? announcementId : undefined}
         aria-pressed={Boolean(session.pinned)}
         aria-busy={busy}
         disabled={busy}
@@ -165,7 +163,7 @@ function SessionPinButton({
       >
         <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
       </Button>
-      <span id={announcementId} className="sr-only" aria-live="polite" aria-atomic="true">
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
     </>

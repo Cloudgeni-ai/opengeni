@@ -23,6 +23,15 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain('id: "agents"');
   });
 
+  test("announces pin results through an independent live region", async () => {
+    const header = await source("components/rail/session-header.tsx");
+    // A persistent description on the action button would replay the previous
+    // pin/unpin result every time keyboard focus returns. The result belongs in
+    // the polite live region only, so it is announced at mutation time.
+    expect(header).toContain('aria-live="polite"');
+    expect(header).not.toContain("aria-describedby");
+  });
+
   test("the retired client-side queue model is gone", async () => {
     expect(await Bun.file(`${import.meta.dir}/lib/queue.ts`).exists()).toBe(false);
   });
