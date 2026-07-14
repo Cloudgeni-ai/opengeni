@@ -60,6 +60,7 @@ const AGENT_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 async function bearerFor(
   workspaceId: string,
   agentId: string,
+  credentialGeneration = 1,
   expSeconds?: number,
 ): Promise<string> {
   const exp = expSeconds ?? Math.floor(Date.now() / 1000) + 3600;
@@ -67,6 +68,7 @@ async function bearerFor(
     workspaceId,
     agentId,
     enrollmentId: agentId,
+    credentialGeneration,
     subjectPrefix: `agent.${workspaceId}.${agentId}`,
     exp,
   });
@@ -80,13 +82,17 @@ async function bearerFor(
 // monkeypatch resolves — implemented by passing a deps.db whose query the stub
 // honors. To keep the test self-contained we override getEnrollment via a module
 // mock.
-const activeEnrollments = new Set<string>([`${WS_A}:${AGENT_A}`, `${WS_B}:${AGENT_B}`]);
+const activeEnrollments = new Map<string, number>([
+  [`${WS_A}:${AGENT_A}`, 1],
+  [`${WS_B}:${AGENT_B}`, 1],
+]);
 
 import { mock } from "bun:test";
 mock.module("@opengeni/db", () => ({
   getEnrollment: async (_db: unknown, workspaceId: string, enrollmentId: string) => {
-    if (activeEnrollments.has(`${workspaceId}:${enrollmentId}`)) {
-      return { id: enrollmentId, workspaceId, status: "active" };
+    const credentialGeneration = activeEnrollments.get(`${workspaceId}:${enrollmentId}`);
+    if (credentialGeneration !== undefined) {
+      return { id: enrollmentId, workspaceId, status: "active", credentialGeneration };
     }
     return null;
   },
@@ -391,5 +397,18 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     }
     expect(err).toBeDefined();
     expect(/auth|denied|violation|not active|timeout/i.test(String(err))).toBe(true);
+  }, 30_000);
+
+  test("(5) ISOLATION: a stale credential generation is denied", async () => {
+    const staleBearer = await bearerFor(WS_A, AGENT_A, 2);
+    let err: unknown;
+    try {
+      const c = await connect({ servers: nats.url, token: staleBearer, timeout: 5_000 });
+      await c.close();
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(/auth|denied|violation|generation|timeout/i.test(String(err))).toBe(true);
   }, 30_000);
 });

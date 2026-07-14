@@ -274,8 +274,15 @@ target.
 - **A machine may self-revoke** during a local purge via the exact public
   `POST /v1/enrollments/self/revoke` route and its own `oge_` bearer. This cannot
   revoke another enrollment or cross a workspace. A matching already-revoked row
-  returns the normal idempotent no-op response to recover a lost first response;
-  it does not make the bearer usable for the ACTIVE-only NATS auth callout.
+  returns the normal idempotent no-op response to recover a lost first response,
+  but only while the row still has that bearer's credential generation. Every
+  re-enrollment atomically increments the generation: the old bearer can neither
+  authenticate nor revoke the new generation.
+
+Revocation immediately blocks the next NATS authorization/reconnect; it does not
+claim to synchronously disconnect an already-live NATS socket. The user JWT minted
+by auth-callout expires at the earlier of the bearer expiry or five minutes from
+authorization, so existing NATS access terminates within that bounded interval.
 
 ## React components
 

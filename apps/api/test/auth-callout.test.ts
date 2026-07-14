@@ -14,7 +14,7 @@ const WS = "11111111-1111-4111-8111-111111111111";
 const AGENT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 // The active-enrollment registry the mocked getEnrollment resolves against.
-const active = new Set<string>([`${WS}:${AGENT}`]);
+const active = new Map<string, number>([[`${WS}:${AGENT}`, 1]]);
 
 // `bun test` runs EVERY test file in ONE shared process, and a top-level
 // `mock.module` replaces a module process-globally for the WHOLE run — it is
@@ -44,14 +44,21 @@ mock.module("@opengeni/db", () => ({
     if (workspaceId !== WS) {
       return realGetEnrollment(db, workspaceId, enrollmentId);
     }
-    return active.has(`${workspaceId}:${enrollmentId}`)
-      ? ({ id: enrollmentId, workspaceId, status: "active" } as never)
-      : null;
+    const credentialGeneration = active.get(`${workspaceId}:${enrollmentId}`);
+    return credentialGeneration === undefined
+      ? null
+      : ({
+          id: enrollmentId,
+          workspaceId,
+          status: "active",
+          credentialGeneration,
+        } as never);
   },
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
-const { handleAuthorizationRequest } = await import("../src/sandbox/auth-callout");
+const { handleAuthorizationRequest, NATS_USER_JWT_TTL_SECONDS } =
+  await import("../src/sandbox/auth-callout");
 
 const account = nkeys.createAccount();
 const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
@@ -88,7 +95,7 @@ function readResponse(bytes: Uint8Array): { granted: boolean; error?: string; us
 
 afterEach(() => {
   active.clear();
-  active.add(`${WS}:${AGENT}`);
+  active.set(`${WS}:${AGENT}`, 1);
 });
 
 // Restore the REAL @opengeni/db so other files in this shared `bun test` process
@@ -104,6 +111,7 @@ describe("handleAuthorizationRequest", () => {
       workspaceId: WS,
       agentId: AGENT,
       enrollmentId: AGENT,
+      credentialGeneration: 1,
       subjectPrefix: `agent.${WS}.${AGENT}`,
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
@@ -117,6 +125,9 @@ describe("handleAuthorizationRequest", () => {
     expect(userClaims.nats.pub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
     expect(userClaims.nats.sub.allow).toEqual([`agent.${WS}.>`, "_INBOX.>"]);
     expect(userClaims.aud).toBe("APP");
+    const now = Math.floor(Date.now() / 1000);
+    expect(userClaims.exp).toBeGreaterThan(now);
+    expect(userClaims.exp).toBeLessThanOrEqual(now + NATS_USER_JWT_TTL_SECONDS);
   });
 
   test("a MISSING bearer is denied", async () => {
@@ -138,6 +149,7 @@ describe("handleAuthorizationRequest", () => {
       workspaceId: WS,
       agentId: AGENT,
       enrollmentId: AGENT,
+      credentialGeneration: 1,
       subjectPrefix: `agent.${WS}.${AGENT}`,
       exp: Math.floor(Date.now() / 1000) - 10, // already past
     });
@@ -153,6 +165,7 @@ describe("handleAuthorizationRequest", () => {
       workspaceId: WS,
       agentId: AGENT,
       enrollmentId: AGENT,
+      credentialGeneration: 1,
       subjectPrefix: `agent.${WS}.${AGENT}`,
       exp: Math.floor(Date.now() / 1000) + 3600,
     });
@@ -160,6 +173,38 @@ describe("handleAuthorizationRequest", () => {
     const res = readResponse(out);
     expect(res.granted).toBe(false);
     expect(res.error).toMatch(/not active/i);
+  });
+
+  test("an old bearer is denied after the enrollment generation advances", async () => {
+    active.set(`${WS}:${AGENT}`, 2);
+    const oldBearer = await signEnrollmentBearer(SECRET, {
+      workspaceId: WS,
+      agentId: AGENT,
+      enrollmentId: AGENT,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${WS}.${AGENT}`,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const res = readResponse(await handleAuthorizationRequest(deps(), authRequest(oldBearer)));
+    expect(res.granted).toBe(false);
+    expect(res.error).toMatch(/generation/i);
+  });
+
+  test("the user JWT never outlives a sooner bearer expiration", async () => {
+    const bearerExp = Math.floor(Date.now() / 1000) + 30;
+    const bearer = await signEnrollmentBearer(SECRET, {
+      workspaceId: WS,
+      agentId: AGENT,
+      enrollmentId: AGENT,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${WS}.${AGENT}`,
+      exp: bearerExp,
+    });
+    const res = readResponse(await handleAuthorizationRequest(deps(), authRequest(bearer)));
+    const userClaims = JSON.parse(
+      Buffer.from(res.userJwt!.split(".")[1]!, "base64url").toString("utf8"),
+    );
+    expect(userClaims.exp).toBe(bearerExp);
   });
 
   test("a denial response is still a SIGNED, server-addressed auth response", async () => {

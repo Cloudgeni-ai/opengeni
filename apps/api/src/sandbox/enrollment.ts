@@ -75,8 +75,9 @@ export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 // box) caused a self-hosted agent to drop PERMANENTLY one hour after connecting: the
 // bearer expired and the auth-callout rejected every reconnect ("re-enroll may be
 // required"). A long-lived bearer is safe because the auth-callout RE-CHECKS the
-// enrollment status on every (re)connect (auth-callout.ts) — a revoked machine is
-// denied regardless of bearer life — exactly as the long-lived relay token relies on.
+// enrollment status AND credential generation on every (re)connect
+// (auth-callout.ts) — a revoked machine or an old pre-re-enrollment bearer is denied
+// regardless of bearer life. The short NATS user-JWT cap bounds already-live access.
 export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
 // The relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5) is ENROLLMENT-scoped,
 // NOT per-stream: the agent presents it on every channel registration for the life
@@ -370,6 +371,7 @@ export async function exchangeEnrollToken(
     secret,
     workspaceId: claims.workspaceId,
     agentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
     consentedScreenControl: enrollment.allowScreenControl,
   });
   return { ok: true, credentials };
@@ -430,6 +432,7 @@ export async function pollDeviceEnrollment(
     secret,
     workspaceId: request.workspaceId,
     agentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
     consentedScreenControl: enrollment.allowScreenControl,
   });
 
@@ -455,7 +458,13 @@ export async function pollDeviceEnrollment(
  *  bearer so an agent using it as the connect-token credential works uniformly. */
 async function buildEnrollmentCredentials(
   services: EnrollmentServices,
-  input: { secret: string; workspaceId: string; agentId: string; consentedScreenControl: boolean },
+  input: {
+    secret: string;
+    workspaceId: string;
+    agentId: string;
+    credentialGeneration: number;
+    consentedScreenControl: boolean;
+  },
 ): Promise<EnrollmentCredentialsResponse> {
   const { settings } = services;
   // The control-plane subject prefix the agent subscribes to: agent.<ws>.<id>.
@@ -466,6 +475,7 @@ async function buildEnrollmentCredentials(
     workspaceId: input.workspaceId,
     agentId: input.agentId,
     enrollmentId: input.agentId,
+    credentialGeneration: input.credentialGeneration,
     subjectPrefix,
     exp,
   });

@@ -175,7 +175,9 @@ describe("M5 enrollment route discipline", () => {
     expect(body.includes("requireAccessGrant("), "self revoke must NOT user-authenticate").toBe(
       false,
     );
-    expect(body).toContain('enrollment.status !== "active" && enrollment.status !== "revoked"');
+    expect(body).toContain("revokeEnrollmentByGeneration");
+    expect(body).toContain("claims.credentialGeneration");
+    expect(body).toContain("if (!result.matched)");
     expect(body).toContain("claims.subjectPrefix");
     expect(appSrc).toContain('label: "/v1/enrollments/self/revoke"');
     expect(appSrc).toContain('label: "/v1/enrollments/token/exchange"');

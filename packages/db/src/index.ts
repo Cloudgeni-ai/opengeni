@@ -15750,6 +15750,7 @@ export type EnrollmentRecord = {
   desktopUnavailableReason: string | null;
   allowScreenControl: boolean;
   status: EnrollmentStatus;
+  credentialGeneration: number;
   os: EnrollmentOs;
   arch: string;
   lastSeenAt: string | null;
@@ -15776,6 +15777,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     desktopUnavailableReason: row.desktopUnavailableReason ?? null,
     allowScreenControl: row.allowScreenControl,
     status: row.status as EnrollmentStatus,
+    credentialGeneration: Number(row.credentialGeneration),
     os: row.os as EnrollmentOs,
     arch: row.arch,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
@@ -15816,8 +15818,10 @@ function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
 // Register (or idempotently re-register) a machine. A re-enroll of the SAME
 // (workspace, pubkey) is an UPSERT — it refreshes the consent/OS fields and, if
 // the machine was previously revoked, re-activates it (status->active, revoked_at
-// cleared) — never a duplicate machine row. The agent's ed25519 pubkey is the
-// machine identity; the unique (workspace, pubkey) index is the conflict target.
+// cleared) — never a duplicate machine row. Every conflict is a fresh
+// re-enrollment and atomically advances credential_generation, invalidating every
+// older bearer. The agent's ed25519 pubkey is the machine identity; the unique
+// (workspace, pubkey) index is the conflict target.
 export async function createEnrollment(
   db: Database,
   input: {
@@ -15859,6 +15863,7 @@ export async function createEnrollment(
             // A re-enroll re-activates a previously revoked machine.
             status: "active",
             revokedAt: null,
+            credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
             updatedAt: new Date(),
           },
         })
@@ -15942,6 +15947,62 @@ export async function revokeEnrollment(
       return { revoked: rows.length > 0 };
     },
   );
+}
+
+// Self-revoke is credential-family scoped, unlike the administrator revoke above.
+// The row is locked before checking generation/status so a concurrent re-enroll
+// cannot slip between validation and mutation. A revoked row is an idempotent
+// success only for the SAME generation (lost-response retry); an old bearer after
+// re-enrollment returns matched:false and cannot revoke the new credential family.
+export async function revokeEnrollmentByGeneration(
+  db: Database,
+  input: {
+    workspaceId: string;
+    enrollmentId: string;
+    credentialGeneration: number;
+  },
+): Promise<{ matched: boolean; revoked: boolean }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.enrollments.status,
+        credentialGeneration: schema.enrollments.credentialGeneration,
+      })
+      .from(schema.enrollments)
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row || Number(row.credentialGeneration) !== input.credentialGeneration) {
+      return { matched: false, revoked: false };
+    }
+    if (row.status === "revoked") {
+      return { matched: true, revoked: false };
+    }
+    if (row.status !== "active") {
+      return { matched: false, revoked: false };
+    }
+    const updated = await scopedDb
+      .update(schema.enrollments)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(schema.enrollments.workspaceId, input.workspaceId),
+          eq(schema.enrollments.id, input.enrollmentId),
+          eq(schema.enrollments.status, "active"),
+          eq(schema.enrollments.credentialGeneration, input.credentialGeneration),
+        ),
+      )
+      .returning({ id: schema.enrollments.id });
+    if (updated.length !== 1) {
+      throw new Error("Enrollment generation changed while row lock was held");
+    }
+    return { matched: true, revoked: true };
+  });
 }
 
 // Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
@@ -16369,8 +16430,10 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 //     re-read fence + the request stamp stay in ONE txn — semantics unchanged), and
 //   * finalizeEnrollmentByToken calls it inside its OWN txn (no pending row exists
 //     for a stateless token).
-// Idempotent: a re-run for the same (workspace, pubkey) re-activates the existing
-// enrollment (M2 upsert) and REUSES its selfhosted sandbox — never a duplicate.
+// A fresh finalize for the same (workspace, pubkey) re-activates the existing
+// enrollment, atomically increments its credential generation, and REUSES its
+// selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
+// before this helper so replaying one already-approved request does not rotate.
 async function finalizeEnrollmentInScope(
   scopedDb: Database,
   input: {
@@ -16412,6 +16475,7 @@ async function finalizeEnrollmentInScope(
         arch: input.arch,
         status: "active",
         revokedAt: null,
+        credentialGeneration: sql`${schema.enrollments.credentialGeneration} + 1`,
         updatedAt: input.now,
       },
     })
@@ -16504,9 +16568,10 @@ export async function finalizeEnrollmentByToken(
 //   4. stamp the request approved + the consent record (WHO approved WHEN to WHAT)
 //      + the resulting enrollment_id / sandbox_id.
 // IDEMPOTENT: a re-approve of an ALREADY-approved row (same user_code re-submitted)
-// re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
-// enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
-// no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
+// returns the existing enrollment/sandbox WITHOUT re-running the enrollment upsert,
+// so a lost approval response cannot rotate the credential generation. A genuinely
+// fresh request for the same pubkey does run the upsert and rotates. An expired /
+// denied / consumed row is a no-op (approved:false).
 export async function approveDeviceEnrollmentRequest(
   db: Database,
   input: {
@@ -16545,8 +16610,43 @@ export async function approveDeviceEnrollmentRequest(
       if (!pending) {
         return { approved: false, enrollment: null, sandbox: null };
       }
-      // Already terminally approved → idempotent return of the existing rows (re-run
-      // the consent fields in case allow_screen_control changed on re-approve).
+      // Already approved → idempotent return of the exact existing rows. Do not run
+      // the finalize upsert again: that operation is the credential-generation
+      // rotation boundary for a genuinely new enrollment request.
+      if (pending.status === "approved") {
+        if (!pending.enrollmentId || !pending.sandboxId) {
+          throw new Error("Approved enrollment request is missing its finalized row ids");
+        }
+        const [existingEnrollment] = await scopedDb
+          .select()
+          .from(schema.enrollments)
+          .where(
+            and(
+              eq(schema.enrollments.workspaceId, input.workspaceId),
+              eq(schema.enrollments.id, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        const [existingSandbox] = await scopedDb
+          .select()
+          .from(schema.sandboxes)
+          .where(
+            and(
+              eq(schema.sandboxes.workspaceId, input.workspaceId),
+              eq(schema.sandboxes.id, pending.sandboxId),
+              eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
+            ),
+          )
+          .limit(1);
+        if (!existingEnrollment || !existingSandbox) {
+          throw new Error("Approved enrollment request references missing finalized rows");
+        }
+        return {
+          approved: true,
+          enrollment: mapEnrollment(existingEnrollment),
+          sandbox: mapSandbox(existingSandbox),
+        };
+      }
       const expired = pending.expiresAt.getTime() <= now.getTime();
       if (pending.status === "denied" || pending.status === "consumed") {
         return { approved: false, enrollment: null, sandbox: null };

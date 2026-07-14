@@ -40,7 +40,12 @@ import {
   type EnrollmentArch,
   type EnrollmentOs,
 } from "@opengeni/contracts";
-import { getEnrollment, getWorkspace, listEnrollments, revokeEnrollment } from "@opengeni/db";
+import {
+  getWorkspace,
+  listEnrollments,
+  revokeEnrollment,
+  revokeEnrollmentByGeneration,
+} from "@opengeni/db";
 import { resolveEnrollmentSigningSecret } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -218,8 +223,9 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /enrollments/self/revoke (ENROLLMENT-bearer authenticated) ───────
   // A machine can revoke only itself. The opaque `oge_` bearer is the complete
   // auth mechanism for this exact route; it is never logged or returned. We still
-  // re-read the enrollment under the claims' workspace before mutating so a
-  // forged, expired, cross-workspace, or identity-mismatched bearer fails closed.
+  // atomically lock/re-read the enrollment under the claims' workspace before
+  // mutating so a forged, expired, cross-workspace, identity-mismatched, or stale-
+  // generation bearer fails closed.
   // A matching *revoked* row is the one deliberate idempotency case: it returns
   // `{ revoked: false }` after a lost successful response. NATS auth-callout keeps
   // its stricter ACTIVE-only check, so that retry never restores machine access.
@@ -239,22 +245,17 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       throw new HTTPException(401, { message: "invalid or expired enrollment bearer" });
     }
-    const enrollment = await getEnrollment(db, claims.workspaceId, claims.enrollmentId);
-    if (
-      !enrollment ||
-      enrollment.id !== claims.agentId ||
-      (enrollment.status !== "active" && enrollment.status !== "revoked")
-    ) {
+    const result = await revokeEnrollmentByGeneration(db, {
+      workspaceId: claims.workspaceId,
+      enrollmentId: claims.enrollmentId,
+      credentialGeneration: claims.credentialGeneration,
+    });
+    if (!result.matched) {
       throw new HTTPException(401, { message: "enrollment identity is not valid" });
     }
-    const result = await revokeEnrollment(db, {
-      accountId: enrollment.accountId,
-      workspaceId: claims.workspaceId,
-      enrollmentId: enrollment.id,
-    });
-    // revokeEnrollment's ACTIVE predicate makes the verified lost-response retry
-    // deterministic: an already revoked matching row yields `{ revoked: false }`.
-    return c.json(RevokeEnrollmentResponse.parse(result));
+    // The DAO's row lock + generation fence makes a same-generation lost-response
+    // retry deterministic (`revoked:false`) while an older generation is a 401.
+    return c.json(RevokeEnrollmentResponse.parse({ revoked: result.revoked }));
   });
 
   // ── POST /workspaces/:workspaceId/enrollments/device/approve (user-authed) ──

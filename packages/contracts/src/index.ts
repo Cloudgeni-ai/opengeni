@@ -715,6 +715,11 @@ export const EnrollmentBearerPayload = z.object({
   workspaceId: z.string().uuid(),
   agentId: z.string().uuid(),
   enrollmentId: z.string().uuid(),
+  // Backward-compatible credential-family fence. Generationless bearers minted
+  // before migration 0061 parse ONLY as generation 1, matching the migration's
+  // default for existing rows. signEnrollmentBearer serializes the parsed output,
+  // so every newly signed bearer carries this claim explicitly.
+  credentialGeneration: z.number().int().positive().default(1),
   // The Account-scoped control-plane subject prefix the agent subscribes to.
   subjectPrefix: z.string().min(1),
   exp: z.number().int().positive(),
@@ -749,7 +754,13 @@ export async function verifyEnrollmentBearer(
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }

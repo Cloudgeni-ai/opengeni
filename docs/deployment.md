@@ -557,8 +557,12 @@ are supported:
 - **Self-revoke**: an enrolled agent can call
   `POST /v1/enrollments/self/revoke` with its `oge_` enrollment bearer. It can
   revoke only the matching enrollment in its own workspace; a lost successful
-  response may be retried idempotently. Revoked credentials still fail the NATS
-  auth-callout's ACTIVE-only check.
+  response may be retried idempotently only within the same credential generation.
+  Re-enrollment atomically increments that generation, so an old bearer cannot
+  authenticate or revoke the new enrollment credentials. Revocation denies new
+  NATS authorization/reconnect immediately; it does not synchronously disconnect
+  an already-live socket. Callout-minted user JWTs are capped at five minutes (and
+  never outlive the bearer), bounding residual live access after DB revocation.
 
 With a deployment shared-key edge, only `POST /v1/enrollments/device/start`,
 `POST /v1/enrollments/device/poll`, `POST /v1/enrollments/token/exchange`, and
