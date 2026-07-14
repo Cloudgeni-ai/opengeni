@@ -10,7 +10,8 @@
 
 # OpenGeni session control-plane clean cutover
 
-Status: accepted implementation plan, pending code review and production proof
+Status: first clean-cutover implementation merged; production remediation amendment
+accepted after Fable rounds 29-31, pending implementation and production proof
 Scope: prompt queue, steer, session/workspace pause, current-inference recovery,
 internal updates, goals, compaction, timeline UI, worker deploy continuity, and
 removal of superseded runtime paths.
@@ -211,6 +212,57 @@ OpenGeni follows the official local path because cross-subscription portability 
 the premise of remote v2, not because the local algorithm is a preferred custom design.
 Model metadata remains versioned/resolved; the 272k/258.4k/244.8k values must be proven
 for the configured current Codex model rather than copied blindly to unrelated models.
+
+### 3.6 Why the first production cutover failed after the code deployed correctly
+
+The first production cutover run deployed the reviewed API, web, relay, worker, and
+0057 migration successfully. It then woke 80 durable sessions. The wake helper limited
+concurrent Temporal signals to 20, but signals are not the expensive operation. Every
+new session workflow immediately claimed database work and scheduled `runAgentTurn` on
+the same worker task queue as control/recovery activities. The worker had no explicit
+activity concurrency setting, so the Temporal TypeScript SDK admitted up to its default
+100 activities per pod. Three 2-CPU/6-GiB pods therefore admitted the entire heavyweight
+burst.
+
+This saturated the worker event loops, delayed the 10-second turn heartbeat beyond the
+two-minute heartbeat timeout, made readiness probes time out, and triggered the existing
+worker-death recovery loop. Recovery reparked and reclaimed work, amplifying the burst.
+The HPA reacted only after the damage and scaled from three toward seven pods. The wake
+receipt proved only that 80 signals were accepted; it did not prove that those sessions
+were stably enrolled or executing. At later samples the Cloudgeni workspace still held
+queued/recovering work while roughly two dozen turns ran.
+
+The production canary exposed the same contention without spending Azure model tokens.
+Its create request used the existing `codex/gpt-5.6-sol` subscription and durably returned
+HTTP 202 after 31.744 seconds, but the client aborted at its hardcoded 30-second timeout.
+The idempotently created session and turn completed correctly. Roughly 29 seconds were
+spent waiting behind workspace-row/database-pool contention before the first turn insert.
+This proves the endpoint was temporarily delayed, not permanently broken, and that the
+canary treated an ambiguous transport timeout as a definitive server failure.
+
+That one successful provider response also exposed a separate audit defect: the same
+response ID produced three authoritative `agent.model.usage` events and three usage log
+lines. Billing remained correct because its deterministic response-source idempotency key
+persisted one zero-cost Codex usage row and no credit debit. The timeline/audit stream did
+not have the same uniqueness boundary: repeated SDK completion-wrapper events each passed
+through runtime normalization and received a different producer sequence.
+
+The remediation is structural:
+
+1. isolate heavyweight turns in a separate process/deployment and Temporal task queue;
+2. cap turn activity admission explicitly;
+3. claim a turn only after a bounded turn-worker slot actually starts the activity;
+4. prove workflow enrollment and bounded progress rather than claimable-row disappearance;
+5. run the ambiguity-safe canary before waking the production backlog; and
+6. give provider-response usage one canonical producer plus a durable uniqueness
+   invariant that preserves duplicates as classified audit evidence.
+
+Fable rounds 29-31 reviewed these conclusions in the same durable Claude Code/Fable 5
+session. Round 29 caught that two Workers in one Node process would still share and starve
+one event loop. Round 30 caught false `running` state from pre-claim and the canary-before-
+wake ordering. Round 31 restored first-class attempt ownership, found the cutover strand
+for `requires_action` workflows, and specified the durable usage-classification boundary.
+All three ended `SHIP-TO-IMPLEMENT`; later rounds explicitly corrected earlier mistakes.
 
 ## 4. Locked product semantics
 
@@ -570,17 +622,90 @@ unknown)” with debug detail; it is not hidden. Repeated real recoveries remain
 
 ## 9. Claim and control ordering
 
-For an active, workspace-eligible session, one transaction chooses work in this order:
+Temporal scheduling and database ownership have separate meanings:
+
+- a running session workflow means the durable session state is enrolled for handling;
+- a scheduled `runAgentTurn` activity may still be waiting for bounded turn capacity;
+- a database turn becomes `running` only when the turn worker has received a slot and its
+  claim transaction registers the exact attempt;
+- queued and recovering state therefore remain truthful while the activity waits in
+  Temporal, and the UI never needs or shows a second machine-work queue.
+
+The workflow mints a replay-deterministic `attemptId` before scheduling a turn activity.
+The activity input does not trust a selected turn ID:
+
+```ts
+type RunAgentTurnInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+  attemptId: string;
+  trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string };
+};
+```
+
+Normal work uses `next`, so a Steer that lands before the turn slot is granted changes
+the durable head and the eventual claim selects that new head. Approval uses the durable
+decision event ID; the database derives and validates the matching current
+`requires_action` turn. No caller-selected turn ID can resurrect a superseded approval.
+
+For an active, workspace-eligible session, the turn-slot claim transaction chooses work
+in this order:
 
 1. recover the nonterminal current inference;
-2. claim the first submitted prompt;
-3. start one combined update/goal continuation if eligible;
-4. otherwise remain idle.
+2. resume a current `requires_action` inference only from its accepted durable approval;
+3. resume a capacity-waiting inference whose durable waiter has been released;
+4. claim the first submitted prompt;
+5. consume an idle manual-compaction request;
+6. start one combined update/goal continuation if eligible;
+7. otherwise return a typed unclaimed result without changing the database.
 
-Pause eligibility is checked before all four. A pending control cancellation must settle
-or be reconciled by the claim path before a new attempt owns the same current inference.
-No deadline, machine lane, role lane, or invisible promotion can reorder the visible
-prompt queue.
+Pause eligibility is checked before every choice. The transaction takes the established
+workspace-then-session-then-turn lock order, advances the execution generation, sets
+`active_attempt_id = attemptId`, stores the Temporal dispatch identity, and changes the
+turn/session to `running` atomically. This is the only supported transition into running.
+The first heartbeat repeats that receipt for liveness and observability, but the database
+attempt fence—not a heartbeat—is ownership authority.
+
+A lightweight read-only peek keeps idle or waiting workflows from consuming turn slots:
+
+```ts
+type SessionWorkPeek =
+  | { kind: "runnable" }
+  | { kind: "approval-pending"; triggerEventId: string }
+  | { kind: "approval-wait" }
+  | { kind: "capacity-wait"; ref: CodexCapacityWaitRef }
+  | { kind: "fence-settle"; controlEventId: string }
+  | { kind: "idle" };
+```
+
+Peek is advisory; the later locked claim is authoritative. A Pause before slot grant
+closes the gate and leaves the prompt queued or current inference recovering/awaiting
+approval. A Steer before slot grant supersedes the current inference and changes the head.
+An approval decision is persisted atomically before its Temporal nudge; start-or-signal
+can therefore recreate a missing workflow and let peek rediscover the decision after
+cutover, worker loss, or continue-as-new.
+
+Transport failure recovery also keys on the workflow-minted attempt, never just the
+session or current turn:
+
+```ts
+type RecoverDispatchOutcome =
+  | { kind: "unclaimed" }
+  | { kind: "reparked"; turnId: string }
+  | { kind: "exceeded"; turnId: string }
+  | { kind: "stale" };
+```
+
+`unclaimed` means the activity never registered its attempt and therefore changes no
+row and consumes no redispatch budget. `reparked` and `exceeded` require the exact current
+attempt/dispatch owner under one lock transaction. `stale` means a successor or terminal
+settlement owns the truth. There is no second catch-all settlement.
+
+A pending control cancellation must settle or be identified as stale before another
+attempt owns the inference. No deadline, machine lane, role lane, or invisible promotion
+can reorder the visible prompt queue.
 
 ## 10. Clean production cutover
 
@@ -601,9 +726,11 @@ Azure infrastructure access is allowed, but Azure model-token use is prohibited.
    using the existing durable Fable session.
 6. Merge the reviewed public implementation to `main`; pin the exact public revision in
    the private production workflow.
-7. Produce a preflight report with image digests, migration checksum, expected schema,
-   production namespace/context, and proof that no Azure model endpoint is configured for
-   the validation calls.
+7. Produce a preflight report with image digests, the exact ordered migration list
+   (`0057` and `0058`) and per-file checksums, expected schema, production
+   namespace/context, worker roles/caps, and proof that no Azure model endpoint is
+   configured for the validation calls. The former single-migration field is deleted;
+   no compatibility request shape is accepted.
 8. Assert that the `@openai/agents` SDK serialization version is identical before and
    after the cutover. Saved `requires_action` RunState is version-bound; an SDK upgrade is
    not part of this release, and a mismatch aborts before maintenance rather than adding
@@ -629,35 +756,83 @@ Store the report durably in the private release evidence location. Do not print 
 1. Enable a single production maintenance/admission gate that rejects new Send/Steer/
    Resume/manual-compact/goal-start claims with a truthful retry response while leaving
    reads available.
-2. Pause Temporal Schedules and signal workers to gracefully preempt active inferences.
-   Stop new claims. Permit each activity up to the existing 120-second termination grace
-   to checkpoint and release ownership. The migration's fail-closed unknown-row check
-   catches anything written during the drain window.
-3. Verify no activity still owns a current inference. Any non-acknowledging attempt is
-   marked recovering under its generation fence; its late writes remain diagnostic only.
-4. Terminate the drained old `session-*` Temporal workflow executions. Postgres durable
-   state is the recovery truth; no old workflow history may require removed activity or
-   `patched()` code. This is also the hard history boundary for replacing the prior
-   queue-named Temporal activity type with `claimNextSessionExecution`: activity type
-   strings are recorded in workflow history, so the new worker registers only the new
-   name after every history containing the prior name is terminated. No alias, dual
-   registration, or compatibility branch is shipped.
-5. Scale the old worker fleet to zero and prove no old public revision remains able to
-   claim work.
-6. Apply one-way schema/data migration:
-   - convert legitimate unstarted human queue rows to the single prompt queue/order;
-   - convert active/requeued execution attempts to current inference + recovering state;
-   - move pending machine queue data to typed update rows or goal state;
-   - preserve order, IDs, events, inactive history, attempts, approvals, and audit data;
-   - establish workspace pause generations/exceptions;
-   - assert no active remote-compaction rows and no unclassified legacy queue row;
-   - drop old columns, constraints, enums, and tables after the assertions pass.
-7. Deploy API/web/worker code containing only the new semantics and exact public revision.
-8. Start fresh Temporal workflows from Postgres truth and run one generalized wake-repair
-   scan covering current recoveries, queued prompts, pending updates, active goals, and
-   capacity waiters.
-9. Remove maintenance admission and resume Temporal Schedules only after health, schema,
-   version, and claim-invariant checks pass.
+2. Pause Temporal Schedules. Drain the old worker deployment to zero and allow its
+   existing 120-second termination grace to checkpoint current attempts. The drain
+   receipt must prove zero controller, ready, available, and updated worker replicas.
+3. Inspect and terminate every running `session-*` Temporal workflow. Postgres is the
+   durable recovery truth; no old history may replay changed activity routing. The
+   termination receipt must prove no matching workflow remains running.
+4. Apply the exact ordered migrations while all workers and session workflows remain
+   stopped. `0057` is already recorded in the failed first cutover and therefore no-ops;
+   `0058` adds the final event columns and workflow-enrollment contract required by the
+   current operator code.
+   `0058`:
+   - adds classified duplicate-usage association and duplicate pointers/reasons;
+   - reclassifies existing duplicate usage rows while retaining the earliest event as
+     current evidence;
+   - creates the partial uniqueness index for current turn/source usage; and
+   - installs the enrollable-session scan that includes queued, recovering,
+     waiting-capacity, requires-action, pending-update, active-goal, and stale-control-
+     fence sessions.
+5. Run the distinct evidence-writing `repark-orphaned-turns` operator action. It refuses
+   unless workflow termination is complete and both migrations are present. Under database
+   locks it changes orphaned
+   `running` turns to `recovering`, exact-matching either the registered attempt or the
+   null-owner residue created when an old worker ran after the partially applied `0057`,
+   clears any attempt owner, restores matching session status/pointers, and leaves queued
+   prompt rows and positions untouched. This is not a prompt enqueue and not a legacy
+   rollback.
+6. Capture and reconcile the migrated snapshot before starting any new worker. Migration
+   reconciliation must preserve all baseline identities, prompt order, run state,
+   approvals, updates, history, and sandbox routing.
+7. Deploy the exact API/web/relay images and split the worker image into two separate
+   process/deployment roles:
+   - **control worker**: workflow tasks and every short/control/recovery activity, never
+     `runAgentTurn`, with explicit workflow/activity/cache caps;
+   - **turn worker**: derived `<control-task-queue>-turns`, only `runAgentTurn`, explicit
+     fixed concurrency eight per pod, its own resources, HPA, PDB, service, readiness,
+     liveness, and termination grace.
+
+   Both roles use one Worker per process. No same-process dual Worker, SDK default slot
+   count, resource tuner, semaphore, activity alias, or dual-routing fallback ships.
+8. Start turn workers before control workers, then prove both deployments are fully ready
+   on the reviewed digest and expose the configured role/cap in startup evidence.
+9. Run the production Codex canary **before** waking the backlog. It calls the internal API
+   service while public ingress remains in maintenance, uses only the workspace's existing
+   Codex subscription, retries ambiguous create/network/5xx outcomes with the same
+   idempotency key inside one overall deadline, and records per-attempt/stage timing. Its
+   temporary key TTL is derived from the deadline plus cleanup buffer.
+10. The canary must prove all of the following before continuing:
+    - its session remains queued until a turn slot actually claims it;
+    - `running` implies a registered attempt on a turn worker;
+    - the exact requested Codex model/provider returned the marker;
+    - one provider response source has exactly one current authoritative usage event;
+    - the billing ledger contains its one idempotent zero-cost Codex marker and no credit
+      debit; and
+    - no Azure model deployment/token endpoint was invoked.
+11. Wake v2 replaces wake v1. Scan the enrollable set once, signal-with-start every
+    workflow (bounded signal concurrency is acceptable because signals are cheap), and
+    verify enrollment rather than waiting for all work to finish:
+    - every initially enrollable session has a running expected workflow or became
+      durably ineligible/terminal through authoritative progress;
+    - approval and capacity waiters remain truthfully waiting with live workflows;
+    - stale control fences are settled;
+    - turn starts/progress reach the configured global turn capacity when enough runnable
+      work exists, while DB `running` count never exceeds that bound; and
+    - a stability window longer than the heartbeat timeout shows ready workers and no new
+      heartbeat-timeout recovery storm.
+
+    Claimable rows need not reach zero: a prompt/recovery waiting behind bounded turn
+    capacity deliberately remains queued/recovering and truthful while its workflow is
+    enrolled. Maintenance never waits days for long agents to drain.
+12. Capture final state, reconcile every baseline fate, usage uniqueness, enrollment, and
+    the read-only storm-casualty report. Production evidence observed no post-storm
+    redispatch-ceiling casualty requiring mutation, so the explicit policy is
+    `preserve_failed`; no automatic resurrection path exists.
+13. Resume only the schedules paused by this exact cutover, restore the production API
+    ingress, delete maintenance resources, and verify the complete production workload
+    set and exact images. The immutable failed run remains audit evidence; this remediation
+    uses a new app/ops-SHA-derived idempotency key.
 
 There is no automated reverse migration. If a catastrophic infrastructure problem occurs
 before destructive migration, stop before step 6. After step 6, restore the reviewed
@@ -674,6 +849,8 @@ Verify:
 - Enter appends in server/UI order.
 - Cmd/Ctrl+Enter head-inserts and interrupts current inference.
 - repeated steer during cancellation is accepted and newest-first.
+- a queued prompt remains visibly queued while its Temporal turn activity waits for a
+  bounded turn-worker slot; it changes to running only with a registered attempt.
 - Pause interrupts and prevents every claim source. Send while paused stays inert and
   Resume continues the same inference before the appended prompt. Steer while paused
   durably supersedes that inference and stays inert; Resume runs the steered prompt first.
@@ -693,7 +870,13 @@ Verify:
   a product dependency.
 - worker restart/deploy recovery continues the same durable current inference and closes
   interrupted tool calls truthfully.
+- a requires-action session survives workflow termination, re-enrolls in approval-wait,
+  and a durable approval decision starts or signals its workflow exactly once.
+- capacity-waiting and stale-control-fence sessions re-enroll without becoming prompts.
 - stale-attempt output appears only as rejected-late diagnostics.
+- every provider response source has at most one current usage event; repeated SDK
+  wrappers or recovered observations are retained only as classified duplicate evidence,
+  never as another authoritative usage row or authoritative usage log line.
 - real sandbox lifecycle events have operation identity/origin and no compaction-induced
   duplicates.
 
@@ -725,7 +908,15 @@ new fake user message, regress its goal, or remain owned by the old revision.
 - Workspace generation exceptions, new-pause invalidation, and interruption of a live
   non-exempt session attempt.
 - Exactly one current inference and one owning attempt.
+- Claim and attempt registration are one transaction executed only after turn-slot grant;
+  failure before claim is typed unclaimed and consumes no redispatch budget.
+- Exact-attempt recovery returns unclaimed/reparked/exceeded/stale under one ownership
+  lock and never chains a catch-all settlement.
 - Atomic settlement and late-event non-authority.
+- Durable approval acceptance, start-or-signal revival, approval-vs-pause/steer, and
+  approval-wait restoration after terminate/continue-as-new.
+- Current model-usage uniqueness by turn/source, in-batch duplicate classification,
+  cross-attempt duplicate classification, and unchanged rejected-late semantics.
 - Exactly-once update delivery and at-most-one update continuation.
 - Goal/update co-claim and human-first ordering.
 - One-way legacy data classification with fail-closed unknown rows.
@@ -750,10 +941,16 @@ new fake user message, regress its goal, or remain owned by the old revision.
 
 - graceful preemption within termination grace and same-turn redispatch.
 - tool-call interrupted result and uncertain-side-effect recovery context.
-- generalized wake repair for every claim source.
+- separate control and turn deployments/processes/task queues with explicit caps; no
+  `runAgentTurn` registration in the control process and no control activity in the turn
+  process.
+- deterministic derived turn queue for production and randomized integration test queues.
+- generalized enrollment repair for runnable, approval-wait, capacity-wait, updates,
+  goals, and stale fences; enrollment/progress proof does not require backlog drain.
 - old Temporal workflows cannot execute after code deletion.
-- private workflow enforces one public revision, one migration checksum, maintenance
-  ordering, baseline/final reconciliation, and Azure-model-token prohibition.
+- private workflow enforces one public revision, exact ordered migration hashes,
+  repark/canary-before-wake ordering, worker roles/capacity, baseline/final reconciliation,
+  and Azure-model-token prohibition.
 - no `legacy`, `durable_v1`, reverse-conversion, or staging-evidence branch remains.
 
 ### UI
@@ -772,26 +969,67 @@ temporary runtime fallback.
 1. **Reconcile branch and preserve good OPE-22 foundations**: merge current `main`, audit
    dirty queue-removal work, retain atomic settlement/generation/capacity/audit fixes.
 2. **Schema and state model**: new prompt/current/update/workspace-generation concepts,
-   shared runnable predicate, one-way migration, removal of legacy schema.
+   shared runnable predicate, one-way 0057 migration, classified current/duplicate/late
+   usage evidence and enrollable-session 0058 migration, removal of legacy schema.
 3. **Send/Steer/Pause/Resume APIs**: one transaction per control, delete-only queue,
    remove aliases and alternate mutation APIs.
-4. **Worker claim loop**: rename the complete domain/activity operation to
-   `claimNextSessionExecution`; current inference recovery first, then prompt, then combined
-   update/goal continuation; no machine queue work.
-5. **Attempt ownership and recovery**: generation/attempt fences, interrupted tool result,
-   rejected-late diagnostics, graceful deploy checkpoint.
+4. **Worker claim loop and admission**: split control/turn task queues and deployments;
+   make read-only peek drive the workflow; claim and register the exact attempt only inside
+   the bounded turn-slot activity; recover current inference, approval/capacity state,
+   prompt, compaction, then combined update/goal continuation; no machine queue work or
+   false running state.
+5. **Attempt ownership and recovery**: generation/attempt/dispatch fences from claim t0,
+   typed unclaimed/reparked/exceeded/stale transport recovery, interrupted tool result,
+   rejected-late diagnostics, graceful deploy checkpoint, durable approval revival.
 6. **Codex 0.144.4 compaction**: official local semantics, allocator integration,
    transactional history replacement, removal of all alternate paths.
 7. **Workspace control**: pause generation, explicit per-session run, removal of kill and
    fan-out state rewriting.
 8. **React/SDK cleanup**: one composer queue, exact server order, compact goal/agents,
    one Pause control, precise sandbox lifecycle UI.
-9. **Private ops clean cutover**: replace the dirty legacy rollback workflow/scripts with
-   maintenance drain, baseline, one-way migration, wake repair, and final reconciliation.
+9. **Private ops clean cutover**: exact 0057+0058 migration list; maintenance drain;
+   workflow termination; evidence-writing repark; split-worker deployment; ambiguity-safe
+   canary before fleet wake; enrollment/progress wake v2; final reconciliation.
 10. **Review and production proof**: Fable implementation review, UBS, complete local
     matrix, merge, production cutover, bounded subscription canary, all-session audit.
 11. **Canonical docs and cleanup**: update current-tier lifecycle, deployment, SDK, and
     rotation docs; archive incident evidence; verify no obsolete symbol/string/path remains.
+
+### 12.1 Remediation dependency graph
+
+The second production attempt follows this dependency graph; a later node must not be
+implemented or released against a provisional predecessor contract:
+
+```text
+R1 production evidence + Fable architecture verdict
+ ├─> R2 0058 schema/event/enrollment contract
+ │    ├─> R3 attempt-owned late claim + peek/recovery DB functions
+ │    │    ├─> R4 workflow/API approval-capacity-control state machine
+ │    │    └─> R5 isolated control/turn workers + chart topology
+ │    └─> R6 canonical usage producer + durable classifier
+ ├─> R7 canary retry/truth/uniqueness contract (depends on R3,R5,R6)
+ ├─> R8 repark + wake-v2 enrollment/progress operator (depends on R2-R5)
+ └─> R9 public full verification and serialized Fable implementation review
+      └─> R10 public merge + immutable image build
+           └─> R11 private ops v2 contract/driver/workflow (depends on R7,R8,R10)
+                └─> R12 private tests + Fable release review + merge/build
+                     └─> R13 production remediation cutover
+                          └─> R14 production continuity/UI/runtime audit
+                               └─> R15 Linear/docs/learning/worktree closure
+```
+
+R2 blocks all runtime code because its event and enrollment shapes are the durable
+contract. R3 blocks the workflow and deployment split because the separate queue would
+otherwise create false running state. R5 and R6 block the canary because the canary is
+the proof of those exact mechanisms. Public main and immutable images block private ops
+request assembly; the private workflow never points at a branch or mutable tag. Production
+is the only deployed verification environment for this amendment, but every deterministic
+and real-service local suite remains a prerequisite.
+
+The repository does not contain the `br`/beads tool, so this graph remains canonical in
+this plan and the active Codex goal/plan state rather than being copied into an unavailable
+parallel task database. Linear remains issue-level coordination, not the execution source
+of truth for the live maintenance run.
 
 ## 13. Linear reconciliation
 
@@ -822,7 +1060,8 @@ The work is not finished until all of the following are true:
 - the exact reviewed revision is deployed to production with no staging deployment;
 - no Azure model tokens were used;
 - production canary verifies queue, steer, pause, workspace exception, updates/goals,
-  recovery, compaction, rotation, UI, sandbox evidence, and late diagnostics;
+  truthful late claim, recovery, approval/capacity enrollment, compaction, rotation, unique
+  usage, UI, sandbox evidence, and late diagnostics;
 - every pre-cutover live session has a reconciled post-cutover fate;
 - all production workloads are healthy and only the new revision can claim work;
 - canonical current-tier docs match the shipped system;

@@ -4,8 +4,10 @@ import { chromium, type Browser } from "playwright";
 import { migrate } from "@opengeni/db/migrate";
 import {
   freePort,
+  startE2eWorkerTopology,
   startProcess,
   startTestServices,
+  type StartedE2eWorkerTopology,
   type StartedProcess,
   type TestServices,
   waitFor,
@@ -16,7 +18,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 describe("browser e2e", () => {
   let services: TestServices;
   let api: StartedProcess;
-  let worker: StartedProcess;
+  let worker: StartedE2eWorkerTopology;
   let web: StartedProcess;
   let browser: Browser;
   let apiPort: number;
@@ -40,11 +42,11 @@ describe("browser e2e", () => {
           (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
         timeoutMs: 45_000,
       });
-      worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+      worker = await startE2eWorkerTopology({
         cwd: repoRoot,
         env,
       });
-      await waitFor(() => workerReady(worker), {
+      await waitFor(() => worker.ready(), {
         timeoutMs: 90_000,
         describe: () => worker.logs(),
       });
@@ -363,13 +365,6 @@ function stackEnv(
     OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
     OPENGENI_TEST_SCENARIO: scenario,
   };
-}
-
-async function workerReady(process: StartedProcess | undefined): Promise<boolean> {
-  if (!process) {
-    return false;
-  }
-  return process.logs().includes("test worker listening");
 }
 
 async function startBrowserTestServices(): Promise<TestServices> {

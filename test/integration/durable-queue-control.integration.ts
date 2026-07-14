@@ -6,6 +6,7 @@ import { postUserMessageTurn } from "@opengeni/core";
 import {
   addSessionSystemUpdate,
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
   enqueueSessionMessageAtomically,
@@ -15,7 +16,6 @@ import {
   listSessionEvents,
   listSessionSystemUpdatesForTurn,
   listSessionTurns,
-  registerSessionTurnDispatch,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -27,8 +27,9 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
-import { createActivities } from "../../apps/worker/src/activities";
+import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
 type RequiredServices = Pick<
   TestServices,
@@ -96,7 +97,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         temporalTaskQueue: taskQueue,
       });
       const workflowClient = sessionWorkflowClient(new Client({ connection }), taskQueue);
-      const activities = createActivities({
+      const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
         bus,
@@ -240,7 +241,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       });
       const temporal = new Client({ connection });
       const workflowClient = sessionWorkflowClient(temporal, taskQueue);
-      const activities = createActivities({
+      const activities = createActivityTestHarness({
         settings,
         db: dbClient.db,
         bus,
@@ -371,7 +372,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
       });
       const temporal = new Client({ connection });
       const workflowClient = sessionWorkflowClient(temporal, taskQueue);
-      const realActivities = createActivities({
+      const realActivities = createActivityTestHarness({
         settings,
         db: dbClient.db,
         bus,
@@ -384,13 +385,16 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         runAgentTurn: async (input: Parameters<typeof realActivities.runAgentTurn>[0]) => {
           dispatches += 1;
           if (dispatches === 1) {
-            await registerSessionTurnDispatch(dbClient.db, input.workspaceId, {
+            const claim = await claimSessionWorkForAttempt(dbClient.db, input.workspaceId, {
               sessionId: input.sessionId,
-              turnId: input.turnId,
-              triggerEventId: input.triggerEventId,
+              workflowId: input.workflowId,
               attemptId: input.attemptId,
               dispatchId: currentActivityContext()!.info.activityId,
+              trigger: input.trigger,
             });
+            if (claim.action !== "claimed") {
+              return { status: "unclaimed", reason: claim.reason } as const;
+            }
             return await hangWithoutHeartbeating();
           }
           return await realActivities.runAgentTurn(input);
@@ -589,14 +593,35 @@ async function integrationWorker(
   temporalConnection: NativeConnection,
   taskQueue: string,
   activities: Record<string, (...args: any[]) => Promise<unknown>>,
-): Promise<Worker> {
-  return await Worker.create({
-    connection: temporalConnection,
-    namespace: "default",
-    taskQueue,
-    workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
-    activities,
-  });
+): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
+  const { runAgentTurn, ...controlActivities } = activities;
+  if (!runAgentTurn) throw new Error("turn activity is missing from the integration harness");
+  const [control, turns] = await Promise.all([
+    Worker.create({
+      connection: temporalConnection,
+      namespace: "default",
+      taskQueue,
+      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      activities: controlActivities,
+      maxConcurrentActivityTaskExecutions: 32,
+    }),
+    Worker.create({
+      connection: temporalConnection,
+      namespace: "default",
+      taskQueue: turnTaskQueue(taskQueue),
+      activities: { runAgentTurn },
+      maxConcurrentActivityTaskExecutions: 8,
+    }),
+  ]);
+  return {
+    run: async () => {
+      await Promise.all([control.run(), turns.run()]);
+    },
+    shutdown: () => {
+      control.shutdown();
+      turns.shutdown();
+    },
+  };
 }
 
 async function hangWithoutHeartbeating(): Promise<{ status: "cancelled" }> {

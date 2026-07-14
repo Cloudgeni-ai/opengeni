@@ -95,7 +95,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.sandboxCreateTimeoutS).toBe(600);
     // The Agents extension otherwise stamps a hardcoded sleep command; let
     // Modal's own timeout own lifetime instead.
-    expect(client.options?.useSleepCmd).toBe(false);
+    expect(client.options?.useSleepCmd).toBe(true);
     // sandbox-file-persistence: idleTimeoutMs is ALWAYS pinned; with no explicit
     // OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS it DEFAULTS to the hard lifetime so
     // Modal's short server-default idle-reap can never kill an idle box before the
@@ -116,7 +116,7 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.timeoutMs).toBe(7_200_000);
     expect(client.options?.idleTimeoutMs).toBe(7_200_000);
     expect(client.options?.sandboxCreateTimeoutS).toBe(123);
-    expect(client.options?.useSleepCmd).toBe(false);
+    expect(client.options?.useSleepCmd).toBe(true);
   });
 
   test("modal idleTimeoutMs honours an explicit override (still pinned, not the SDK default)", () => {

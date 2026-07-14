@@ -4,8 +4,10 @@ import {
   buildSandboxImage,
   freePort,
   runCommand,
+  startE2eWorkerTopology,
   startProcess,
   startTestServices,
+  type StartedE2eWorkerTopology,
   type StartedProcess,
   type TestServices,
   waitFor,
@@ -18,7 +20,7 @@ let workspaceId = "";
 describe("real Docker sandbox e2e", () => {
   let services: TestServices;
   let api: StartedProcess;
-  let worker: StartedProcess;
+  let worker: StartedE2eWorkerTopology;
 
   beforeAll(async () => {
     await buildSandboxImage("opengeni-sandbox:local", repoRoot);
@@ -34,11 +36,11 @@ describe("real Docker sandbox e2e", () => {
       timeoutMs: 45_000,
     });
     workspaceId = await discoverWorkspaceId();
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+    worker = await startE2eWorkerTopology({
       cwd: repoRoot,
       env,
     });
-    await waitFor(() => worker.logs().includes("test worker listening"), {
+    await waitFor(() => worker.ready(), {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });

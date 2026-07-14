@@ -10,6 +10,7 @@ import {
   enqueueSessionMessageAtomically,
   getSession,
   getSessionHistoryItems,
+  getSessionTurn,
   listSessionEvents,
   listSessionTurns,
   requestSessionControl,
@@ -28,8 +29,9 @@ import {
 } from "@opengeni/testing";
 import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
-import { createActivities } from "../../apps/worker/src/activities";
+import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
 // Proves the campaign's robustness contract: a worker rollout restart
 // (graceful SIGTERM shutdown) mid-turn must not produce a failed session.
@@ -103,7 +105,7 @@ describe("worker restart resilience", () => {
         },
       ],
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -223,7 +225,7 @@ describe("worker restart resilience", () => {
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -365,7 +367,7 @@ describe("worker restart resilience", () => {
         outputText: "must not finish",
       },
     ]);
-    const baseActivities = createActivities({
+    const baseActivities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -382,20 +384,24 @@ describe("worker restart resilience", () => {
       settleSessionControl: async (
         input: Parameters<typeof baseActivities.settleSessionControl>[0],
       ) => {
-        await baseActivities.settleSessionControl(input);
+        const result = await baseActivities.settleSessionControl(input);
         interruptSettled();
+        return result;
       },
       runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
         dispatchedAttemptId = input.attemptId;
         const result = await baseActivities.runAgentTurn(input);
+        if (result.status === "unclaimed") return result;
         // Deterministically model the production zombie boundary: the real
         // activity has observed cancellation, then this wrapper publishes a
         // terminal settlement from that fenced attempt after Pause committed.
         await interruptSettlement;
+        const turn = await getSessionTurn(dbClient.db, input.workspaceId, result.turnId);
+        if (!turn) throw new Error(`zombie fixture turn disappeared: ${result.turnId}`);
         lateSettlement = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
           sessionId: input.sessionId,
-          turnId: input.turnId!,
-          triggerEventId: input.triggerEventId,
+          turnId: result.turnId,
+          triggerEventId: turn.triggerEventId,
           attemptId: input.attemptId,
           turnStatus: "completed",
           sessionStatus: "idle",
@@ -498,7 +504,7 @@ describe("worker restart resilience", () => {
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -656,13 +662,33 @@ describe("worker restart resilience", () => {
 async function restartTestWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
-  activities: ReturnType<typeof createActivities>,
-): Promise<Worker> {
-  return await Worker.create({
-    connection: nativeConnection,
-    namespace: "default",
-    taskQueue,
-    workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
-    activities,
-  });
+  activities: ReturnType<typeof createActivityTestHarness>,
+): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
+  const { runAgentTurn, ...controlActivities } = activities;
+  const [control, turns] = await Promise.all([
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue,
+      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      activities: controlActivities,
+      maxConcurrentActivityTaskExecutions: 32,
+    }),
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue: turnTaskQueue(taskQueue),
+      activities: { runAgentTurn },
+      maxConcurrentActivityTaskExecutions: 8,
+    }),
+  ]);
+  return {
+    run: async () => {
+      await Promise.all([control.run(), turns.run()]);
+    },
+    shutdown: () => {
+      control.shutdown();
+      turns.shutdown();
+    },
+  };
 }

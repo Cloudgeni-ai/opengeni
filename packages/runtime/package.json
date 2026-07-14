@@ -36,16 +36,17 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "@openai/agents": "0.11.6",
-    "@openai/agents-extensions": "0.11.6",
+    "@openai/agents": "0.13.3",
+    "@openai/agents-extensions": "0.13.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
-    "modal": "^0.7.4",
-    "openai": "6.36.0"
+    "modal": "0.7.6",
+    "openai": "6.47.0"
   },
   "devDependencies": {
+    "@openai/agents-core": "0.13.3",
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   }

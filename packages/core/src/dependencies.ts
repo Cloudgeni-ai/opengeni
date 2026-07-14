@@ -31,6 +31,8 @@ export type SessionWorkflowClient = {
     wakeRevision: number;
   }) => Promise<void>;
   signalApprovalDecision: (input: {
+    accountId: string;
+    workspaceId: string;
     sessionId: string;
     eventId: string;
     workflowId: string;

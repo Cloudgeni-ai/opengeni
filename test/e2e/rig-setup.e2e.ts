@@ -4,8 +4,10 @@ import { createDb, createRig, type DbClient } from "@opengeni/db";
 import {
   buildSandboxImage,
   freePort,
+  startE2eWorkerTopology,
   startProcess,
   startTestServices,
+  type StartedE2eWorkerTopology,
   type StartedProcess,
   type TestServices,
   waitFor,
@@ -32,7 +34,7 @@ let db: DbClient;
 describe("real Docker rig-setup e2e", () => {
   let services: TestServices;
   let api: StartedProcess;
-  let worker: StartedProcess;
+  let worker: StartedE2eWorkerTopology;
 
   beforeAll(async () => {
     await buildSandboxImage("opengeni-sandbox:local", repoRoot);
@@ -50,11 +52,11 @@ describe("real Docker rig-setup e2e", () => {
     workspaceId = await discoverWorkspaceId();
     accountId = await discoverAccountId();
     db = createDb(services.databaseUrl);
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+    worker = await startE2eWorkerTopology({
       cwd: repoRoot,
       env,
     });
-    await waitFor(() => worker.logs().includes("test worker listening"), {
+    await waitFor(() => worker.ready(), {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });

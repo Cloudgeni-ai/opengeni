@@ -6,7 +6,7 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   getOrCreateSessionSystemUpdateOutbox,
-  listClaimableSessions,
+  listEnrollableSessions,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   markSessionSystemUpdateOutboxFailed,
   type Database,
@@ -158,7 +158,7 @@ export async function reconcilePendingParentSystemUpdates(
 ): Promise<{ claimed: number; delivered: number; failed: number; wakeRepairs: number }> {
   let wakeRepairs = 0;
   if (svc.wakeSessionWorkflow) {
-    const repairs = await listClaimableSessions(svc.db, limit);
+    const repairs = await listEnrollableSessions(svc.db, limit);
     for (const repair of repairs) {
       await svc.wakeSessionWorkflow({
         accountId: repair.accountId,

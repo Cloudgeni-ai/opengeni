@@ -4,9 +4,10 @@ import {
   allWorkspacePermissions,
   appendSessionEvents,
   applyCreditLedgerEntry,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   buildConnectionTokenResolver,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   isSessionCompactionRequested,
   createDb,
   createSession,
@@ -29,12 +30,12 @@ import {
   getWorkspaceEnvironmentValuesForRun,
   listSessionEvents,
   listScheduledTasks,
+  listPendingSessionSystemUpdates,
   listSessionTurns,
   listSessionMcpServersForRun,
   listUsageEvents,
   recordStripeWebhookEvent,
   recordUsageEvent,
-  registerSessionTurnDispatch,
   requireFile,
   requireSession,
   setSessionGoalStatus,
@@ -149,7 +150,9 @@ describe("API component integration", () => {
       "session.status.changed",
       "turn.queued",
     ]);
-    expect(buildTimeline(events).map((item) => item.kind)).toEqual(["user-message"]);
+    // The initial prompt is still waiting, so it exists only in the compact
+    // prompt queue. Timeline projection begins it when the turn actually starts.
+    expect(buildTimeline(events).map((item) => item.kind)).toEqual([]);
 
     const listed = await app.request(workspacePath(workspaceId, "/sessions?limit=10"));
     expect(listed.status).toBe(200);
@@ -3797,7 +3800,27 @@ describe("API component integration", () => {
     );
     expect(approvalRejected.status).toBe(409);
 
-    await setSessionStatus(dbClient.db, workspaceId, session.id, "requires_action", null);
+    const approvalWaitAttemptId = crypto.randomUUID();
+    const approvalWaitClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      attemptId: approvalWaitAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (approvalWaitClaim.action !== "claimed") {
+      throw new Error(`failed to claim approval fixture: ${approvalWaitClaim.reason}`);
+    }
+    await applySessionTurnSettlement(dbClient.db, workspaceId, {
+      sessionId: session.id,
+      turnId: approvalWaitClaim.turn.id,
+      triggerEventId: approvalWaitClaim.turn.triggerEventId,
+      attemptId: approvalWaitAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: approvalWaitClaim.turn.id,
+      events: [{ type: "session.requiresAction", payload: { approvalId: "x" } }],
+    });
     const approvalAccepted = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/events`),
       {
@@ -3811,24 +3834,18 @@ describe("API component integration", () => {
     );
     expect(approvalAccepted.status).toBe(202);
     expect(workflow.approvals).toHaveLength(1);
+    const approvalEvent = (await approvalAccepted.json()) as SessionEvent;
 
-    const running = await claimNextSessionExecution(
-      dbClient.db,
-      workspaceId,
-      session.id,
-      `session-${session.id}`,
-    );
-    expect(running).not.toBeNull();
     const attemptId = crypto.randomUUID();
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, workspaceId, {
-        sessionId: session.id,
-        turnId: running!.id,
-        triggerEventId: running!.triggerEventId,
-        attemptId,
-        dispatchId: `dispatch-${crypto.randomUUID()}`,
-      }),
-    ).toMatchObject({ action: "registered" });
+    const running = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "approval", triggerEventId: approvalEvent.id },
+    });
+    expect(running).toMatchObject({ action: "claimed" });
+    if (running.action !== "claimed") throw new Error("approval fixture did not resume");
 
     const paused = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/control`),
@@ -3845,7 +3862,7 @@ describe("API component integration", () => {
     expect(paused.status).toBe(202);
     expect(await paused.json()).toMatchObject({
       controlState: "paused",
-      expectedActiveTurnId: running!.id,
+      expectedActiveTurnId: running.turn.id,
       expectedAttemptId: attemptId,
       shouldSignalControl: true,
     });
@@ -5945,6 +5962,43 @@ describe("API component integration", () => {
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
     expect(turns.some((turn) => turn.id === sent.turnId && turn.status === "queued")).toBe(true);
 
+    const workerMcpWithIdentity = buildOpenGeniMcpServer(mcpDeps, {
+      ...grant,
+      metadata: { delegated: true, sessionId: created.id },
+    });
+    const beforeInternalTurnIds = (
+      await listSessionTurns(dbClient.db, grant.workspaceId, created.id)
+    )
+      .map((turn) => turn.id)
+      .sort();
+    const internal = await callMcpTool<{
+      delivered: boolean;
+      updateId: string;
+      delivery: string;
+    }>(workerMcpWithIdentity, "session_send_message", {
+      sessionId: created.id,
+      text: "child result one of several",
+    });
+    expect(internal).toMatchObject({
+      delivered: true,
+      delivery: "coalesced_internal_update",
+    });
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, created.id))
+        .map((turn) => turn.id)
+        .sort(),
+    ).toEqual(beforeInternalTurnIds);
+    expect(
+      await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, created.id),
+    ).toEqual([
+      expect.objectContaining({
+        id: internal.updateId,
+        kind: "runtime_notice",
+        sourceId: created.id,
+        summary: "child result one of several",
+      }),
+    ]);
+
     // The sandboxed worker's first-party delegated permission set sees none of
     // the manager tools: orchestration, environments, or the connect link.
     const workerGrant = {
@@ -7715,16 +7769,17 @@ async function createToolspaceMcpSession(
     delivery: "queue",
     reasoningEffortFallback: "medium",
   });
-  const running = await claimNextSessionExecution(
-    db,
-    grant.workspaceId,
-    session.id,
-    `session-${session.id}`,
-  );
-  if (!running || running.id !== queued.turn.id) {
+  const running = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    attemptId: crypto.randomUUID(),
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (running.action !== "claimed" || running.turn.id !== queued.turn.id) {
     throw new Error("failed to claim the toolspace fixture turn");
   }
-  return { session, turnId: running.id };
+  return { session, turnId: running.turn.id };
 }
 
 async function readSseEvents(

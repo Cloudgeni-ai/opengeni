@@ -7,6 +7,7 @@ import {
   type CutoverPhase,
   type SessionControlCutoverSnapshot,
 } from "@opengeni/db/session-control-cutover-audit";
+import { createDb, reparkOrphanedSessionTurn } from "@opengeni/db";
 import { getSettings } from "@opengeni/config";
 import { createObjectStorage } from "@opengeni/storage";
 import { Client as TemporalClient, Connection } from "@temporalio/client";
@@ -190,16 +191,100 @@ async function reconcile(args: ParsedArgs): Promise<void> {
   );
 }
 
-type Claimable = {
+type Enrollable = {
   account_id: string;
   workspace_id: string;
   session_id: string;
   temporal_workflow_id: string;
 };
 
+type EnrollmentState = {
+  session_id: string;
+  approval_waiting: boolean;
+  capacity_waiting: boolean;
+  control_pending: boolean;
+  runnable: boolean;
+};
+
+export function countBoundedWakeProgress(
+  initiallyRunnableSessionIds: Iterable<string>,
+  ...proofSets: Array<Iterable<string>>
+): number {
+  const initiallyRunnable = new Set(initiallyRunnableSessionIds);
+  const proven = new Set<string>();
+  for (const proofSet of proofSets) {
+    for (const sessionId of proofSet) {
+      if (initiallyRunnable.has(sessionId)) proven.add(sessionId);
+    }
+  }
+  return proven.size;
+}
+
+function integerArg(
+  args: ParsedArgs,
+  name: string,
+  options: { defaultValue?: number; min: number; max: number },
+): number {
+  const raw =
+    args.values.get(name) ??
+    (options.defaultValue === undefined ? required(args, name) : String(options.defaultValue));
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < options.min || parsed > options.max) {
+    throw new Error(`${name} must be an integer between ${options.min} and ${options.max}`);
+  }
+  return parsed;
+}
+
+async function runningSessionWorkflowIds(temporal: TemporalClient): Promise<Set<string>> {
+  const running = new Set<string>();
+  for await (const execution of temporal.workflow.list({ query: "ExecutionStatus='Running'" })) {
+    if (execution.workflowId.startsWith("session-")) running.add(execution.workflowId);
+  }
+  return running;
+}
+
+async function enrollmentStates(
+  sql: postgres.Sql,
+  sessionIds: string[],
+): Promise<EnrollmentState[]> {
+  if (sessionIds.length === 0) return [];
+  return (await sql.unsafe<EnrollmentState[]>(
+    `select s.id as session_id,
+       exists (
+         select 1 from session_turns t
+         where t.workspace_id = s.workspace_id and t.session_id = s.id
+           and t.status = 'requires_action'
+       ) as approval_waiting,
+       exists (
+         select 1 from session_turns t
+         where t.workspace_id = s.workspace_id and t.session_id = s.id
+           and t.status = 'waiting_capacity'
+       ) as capacity_waiting,
+       (s.pending_control_event_id is not null) as control_pending,
+       exists (
+         select 1 from session_turns t
+         where t.workspace_id = s.workspace_id and t.session_id = s.id
+           and t.status in ('queued', 'recovering')
+       ) as runnable
+     from sessions s where s.id = any($1::uuid[]) order by s.id`,
+    [sessionIds],
+  )) as unknown as EnrollmentState[];
+}
+
 async function wake(args: ParsedArgs): Promise<void> {
   const output = required(args, "--output");
   const execute = args.flags.has("--execute");
+  const turnCapacity = integerArg(args, "--turn-capacity", { min: 1, max: 10_000 });
+  const stabilitySeconds = integerArg(args, "--stability-seconds", {
+    defaultValue: 150,
+    min: 121,
+    max: 900,
+  });
+  const sampleSeconds = integerArg(args, "--sample-seconds", {
+    defaultValue: 5,
+    min: 1,
+    max: 30,
+  });
   const temporalSettingsValue = temporalSettings();
   const sql = postgres(migrationDatabaseUrl(), {
     max: 1,
@@ -210,9 +295,9 @@ async function wake(args: ParsedArgs): Promise<void> {
   });
   let connection: Connection | null = null;
   try {
-    const rows = (await sql.unsafe<Claimable[]>(
-      "select * from opengeni_private.list_claimable_sessions(10000)",
-    )) as unknown as Claimable[];
+    const rows = (await sql.unsafe<Enrollable[]>(
+      "select * from opengeni_private.list_enrollable_sessions(10000)",
+    )) as unknown as Enrollable[];
     if (rows.length === 10_000) {
       throw new Error(
         "claimable-session scan reached its hard limit; refusing a partial wake repair",
@@ -221,6 +306,21 @@ async function wake(args: ParsedArgs): Promise<void> {
     const ordered = [...rows].sort((a, b) => a.session_id.localeCompare(b.session_id));
     const failures: Array<{ sessionId: string; error: string }> = [];
     const woken: string[] = [];
+    const enrollmentProof: Array<{
+      sessionId: string;
+      workflowId: string;
+      outcome: "running-workflow" | "authoritative-progress";
+    }> = [];
+    const samples: Array<{
+      capturedAt: string;
+      runningTurns: number;
+      recoveringTurns: number;
+      heartbeatRecoveries: number;
+    }> = [];
+    const initialStates = await enrollmentStates(
+      sql,
+      ordered.map((row) => row.session_id),
+    );
     if (execute) {
       connection = await Connection.connect({
         address: temporalSettingsValue.address,
@@ -258,14 +358,151 @@ async function wake(args: ParsedArgs): Promise<void> {
         }
       });
       await Promise.all(workers);
+      if (failures.length === 0) {
+        const initialRecoveryRows = await sql<Array<{ count: number }>>`
+          select count(*)::integer as count from session_events
+          where type = 'turn.recovery.requested'
+            and payload ->> 'reason' = 'worker_death'`;
+        const initialHeartbeatRecoveries = Number(initialRecoveryRows[0]?.count ?? 0);
+        const deadline = Date.now() + stabilitySeconds * 1_000;
+        let maxRunningTurns = 0;
+        const sampledRunningSessionIds = new Set<string>();
+        while (Date.now() <= deadline) {
+          const [[counts], runningSessions] = await Promise.all([
+            sql<
+              Array<{
+                running_turns: number;
+                recovering_turns: number;
+                heartbeat_recoveries: number;
+              }>
+            >`
+            select
+              (select count(*)::integer from session_turns where status = 'running') as running_turns,
+              (select count(*)::integer from session_turns where status = 'recovering') as recovering_turns,
+              (select count(*)::integer from session_events
+               where type = 'turn.recovery.requested'
+                 and payload ->> 'reason' = 'worker_death') as heartbeat_recoveries`,
+            sql<Array<{ session_id: string }>>`
+              select distinct session_id::text as session_id
+              from session_turns where status = 'running'`,
+          ]);
+          for (const running of runningSessions) {
+            sampledRunningSessionIds.add(running.session_id);
+          }
+          const runningTurns = Number(counts?.running_turns ?? 0);
+          const recoveringTurns = Number(counts?.recovering_turns ?? 0);
+          const heartbeatRecoveries = Number(counts?.heartbeat_recoveries ?? 0);
+          maxRunningTurns = Math.max(maxRunningTurns, runningTurns);
+          samples.push({
+            capturedAt: new Date().toISOString(),
+            runningTurns,
+            recoveringTurns,
+            heartbeatRecoveries,
+          });
+          if (runningTurns > turnCapacity) {
+            throw new Error(
+              `database reports ${runningTurns} running turns above configured capacity ${turnCapacity}`,
+            );
+          }
+          if (heartbeatRecoveries > initialHeartbeatRecoveries) {
+            throw new Error(
+              "new heartbeat-timeout recovery appeared during the wake stability window",
+            );
+          }
+          if (Date.now() >= deadline) break;
+          await Bun.sleep(sampleSeconds * 1_000);
+        }
+
+        const remainingRows = (await sql.unsafe<Enrollable[]>(
+          "select * from opengeni_private.list_enrollable_sessions(10000)",
+        )) as unknown as Enrollable[];
+        if (remainingRows.length === 10_000) {
+          throw new Error("post-wake enrollable scan reached its hard limit");
+        }
+        const remaining = new Set(remainingRows.map((row) => row.session_id));
+        const runningWorkflows = await runningSessionWorkflowIds(temporal);
+        for (const row of ordered) {
+          if (runningWorkflows.has(row.temporal_workflow_id)) {
+            enrollmentProof.push({
+              sessionId: row.session_id,
+              workflowId: row.temporal_workflow_id,
+              outcome: "running-workflow",
+            });
+          } else if (!remaining.has(row.session_id)) {
+            enrollmentProof.push({
+              sessionId: row.session_id,
+              workflowId: row.temporal_workflow_id,
+              outcome: "authoritative-progress",
+            });
+          } else {
+            failures.push({
+              sessionId: row.session_id,
+              error: "session remains enrollable without a running workflow",
+            });
+          }
+        }
+        const finalStates = await enrollmentStates(
+          sql,
+          ordered.map((row) => row.session_id),
+        );
+        const finalBySession = new Map(finalStates.map((state) => [state.session_id, state]));
+        for (const initial of initialStates) {
+          const current = finalBySession.get(initial.session_id);
+          const workflowId = ordered.find(
+            (row) => row.session_id === initial.session_id,
+          )?.temporal_workflow_id;
+          if (
+            current &&
+            (current.approval_waiting || current.capacity_waiting) &&
+            (!workflowId || !runningWorkflows.has(workflowId))
+          ) {
+            failures.push({
+              sessionId: initial.session_id,
+              error: "approval/capacity wait remains without a running workflow",
+            });
+          }
+          if (initial.control_pending && current?.control_pending) {
+            failures.push({
+              sessionId: initial.session_id,
+              error: "pending control fence did not settle during the stability window",
+            });
+          }
+        }
+        const initiallyRunnableSessionIds = initialStates
+          .filter((state) => state.runnable)
+          .map((state) => state.session_id);
+        const authoritativeProgressSessionIds = enrollmentProof
+          .filter((proof) => proof.outcome === "authoritative-progress")
+          .map((proof) => proof.sessionId);
+        const waitingSessionIds = finalStates
+          .filter((state) => state.approval_waiting || state.capacity_waiting)
+          .map((state) => state.session_id);
+        const initiallyRunnable = initiallyRunnableSessionIds.length;
+        const expectedProgress = Math.min(turnCapacity, initiallyRunnable);
+        const observedProgress = countBoundedWakeProgress(
+          initiallyRunnableSessionIds,
+          sampledRunningSessionIds,
+          authoritativeProgressSessionIds,
+          waitingSessionIds,
+        );
+        if (observedProgress < expectedProgress) {
+          throw new Error(
+            `wake proved progress for ${observedProgress} session(s), below expected bounded progress ${expectedProgress}`,
+          );
+        }
+      }
     }
     const draft = {
-      contractVersion: "opengeni/session-control-cutover-wake/v1",
+      contractVersion: "opengeni/session-control-cutover-wake/v2",
       executed: execute,
       capturedAt: new Date().toISOString(),
-      claimableSessionIds: ordered.map((row) => row.session_id),
+      turnCapacity,
+      stabilitySeconds,
+      enrollableSessionIds: ordered.map((row) => row.session_id),
       workflowIds: ordered.map((row) => row.temporal_workflow_id),
       wokenSessionIds: woken.sort(),
+      enrollmentProof: enrollmentProof.sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
+      samples,
       failures: failures.sort((a, b) => a.sessionId.localeCompare(b.sessionId)),
     };
     const receipt = { ...draft, sha256: sha256(draft) };
@@ -274,7 +511,7 @@ async function wake(args: ParsedArgs): Promise<void> {
       throw new Error(`wake repair failed for ${failures.length} session(s)`);
     }
     process.stderr.write(
-      `[cutover-wake] ${execute ? "woke" : "found"} ${ordered.length} claimable sessions, sha256 ${receipt.sha256}\n`,
+      `[cutover-wake] ${execute ? "enrolled" : "found"} ${ordered.length} sessions, sha256 ${receipt.sha256}\n`,
     );
   } finally {
     await connection?.close().catch(() => undefined);
@@ -507,6 +744,122 @@ async function temporalWorkflows(args: ParsedArgs): Promise<void> {
   }
 }
 
+type OrphanedRunningTurn = {
+  workspace_id: string;
+  session_id: string;
+  turn_id: string;
+  active_attempt_id: string | null;
+};
+
+async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
+  const output = required(args, "--output");
+  const runId = safeRunId(required(args, "--run-id"));
+  const execute = args.flags.has("--execute");
+  const settings = temporalSettings();
+  const connection = await Connection.connect({ address: settings.address });
+  const sql = postgres(migrationDatabaseUrl(), {
+    max: 1,
+    prepare: false,
+    idle_timeout: 5,
+    connect_timeout: 15,
+    connection: { application_name: "opengeni-cutover-repark" },
+  });
+  const client = createDb(migrationDatabaseUrl(), { max: 1 });
+  try {
+    const temporal = new TemporalClient({ connection, namespace: settings.namespace });
+    const runningWorkflows: Array<{ workflowId: string; runId: string }> = [];
+    for await (const execution of temporal.workflow.list({ query: "ExecutionStatus='Running'" })) {
+      if (execution.workflowId.startsWith("session-")) {
+        runningWorkflows.push({ workflowId: execution.workflowId, runId: execution.runId });
+      }
+    }
+    if (runningWorkflows.length > 0) {
+      throw new Error(
+        `refusing to repark while ${runningWorkflows.length} session workflow(s) remain running`,
+      );
+    }
+    const migrations = await sql<Array<{ name: string }>>`
+      select name from schema_migrations
+      where name in ('0057_durable_queue_control.sql', '0058_turn_admission_usage_enrollment.sql')
+      order by name`;
+    const migrationNames = new Set(migrations.map((row) => row.name));
+    if (
+      !migrationNames.has("0057_durable_queue_control.sql") ||
+      !migrationNames.has("0058_turn_admission_usage_enrollment.sql")
+    ) {
+      throw new Error("repark requires the complete ordered 0057+0058 schema");
+    }
+    const rows = (await sql.unsafe<OrphanedRunningTurn[]>(
+      `select workspace_id, session_id, id as turn_id, active_attempt_id
+       from session_turns
+       where status = 'running'
+       order by workspace_id, session_id, id`,
+    )) as unknown as OrphanedRunningTurn[];
+    const reparks: Array<{
+      workspaceId: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string | null;
+      sessionStatus: "recovering" | "paused";
+      closedToolCalls: number;
+      eventIds: string[];
+    }> = [];
+    if (execute) {
+      for (const row of rows) {
+        const result = await reparkOrphanedSessionTurn(client.db, row.workspace_id, {
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          attemptId: row.active_attempt_id,
+          reason: `production_cutover:${runId}`,
+        });
+        if (result.action !== "recovering") {
+          throw new Error(
+            `orphaned turn ${row.turn_id} changed ownership during the maintenance repark`,
+          );
+        }
+        reparks.push({
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          turnId: row.turn_id,
+          attemptId: row.active_attempt_id,
+          sessionStatus: result.sessionStatus,
+          closedToolCalls: result.closedToolCalls,
+          eventIds: result.events.map((event) => event.id),
+        });
+      }
+    }
+    const remaining = await sql<Array<{ turn_id: string }>>`
+      select id as turn_id from session_turns where status = 'running' order by id`;
+    if (execute && remaining.length > 0) {
+      throw new Error(`${remaining.length} running turn(s) remain after cutover repark`);
+    }
+    const draft = {
+      contractVersion: "opengeni/session-control-cutover-repark/v2",
+      runId,
+      executed: execute,
+      capturedAt: new Date().toISOString(),
+      runningSessionWorkflowCount: runningWorkflows.length,
+      candidateTurns: rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        attemptId: row.active_attempt_id,
+      })),
+      reparks,
+      remainingRunningTurnIds: remaining.map((row) => row.turn_id),
+    };
+    const artifact = { ...draft, sha256: sha256(draft) };
+    await writeJson(output, artifact);
+    process.stderr.write(
+      `[cutover-repark] ${execute ? "reparked" : "found"} ${rows.length} orphaned running turn(s), sha256 ${artifact.sha256}\n`,
+    );
+  } finally {
+    await client.close().catch(() => undefined);
+    await sql.end({ timeout: 2 }).catch(() => undefined);
+    await connection.close().catch(() => undefined);
+  }
+}
+
 async function responseJson(
   response: Response,
   operation: string,
@@ -565,6 +918,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
     const randomBytes = crypto.getRandomValues(new Uint8Array(32));
     const token = `ogk_${Buffer.from(randomBytes).toString("hex")}`;
     const keyHash = createHash("sha256").update(token).digest("hex");
+    const apiKeyTtlSeconds = timeoutSeconds + 300;
     const inserted = await sql<Array<{ id: string }>>`
       insert into api_keys (
         account_id, workspace_id, name, prefix, key_hash, permissions, expires_at
@@ -572,7 +926,7 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
         ${candidate.account_id}, ${candidate.workspace_id}, ${`OpenGeni production canary ${runId}`},
         ${token.slice(0, 14)}, ${keyHash},
         ${sql.json(["workspace:read", "sessions:create", "sessions:read", "sessions:control"])},
-        now() + interval '15 minutes'
+        now() + ${apiKeyTtlSeconds} * interval '1 second'
       ) returning id`;
     apiKeyId = inserted[0]?.id ?? null;
     if (!apiKeyId) throw new Error("failed to create the temporary canary API key");
@@ -582,34 +936,110 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
       "content-type": "application/json",
     };
     const canaryMarker = `OPENGENI_CANARY_OK_${runId.replaceAll(/[^A-Za-z0-9]/g, "_")}`;
-    const createResponse = await fetch(
-      `${apiBaseUrl}/v1/workspaces/${candidate.workspace_id}/sessions`,
-      {
-        method: "POST",
-        headers,
-        signal: AbortSignal.timeout(30_000),
-        body: JSON.stringify({
-          initialMessage: `Reply with exactly ${canaryMarker} and nothing else. Do not call tools.`,
-          resources: [],
-          tools: [],
-          metadata: { productionCutoverCanary: runId },
-          model,
-          reasoningEffort: "low",
-          sandbox: "new",
-          idempotencyKey: `production-cutover-canary:${runId}`,
-        }),
-      },
-    );
-    const created = await responseJson(createResponse, "canary session creation");
-    const sessionId = typeof created.id === "string" ? created.id : null;
+    const idempotencyKey = `production-cutover-canary:${runId}`;
+    const createBody = JSON.stringify({
+      initialMessage: `Reply with exactly ${canaryMarker} and nothing else. Do not call tools.`,
+      resources: [],
+      tools: [],
+      metadata: { productionCutoverCanary: runId },
+      model,
+      reasoningEffort: "low",
+      sandbox: "new",
+      idempotencyKey,
+    });
+    const overallDeadline = Date.now() + timeoutSeconds * 1_000;
+    const createAttempts: Array<{
+      attempt: number;
+      startedAt: string;
+      durationMs: number;
+      httpStatus: number | null;
+      outcome: "created" | "authoritative-existing" | "retryable";
+      error: string | null;
+    }> = [];
+    let sessionId: string | null = null;
+    for (let attempt = 1; attempt <= 5 && Date.now() < overallDeadline; attempt += 1) {
+      const startedAt = new Date().toISOString();
+      const startedMs = Date.now();
+      let httpStatus: number | null = null;
+      let retryableError: string | null = null;
+      let nonRetryable = false;
+      try {
+        const response = await fetch(
+          `${apiBaseUrl}/v1/workspaces/${candidate.workspace_id}/sessions`,
+          {
+            method: "POST",
+            headers,
+            signal: AbortSignal.timeout(
+              Math.max(1_000, Math.min(30_000, overallDeadline - Date.now())),
+            ),
+            body: createBody,
+          },
+        );
+        httpStatus = response.status;
+        if (response.ok) {
+          const created = await responseJson(response, "canary session creation");
+          sessionId = typeof created.id === "string" ? created.id : null;
+          if (!sessionId) throw new Error("canary session creation returned no session id");
+          createAttempts.push({
+            attempt,
+            startedAt,
+            durationMs: Date.now() - startedMs,
+            httpStatus,
+            outcome: "created",
+            error: null,
+          });
+          break;
+        }
+        if (response.status < 500) {
+          nonRetryable = true;
+          await responseJson(response, "canary session creation");
+        }
+        retryableError = `HTTP ${response.status}`;
+      } catch (error) {
+        retryableError = error instanceof Error ? error.message : String(error);
+      }
+      if (nonRetryable) throw new Error(retryableError ?? "canary session creation was rejected");
+      const [existing] = await sql<Array<{ id: string }>>`
+        select id from sessions
+        where workspace_id = ${candidate.workspace_id}
+          and create_idempotency_key = ${idempotencyKey}
+        limit 1`;
+      if (existing?.id) {
+        sessionId = existing.id;
+        createAttempts.push({
+          attempt,
+          startedAt,
+          durationMs: Date.now() - startedMs,
+          httpStatus,
+          outcome: "authoritative-existing",
+          error: retryableError,
+        });
+        break;
+      }
+      createAttempts.push({
+        attempt,
+        startedAt,
+        durationMs: Date.now() - startedMs,
+        httpStatus,
+        outcome: "retryable",
+        error: retryableError,
+      });
+      if (Date.now() < overallDeadline) await Bun.sleep(1_000);
+    }
     if (!sessionId) throw new Error("canary session creation returned no session id");
 
-    const deadline = Date.now() + timeoutSeconds * 1_000;
+    const deadline = overallDeadline;
     let completedEventId: string | null = null;
     let usageEventId: string | null = null;
     let observedProvider: string | null = null;
     let observedModel: string | null = null;
     let terminalFailure = false;
+    const turnStateSamples: Array<{
+      capturedAt: string;
+      turnId: string;
+      status: string;
+      activeAttemptId: string | null;
+    }> = [];
     while (Date.now() < deadline) {
       const response = await fetch(
         `${apiBaseUrl}/v1/workspaces/${candidate.workspace_id}/sessions/${sessionId}/events?limit=1000`,
@@ -636,6 +1066,24 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
         }
         if (event.type === "turn.failed" || event.type === "turn.cancelled") terminalFailure = true;
       }
+      const turnRows = await sql<
+        Array<{ id: string; status: string; active_attempt_id: string | null }>
+      >`
+        select id, status, active_attempt_id from session_turns
+        where workspace_id = ${candidate.workspace_id} and session_id = ${sessionId}
+        order by position desc, id desc limit 1`;
+      const sampledTurn = turnRows[0];
+      if (sampledTurn) {
+        turnStateSamples.push({
+          capturedAt: new Date().toISOString(),
+          turnId: sampledTurn.id,
+          status: sampledTurn.status,
+          activeAttemptId: sampledTurn.active_attempt_id,
+        });
+        if (sampledTurn.status === "running" && !sampledTurn.active_attempt_id) {
+          throw new Error("canary became running without a registered attempt owner");
+        }
+      }
       if (completedEventId && usageEventId) break;
       if (terminalFailure) throw new Error("production Codex canary turn failed or was cancelled");
       await Bun.sleep(2_000);
@@ -645,8 +1093,70 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
         "production Codex canary did not produce the exact reply and usage evidence in time",
       );
     }
+    if (observedProvider !== "codex-subscription") {
+      throw new Error(
+        `production canary used ${observedProvider ?? "an unknown provider"}, expected codex-subscription`,
+      );
+    }
+    const currentUsage = await sql<
+      Array<{ id: string; turn_id: string; source_key: string; provider: string; model: string }>
+    >`
+      select id, turn_id, payload ->> 'sourceKey' as source_key,
+        payload ->> 'provider' as provider, payload ->> 'model' as model
+      from session_events
+      where workspace_id = ${candidate.workspace_id}
+        and session_id = ${sessionId}
+        and type = 'agent.model.usage'
+        and turn_association = 'current'
+      order by sequence`;
+    if (
+      currentUsage.length !== 1 ||
+      currentUsage[0]?.id !== usageEventId ||
+      currentUsage[0]?.provider !== "codex-subscription" ||
+      currentUsage[0]?.model !== model ||
+      !currentUsage[0]?.source_key
+    ) {
+      throw new Error("canary did not produce exactly one authoritative Codex usage source");
+    }
+    const usage = currentUsage[0]!;
+    const duplicateUsage = await sql<Array<{ count: number }>>`
+      select count(*)::integer as count from session_events
+      where workspace_id = ${candidate.workspace_id}
+        and session_id = ${sessionId}
+        and type = 'agent.model.usage'
+        and payload ->> 'sourceKey' = ${usage.source_key}
+        and turn_association = 'duplicate'
+        and duplicate_of_event_id = ${usage.id}`;
+    const billingMarkers = await sql<Array<{ count: number }>>`
+      select count(*)::integer as count from usage_events
+      where workspace_id = ${candidate.workspace_id}
+        and event_type = 'model.cost'
+        and quantity = 0
+        and source_resource_id = ${`${usage.turn_id}:${usage.source_key}`}`;
+    const creditDebits = await sql<Array<{ count: number }>>`
+      select count(*)::integer as count from credit_ledger_entries
+      where workspace_id = ${candidate.workspace_id}
+        and source_type = 'model_response'
+        and source_id = ${`${usage.turn_id}:${usage.source_key}`}`;
+    const startedAttempts = await sql<Array<{ count: number }>>`
+      select count(*)::integer as count from session_events
+      where workspace_id = ${candidate.workspace_id}
+        and session_id = ${sessionId}
+        and turn_id = ${usage.turn_id}
+        and type = 'turn.started'
+        and turn_attempt_id is not null
+        and turn_association = 'current'`;
+    if (Number(billingMarkers[0]?.count ?? 0) !== 1) {
+      throw new Error("canary is missing its one idempotent zero-cost Codex billing marker");
+    }
+    if (Number(creditDebits[0]?.count ?? 0) !== 0) {
+      throw new Error("canary unexpectedly debited OpenGeni credits");
+    }
+    if (Number(startedAttempts[0]?.count ?? 0) !== 1) {
+      throw new Error("canary has no unique current turn.started attempt evidence");
+    }
     const draft = {
-      contractVersion: "opengeni/session-control-cutover-canary/v1",
+      contractVersion: "opengeni/session-control-cutover-canary/v2",
       runId,
       capturedAt: new Date().toISOString(),
       workspaceId: candidate.workspace_id,
@@ -656,6 +1166,15 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
       provider: observedProvider,
       model: observedModel,
       exactReplyMatched: true,
+      createIdempotencyKey: idempotencyKey,
+      createAttempts,
+      turnStateSamples,
+      usageSourceKey: usage.source_key,
+      classifiedDuplicateUsageCount: Number(duplicateUsage[0]?.count ?? 0),
+      zeroCostBillingMarkerCount: Number(billingMarkers[0]?.count ?? 0),
+      creditDebitCount: Number(creditDebits[0]?.count ?? 0),
+      currentStartedAttemptCount: Number(startedAttempts[0]?.count ?? 0),
+      azureModelTokensUsed: false,
       temporaryApiKeyRevoked: true,
     };
     await sql`update api_keys set revoked_at = now(), updated_at = now() where id = ${apiKeyId}`;
@@ -725,9 +1244,18 @@ async function preflight(args: ParsedArgs): Promise<void> {
     );
   }
 
-  const migrationPath = "packages/db/drizzle/0057_durable_queue_control.sql";
-  const migrationBytes = await readFile(migrationPath);
-  const migrationSha256 = createHash("sha256").update(migrationBytes).digest("hex");
+  const migrationPaths = [
+    "packages/db/drizzle/0057_durable_queue_control.sql",
+    "packages/db/drizzle/0058_turn_admission_usage_enrollment.sql",
+  ] as const;
+  const migrations = await Promise.all(
+    migrationPaths.map(async (path) => ({
+      path,
+      sha256: createHash("sha256")
+        .update(await readFile(path))
+        .digest("hex"),
+    })),
+  );
   const workerPackage = parseJson<{
     devDependencies?: Record<string, string>;
   }>(await readFile("apps/worker/package.json", "utf8"), "apps/worker/package.json");
@@ -761,12 +1289,20 @@ async function preflight(args: ParsedArgs): Promise<void> {
   }
 
   const draft = {
-    contractVersion: "opengeni/session-control-cutover-preflight/v1",
+    contractVersion: "opengeni/session-control-cutover-preflight/v2",
     capturedAt: new Date().toISOString(),
     sourceSha: bakedSourceSha,
-    migration: {
-      path: migrationPath,
-      sha256: migrationSha256,
+    migrations,
+    workerTopology: {
+      roles: ["control", "turn"],
+      turnTaskQueueSuffix: "-turns",
+      controlActivityConcurrencyPerPod: 32,
+      controlWorkflowConcurrencyPerPod: 40,
+      turnActivityConcurrencyPerPod: 8,
+    },
+    validationModelPolicy: {
+      allowedPrefix: "codex/",
+      azureModelTokensAllowed: false,
     },
     agentsCoreVersion,
     runStateSchemaVersion: schema.schemaVersion,
@@ -774,7 +1310,7 @@ async function preflight(args: ParsedArgs): Promise<void> {
   const artifact = { ...draft, sha256: sha256(draft) };
   await writeJson(output, artifact);
   process.stderr.write(
-    `[cutover-preflight] source ${bakedSourceSha}, migration ${migrationSha256}, RunState ${schema.schemaVersion}\n`,
+    `[cutover-preflight] source ${bakedSourceSha}, migrations ${migrations.map((migration) => migration.sha256).join(",")}, RunState ${schema.schemaVersion}\n`,
   );
 }
 
@@ -783,13 +1319,14 @@ function usage(): void {
   bun run operator:session-control-cutover preflight --source-sha SHA --output FILE
   bun run operator:session-control-cutover capture --phase baseline|migrated|final --output FILE [--allow-empty-baseline]
   bun run operator:session-control-cutover reconcile --baseline FILE --observed FILE --mode migration|final-fate --output FILE
-  bun run operator:session-control-cutover wake --output FILE [--execute]
+  bun run operator:session-control-cutover wake --turn-capacity N --output FILE [--execute] [--stability-seconds N]
   bun run operator:session-control-cutover temporal-schedules --action pause|resume|inspect --run-id ID [--input FILE] --output FILE
   bun run operator:session-control-cutover temporal-workflows --action inspect|terminate --run-id ID --output FILE [--execute]
+  bun run operator:session-control-cutover repark-orphaned-turns --run-id ID --output FILE [--execute]
   bun run operator:session-control-cutover canary --run-id ID --workspace-id UUID --model codex/MODEL --api-base-url URL --output FILE [--timeout-seconds N]
   bun run operator:session-control-cutover maintenance-server
 
-capture and wake require OPENGENI_MIGRATIONS_DATABASE_URL. wake also requires the production Temporal settings.
+capture, repark, canary, and wake require OPENGENI_MIGRATIONS_DATABASE_URL. repark and wake also require the production Temporal settings.
 `);
 }
 
@@ -802,6 +1339,7 @@ if (import.meta.main) {
     else if (args.command === "wake") await wake(args);
     else if (args.command === "temporal-schedules") await temporalSchedules(args);
     else if (args.command === "temporal-workflows") await temporalWorkflows(args);
+    else if (args.command === "repark-orphaned-turns") await reparkOrphanedTurns(args);
     else if (args.command === "canary") await productionCodexCanary(args);
     else if (args.command === "maintenance-server") await maintenanceServer();
     else if (args.command === "help" || args.flags.has("--help")) usage();

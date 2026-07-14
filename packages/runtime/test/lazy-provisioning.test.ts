@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
-import { applyManifestToProvidedSession } from "../../../node_modules/.bun/@openai+agents-core@0.11.6+4b65e697391ccbcb/node_modules/@openai/agents-core/dist/sandbox/runtime/providedSessionManifest.js";
+
+const agentsCoreEntry = import.meta.resolve("@openai/agents-core");
+const { applyManifestToProvidedSession } = (await import(
+  new URL("./sandbox/runtime/providedSessionManifest.mjs", agentsCoreEntry).href
+)) as {
+  applyManifestToProvidedSession: (session: never, manifest: never) => Promise<void>;
+};
 
 async function manifestEnv(manifest: {
   resolveEnvironment?: () => Promise<Record<string, string>>;

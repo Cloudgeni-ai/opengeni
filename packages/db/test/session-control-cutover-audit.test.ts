@@ -193,12 +193,90 @@ describe("session-control production cutover audit", () => {
       await sql`
           insert into schema_migrations (name)
           values ('0057_durable_queue_control.sql') on conflict do nothing`;
+
+      const migrated0057 = await captureSessionControlCutoverSnapshot(
+        sql,
+        "migrated",
+        "2026-07-14T10:00:30.000Z",
+      );
+      const migrated0057Result = reconcileSessionControlCutover(
+        baseline,
+        migrated0057,
+        "migration",
+      );
+      expect(migrated0057Result.errors).toEqual([]);
+      expect(migrated0057Result.ok).toBe(true);
+
+      const usageEventIds = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+      await sql`
+          insert into session_events (
+            id, account_id, workspace_id, session_id, turn_id, turn_generation,
+            turn_association, sequence, type, payload
+          ) values
+            (${usageEventIds[0]!}, ${accountId}, ${workspaceId}, ${sessionId}, ${runningTurnId}, 1,
+             'current', 35, 'agent.model.usage', ${sql.json({ sourceKey: "response-duplicate" })}),
+            (${usageEventIds[1]!}, ${accountId}, ${workspaceId}, ${sessionId}, ${runningTurnId}, 1,
+             'current', 36, 'agent.model.usage', ${sql.json({ sourceKey: "response-duplicate" })}),
+            (${usageEventIds[2]!}, ${accountId}, ${workspaceId}, ${sessionId}, ${runningTurnId}, 1,
+             'current', 37, 'agent.model.usage', ${sql.json({ sourceKey: "response-duplicate" })})`;
+
+      const remediationBaseline = await captureSessionControlCutoverSnapshot(
+        sql,
+        "baseline",
+        "2026-07-14T10:00:45.000Z",
+      );
+
+      await applyFile(sql, "0058_turn_admission_usage_enrollment.sql");
+      await sql`
+          insert into schema_migrations (name)
+          values ('0058_turn_admission_usage_enrollment.sql') on conflict do nothing`;
+
+      const classifiedUsage = await sql<
+        Array<{
+          id: string;
+          turn_association: string;
+          duplicate_of_event_id: string | null;
+          duplicate_reason: string | null;
+        }>
+      >`
+          select id, turn_association, duplicate_of_event_id, duplicate_reason
+          from session_events
+          where id in (${usageEventIds[0]!}, ${usageEventIds[1]!}, ${usageEventIds[2]!})
+          order by sequence`;
+      expect([...classifiedUsage]).toEqual([
+        {
+          id: usageEventIds[0]!,
+          turn_association: "current",
+          duplicate_of_event_id: null,
+          duplicate_reason: null,
+        },
+        {
+          id: usageEventIds[1]!,
+          turn_association: "duplicate",
+          duplicate_of_event_id: usageEventIds[0]!,
+          duplicate_reason: "duplicate_provider_response_usage",
+        },
+        {
+          id: usageEventIds[2]!,
+          turn_association: "duplicate",
+          duplicate_of_event_id: usageEventIds[0]!,
+          duplicate_reason: "duplicate_provider_response_usage",
+        },
+      ]);
+      const enrollable = await sql<Array<{ session_id: string }>>`
+          select session_id
+          from opengeni_private.list_enrollable_sessions(10000)
+          order by session_id`;
+      expect(enrollable.map((row) => row.session_id)).toEqual(
+        [sessionId, recoverySessionId].sort(),
+      );
+
       const migrated = await captureSessionControlCutoverSnapshot(
         sql,
         "migrated",
         "2026-07-14T10:01:00.000Z",
       );
-      const result = reconcileSessionControlCutover(baseline, migrated, "migration");
+      const result = reconcileSessionControlCutover(remediationBaseline, migrated, "migration");
       expect(result.errors).toEqual([]);
       expect(result.ok).toBe(true);
 

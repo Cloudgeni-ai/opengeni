@@ -82,7 +82,10 @@ export function makeResumeBoxById(
     let session: ApiSandboxSession;
     try {
       const state = await client.deserializeSessionState(resumeState);
-      session = await client.resume(state);
+      // API-direct access borrows the live box. The lease remains its sole
+      // lifecycle owner, even when the serialized founding handle was owned.
+      // Clone instead of mutating the canonical resume envelope.
+      session = await client.resume({ ...state, ownsSandbox: false });
     } catch (error) {
       throw new SandboxResumeError(
         `Failed to resume sandbox box by id on backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,

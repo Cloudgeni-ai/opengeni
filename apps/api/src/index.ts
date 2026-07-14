@@ -93,8 +93,15 @@ export async function createTemporalWorkflowClient(
         signalArgs: [wakeRevision],
       });
     },
-    signalApprovalDecision: async ({ eventId, workflowId }) => {
-      await temporal.workflow.getHandle(workflowId).signal("approvalDecision", eventId);
+    signalApprovalDecision: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [{ accountId, workspaceId, sessionId }],
+        signal: "approvalDecision",
+        signalArgs: [eventId],
+      });
     },
     signalSessionControl: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
       // Start-or-signal: a control sent after the prior workflow returned idle

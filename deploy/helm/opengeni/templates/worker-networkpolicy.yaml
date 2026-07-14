@@ -10,7 +10,9 @@ spec:
   podSelector:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: worker
+    matchExpressions:
+      - key: opengeni.ai/worker-role
+        operator: Exists
   policyTypes:
     {{- if .Values.networkPolicy.egress.enabled }}
     - Egress

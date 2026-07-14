@@ -10,61 +10,43 @@ worker:
   image:
     tag: "RELEASE_TAG"
     digest: "sha256:WORKER_IMAGE_DIGEST"
-  # Memory sizing grounded in production measurement (2026-07-10): a single
-  # worker pod runs ~13 concurrent sessions plus ~17 sandbox clients, each
-  # session holding its full in-turn history (observed up to ~345k input
-  # tokens). Pods were OOMKilled (exit 137) against the 4Gi chart default
-  # repeatedly under fleet load; peak is spiky because serializing a large run
-  # state transiently copies it. Raise the limit to 6Gi (50% over the observed
-  # kill point) and raise the request toward the steady-state footprint so
-  # (a) the scheduler reserves realistically and (b) the memory-utilization HPA
-  # below is meaningful — HPA memory utilization is measured against the
-  # REQUEST, so a 1Gi request would read >100% and peg the HPA at max on the
-  # first sample. 6Gi (not 8Gi) keeps headroom on the ~16Gi nodes for api/relay/
-  # system pods; once proactive context compaction is fixed the histories — and
-  # thus this footprint — shrink further.
-  resources:
-    requests:
-      cpu: 500m
-      memory: 3Gi
-    limits:
-      cpu: "2"
-      memory: 6Gi
-  # Worker autoscaling was never enabled on this managed profile (the chart
-  # default is enabled:false and only relay opted in), so production ran a
-  # fixed 2 replicas while the fleet grew — the ~27-session load could not
-  # spread. Enable it here. The worker is MEMORY bound, not CPU bound (CPU
-  # stayed well under target while pods OOMed), so memory is the primary signal
-  # with CPU as a secondary load valve. Caveats this does NOT solve on its own,
-  # documented for operators: HPA scale-up is laggy and new pods only take NEW
-  # sessions, so it cannot rescue an already-hot pod — the limit headroom above
-  # and earlier context compaction are what prevent a single-pod OOM. The
-  # scaleDown stabilization keeps a transient dip from evicting a pod mid-turn
-  # (the 120s termination grace + PDB minAvailable:1 requeue survivors, but the
-  # graceful path loses less). minReplicas is 3, not 2: two pods at ~13 fat
-  # sessions each is exactly the density that OOMed, so the floor is cheap
-  # insurance that de-densifies deterministically without waiting on HPA
-  # scale-up (which only lands new sessions on new pods).
-  autoscaling:
-    enabled: true
-    minReplicas: 3
-    maxReplicas: 20
-    targetCPUUtilizationPercentage: 70
-    targetMemoryUtilizationPercentage: 80
-    customMetrics: []
-    behavior:
-      scaleUp:
-        stabilizationWindowSeconds: 60
-        policies:
-          - type: Pods
-            value: 2
-            periodSeconds: 60
-      scaleDown:
-        stabilizationWindowSeconds: 600
-        policies:
-          - type: Pods
-            value: 1
-            periodSeconds: 300
+  # Control workflows and short recovery activities are isolated from agent
+  # inference so a saturated turn fleet cannot starve Pause, Steer, or wakeup.
+  control:
+    replicaCount: 2
+  turns:
+    replicaCount: 4
+    # Turn pods hold the in-flight model history and sandbox clients. The
+    # per-pod activity cap is enforced by the worker process; these limits cover
+    # the measured transient serialization peak without granting control work
+    # the same oversized footprint.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 3Gi
+      limits:
+        cpu: "2"
+        memory: 6Gi
+    autoscaling:
+      enabled: true
+      minReplicas: 4
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+      customMetrics: []
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
 
 web:
   image:

@@ -1,25 +1,30 @@
 {{- if .Values.worker.enabled }}
+{{- range $role := list "control" "turns" }}
+{{- if ne $role "control" }}
+---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "opengeni.fullname" . }}-worker
+  name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
   labels:
-    {{- include "opengeni.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
-  {{- if ((.Values.observability).metrics).enabled }}
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $role }}
+  {{- if (($.Values.observability).metrics).enabled }}
   annotations:
     prometheus.io/scrape: "true"
-    prometheus.io/path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
-    prometheus.io/port: {{ (.Values.worker.service).port | default 8001 | quote }}
+    prometheus.io/path: {{ (($.Values.observability).metrics).path | default "/metrics" | quote }}
+    prometheus.io/port: {{ ($.Values.worker.service).port | default 8001 | quote }}
   {{- end }}
 spec:
-  type: {{ (.Values.worker.service).type | default "ClusterIP" }}
+  type: {{ ($.Values.worker.service).type | default "ClusterIP" }}
   ports:
-    - port: {{ (.Values.worker.service).port | default 8001 }}
+    - port: {{ ($.Values.worker.service).port | default 8001 }}
       targetPort: http
       protocol: TCP
       name: http
   selector:
-    {{- include "opengeni.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
+    {{- include "opengeni.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $role }}
+{{- end }}
 {{- end }}

@@ -555,6 +555,14 @@ describe("model call usage observability", () => {
             payload: event.payload,
           })),
         );
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as any,
+        };
       },
       accountId: "acct-1",
       workspaceId: "ws-1",
@@ -617,7 +625,14 @@ describe("model call usage observability", () => {
 
     await emitModelCallUsage({
       observability: observability as any,
-      publish: null,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
       accountId: "acct-1",
       workspaceId: "ws-1",
       sessionId: "sess-1",
@@ -644,6 +659,37 @@ describe("model call usage observability", () => {
       servingAccountHash: "abc123def456",
       accountChangedFromPrevCall: true,
     });
+  });
+
+  test("does not log a duplicate usage observation as authoritative", async () => {
+    const infos: Array<Record<string, unknown>> = [];
+    await emitModelCallUsage({
+      observability: {
+        info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+        warn: mock(),
+      } as any,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "duplicate" as const,
+          duplicateOfEventId: crypto.randomUUID(),
+          duplicateReason: "duplicate_provider_response_usage",
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-duplicate",
+      usage: { usage: { inputTokens: 10, outputTokens: 1 } },
+    });
+
+    expect(infos).toEqual([]);
   });
 });
 

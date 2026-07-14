@@ -119,7 +119,6 @@ import {
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
-import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
   SUMMARY_BUFFER_TOKENS,
@@ -3973,16 +3972,6 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       return out;
     }
     if (data?.type === "response_done") {
-      const responseUsage = modelResponseUsageFromSdkEvent(event);
-      if (responseUsage) {
-        out.push({
-          type: "agent.model.usage",
-          payload: {
-            responseId: responseUsage.responseId ?? null,
-            ...modelCallUsageTelemetry(responseUsage.usage),
-          },
-        });
-      }
       return out;
     }
   }
@@ -3990,18 +3979,6 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
-    }
-    if (raw?.type === "response.completed") {
-      const responseUsage = modelResponseUsageFromSdkEvent(event);
-      if (responseUsage) {
-        out.push({
-          type: "agent.model.usage",
-          payload: {
-            responseId: responseUsage.responseId ?? null,
-            ...modelCallUsageTelemetry(responseUsage.usage),
-          },
-        });
-      }
     }
     return out;
   }

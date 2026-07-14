@@ -21,8 +21,13 @@ import {
 } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { ensureModalRegistryImage } from "@opengeni/runtime";
-import { createActivities, type ActivityDependencies } from "./activities";
+import {
+  createControlActivities,
+  createTurnActivities,
+  type ActivityDependencies,
+} from "./activities";
 import type { SignalCodexCapacityWorkflow, WakeSessionWorkflowSignal } from "./activities/types";
+import { turnTaskQueue } from "./workflows/activities";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
 import { observabilityEventLogger } from "./observability-metrics";
 
@@ -35,9 +40,12 @@ const SANDBOX_REAPER_SCHEDULE_ID = "opengeni-sandbox-lease-reaper";
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
 
+export type OpenGeniWorkerRole = "control" | "turn";
+
 export type WorkerOptions = {
+  role: OpenGeniWorkerRole;
   settings?: Settings;
-  activities?: ReturnType<typeof createActivities>;
+  activities?: ReturnType<typeof createControlActivities> | ReturnType<typeof createTurnActivities>;
   activityDependencies?: ActivityDependencies;
   // Embedded hosts install @opengeni/worker-bundle under node_modules, where
   // Temporal's workflow webpack refuses to transpile TS. They relocate
@@ -46,26 +54,28 @@ export type WorkerOptions = {
   workflowsPath?: string;
 };
 
-export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise<{
+export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   worker: Worker;
   connection: NativeConnection;
 }> {
   const settings = options.settings ?? getSettings();
   const observability =
     options.activityDependencies?.observability ??
-    createObservability(settings, { component: "worker" });
+    createObservability(settings, { component: `worker-${options.role}` });
   // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
   // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
   // both set (so non-modal / public-image deployments are byte-unchanged and never
   // load the modal SDK here). Memoized in the provider, so this runs once per process.
-  await retryStartupDependency(
-    "Modal private-registry image",
-    () => ensureModalRegistryImage(settings),
-    {
-      ...startupRetryOptions(settings),
-      onRetry: (event) => logStartupDependencyRetry(observability, event),
-    },
-  );
+  if (options.role === "turn") {
+    await retryStartupDependency(
+      "Modal private-registry image",
+      () => ensureModalRegistryImage(settings),
+      {
+        ...startupRetryOptions(settings),
+        onRetry: (event) => logStartupDependencyRetry(observability, event),
+      },
+    );
+  }
   const connection = await retryStartupDependency(
     "Temporal",
     () => NativeConnection.connect({ address: settings.temporalHost }),
@@ -76,7 +86,7 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
   );
   const activities =
     options.activities ??
-    createActivities({
+    (options.role === "control" ? createControlActivities : createTurnActivities)({
       ...options.activityDependencies,
       settings,
       observability,
@@ -84,10 +94,19 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
   const worker = await Worker.create({
     connection,
     namespace: settings.temporalNamespace,
-    taskQueue: settings.temporalTaskQueue,
-    workflowsPath:
-      options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
+    taskQueue:
+      options.role === "control"
+        ? settings.temporalTaskQueue
+        : turnTaskQueue(settings.temporalTaskQueue),
+    ...(options.role === "control"
+      ? {
+          workflowsPath:
+            options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
+          maxConcurrentWorkflowTaskExecutions: 40,
+        }
+      : {}),
     activities,
+    maxConcurrentActivityTaskExecutions: options.role === "turn" ? 8 : 32,
     // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
     // after shutdown() stops polling, in-flight activities get this long to
     // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
@@ -273,8 +292,12 @@ export async function registerFileUploadReaperSchedule(
 }
 
 export async function startWorker() {
+  const role = process.env.OPENGENI_WORKER_ROLE;
+  if (role !== "control" && role !== "turn") {
+    throw new Error("OPENGENI_WORKER_ROLE must be explicitly set to 'control' or 'turn'");
+  }
   const settings = getSettings();
-  const observability = createObservability(settings, { component: "worker" });
+  const observability = createObservability(settings, { component: `worker-${role}` });
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
@@ -311,6 +334,7 @@ export async function startWorker() {
       { ...retryOptions, onRetry },
     );
     workerBundle = await createOpenGeniWorker({
+      role,
       settings,
       activityDependencies: {
         observability,
@@ -329,22 +353,26 @@ export async function startWorker() {
         temporal: signaler.check,
       },
     });
-    // Register the ONE global reaper Schedule (no-op when sandboxOwnershipEnabled
-    // is false). Idempotent across the pool: only the first worker creates it. The
-    // static global-queue Worker.create above is UNCHANGED — there is no
-    // per-session worker factory.
-    reaperSchedule = await retryStartupDependency(
-      "Temporal schedule (sandbox reaper)",
-      () => registerSandboxReaperSchedule(settings, observability),
-      { ...retryOptions, onRetry },
-    );
-    fileUploadReaperSchedule = await retryStartupDependency(
-      "Temporal schedule (file upload reaper)",
-      () => registerFileUploadReaperSchedule(settings, observability),
-      { ...retryOptions, onRetry },
-    );
+    // Control workers alone own global schedules. Turn workers poll only the
+    // bounded inference activity queue and can never duplicate schedule setup.
+    if (role === "control") {
+      reaperSchedule = await retryStartupDependency(
+        "Temporal schedule (sandbox reaper)",
+        () => registerSandboxReaperSchedule(settings, observability),
+        { ...retryOptions, onRetry },
+      );
+      fileUploadReaperSchedule = await retryStartupDependency(
+        "Temporal schedule (file upload reaper)",
+        () => registerFileUploadReaperSchedule(settings, observability),
+        { ...retryOptions, onRetry },
+      );
+    }
     observability.info("OpenGeni worker listening", {
-      temporalTaskQueue: settings.temporalTaskQueue,
+      role,
+      temporalTaskQueue:
+        role === "control" ? settings.temporalTaskQueue : turnTaskQueue(settings.temporalTaskQueue),
+      maxConcurrentActivityTaskExecutions: role === "turn" ? 8 : 32,
+      maxConcurrentWorkflowTaskExecutions: role === "control" ? 40 : 0,
       httpPort: settings.workerHttpPort,
     });
     // GRACEFUL DEPLOY SHUTDOWN — the missing link that made every deploy a

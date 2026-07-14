@@ -9,6 +9,7 @@ import {
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
+  addSessionSystemUpdate,
   correctWorkspaceMemory,
   countVariableSets,
   beginRigChangeVerificationAttempt,
@@ -203,7 +204,7 @@ export function buildOpenGeniMcpServer(
   // and mint GitHub install links out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
-  registerWorkspaceOrchestrationTools(server, deps, grant, can, json);
+  registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
@@ -1229,14 +1230,15 @@ function registerRigTools(
   }
 }
 
-// Workspace orchestration for manager-style agents: sessions are listed,
-// inspected, spawned, and steered with the same domain functions the REST
-// routes use, so limits, validation, and usage metering cannot drift.
+// Workspace orchestration for manager-style agents. Session-authenticated
+// workers communicate through the typed internal-update plane; only a
+// sessionless operator can append a visible prompt through this surface.
 function registerWorkspaceOrchestrationTools(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
   can: (permission: Permission) => boolean,
+  callerSessionId: string | null,
   json: JsonResult,
 ): void {
   if (can("sessions:read")) {
@@ -1385,26 +1387,61 @@ function registerWorkspaceOrchestrationTools(
       "session_send_message",
       {
         description:
-          "Post a human/operator message into an existing session. delivery='queue' (default) appends normally. delivery='steer' atomically inserts and promotes this exact item, fences the active turn, and delivers it next with no intermediate queued inference.",
+          "Send information to another session. From an OpenGeni worker this becomes a coalescible internal update, never a visible prompt-queue row; pending updates are delivered together on the target's next inference. A sessionless operator call appends one visible prompt.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           text: z4.string().min(1),
-          delivery: z4.enum(["queue", "steer"]).optional(),
           // Header-value rotation only. URL/name/tool settings are immutable
           // after create; core enforces mcp_servers:attach on this field.
           mcpCredentialUpdates: z4.array(z4.unknown()).optional(),
         },
       },
-      async ({ sessionId, text, delivery, mcpCredentialUpdates }) => {
+      async ({ sessionId: targetSessionId, text, mcpCredentialUpdates }) => {
+        if (callerSessionId !== null) {
+          if ((mcpCredentialUpdates?.length ?? 0) > 0) {
+            throw new Error("internal session updates cannot change MCP credentials");
+          }
+          const result = await addSessionSystemUpdate(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: targetSessionId,
+            kind: "runtime_notice",
+            classification: "info",
+            sourceId: callerSessionId,
+            dedupeKey: `session-message:${callerSessionId}:${crypto.randomUUID()}`,
+            summary: text,
+            payload: { text },
+            lineage: { sourceSessionId: callerSessionId, targetSessionId },
+          });
+          if (result.reason === "session_cancelled") {
+            return json({ delivered: false, reason: result.reason });
+          }
+          if (result.added && result.events.length > 0) {
+            await deps.bus.publish(grant.workspaceId, targetSessionId, result.events);
+          }
+          if (result.shouldWake) {
+            await deps.workflowClient.wakeSessionWorkflow({
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: targetSessionId,
+              workflowId: result.temporalWorkflowId ?? workflowIdForSession(targetSessionId),
+            });
+          }
+          return json({
+            delivered: true,
+            updateId: result.update.id,
+            delivery: "coalesced_internal_update",
+          });
+        }
         const { accepted, turn } = await acceptSessionUserMessage(
           deps,
           grant,
           grant.workspaceId,
-          sessionId,
+          targetSessionId,
           {
             text,
             toolsProvided: false,
-            delivery: delivery ?? "queue",
+            delivery: "queue",
             origin: "operator",
             mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) =>
               SessionMcpCredentialUpdateInput.parse(update),

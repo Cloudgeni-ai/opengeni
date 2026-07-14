@@ -16,8 +16,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   buildSandboxImage,
   freePort,
+  startE2eWorkerTopology,
   startProcess,
   startTestServices,
+  type StartedE2eWorkerTopology,
   type StartedProcess,
   type TestServices,
   waitFor,
@@ -30,7 +32,7 @@ let workspaceId = "";
 describe("Channel-A structured services e2e (real Docker box, API-direct)", () => {
   let services: TestServices;
   let api: StartedProcess;
-  let worker: StartedProcess;
+  let worker: StartedE2eWorkerTopology;
   let sessionId = "";
 
   beforeAll(async () => {
@@ -47,11 +49,11 @@ describe("Channel-A structured services e2e (real Docker box, API-direct)", () =
       timeoutMs: 45_000,
     });
     workspaceId = await discoverWorkspaceId();
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+    worker = await startE2eWorkerTopology({
       cwd: repoRoot,
       env,
     });
-    await waitFor(() => worker.logs().includes("test worker listening"), {
+    await waitFor(() => worker.ready(), {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });

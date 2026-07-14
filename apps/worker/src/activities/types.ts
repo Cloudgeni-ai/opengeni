@@ -109,10 +109,9 @@ export type RunAgentTurnInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  triggerEventId: string;
   workflowId: string;
-  turnId: string;
   attemptId: string;
+  trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string };
 };
 
 export type SettleSessionControlInput = {
@@ -123,24 +122,27 @@ export type SettleSessionControlInput = {
   workflowId: string;
 };
 
-export type RecoverTurnAfterWorkerDeathInput = {
+export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  // The trigger the dead attempt was actually running (for an approval rerun
-  // this is the approval-decision event, not the turn row's original trigger).
-  triggerEventId: string;
-  workflowId: string;
-  turnId: string;
   attemptId: string;
-  dispatchId: string;
+  error?: string;
+};
+
+export type RecoverDispatchInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
   timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
 };
 
-export type RecoverTurnAfterWorkerDeathResult =
+export type RecoverDispatchResult =
   // The same current inference is now recoverable. It never enters the prompt
   // queue; the next claim creates a new attempt for this exact turn.
-  | { action: "recovering"; redispatches: number }
+  | { action: "unclaimed" }
+  | { action: "recovering"; turnId: string; redispatches: number }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.
@@ -148,12 +150,11 @@ export type RecoverTurnAfterWorkerDeathResult =
   // The per-turn crash-loop guard tripped; the workflow must fail the
   // session for real. `redispatches` is the count already consumed (== the
   // ceiling), so the failed attempt was worker death number redispatches + 1.
-  | { action: "exceeded"; redispatches: number };
+  | { action: "exceeded"; turnId: string; redispatches: number };
 
-export type ClaimNextSessionExecutionInput = {
+export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
-  workflowId: string;
 };
 
 export type MarkSessionIdleInput = {
@@ -196,10 +197,12 @@ export type IndexDocumentInput = {
   documentId: string;
 };
 
-export type RunAgentTurnResult = {
+type ClaimedRunAgentTurnResult = {
   // "recovering": this attempt ended after durably preserving the same current
   // inference for a new attempt. Recovery is not prompt queue work.
   status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  turnId: string;
+  attemptId: string;
   // Provider backpressure pacing: when set on an idle result, the session
   // workflow holds the loop this long before admitting the next turn (an
   // active goal's continuation would otherwise immediately re-hit the limit).
@@ -220,3 +223,10 @@ export type RunAgentTurnResult = {
   // prompt claim ordering consumes the request in-turn.
   deferredUntilWake?: boolean;
 };
+
+export type RunAgentTurnResult =
+  | ClaimedRunAgentTurnResult
+  | {
+      status: "unclaimed";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+    };
