@@ -60,9 +60,11 @@ jobs:
         # A preceding repository-wide gate may fail before the browser command
         # starts. In that case there are no screenshots to upload, and turning
         # that skipped command into a second artifact failure obscures the real
-        # cause. Once the browser gate succeeds, visual evidence remains
-        # mandatory (`if-no-files-found: error`).
-        if: ${{ always() && steps.ope26_session_pin_browser.outcome == 'success' }}
+        # cause. Once the browser gate actually runs, preserve its visual
+        # evidence on both green and red outcomes; a failure report is needed
+        # to diagnose a browser regression just as much as a passing capture.
+        # `if-no-files-found: error` remains mandatory in either case.
+        if: ${{ always() && (steps.ope26_session_pin_browser.outcome == 'success' || steps.ope26_session_pin_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v4
         with:
           name: ope26-session-pin-visual-evidence
