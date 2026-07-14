@@ -268,7 +268,7 @@ async function observedResponse(
           ...(requestId ? { providerRequestId: requestId } : {}),
         }).then(
           () => controller.error(error),
-          (auditError) => controller.error(auditError),
+          () => controller.error(error),
         );
       };
       armIdle = () => {
@@ -294,7 +294,7 @@ async function observedResponse(
           ...(requestId ? { providerRequestId: requestId } : {}),
         }).then(
           () => controller.error(reason),
-          (auditError) => controller.error(auditError),
+          () => controller.error(reason),
         );
       };
       if (externalSignal?.aborted) {

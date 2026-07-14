@@ -318,7 +318,7 @@ describe("codexSubscriptionFetch", () => {
     expect(events.find((event) => event.phase === "timed_out")?.timeoutClass).toBe("connect");
   });
 
-  test("an idle timeout after the first byte is surfaced without replay", async () => {
+  test("an idle timeout after the first byte stays typed without replay when audit persistence rejects", async () => {
     const events: CodexModelRequestEvent[] = [];
     let calls = 0;
     const response = await codexRequestStorage.run(
@@ -333,6 +333,9 @@ describe("codexSubscriptionFetch", () => {
         },
         onModelRequestEvent: (event) => {
           events.push(event);
+          if (event.phase === "timed_out") {
+            throw new Error("injected audit write failure");
+          }
         },
       }),
       () =>
@@ -407,6 +410,7 @@ describe("codexSubscriptionFetch", () => {
   test("external cancellation after headers cancels the body without a timeout retry", async () => {
     const events: CodexModelRequestEvent[] = [];
     const controller = new AbortController();
+    const abortReason = new Error("pause requested");
     let calls = 0;
     const response = await codexRequestStorage.run(
       ctx({
@@ -419,6 +423,9 @@ describe("codexSubscriptionFetch", () => {
         },
         onModelRequestEvent: (event) => {
           events.push(event);
+          if (event.phase === "failed") {
+            throw new Error("injected audit write failure");
+          }
         },
       }),
       () =>
@@ -431,11 +438,17 @@ describe("codexSubscriptionFetch", () => {
           body: JSON.stringify({ stream: true }),
         }),
     );
-    controller.abort(new Error("pause requested"));
-    await response.text().catch(() => undefined);
+    controller.abort(abortReason);
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
     expect(calls).toBe(1);
     expect(events.some((event) => event.phase === "timed_out")).toBe(false);
     expect(events.at(-1)?.phase).toBe("failed");
+    expect(observed).toBe(abortReason);
   });
 
   // A realistic codex stream: the terminal response.completed leaves output EMPTY,
