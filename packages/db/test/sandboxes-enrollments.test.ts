@@ -19,6 +19,7 @@ import {
   readMachineMetricsLatestForWorkspace,
   readMachineMetricsSeries,
   revokeEnrollment,
+  revokeEnrollmentByGeneration,
   sessionsWithActiveOpOnEnrollment,
   setActiveSandbox,
   setEnrollmentWentOffline,
@@ -117,6 +118,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       arch: "x86_64",
     });
     expect(created.status).toBe("active");
+    expect(created.credentialGeneration).toBe(1);
     expect(created.exposure).toBe("whole-machine");
     expect(created.hasDisplay).toBe(true);
     expect(created.allowScreenControl).toBe(false);
@@ -127,8 +129,8 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(fetched?.id).toBe(created.id);
     expect(fetched?.pubkey).toBe("ed25519:AAAA");
 
-    // Idempotent re-enroll of the SAME (workspace, pubkey) -> SAME row id, updated
-    // consent fields, NOT a duplicate.
+    // Re-enroll of the SAME (workspace, pubkey) -> SAME row id, updated consent
+    // fields, NOT a duplicate, and a new credential generation.
     const reEnrolled = await createEnrollment(db, {
       accountId,
       workspaceId,
@@ -138,6 +140,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       os: "linux",
     });
     expect(reEnrolled.id).toBe(created.id);
+    expect(reEnrolled.credentialGeneration).toBe(2);
     expect(reEnrolled.hasDisplay).toBe(false);
     expect(reEnrolled.allowScreenControl).toBe(true);
 
@@ -170,6 +173,70 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(reactivated.id).toBe(created.id);
     expect(reactivated.status).toBe("active");
     expect(reactivated.revokedAt).toBeNull();
+    expect(reactivated.credentialGeneration).toBe(3);
+  }, 60_000);
+
+  test("generation-fenced self-revoke is retry-safe, stale-proof, and tenant-isolated", async () => {
+    if (!available) return;
+    const a = await freshWorkspace();
+    const b = await freshWorkspace();
+    const first = await createEnrollment(db, {
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      pubkey: "ed25519:GENERATION-FENCE",
+    });
+    expect(first.credentialGeneration).toBe(1);
+
+    const revoked = await revokeEnrollmentByGeneration(db, {
+      workspaceId: a.workspaceId,
+      enrollmentId: first.id,
+      credentialGeneration: 1,
+    });
+    expect(revoked).toEqual({ matched: true, revoked: true });
+    const lostResponseRetry = await revokeEnrollmentByGeneration(db, {
+      workspaceId: a.workspaceId,
+      enrollmentId: first.id,
+      credentialGeneration: 1,
+    });
+    expect(lostResponseRetry).toEqual({ matched: true, revoked: false });
+
+    const second = await createEnrollment(db, {
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      pubkey: "ed25519:GENERATION-FENCE",
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.credentialGeneration).toBe(2);
+    expect(second.status).toBe("active");
+
+    // The old family cannot revoke the active re-enrollment.
+    expect(
+      await revokeEnrollmentByGeneration(db, {
+        workspaceId: a.workspaceId,
+        enrollmentId: second.id,
+        credentialGeneration: 1,
+      }),
+    ).toEqual({ matched: false, revoked: false });
+    expect((await getEnrollment(db, a.workspaceId, second.id))?.status).toBe("active");
+
+    // Workspace B cannot resolve or mutate A's enrollment even with the right id
+    // and current generation; the FORCE-RLS scoped lookup is intentionally flat.
+    expect(
+      await revokeEnrollmentByGeneration(db, {
+        workspaceId: b.workspaceId,
+        enrollmentId: second.id,
+        credentialGeneration: 2,
+      }),
+    ).toEqual({ matched: false, revoked: false });
+    expect((await getEnrollment(db, a.workspaceId, second.id))?.status).toBe("active");
+
+    expect(
+      await revokeEnrollmentByGeneration(db, {
+        workspaceId: a.workspaceId,
+        enrollmentId: second.id,
+        credentialGeneration: 2,
+      }),
+    ).toEqual({ matched: true, revoked: true });
   }, 60_000);
 
   test("clean going-offline marker: set → clear-on-heartbeat and clear-on-Hello (change-guarded)", async () => {
