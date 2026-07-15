@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 
-export const SESSION_CONTROL_CUTOVER_CONTRACT = "opengeni/session-control-cutover/v2" as const;
+export const SESSION_CONTROL_CUTOVER_CONTRACT = "opengeni/session-control-cutover/v3" as const;
 
 export type CutoverPhase = "baseline" | "migrated" | "final";
 
@@ -285,11 +285,14 @@ function collectProofGarbage(): void {
   if (typeof Bun !== "undefined") Bun.gc(true);
 }
 
-function updateProofHash(hash: ReturnType<typeof createHash>, value: unknown): void {
-  const serialized = stableJson(value);
-  hash.update(String(Buffer.byteLength(serialized, "utf8")));
+function updateProofHash(hash: ReturnType<typeof createHash>, fields: readonly string[]): void {
+  hash.update(String(fields.length));
   hash.update(":");
-  hash.update(serialized);
+  for (const field of fields) {
+    hash.update(String(Buffer.byteLength(field, "utf8")));
+    hash.update(":");
+    hash.update(field);
+  }
 }
 
 function newProofAccumulator(): RelationProofAccumulator {
@@ -306,9 +309,9 @@ function newProofAccumulator(): RelationProofAccumulator {
 
 async function captureRelationProofs(
   sql: postgres.Sql,
-  query: string,
-  ordinalColumn: string,
-  stableRow: (row: Row) => Record<string, unknown>,
+  copyQuery: string,
+  expectedFieldCount: number,
+  stableFieldIndexes: readonly number[],
   reference: SessionControlCutoverSnapshot | undefined,
   referenceProof: (session: CutoverSession) => CutoverRelationProof,
 ): Promise<Map<string, CutoverRelationProof>> {
@@ -316,34 +319,77 @@ async function captureRelationProofs(
     (reference?.sessions ?? []).map((session) => [session.id, referenceProof(session).maxOrdinal]),
   );
   const accumulators = new Map<string, RelationProofAccumulator>();
-  await sql.unsafe<Row[]>(query).cursor(2_048, (rows) => {
-    for (const row of rows) {
-      const sessionId = stringValue(row.session_id, "relation.session_id");
-      const ordinal = numberValue(row[ordinalColumn], `relation.${ordinalColumn}`);
-      const identity = { id: stringValue(row.id, "relation.id") };
-      const stable = stableRow(row);
-      const accumulator = accumulators.get(sessionId) ?? newProofAccumulator();
-      accumulator.count += 1;
-      accumulator.maxOrdinal = Math.max(accumulator.maxOrdinal ?? ordinal, ordinal);
-      updateProofHash(accumulator.stable, stable);
-      updateProofHash(accumulator.identity, identity);
-      const boundary = referenceBoundaries.get(sessionId);
-      const preservesRow = reference
-        ? boundary !== undefined && boundary !== null && ordinal <= boundary
-        : true;
-      if (preservesRow) {
-        accumulator.preservedCount += 1;
-        updateProofHash(accumulator.preservedStable, stable);
-        updateProofHash(accumulator.preservedIdentity, identity);
-      }
-      accumulators.set(sessionId, accumulator);
+  const stream = await sql.unsafe(copyQuery).readable();
+  let pending = "";
+  let bytesSinceGarbageCollection = 0;
+
+  const consumeLine = (line: string): void => {
+    const fields = line.split("\t");
+    if (fields.length !== expectedFieldCount) {
+      throw new Error(
+        `relation proof COPY row has ${fields.length} fields; expected ${expectedFieldCount}`,
+      );
     }
-    // The callback cursor makes the previous portal Result unreachable before
-    // this callback receives the next batch. Collect at that exact ownership
-    // boundary: a row-count interval is not a memory bound when event payload
-    // sizes vary, and Bun does not observe the pod's cgroup limit soon enough.
-    collectProofGarbage();
-  });
+    const sessionId = fields[0];
+    const id = fields[1];
+    const ordinalText = fields[2];
+    if (!sessionId || !id || !ordinalText) {
+      throw new Error("relation proof COPY row is missing its identity or ordinal");
+    }
+    const ordinal = numberValue(ordinalText, "relation.ordinal");
+    const stableFields = stableFieldIndexes.map((index) => {
+      const field = fields[index];
+      if (field === undefined) {
+        throw new Error(`relation proof COPY row is missing stable field ${index}`);
+      }
+      return field;
+    });
+    let accumulator = accumulators.get(sessionId);
+    if (!accumulator) {
+      accumulator = newProofAccumulator();
+      // Bun can represent a split substring as a view into the COPY chunk that
+      // produced it. A Map key then pins that entire network chunk for the life
+      // of the audit. Flatten the one durable key per session into independent
+      // storage; transient lookup strings remain collectable with their chunk.
+      const durableSessionId = Buffer.from(sessionId, "utf8").toString("utf8");
+      accumulators.set(durableSessionId, accumulator);
+    }
+    accumulator.count += 1;
+    accumulator.maxOrdinal = Math.max(accumulator.maxOrdinal ?? ordinal, ordinal);
+    updateProofHash(accumulator.stable, stableFields);
+    updateProofHash(accumulator.identity, [id]);
+    const boundary = referenceBoundaries.get(sessionId);
+    const preservesRow = reference
+      ? boundary !== undefined && boundary !== null && ordinal <= boundary
+      : true;
+    if (preservesRow) {
+      accumulator.preservedCount += 1;
+      updateProofHash(accumulator.preservedStable, stableFields);
+      updateProofHash(accumulator.preservedIdentity, [id]);
+    }
+  };
+
+  for await (const chunk of stream) {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    pending += text;
+    let start = 0;
+    for (;;) {
+      const newline = pending.indexOf("\n", start);
+      if (newline === -1) break;
+      consumeLine(pending.slice(start, newline));
+      start = newline + 1;
+    }
+    pending = pending.slice(start);
+    bytesSinceGarbageCollection += Buffer.byteLength(text, "utf8");
+    if (bytesSinceGarbageCollection >= 8 * 1_024 * 1_024) {
+      // COPY applies stream backpressure and exposes only bounded byte chunks.
+      // Collecting on bytes, rather than decoded row count, therefore bounds
+      // transient proof allocations independently of production cardinality.
+      collectProofGarbage();
+      bytesSinceGarbageCollection = 0;
+    }
+  }
+  if (pending.length > 0) consumeLine(pending);
   collectProofGarbage();
 
   const proofs = new Map<string, CutoverRelationProof>();
@@ -437,7 +483,7 @@ export async function captureSessionControlCutoverSnapshot(
   }
   if (phase !== "baseline") {
     if (!reference || reference.contractVersion !== SESSION_CONTROL_CUTOVER_CONTRACT) {
-      throw new Error(`${phase} capture requires a v2 baseline proof`);
+      throw new Error(`${phase} capture requires a v3 baseline proof`);
     }
     if (reference.phase !== "baseline") {
       throw new Error(`${phase} capture reference is not a baseline`);
@@ -505,32 +551,23 @@ export async function captureSessionControlCutoverSnapshot(
   );
   const historyProofs = await captureRelationProofs(
     sql,
-    `select session_id, id, turn_id, position, active, producer_codex_credential_id
-     from session_history_items order by session_id, position, id`,
-    "position",
-    (row) => ({
-      id: stringValue(row.id, "history.id"),
-      turnId: nullableString(row.turn_id, "history.turn_id"),
-      position: numberValue(row.position, "history.position"),
-      active: booleanValue(row.active),
-      producerCodexCredentialId: nullableString(
-        row.producer_codex_credential_id,
-        "history.producer_codex_credential_id",
-      ),
-    }),
+    `copy (
+       select session_id, id, position, turn_id, active, producer_codex_credential_id
+       from session_history_items order by session_id, position, id
+     ) to stdout with (format text)`,
+    6,
+    [1, 3, 2, 4, 5],
     reference,
     (session) => session.historyProof,
   );
   const eventProofs = await captureRelationProofs(
     sql,
-    `select session_id, id, turn_id, sequence
-     from session_events order by session_id, sequence, id`,
-    "sequence",
-    (row) => ({
-      id: stringValue(row.id, "event.id"),
-      turnId: nullableString(row.turn_id, "event.turn_id"),
-      sequence: numberValue(row.sequence, "event.sequence"),
-    }),
+    `copy (
+       select session_id, id, sequence, turn_id
+       from session_events order by session_id, sequence, id
+     ) to stdout with (format text)`,
+    4,
+    [1, 3, 2],
     reference,
     (session) => session.eventProof,
   );
