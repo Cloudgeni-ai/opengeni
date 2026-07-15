@@ -3653,11 +3653,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             executionGeneration,
             attemptId: input.attemptId,
           },
-          // Recovery must use the signal that triggered THIS compaction. A
-          // stale prior-turn value can be tiny (or refer to different active
-          // history), which would make the strict-shrink ceiling impossible.
-          // Proactive guards provide their exact current signal; provider
-          // overflows do not, so null derives the ceiling from active history.
+          // Never reuse the persisted prior-turn signal for recovery. Proactive
+          // guards provide their exact current signal; provider overflows do not,
+          // so null derives decision metadata from active history. Forced
+          // recovery proves progress separately by comparing the replacement
+          // with the current active-history estimate in maybeCompactContext.
           recoverySignalTokens,
           compactSummarizer,
           {
