@@ -319,7 +319,7 @@ async function captureRelationProofs(
   );
   const accumulators = new Map<string, RelationProofAccumulator>();
   let rowsSinceGarbageCollection = 0;
-  for await (const rows of sql.unsafe<Row[]>(query).cursor(2_048)) {
+  await sql.unsafe<Row[]>(query).cursor(2_048, (rows) => {
     for (const row of rows) {
       const sessionId = stringValue(row.session_id, "relation.session_id");
       const ordinal = numberValue(row[ordinalColumn], `relation.${ordinalColumn}`);
@@ -343,13 +343,14 @@ async function captureRelationProofs(
     }
     rowsSinceGarbageCollection += rows.length;
     if (rowsSinceGarbageCollection >= PROOF_GC_ROW_INTERVAL) {
-      // Bun's adaptive heap threshold does not observe a Kubernetes cgroup
-      // limit soon enough for multi-million-row cursors. Bound the transient
-      // row/string heap before the kernel has to enforce the pod limit.
+      // The callback cursor lets postgres.js release each portal Result before
+      // requesting the next batch. Its async iterator retains a promise chain
+      // that grows across multi-million-row relations under Bun. Explicit GC
+      // also keeps Bun's adaptive heap below the Kubernetes cgroup limit.
       collectProofGarbage();
       rowsSinceGarbageCollection = 0;
     }
-  }
+  });
   collectProofGarbage();
 
   const proofs = new Map<string, CutoverRelationProof>();
