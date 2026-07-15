@@ -11428,7 +11428,16 @@ type TurnAttemptFenceResult =
       turn: typeof schema.sessionTurns.$inferSelect | null;
     };
 
-/** Lock order for every activity write fence: workspace -> session -> turn. */
+/**
+ * Lock order for every activity write fence: workspace -> session -> turn.
+ *
+ * Activity writes only need a shared workspace admission lock: concurrent
+ * sessions may write independently, while an exclusive workspace Pause/Resume
+ * still waits for every admitted write and prevents later writes from crossing
+ * the control boundary. Using FOR UPDATE here serialized every active session in
+ * one workspace behind a single row and turned streaming into a workspace-wide
+ * lock queue.
+ */
 async function lockTurnAttemptWriteFenceTx(
   tx: Database,
   input: {
@@ -11443,7 +11452,7 @@ async function lockTurnAttemptWriteFenceTx(
     .select()
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, input.workspaceId))
-    .for("update")
+    .for("share")
     .limit(1);
   const [session] = await tx
     .select()
