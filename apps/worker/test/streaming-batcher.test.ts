@@ -8,7 +8,8 @@ import { createRuntimeBatcher } from "../src/activities/streaming";
 // tests pin: (1) coalescing under burst, (2) the trailing timer flushing on
 // model silence, (3) structural events still flushing immediately AND carrying
 // any pending deltas in order, (4) flushes never interleaving, and (5) the
-// before/after flush-count reduction for a 1000-delta turn.
+// before/after flush-count reduction for a 1000-delta turn, and (6) slow
+// storage never serializes provider ingestion while memory remains bounded.
 
 const DELTA: SessionEventType = "agent.message.delta";
 const REASONING: SessionEventType = "agent.reasoning.delta";
@@ -102,6 +103,72 @@ describe("createRuntimeBatcher", () => {
 
     await Promise.all([p1, p2]);
     expect(maxActive).toBe(1); // never two flushEvents in flight at once
+  });
+
+  test("a slow append does not block ordinary model deltas and the drain preserves order", async () => {
+    const starts: number[][] = [];
+    const gates: Array<() => void> = [];
+    const batcher = createRuntimeBatcher(async (events: AppendEventInput[]) => {
+      starts.push(events.map((event) => (event.payload as { n: number }).n));
+      await new Promise<void>((resolve) => gates.push(resolve));
+    });
+
+    // The 50th delta starts a flush. The next 50 pushes must still resolve while
+    // that slow append is blocked; this is the production regression where each
+    // model delta previously waited ~0.75s for its own DB transaction.
+    for (let n = 0; n < 100; n += 1) {
+      await batcher.push(delta(n));
+    }
+    expect(starts).toEqual([Array.from({ length: 50 }, (_, index) => index)]);
+
+    const drained = batcher.flush();
+    gates[0]!();
+    await sleep(10);
+    expect(starts[1]).toEqual(Array.from({ length: 50 }, (_, index) => index + 50));
+    gates[1]!();
+    await drained;
+  });
+
+  test("a failed timer flush is retained and rethrown at the next boundary", async () => {
+    const batcher = createRuntimeBatcher(async () => {
+      throw new Error("durable append failed");
+    });
+
+    await batcher.push(delta(1));
+    await sleep(60);
+    await expect(batcher.push(delta(2))).rejects.toThrow("durable append failed");
+    await expect(batcher.flush()).rejects.toThrow("durable append failed");
+  });
+
+  test("provider ingestion backpressures at the bounded high-water mark", async () => {
+    let releaseFirst: (() => void) | null = null;
+    let flushCount = 0;
+    const flushed: number[] = [];
+    const batcher = createRuntimeBatcher(async (events: AppendEventInput[]) => {
+      flushCount += 1;
+      flushed.push(...events.map((event) => (event.payload as { n: number }).n));
+      if (flushCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+    });
+
+    // 50 active + 949 pending stays below the 1,000-event high-water mark.
+    for (let n = 0; n < 999; n += 1) {
+      await batcher.push(delta(n));
+    }
+    let cappedPushSettled = false;
+    const cappedPush = batcher.push(delta(999)).then(() => {
+      cappedPushSettled = true;
+    });
+    await sleep(10);
+    expect(cappedPushSettled).toBe(false);
+
+    releaseFirst!();
+    await cappedPush;
+    await batcher.flush();
+    expect(flushed).toEqual(Array.from({ length: 1_000 }, (_, index) => index));
   });
 
   test("1000-delta turn: flush count collapses vs the per-delta (structural) path", async () => {
