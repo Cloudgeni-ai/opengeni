@@ -75,6 +75,8 @@ jobs:
             /tmp/ope26-session-pin-desktop-dark.png
             /tmp/ope26-session-pin-mobile-light.png
             /tmp/ope26-session-pin-mobile-dark.png
+            /tmp/ope26-session-pin-mobile-375-light.png
+            /tmp/ope26-session-pin-mobile-375-dark.png
 
       # OPE-22's escaped MCP timeout and stale-input-token regressions cross the
       # activity/DB/event boundary. Keep both explicit incident gates so a future

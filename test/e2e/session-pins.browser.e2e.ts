@@ -406,9 +406,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 150_000);
 
-  test("keeps the pin/header/rail usable at 320px in light and dark themes", async () => {
+  test("keeps the pin/header/rail usable at 320px and 375px in light and dark themes", async () => {
+    const mobileViewports = [
+      { width: 320, height: 740, artifactSuffix: "" },
+      { width: 375, height: 812, artifactSuffix: "-375" },
+    ] as const;
     const context = await configuredContext(browser, {
-      viewport: { width: 320, height: 740 },
+      viewport: mobileViewports[0],
       hasTouch: true,
       isMobile: true,
       extraHTTPHeaders: ownerHeaders,
@@ -438,54 +442,61 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, extra, true);
     }
 
-    for (const theme of ["light", "dark"] as const) {
-      await setTheme(page, theme);
-      await expectNoPageOverflow(page);
-      const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
-      const inspector = page.getByRole("button", { name: /session panel$/ });
-      const hamburger = page.getByRole("button", { name: "Open navigation" });
-      for (const control of [pin, inspector, hamburger]) {
-        const box = await control.boundingBox();
-        expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-        expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    for (const viewport of mobileViewports) {
+      await page.setViewportSize(viewport);
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(page, theme);
+        await expectNoPageOverflow(page);
+        const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
+        const inspector = page.getByRole("button", { name: /session panel$/ });
+        const hamburger = page.getByRole("button", { name: "Open navigation" });
+        for (const control of [pin, inspector, hamburger]) {
+          const box = await control.boundingBox();
+          expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+          expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+        }
+
+        // Capture the actual opened drawer and pinned section in each theme, not
+        // merely the header behind a closed drawer.
+        await page.getByRole("button", { name: "Open navigation" }).click();
+        const navigation = page.getByRole("navigation", { name: "Primary" });
+        await navigation.waitFor();
+        expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
+          "Session navigation",
+        );
+        const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
+        await targetRow.waitFor();
+        expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
+        expect(
+          await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
+        ).toBe(7);
+        await expectTouchTarget(targetRow);
+        await expectTouchTarget(
+          navigation.getByRole("button", { name: /^Actions for Mobile pin/ }),
+        );
+        await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
+        await expectContainedInViewport(navigation, viewport.width);
+        await expectNoPageOverflow(page);
+        await expectNoAxeViolations(page, [
+          "[data-ope26-session-header]",
+          "[data-ope26-session-list]",
+        ]);
+        await page.screenshot({
+          path: `/tmp/ope26-session-pin-mobile${viewport.artifactSuffix}-${theme}.png`,
+          fullPage: true,
+        });
+
+        await page.keyboard.press("Escape");
+        await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
+        // Radix restores focus after the drawer's close animation settles. Wait
+        // for that observable contract rather than racing the animation frame.
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
+        );
+        expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+          "Open navigation",
+        );
       }
-
-      // Capture the actual opened drawer and pinned section in each theme, not
-      // merely the header behind a closed drawer.
-      await page.getByRole("button", { name: "Open navigation" }).click();
-      const navigation = page.getByRole("navigation", { name: "Primary" });
-      await navigation.waitFor();
-      expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe("Session navigation");
-      const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
-      await targetRow.waitFor();
-      expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
-      expect(
-        await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
-      ).toBe(7);
-      await expectTouchTarget(targetRow);
-      await expectTouchTarget(navigation.getByRole("button", { name: /^Actions for Mobile pin/ }));
-      await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
-      await expectContainedInViewport(navigation, 320);
-      await expectNoPageOverflow(page);
-      await expectNoAxeViolations(page, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
-      ]);
-      await page.screenshot({
-        path: `/tmp/ope26-session-pin-mobile-${theme}.png`,
-        fullPage: true,
-      });
-
-      await page.keyboard.press("Escape");
-      await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
-      // Radix restores focus after the drawer's close animation settles. Wait
-      // for that observable contract rather than racing the animation frame.
-      await page.waitForFunction(
-        () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
-      );
-      expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
-        "Open navigation",
-      );
     }
     await context.close();
   }, 90_000);
