@@ -62,7 +62,7 @@ environment configuration:
 
 ```hcl
 managed_aks_capacity = {
-  node_count = 4
+  node_count = 5
 }
 ```
 
