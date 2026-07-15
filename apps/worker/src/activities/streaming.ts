@@ -8,6 +8,11 @@ import { Context } from "@temporalio/activity";
 // latency added by batching is bounded to ~one window (imperceptible, and far
 // cheaper than the per-delta DB round-trip it replaces).
 const TRAILING_FLUSH_MS = 33;
+const MAX_BATCH_EVENTS = 50;
+// Keep model ingestion independent from a slow durable append, but never let a
+// provider outrun storage without bound. At the high-water mark `push` waits for
+// the serialized drain before consuming more provider output.
+const MAX_BUFFERED_EVENTS = 1_000;
 
 /** Optional metrics seam for the batcher. `onFlush` fires once per flush (on both
  *  success and failure) with the coalesced event count and the flush duration, so
@@ -26,12 +31,15 @@ export function createRuntimeBatcher(
   let pending: AppendEventInput[] = [];
   let lastFlush = Date.now();
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
-  // Serializes flushEvents: each flush chains after the in-flight one so two
-  // flushEvents never overlap and the DB-assigned sequence order matches push
-  // order (the ordering invariant). A rejected flush resolves the gate (a
-  // single failed flush must not poison later flushes) while still rejecting
-  // the caller that awaited it.
-  let inFlight: Promise<void> | null = null;
+  let activeBatchSize = 0;
+  // One drain loop owns `flushEvents`, so DB-assigned sequence order always
+  // matches push order. Ordinary deltas do not await this promise; structural
+  // boundaries, explicit flushes, and the bounded high-water mark do.
+  let drainPromise: Promise<void> | null = null;
+  // A timer has no direct awaiter. Retain its failure so the next push or final
+  // flush terminates the turn instead of silently losing streamed evidence.
+  let flushFailed = false;
+  let flushFailure: unknown;
   // The high-volume token deltas (agent.message.delta, agent.reasoning.delta,
   // sandbox.command.output.delta) are DELIBERATELY NOT here: they coalesce
   // under the 50-event / 33ms policy into one appendSessionEvents txn + one
@@ -52,15 +60,26 @@ export function createRuntimeBatcher(
   ]);
   return {
     push: async (event: { type: SessionEventType; payload: unknown }) => {
+      throwIfFlushFailed();
       // Append BEFORE the structural check so a structural event's flush always
       // carries any pending deltas in order (same flush, order preserved).
       pending.push({ type: event.type, payload: event.payload });
       const elapsed = Date.now() - lastFlush;
-      if (pending.length >= 50 || elapsed >= 33 || structural.has(event.type)) {
+      if (structural.has(event.type)) {
         await flush();
-      } else {
-        armTrailingTimer();
+        return;
       }
+      if (pending.length >= MAX_BATCH_EVENTS || elapsed >= TRAILING_FLUSH_MS) {
+        // Start the serialized drain, but keep consuming provider deltas while
+        // the append/publish round-trip is in flight. The active drain records
+        // any failure for the next awaited boundary.
+        void startDrain().catch(() => undefined);
+      }
+      if (activeBatchSize + pending.length >= MAX_BUFFERED_EVENTS) {
+        await flush();
+        return;
+      }
+      armTrailingTimer();
     },
     flush,
   };
@@ -71,9 +90,8 @@ export function createRuntimeBatcher(
     }
     trailingTimer = setTimeout(() => {
       trailingTimer = null;
-      // Best-effort trailing flush: any error re-surfaces on the next awaited
-      // push or the turn-end flush, so swallow here (a timer has no awaiter and
-      // an unhandled rejection would crash the worker).
+      // A timer has no awaiter, so prevent an unhandled rejection. startDrain
+      // retains the exact error and the next push/final flush rethrows it.
       void flush().catch(() => undefined);
     }, TRAILING_FLUSH_MS);
     if ("unref" in trailingTimer && typeof trailingTimer.unref === "function") {
@@ -88,38 +106,61 @@ export function createRuntimeBatcher(
     }
   }
 
-  function flush(): Promise<void> {
-    // A flush is in-flight: wait for it, THEN drain whatever is pending now.
-    // Never start a second flushEvents concurrently. `() => flush()` on both
-    // settle paths so a failed in-flight flush still lets the queue drain.
-    if (inFlight) {
-      return inFlight.then(
-        () => flush(),
-        () => flush(),
-      );
+  async function flush(): Promise<void> {
+    throwIfFlushFailed();
+    clearTrailingTimer();
+    await startDrain();
+    throwIfFlushFailed();
+  }
+
+  function startDrain(): Promise<void> {
+    if (drainPromise) {
+      return drainPromise;
+    }
+    if (flushFailed) {
+      return Promise.reject(flushFailure);
     }
     if (pending.length === 0) {
       return Promise.resolve();
     }
     clearTrailingTimer();
-    const events = pending;
-    pending = [];
-    lastFlush = Date.now();
-    const startedAt = now();
-    inFlight = flushEvents(events).finally(() => {
-      inFlight = null;
-      if (options.onFlush) {
+    const running = (async () => {
+      while (pending.length > 0) {
+        const events = pending.splice(0, MAX_BATCH_EVENTS);
+        activeBatchSize = events.length;
+        lastFlush = Date.now();
+        const startedAt = now();
         try {
-          options.onFlush({
-            events: events.length,
-            durationSeconds: Math.max(0, (now() - startedAt) / 1000),
-          });
-        } catch {
-          // Metrics emission must never affect a flush.
+          await flushEvents(events);
+        } catch (error) {
+          flushFailed = true;
+          flushFailure = error;
+          throw error;
+        } finally {
+          activeBatchSize = 0;
+          if (options.onFlush) {
+            try {
+              options.onFlush({
+                events: events.length,
+                durationSeconds: Math.max(0, (now() - startedAt) / 1000),
+              });
+            } catch {
+              // Metrics emission must never affect a flush.
+            }
+          }
         }
       }
+    })();
+    drainPromise = running.finally(() => {
+      drainPromise = null;
     });
-    return inFlight;
+    return drainPromise;
+  }
+
+  function throwIfFlushFailed(): void {
+    if (flushFailed) {
+      throw flushFailure;
+    }
   }
 }
 
