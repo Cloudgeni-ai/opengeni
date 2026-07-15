@@ -198,6 +198,7 @@ describe("session-control production cutover audit", () => {
         sql,
         "migrated",
         "2026-07-14T10:00:30.000Z",
+        baseline,
       );
       const migrated0057Result = reconcileSessionControlCutover(
         baseline,
@@ -275,6 +276,7 @@ describe("session-control production cutover audit", () => {
         sql,
         "migrated",
         "2026-07-14T10:01:00.000Z",
+        remediationBaseline,
       );
       const result = reconcileSessionControlCutover(remediationBaseline, migrated, "migration");
       expect(result.errors).toEqual([]);
@@ -293,12 +295,36 @@ describe("session-control production cutover audit", () => {
 
       const damaged = structuredClone(migrated);
       const damagedMain = damaged.sessions.find((session) => session.id === sessionId);
-      const damagedHistory = damagedMain?.history[0];
-      if (!damagedHistory) throw new Error("migrated history row is missing");
-      damagedHistory.active = false;
-      const rejected = reconcileSessionControlCutover(baseline, damaged, "migration");
+      if (!damagedMain) throw new Error("migrated session is missing");
+      damagedMain.historyProof.stableSha256 = "0".repeat(64);
+      const rejected = reconcileSessionControlCutover(remediationBaseline, damaged, "migration");
       expect(rejected.ok).toBe(false);
-      expect(rejected.errors.some((error) => error.includes("history row"))).toBe(true);
+      expect(rejected.errors.some((error) => error.includes("history changed"))).toBe(true);
+
+      await sql`
+          insert into session_events (
+            account_id, workspace_id, session_id, turn_id, sequence, type, payload
+          ) values (
+            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 38,
+            'agent.message', ${sql.json({ text: "POST_CUTOVER_EVENT" })}
+          )`;
+      await sql`
+          insert into session_history_items (
+            account_id, workspace_id, session_id, turn_id, position, item
+          ) values (
+            ${accountId}, ${workspaceId}, ${sessionId}, ${queuedUserTurnId}, 2,
+            ${sql.json({ role: "assistant", content: "POST_CUTOVER_HISTORY" })}
+          )`;
+      const final = await captureSessionControlCutoverSnapshot(
+        sql,
+        "final",
+        "2026-07-14T10:02:00.000Z",
+        remediationBaseline,
+      );
+      const finalResult = reconcileSessionControlCutover(remediationBaseline, final, "final-fate");
+      expect(finalResult.errors).toEqual([]);
+      expect(finalResult.ok).toBe(true);
+      expect(final.sessions.find((session) => session.id === sessionId)?.eventProof.count).toBe(5);
     } finally {
       await sql.end().catch(() => undefined);
     }

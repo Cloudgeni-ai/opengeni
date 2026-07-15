@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 
-export const SESSION_CONTROL_CUTOVER_CONTRACT = "opengeni/session-control-cutover/v1" as const;
+export const SESSION_CONTROL_CUTOVER_CONTRACT = "opengeni/session-control-cutover/v2" as const;
 
 export type CutoverPhase = "baseline" | "migrated" | "final";
 
@@ -29,18 +29,15 @@ export type CutoverGoal = {
   lastContinuationTurnId: string | null;
 };
 
-export type CutoverHistoryRef = {
-  id: string;
-  turnId: string | null;
-  position: number;
-  active: boolean;
-  producerCodexCredentialId: string | null;
-};
-
-export type CutoverEventRef = {
-  id: string;
-  turnId: string | null;
-  sequence: number;
+export type CutoverRelationProof = {
+  count: number;
+  maxOrdinal: number | null;
+  stableSha256: string;
+  identitySha256: string;
+  preservedCount: number;
+  preservedThroughOrdinal: number | null;
+  preservedStableSha256: string;
+  preservedIdentitySha256: string;
 };
 
 export type CutoverRunState = {
@@ -111,8 +108,8 @@ export type CutoverSession = {
   queueTailPosition: number | null;
   turns: CutoverTurn[];
   goals: CutoverGoal[];
-  history: CutoverHistoryRef[];
-  events: CutoverEventRef[];
+  historyProof: CutoverRelationProof;
+  eventProof: CutoverRelationProof;
   runStates: CutoverRunState[];
   capacityWaiters: CutoverCapacityWaiter[];
   sandboxLeases: CutoverSandboxLease[];
@@ -147,6 +144,7 @@ export type SessionControlCutoverSnapshot = {
   schemaMigrations: string[];
   workspaces: CutoverWorkspace[];
   sessions: CutoverSession[];
+  proofBaselineSha256: string | null;
   invariants: CutoverInvariantCounts;
   identityCount: number;
   sha256: string;
@@ -273,6 +271,108 @@ function groupBySession<T extends { sessionId: string }>(rows: T[]): Map<string,
   return grouped;
 }
 
+type RelationProofAccumulator = {
+  count: number;
+  maxOrdinal: number | null;
+  stable: ReturnType<typeof createHash>;
+  identity: ReturnType<typeof createHash>;
+  preservedCount: number;
+  preservedStable: ReturnType<typeof createHash>;
+  preservedIdentity: ReturnType<typeof createHash>;
+};
+
+function updateProofHash(hash: ReturnType<typeof createHash>, value: unknown): void {
+  const serialized = stableJson(value);
+  hash.update(String(Buffer.byteLength(serialized, "utf8")));
+  hash.update(":");
+  hash.update(serialized);
+}
+
+function newProofAccumulator(): RelationProofAccumulator {
+  return {
+    count: 0,
+    maxOrdinal: null,
+    stable: createHash("sha256"),
+    identity: createHash("sha256"),
+    preservedCount: 0,
+    preservedStable: createHash("sha256"),
+    preservedIdentity: createHash("sha256"),
+  };
+}
+
+async function captureRelationProofs(
+  sql: postgres.Sql,
+  query: string,
+  ordinalColumn: string,
+  stableRow: (row: Row) => Record<string, unknown>,
+  reference: SessionControlCutoverSnapshot | undefined,
+  referenceProof: (session: CutoverSession) => CutoverRelationProof,
+): Promise<Map<string, CutoverRelationProof>> {
+  const referenceBoundaries = new Map(
+    (reference?.sessions ?? []).map((session) => [session.id, referenceProof(session).maxOrdinal]),
+  );
+  const accumulators = new Map<string, RelationProofAccumulator>();
+  for await (const rows of sql.unsafe<Row[]>(query).cursor(2_048)) {
+    for (const row of rows) {
+      const sessionId = stringValue(row.session_id, "relation.session_id");
+      const ordinal = numberValue(row[ordinalColumn], `relation.${ordinalColumn}`);
+      const identity = { id: stringValue(row.id, "relation.id") };
+      const stable = stableRow(row);
+      const accumulator = accumulators.get(sessionId) ?? newProofAccumulator();
+      accumulator.count += 1;
+      accumulator.maxOrdinal = Math.max(accumulator.maxOrdinal ?? ordinal, ordinal);
+      updateProofHash(accumulator.stable, stable);
+      updateProofHash(accumulator.identity, identity);
+      const boundary = referenceBoundaries.get(sessionId);
+      const preservesRow = reference
+        ? boundary !== undefined && boundary !== null && ordinal <= boundary
+        : true;
+      if (preservesRow) {
+        accumulator.preservedCount += 1;
+        updateProofHash(accumulator.preservedStable, stable);
+        updateProofHash(accumulator.preservedIdentity, identity);
+      }
+      accumulators.set(sessionId, accumulator);
+    }
+  }
+
+  const proofs = new Map<string, CutoverRelationProof>();
+  const sessionIds = new Set([
+    ...accumulators.keys(),
+    ...(reference?.sessions.map((session) => session.id) ?? []),
+  ]);
+  for (const sessionId of sessionIds) {
+    const accumulator = accumulators.get(sessionId) ?? newProofAccumulator();
+    proofs.set(sessionId, {
+      count: accumulator.count,
+      maxOrdinal: accumulator.maxOrdinal,
+      stableSha256: accumulator.stable.digest("hex"),
+      identitySha256: accumulator.identity.digest("hex"),
+      preservedCount: accumulator.preservedCount,
+      preservedThroughOrdinal: reference
+        ? (referenceBoundaries.get(sessionId) ?? null)
+        : accumulator.maxOrdinal,
+      preservedStableSha256: accumulator.preservedStable.digest("hex"),
+      preservedIdentitySha256: accumulator.preservedIdentity.digest("hex"),
+    });
+  }
+  return proofs;
+}
+
+function emptyRelationProof(): CutoverRelationProof {
+  const digest = createHash("sha256").digest("hex");
+  return {
+    count: 0,
+    maxOrdinal: null,
+    stableSha256: digest,
+    identitySha256: digest,
+    preservedCount: 0,
+    preservedThroughOrdinal: null,
+    preservedStableSha256: digest,
+    preservedIdentitySha256: digest,
+  };
+}
+
 function idsEqual<T extends { id: string }>(before: T[], after: T[]): boolean {
   if (before.length !== after.length) return false;
   const afterIds = new Set(after.map((entry) => entry.id));
@@ -320,7 +420,19 @@ export async function captureSessionControlCutoverSnapshot(
   sql: postgres.Sql,
   phase: CutoverPhase,
   capturedAt = new Date().toISOString(),
+  reference?: SessionControlCutoverSnapshot,
 ): Promise<SessionControlCutoverSnapshot> {
+  if (phase === "baseline" && reference) {
+    throw new Error("a baseline capture cannot reference an earlier baseline");
+  }
+  if (phase !== "baseline") {
+    if (!reference || reference.contractVersion !== SESSION_CONTROL_CUTOVER_CONTRACT) {
+      throw new Error(`${phase} capture requires a v2 baseline proof`);
+    }
+    if (reference.phase !== "baseline") {
+      throw new Error(`${phase} capture reference is not a baseline`);
+    }
+  }
   await assertSessionControlCutoverAuditAuthority(sql);
   const hasControl = await columnExists(sql, "sessions", "control_state");
   const hasAttempts = await columnExists(sql, "session_turns", "execution_generation");
@@ -381,14 +493,36 @@ export async function captureSessionControlCutoverSnapshot(
     `select session_id, id, status, version, auto_continuations, no_progress_streak,
        last_continuation_turn_id from session_goals order by session_id, id`,
   );
-  const historyRows = await unsafeRows(
+  const historyProofs = await captureRelationProofs(
     sql,
     `select session_id, id, turn_id, position, active, producer_codex_credential_id
      from session_history_items order by session_id, position, id`,
+    "position",
+    (row) => ({
+      id: stringValue(row.id, "history.id"),
+      turnId: nullableString(row.turn_id, "history.turn_id"),
+      position: numberValue(row.position, "history.position"),
+      active: booleanValue(row.active),
+      producerCodexCredentialId: nullableString(
+        row.producer_codex_credential_id,
+        "history.producer_codex_credential_id",
+      ),
+    }),
+    reference,
+    (session) => session.historyProof,
   );
-  const eventRows = await unsafeRows(
+  const eventProofs = await captureRelationProofs(
     sql,
-    `select session_id, id, turn_id, sequence from session_events order by session_id, sequence, id`,
+    `select session_id, id, turn_id, sequence
+     from session_events order by session_id, sequence, id`,
+    "sequence",
+    (row) => ({
+      id: stringValue(row.id, "event.id"),
+      turnId: nullableString(row.turn_id, "event.turn_id"),
+      sequence: numberValue(row.sequence, "event.sequence"),
+    }),
+    reference,
+    (session) => session.eventProof,
   );
   const runStateRows = await unsafeRows(
     sql,
@@ -459,27 +593,6 @@ export async function captureSessionControlCutoverSnapshot(
         row.last_continuation_turn_id,
         "goal.last_continuation_turn_id",
       ),
-    })),
-  );
-  const history = groupBySession(
-    historyRows.map((row) => ({
-      sessionId: stringValue(row.session_id, "history.session_id"),
-      id: stringValue(row.id, "history.id"),
-      turnId: nullableString(row.turn_id, "history.turn_id"),
-      position: numberValue(row.position, "history.position"),
-      active: booleanValue(row.active),
-      producerCodexCredentialId: nullableString(
-        row.producer_codex_credential_id,
-        "history.producer_codex_credential_id",
-      ),
-    })),
-  );
-  const events = groupBySession(
-    eventRows.map((row) => ({
-      sessionId: stringValue(row.session_id, "event.session_id"),
-      id: stringValue(row.id, "event.id"),
-      turnId: nullableString(row.turn_id, "event.turn_id"),
-      sequence: numberValue(row.sequence, "event.sequence"),
     })),
   );
   const runStates = groupBySession(
@@ -578,8 +691,8 @@ export async function captureSessionControlCutoverSnapshot(
       queueTailPosition: nullableNumber(row.queue_tail_position, "session.queue_tail_position"),
       turns: turns.get(id) ?? [],
       goals: goals.get(id) ?? [],
-      history: history.get(id) ?? [],
-      events: events.get(id) ?? [],
+      historyProof: historyProofs.get(id) ?? emptyRelationProof(),
+      eventProof: eventProofs.get(id) ?? emptyRelationProof(),
       runStates: runStates.get(id) ?? [],
       capacityWaiters: capacityWaiters.get(id) ?? [],
       sandboxLeases: sandboxLeases.get(id) ?? [],
@@ -663,6 +776,7 @@ export async function captureSessionControlCutoverSnapshot(
     schemaMigrations: migrationRows.map((row) => stringValue(row.name, "schema_migration.name")),
     workspaces,
     sessions,
+    proofBaselineSha256: reference?.sha256 ?? null,
     invariants: {
       multipleCurrentInferences,
       queuedMachineTurns,
@@ -696,8 +810,8 @@ export async function captureSessionControlCutoverSnapshot(
         1 +
         session.turns.length +
         session.goals.length +
-        session.history.length +
-        session.events.length +
+        session.historyProof.count +
+        session.eventProof.count +
         session.runStates.length +
         session.capacityWaiters.length +
         session.sandboxLeases.length +
@@ -733,6 +847,36 @@ function compareStableRows<T extends { id: string }>(
   }
 }
 
+function compareRelationProof(
+  errors: string[],
+  sessionId: string,
+  name: string,
+  before: CutoverRelationProof,
+  after: CutoverRelationProof,
+  mode: "migration" | "final-fate",
+): void {
+  if (after.preservedThroughOrdinal !== before.maxOrdinal) {
+    errors.push(`${sessionId}: ${name} proof used the wrong baseline boundary`);
+    return;
+  }
+  if (mode === "migration") {
+    if (
+      after.count !== before.count ||
+      after.stableSha256 !== before.stableSha256 ||
+      after.identitySha256 !== before.identitySha256
+    ) {
+      errors.push(`${sessionId}: ${name} changed during migration`);
+    }
+    return;
+  }
+  if (
+    after.preservedCount !== before.count ||
+    after.preservedIdentitySha256 !== before.identitySha256
+  ) {
+    errors.push(`${sessionId}: baseline ${name} identities were not preserved`);
+  }
+}
+
 export function reconcileSessionControlCutover(
   baseline: SessionControlCutoverSnapshot,
   observed: SessionControlCutoverSnapshot,
@@ -752,6 +896,9 @@ export function reconcileSessionControlCutover(
   }
   if (mode === "final-fate" && observed.phase !== "final") {
     errors.push("final-fate reconciliation requires a final snapshot");
+  }
+  if (observed.proofBaselineSha256 !== baseline.sha256) {
+    errors.push("observed relation proofs were not derived from this baseline");
   }
   if (observed.invariants.multipleCurrentInferences !== 0) {
     errors.push("observed snapshot has multiple current inferences for a session");
@@ -857,22 +1004,15 @@ export function reconcileSessionControlCutover(
     }
 
     compareStableRows(errors, session.id, "goal", session.goals, next.goals, mode === "migration");
-    compareStableRows(
+    compareRelationProof(
       errors,
       session.id,
-      "history row",
-      session.history,
-      next.history,
-      mode === "migration",
+      "history",
+      session.historyProof,
+      next.historyProof,
+      mode,
     );
-    compareStableRows(
-      errors,
-      session.id,
-      "event",
-      session.events,
-      next.events,
-      mode === "migration",
-    );
+    compareRelationProof(errors, session.id, "event", session.eventProof, next.eventProof, mode);
     compareStableRows(
       errors,
       session.id,

@@ -143,6 +143,8 @@ async function capture(args: ParsedArgs): Promise<void> {
   const phase = required(args, "--phase");
   assertPhase(phase);
   const output = required(args, "--output");
+  const baseline =
+    phase === "baseline" ? undefined : await readSnapshot(required(args, "--baseline"));
   const sql = postgres(migrationDatabaseUrl(), {
     max: 1,
     prepare: false,
@@ -153,7 +155,12 @@ async function capture(args: ParsedArgs): Promise<void> {
   try {
     const snapshot = await sql.begin(async (transaction) => {
       await transaction.unsafe("set transaction isolation level repeatable read, read only");
-      return await captureSessionControlCutoverSnapshot(transaction, phase);
+      return await captureSessionControlCutoverSnapshot(
+        transaction,
+        phase,
+        new Date().toISOString(),
+        baseline,
+      );
     });
     if (
       phase === "baseline" &&
@@ -237,7 +244,9 @@ function integerArg(
 
 async function runningSessionWorkflowIds(temporal: TemporalClient): Promise<Set<string>> {
   const running = new Set<string>();
-  for await (const execution of temporal.workflow.list({ query: "ExecutionStatus='Running'" })) {
+  for await (const execution of temporal.workflow.list({
+    query: "ExecutionStatus='Running'",
+  })) {
     if (execution.workflowId.startsWith("session-")) running.add(execution.workflowId);
   }
   return running;
@@ -274,7 +283,10 @@ async function enrollmentStates(
 async function wake(args: ParsedArgs): Promise<void> {
   const output = required(args, "--output");
   const execute = args.flags.has("--execute");
-  const turnCapacity = integerArg(args, "--turn-capacity", { min: 1, max: 10_000 });
+  const turnCapacity = integerArg(args, "--turn-capacity", {
+    min: 1,
+    max: 10_000,
+  });
   const stabilitySeconds = integerArg(args, "--stability-seconds", {
     defaultValue: 150,
     min: 121,
@@ -766,11 +778,19 @@ async function reparkOrphanedTurns(args: ParsedArgs): Promise<void> {
   });
   const client = createDb(migrationDatabaseUrl(), { max: 1 });
   try {
-    const temporal = new TemporalClient({ connection, namespace: settings.namespace });
+    const temporal = new TemporalClient({
+      connection,
+      namespace: settings.namespace,
+    });
     const runningWorkflows: Array<{ workflowId: string; runId: string }> = [];
-    for await (const execution of temporal.workflow.list({ query: "ExecutionStatus='Running'" })) {
+    for await (const execution of temporal.workflow.list({
+      query: "ExecutionStatus='Running'",
+    })) {
       if (execution.workflowId.startsWith("session-")) {
-        runningWorkflows.push({ workflowId: execution.workflowId, runId: execution.runId });
+        runningWorkflows.push({
+          workflowId: execution.workflowId,
+          runId: execution.runId,
+        });
       }
     }
     if (runningWorkflows.length > 0) {
@@ -1099,7 +1119,13 @@ async function productionCodexCanary(args: ParsedArgs): Promise<void> {
       );
     }
     const currentUsage = await sql<
-      Array<{ id: string; turn_id: string; source_key: string; provider: string; model: string }>
+      Array<{
+        id: string;
+        turn_id: string;
+        source_key: string;
+        provider: string;
+        model: string;
+      }>
     >`
       select id, turn_id, payload ->> 'sourceKey' as source_key,
         payload ->> 'provider' as provider, payload ->> 'model' as model
@@ -1317,7 +1343,8 @@ async function preflight(args: ParsedArgs): Promise<void> {
 function usage(): void {
   process.stdout.write(`Usage:
   bun run operator:session-control-cutover preflight --source-sha SHA --output FILE
-  bun run operator:session-control-cutover capture --phase baseline|migrated|final --output FILE [--allow-empty-baseline]
+  bun run operator:session-control-cutover capture --phase baseline --output FILE [--allow-empty-baseline]
+  bun run operator:session-control-cutover capture --phase migrated|final --baseline FILE --output FILE
   bun run operator:session-control-cutover reconcile --baseline FILE --observed FILE --mode migration|final-fate --output FILE
   bun run operator:session-control-cutover wake --turn-capacity N --output FILE [--execute] [--stability-seconds N]
   bun run operator:session-control-cutover temporal-schedules --action pause|resume|inspect --run-id ID [--input FILE] --output FILE
