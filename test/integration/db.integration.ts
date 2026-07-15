@@ -2339,6 +2339,7 @@ async function settleRegisteredExecution(
     turnId: execution.turn.id,
     triggerEventId: execution.triggerEventId,
     attemptId: execution.attemptId,
+    childCompletionParentWakeEnabled: false,
     turnStatus,
     sessionStatus: requiresAction ? "requires_action" : "idle",
     activeTurnId: requiresAction ? execution.turn.id : null,

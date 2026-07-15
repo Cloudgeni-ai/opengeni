@@ -1779,6 +1779,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId: turnId!,
           triggerEventId: triggerEventId!,
           attemptId: input.attemptId,
+          childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
           turnStatus: inputSettlement.turnStatus,
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,

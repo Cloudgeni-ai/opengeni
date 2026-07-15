@@ -23,6 +23,11 @@ export type NotifyServices = {
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
 };
 
+export type ReconcileParentSystemUpdateOverrides = Partial<{
+  claimPendingSessionSystemUpdateOutbox: typeof claimPendingSessionSystemUpdateOutbox;
+  listEnrollableSessions: typeof listEnrollableSessions;
+}>;
+
 /**
  * Deliver exactly one completion wake to a spawned worker's parent (manager)
  * session when the worker reaches a terminal-for-now state. No-op for a
@@ -55,6 +60,13 @@ export async function notifyParentOfChildTerminal(
   // per work batch and is stable across retries of that same idle transition.
   episodeKey?: string | null,
 ): Promise<void> {
+  // Temporarily disabled by default: child completion remains durable on the
+  // child session, but must not manufacture parent system-update/inference
+  // work. Keep this before every DB read, event publish, and workflow signal so
+  // the disabled path cannot mutate or wake the parent.
+  if (!svc.settings.childCompletionParentWakeEnabled) {
+    return;
+  }
   try {
     const child = await getSession(svc.db, workspaceId, childSessionId);
     if (!child || !child.parentSessionId) {
@@ -155,10 +167,14 @@ async function deliverParentSystemUpdateOutbox(
 export async function reconcilePendingParentSystemUpdates(
   svc: NotifyServices,
   limit = 100,
+  overrides: ReconcileParentSystemUpdateOverrides = {},
 ): Promise<{ claimed: number; delivered: number; failed: number; wakeRepairs: number }> {
+  const claimPendingSessionSystemUpdateOutboxFn =
+    overrides.claimPendingSessionSystemUpdateOutbox ?? claimPendingSessionSystemUpdateOutbox;
+  const listEnrollableSessionsFn = overrides.listEnrollableSessions ?? listEnrollableSessions;
   let wakeRepairs = 0;
   if (svc.wakeSessionWorkflow) {
-    const repairs = await listEnrollableSessions(svc.db, limit);
+    const repairs = await listEnrollableSessionsFn(svc.db, limit);
     for (const repair of repairs) {
       await svc.wakeSessionWorkflow({
         accountId: repair.accountId,
@@ -169,7 +185,13 @@ export async function reconcilePendingParentSystemUpdates(
       wakeRepairs += 1;
     }
   }
-  const rows = await claimPendingSessionSystemUpdateOutbox(svc.db, limit);
+  // Keep generic workflow wake repair active, but do not claim or deliver the
+  // child-terminal outbox while completion wakes are disabled. Atomic terminal
+  // producers use the same setting, so no new backlog is manufactured either.
+  if (!svc.settings.childCompletionParentWakeEnabled) {
+    return { claimed: 0, delivered: 0, failed: 0, wakeRepairs };
+  }
+  const rows = await claimPendingSessionSystemUpdateOutboxFn(svc.db, limit);
   let delivered = 0;
   let failed = 0;
   for (const row of rows) {

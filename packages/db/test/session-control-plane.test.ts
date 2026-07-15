@@ -436,6 +436,7 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId: firstAttemptId,
+      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn!.id,
@@ -531,6 +532,7 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       triggerEventId: turn!.triggerEventId,
       attemptId,
+      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn!.id,
@@ -616,6 +618,7 @@ describe("clean session control plane", () => {
         attemptId: neverStartedAttemptId,
         timeoutType: "SCHEDULE_TO_START",
         maxRedispatches: 3,
+        childCompletionParentWakeEnabled: false,
       }),
     ).toEqual({ action: "unclaimed", events: [] });
     expect(await getSessionTurn(client.db, grant.workspaceId!, queued.turn.id)).toMatchObject({
@@ -643,6 +646,7 @@ describe("clean session control plane", () => {
         attemptId: firstAttemptId,
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
+        childCompletionParentWakeEnabled: false,
       }),
     ).toMatchObject({ action: "recovering", turnId: first.id, redispatches: 1 });
 
@@ -666,6 +670,7 @@ describe("clean session control plane", () => {
         attemptId: firstAttemptId,
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
+        childCompletionParentWakeEnabled: false,
       }),
     ).toMatchObject({ action: "stale", activeTurnId: first.id });
     expect(await getSessionTurn(client.db, grant.workspaceId!, first.id)).toMatchObject({
@@ -915,6 +920,7 @@ describe("clean session control plane", () => {
       turnId: compaction!.id,
       triggerEventId: compaction!.triggerEventId,
       attemptId,
+      childCompletionParentWakeEnabled: false,
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
@@ -971,6 +977,7 @@ describe("clean session control plane", () => {
         client.db,
         sessionPause.grant.workspaceId!,
         sessionPause.session.id,
+        false,
       ),
     ).toEqual({ action: "stale", episodeKey: null, events: [] });
 
@@ -991,8 +998,151 @@ describe("clean session control plane", () => {
         client.db,
         workspacePause.grant.workspaceId!,
         workspacePause.session.id,
+        false,
       ),
     ).toEqual({ action: "stale", episodeKey: null, events: [] });
+  });
+
+  test("child terminal settlement keeps child truth and gates every parent outbox producer", async () => {
+    const { grant, session: parent } = await fixture();
+    const createChild = async (label: string) => {
+      const child = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: label,
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: parent.id,
+      });
+      await send(grant, child.id, label);
+      return child;
+    };
+    const claimChild = async (child: Awaited<ReturnType<typeof createChild>>) => {
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        child.id,
+        `session-${child.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`child turn was not claimed: ${child.id}`);
+      return { attemptId, turn };
+    };
+    const createIdleReadyChild = async (label: string) => {
+      const child = await createChild(label);
+      const { attemptId, turn } = await claimChild(child);
+      expect(
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: child.id,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId,
+          childCompletionParentWakeEnabled: false,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [],
+        }),
+      ).toMatchObject({ action: "settled" });
+      return child;
+    };
+    const childOutboxes = async (childSessionId: string) =>
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
+        db
+          .select({ id: schema.sessionSystemUpdateOutbox.id })
+          .from(schema.sessionSystemUpdateOutbox)
+          .where(eq(schema.sessionSystemUpdateOutbox.sourceSessionId, childSessionId)),
+      );
+
+    const idleChild = await createIdleReadyChild("disabled idle child");
+    expect(
+      await settleSessionIdleWithParentOutbox(client.db, grant.workspaceId!, idleChild.id, false),
+    ).toMatchObject({ action: "settled" });
+    expect(await getSession(client.db, grant.workspaceId!, idleChild.id)).toMatchObject({
+      status: "idle",
+    });
+    expect(await childOutboxes(idleChild.id)).toHaveLength(0);
+
+    const failedChild = await createChild("disabled failed child");
+    const { attemptId: failedAttemptId, turn: failedTurn } = await claimChild(failedChild);
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: failedChild.id,
+        turnId: failedTurn.id,
+        triggerEventId: failedTurn.triggerEventId,
+        attemptId: failedAttemptId,
+        childCompletionParentWakeEnabled: false,
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+        events: [{ type: "turn.failed", payload: { error: "expected test failure" } }],
+      }),
+    ).toMatchObject({ action: "settled" });
+    expect(await getSession(client.db, grant.workspaceId!, failedChild.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(await childOutboxes(failedChild.id)).toHaveLength(0);
+
+    const exhaustedChild = await createChild("disabled worker-death child");
+    const { attemptId: exhaustedAttemptId } = await claimChild(exhaustedChild);
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: exhaustedChild.id,
+        attemptId: exhaustedAttemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 0,
+        childCompletionParentWakeEnabled: false,
+      }),
+    ).toMatchObject({ action: "exceeded" });
+    expect(await getSession(client.db, grant.workspaceId!, exhaustedChild.id)).toMatchObject({
+      status: "failed",
+    });
+    expect(await childOutboxes(exhaustedChild.id)).toHaveLength(0);
+
+    const enabledIdleChild = await createIdleReadyChild("enabled idle child");
+    expect(
+      await settleSessionIdleWithParentOutbox(
+        client.db,
+        grant.workspaceId!,
+        enabledIdleChild.id,
+        true,
+      ),
+    ).toMatchObject({ action: "settled" });
+    expect(await childOutboxes(enabledIdleChild.id)).toHaveLength(1);
+
+    const enabledFailedChild = await createChild("enabled failed child");
+    const { attemptId: enabledFailedAttemptId, turn: enabledFailedTurn } =
+      await claimChild(enabledFailedChild);
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: enabledFailedChild.id,
+        turnId: enabledFailedTurn.id,
+        triggerEventId: enabledFailedTurn.triggerEventId,
+        attemptId: enabledFailedAttemptId,
+        childCompletionParentWakeEnabled: true,
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+        events: [{ type: "turn.failed", payload: { error: "expected enabled test failure" } }],
+      }),
+    ).toMatchObject({ action: "settled" });
+    expect(await childOutboxes(enabledFailedChild.id)).toHaveLength(1);
+
+    const enabledExhaustedChild = await createChild("enabled worker-death child");
+    const { attemptId: enabledExhaustedAttemptId } = await claimChild(enabledExhaustedChild);
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: enabledExhaustedChild.id,
+        attemptId: enabledExhaustedAttemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 0,
+        childCompletionParentWakeEnabled: true,
+      }),
+    ).toMatchObject({ action: "exceeded" });
+    expect(await childOutboxes(enabledExhaustedChild.id)).toHaveLength(1);
   });
 
   test("Pause blocks a racing terminal settlement and Resume admits a new attempt of the same turn", async () => {
@@ -1021,6 +1171,7 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         triggerEventId: turn!.triggerEventId,
         attemptId: firstAttemptId,
+        childCompletionParentWakeEnabled: false,
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
@@ -1635,6 +1786,7 @@ describe("clean session control plane", () => {
         turnId: running!.id,
         triggerEventId: running!.triggerEventId,
         attemptId: firstAttemptId,
+        childCompletionParentWakeEnabled: false,
         turnStatus: "requires_action",
         sessionStatus: "requires_action",
         activeTurnId: running!.id,
@@ -1700,6 +1852,7 @@ describe("clean session control plane", () => {
       turnId: turn.id,
       triggerEventId: turn.triggerEventId,
       attemptId: firstAttemptId,
+      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: turn.id,
