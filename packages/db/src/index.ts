@@ -14607,6 +14607,11 @@ export type WorkspaceCaptureRow = {
   capturedAt: string;
 };
 
+export type WorkspaceCaptureCommitResult = {
+  revision: number;
+  events: SessionEvent[];
+};
+
 const WORKSPACE_CAPTURE_COLUMNS = sql`
   id, session_id, turn_id, revision, lease_epoch, state,
   manifest_key, tree_index_key, blob_keys, size_bytes, stats, captured_at
@@ -14642,6 +14647,142 @@ function mapWorkspaceCaptureRow(row: {
   };
 }
 
+type CommitWorkspaceCaptureRevisionInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  revision: number;
+  state: "available" | "failed";
+  manifestKey: string | null;
+  treeIndexKey: string | null;
+  blobKeys: string[];
+  sizeBytes: number;
+  stats: Record<string, unknown>;
+  capturedAt?: Date;
+};
+
+/**
+ * Commit the epoch-fenced capture index and its session-scoped announcement as
+ * one durable transition. The announcement is metadata about an already
+ * captured revision, not output from the active turn attempt, so it deliberately
+ * carries no attempt/generation fence or current-turn association.
+ */
+async function commitWorkspaceCaptureRevision(
+  db: Database,
+  input: CommitWorkspaceCaptureRevisionInput,
+): Promise<WorkspaceCaptureCommitResult | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        // Match the canonical lifecycle lock order. The capture event has FKs to
+        // workspace/session/turn, so taking these locks later could deadlock a
+        // concurrent turn settlement that already owns them in this order.
+        await tx
+          .select({ id: schema.workspaces.id })
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("update")
+          .limit(1);
+        const [session] = await tx
+          .select()
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+
+        const capturedAt = input.capturedAt ?? new Date();
+        const rows = await tx.execute<{ revision: number | string }>(sql`
+          insert into workspace_captures
+            (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
+             manifest_key, tree_index_key, blob_keys, size_bytes, stats, captured_at)
+          select
+            ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
+            ${input.revision}, ${input.expectedEpoch}, ${input.state},
+            ${input.manifestKey}, ${input.treeIndexKey},
+            ${JSON.stringify(input.blobKeys)}::jsonb, ${input.sizeBytes},
+            ${JSON.stringify(input.stats)}::jsonb, ${capturedAt.toISOString()}::timestamptz
+          where exists (
+            select 1 from sandbox_leases
+            where workspace_id = ${input.workspaceId}
+              and sandbox_group_id = ${input.sandboxGroupId}
+              and lease_epoch = ${input.expectedEpoch}
+          )
+          returning revision
+        `);
+        const [capture] = rows;
+        if (!capture) return null;
+
+        const revision = Number(capture.revision);
+        const type: SessionEventType =
+          input.state === "available"
+            ? "workspace.revision.captured"
+            : "workspace.revision.degraded";
+        const payload =
+          input.state === "available"
+            ? {
+                revision,
+                turnId: input.turnId,
+                capturedAt: capturedAt.toISOString(),
+                leaseEpoch: input.expectedEpoch,
+                stats: input.stats,
+              }
+            : {
+                revision,
+                turnId: input.turnId,
+                capturedAt: capturedAt.toISOString(),
+                leaseEpoch: input.expectedEpoch,
+                reason:
+                  typeof input.stats.degradedReason === "string"
+                    ? input.stats.degradedReason
+                    : "repository_discovery_command_failed",
+              };
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type,
+            payload: sanitizeEventPayload(payload),
+            clientEventId: `opengeni:workspace-capture:${revision}`,
+            turnId: input.turnId,
+            turnGeneration: null,
+            turnAttemptId: null,
+            turnAssociation: null,
+            duplicateOfEventId: null,
+            duplicateReason: null,
+            producerId: "workspace-capture",
+            producerSeq: revision,
+            occurredAt: capturedAt,
+          })
+          .returning();
+        if (!event) throw new Error("Workspace capture announcement was not inserted");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: event.sequence, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { revision, events: [mapEvent(event)] };
+      }),
+  );
+}
+
 /**
  * Fenced insert of a capture revision at an EXPLICIT revision (the caller
  * assigns it as prevRevision+1 so the manifest blob — written before this insert
@@ -14667,34 +14808,13 @@ export async function insertWorkspaceCapture(
     blobKeys: string[];
     sizeBytes: number;
     stats: Record<string, unknown>;
+    capturedAt?: Date;
   },
-): Promise<{ revision: number } | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{ revision: number | string }>(sql`
-        insert into workspace_captures
-          (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
-           manifest_key, tree_index_key, blob_keys, size_bytes, stats)
-        select
-          ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
-          ${input.revision}, ${input.expectedEpoch}, 'available',
-          ${input.manifestKey}, ${input.treeIndexKey},
-          ${JSON.stringify(input.blobKeys)}::jsonb, ${input.sizeBytes}, ${JSON.stringify(input.stats)}::jsonb
-        where exists (
-          select 1 from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-            and lease_epoch = ${input.expectedEpoch}
-        )
-        returning revision
-      `);
-      const [row] = rows;
-      if (!row) return null;
-      return { revision: Number(row.revision) };
-    },
-  );
+): Promise<WorkspaceCaptureCommitResult | null> {
+  return await commitWorkspaceCaptureRevision(db, {
+    ...input,
+    state: "available",
+  });
 }
 
 /**
@@ -14717,33 +14837,17 @@ export async function insertFailedWorkspaceCapture(
     expectedEpoch: number;
     revision: number;
     stats: Record<string, unknown>;
+    capturedAt?: Date;
   },
-): Promise<{ revision: number } | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{ revision: number | string }>(sql`
-        insert into workspace_captures
-          (account_id, workspace_id, session_id, turn_id, revision, lease_epoch, state,
-           manifest_key, tree_index_key, blob_keys, size_bytes, stats)
-        select
-          ${input.accountId}, ${input.workspaceId}, ${input.sessionId}, ${input.turnId},
-          ${input.revision}, ${input.expectedEpoch}, 'failed',
-          null, null, '[]'::jsonb, 0, ${JSON.stringify(input.stats)}::jsonb
-        where exists (
-          select 1 from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-            and lease_epoch = ${input.expectedEpoch}
-        )
-        returning revision
-      `);
-      const [row] = rows;
-      if (!row) return null;
-      return { revision: Number(row.revision) };
-    },
-  );
+): Promise<WorkspaceCaptureCommitResult | null> {
+  return await commitWorkspaceCaptureRevision(db, {
+    ...input,
+    state: "failed",
+    manifestKey: null,
+    treeIndexKey: null,
+    blobKeys: [],
+    sizeBytes: 0,
+  });
 }
 
 /** The newest capture for a session (highest revision), or null if none. */

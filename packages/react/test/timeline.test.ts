@@ -757,6 +757,23 @@ describe("buildTimeline", () => {
     ]);
   });
 
+  test("hides rejected workspace revision bookkeeping from the user timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "workspace.revision.captured",
+        rejectedPayload: { revision: 3 },
+        reason: "active_turn_changed",
+      }),
+      event("turn.event.rejected_late", {
+        rejectedType: "workspace.revision.degraded",
+        rejectedPayload: { revision: 4 },
+        reason: "active_turn_changed",
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
   test("routine repository-clone operations never render", () => {
     // Per-turn platform plumbing (idempotent clone check + token re-seed) —
     // rendering it every turn reads as the agent redoing work.

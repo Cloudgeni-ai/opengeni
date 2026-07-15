@@ -435,9 +435,20 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.event.rejected_late": {
-        closeStreamingTail();
         const rejectedType =
           typeof payload.rejectedType === "string" ? payload.rejectedType : "unknown event";
+        // Workspace revision events are session-scoped cache announcements, not
+        // user/agent turn evidence. Older servers could route them through the
+        // attempt fence after the turn settled; retain that audit row durably,
+        // but never present harmless internal bookkeeping as a user-visible
+        // failed action.
+        if (
+          rejectedType === "workspace.revision.captured" ||
+          rejectedType === "workspace.revision.degraded"
+        ) {
+          break;
+        }
+        closeStreamingTail();
         const reason =
           typeof payload.reason === "string"
             ? payload.reason.replaceAll("_", " ")

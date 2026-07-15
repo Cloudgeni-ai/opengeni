@@ -52,7 +52,7 @@ import type {
   FsTreeNode,
   GitFileStatus,
   GitFileStatusCode,
-  SessionEventType,
+  SessionEvent,
   WorkspaceCaptureFile,
   WorkspaceCaptureDegradedReason,
   WorkspaceCaptureManifest,
@@ -173,11 +173,9 @@ function classifyCaptureEntryError(error: unknown): BoxExitingError | null {
 const TREE_MAX_ENTRIES = 20_000; // whole-tree node cap (truncate beyond)
 const TREE_MAX_DIRS = 600; // BFS round-trip cap (bounds turn-end latency)
 
-// The publish closure from agent-turn (Omit<AppendEventInput, producer/turn ids>)
-// is assignable to this. Announce-only — payload is metadata, never file content.
-export type CaptureEventPublisher = (
-  events: Array<{ type: SessionEventType; payload: Record<string, unknown> }>,
-) => Promise<void>;
+// The capture row and announcement are committed together by @opengeni/db. This
+// callback performs only best-effort live fanout of those already-durable events.
+export type CaptureEventPublisher = (events: SessionEvent[]) => Promise<void>;
 
 export type CaptureWorkspaceRevisionInput = {
   db: Database;
@@ -276,8 +274,13 @@ async function runCapture(
   // ── 1. per-repo status + diff, union the touched set ──────────────────────
   const discovery = await svc.detectReposDetailed();
   if (!discovery.complete) {
-    const capturedAt = new Date().toISOString();
+    const capturedAt = new Date();
     const reason = captureDegradedReason(discovery.degradedReason);
+    const stats = {
+      degradedReason: reason,
+      discoveredRepoCount: discovery.repos.length,
+      durationMs: Date.now() - startedAt,
+    };
     const inserted = await insertFailedWorkspaceCapture(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -286,11 +289,8 @@ async function runCapture(
       sandboxGroupId: input.sandboxGroupId,
       expectedEpoch: input.leaseEpoch,
       revision,
-      stats: {
-        degradedReason: reason,
-        discoveredRepoCount: discovery.repos.length,
-        durationMs: Date.now() - startedAt,
-      },
+      stats,
+      capturedAt,
     });
     if (!inserted) {
       observability.incrementCounter({
@@ -310,20 +310,7 @@ async function runCapture(
       labels: { result: "degraded_repository_discovery" },
     });
     if (input.publish) {
-      await input
-        .publish([
-          {
-            type: "workspace.revision.degraded",
-            payload: {
-              revision: inserted.revision,
-              turnId: input.turnId,
-              capturedAt,
-              leaseEpoch: input.leaseEpoch,
-              reason,
-            },
-          },
-        ])
-        .catch(() => undefined);
+      await input.publish(inserted.events).catch(() => undefined);
     }
     return;
   }
@@ -532,7 +519,7 @@ async function runCapture(
   const tree = await buildTreeIndex(svc, startedAt);
 
   // ── 6. serialize manifest ─────────────────────────────────────────────────
-  const capturedAt = new Date().toISOString();
+  const capturedAt = new Date();
   const stats: WorkspaceCaptureStats = {
     repoCount: repos.length,
     fileCount: files.length,
@@ -543,13 +530,13 @@ async function runCapture(
     binaryCount,
     treeEntryCount: tree.entryCount,
     treeTruncated: tree.truncated,
-    durationMs: 0, // filled just before publish
+    durationMs: 0, // filled after tree/content writes, before manifest serialization
     fingerprint,
   };
   const manifest: WorkspaceCaptureManifest = {
     version: 1,
     revision,
-    capturedAt,
+    capturedAt: capturedAt.toISOString(),
     turnId: input.turnId,
     leaseEpoch: input.leaseEpoch,
     treeIndex: tree.root,
@@ -578,6 +565,7 @@ async function runCapture(
     }),
   );
   await storage.putObject({ key: treeKey, contentType: "application/json", body: treeBytes });
+  stats.durationMs = Date.now() - startedAt;
   const manifestBytes = utf8(JSON.stringify(manifest));
   await storage.putObject({
     key: manifestKey,
@@ -600,6 +588,7 @@ async function runCapture(
     blobKeys: [...blobKeys],
     sizeBytes,
     stats,
+    capturedAt,
   });
   if (!inserted) {
     // Lease superseded/released between capture and commit. Best-effort clean up
@@ -611,6 +600,10 @@ async function runCapture(
     });
     await safeDelete(storage, [manifestKey, treeKey], observability);
     return;
+  }
+
+  if (input.publish) {
+    await input.publish(inserted.events).catch(() => undefined);
   }
 
   // ── 9. inline keep-latest-N GC (best-effort; F9 — after the commit) ────────
@@ -644,9 +637,8 @@ async function runCapture(
     });
   }
 
-  // ── 10. announce (announce-only; hits the timeline projection default case) ─
+  // ── 10. observe completion ────────────────────────────────────────────────
   const durationMs = Date.now() - startedAt;
-  stats.durationMs = durationMs;
   observability.incrementCounter({
     name: "opengeni_workspace_capture_total",
     labels: { result: "ok" },
@@ -655,22 +647,6 @@ async function runCapture(
     name: "opengeni_workspace_capture_duration_seconds",
     value: durationMs / 1000,
   });
-  if (input.publish) {
-    await input
-      .publish([
-        {
-          type: "workspace.revision.captured",
-          payload: {
-            revision: inserted.revision,
-            turnId: input.turnId,
-            capturedAt,
-            leaseEpoch: input.leaseEpoch,
-            stats,
-          },
-        },
-      ])
-      .catch(() => undefined);
-  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
