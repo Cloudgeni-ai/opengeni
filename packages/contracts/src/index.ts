@@ -1260,6 +1260,10 @@ export type GitCredentials = {
   // FORK-7 echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
+  // Optional provider expiry for host-managed proactive renewal. ISO-8601;
+  // null/omitted means the host does not expose a deadline and OpenGeni uses
+  // its conservative bounded refresh cadence instead.
+  expiresAt?: string | null;
   // Optional git identity override. When omitted the activity falls back to
   // today's `githubAppBotIdentity(settings)`.
   identity?: { name: string; email: string } | null;

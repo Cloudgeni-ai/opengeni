@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import {
   buildGitHubAppManifest,
+  createGitHubAppInstallationTokenWithExpiry,
   createSignedState,
   envLinesFromGitHubManifestConversion,
   githubAppBotIdentity,
@@ -88,5 +89,30 @@ describe("GitHub app manifest helpers", () => {
     const normalized = normalizeGitHubAppPrivateKey(pkcs1.replace(/\n/g, "\\n"));
     expect(normalized).toStartWith(pkcs8PrivateKeyHeader);
     expect(normalized).toContain(pkcs8PrivateKeyFooter);
+  });
+
+  test("returns GitHub's installation-token expiry for host-managed renewal", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ token: "ghs_test", expires_at: "2026-07-14T11:00:00Z" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      })) as typeof fetch;
+    try {
+      const result = await createGitHubAppInstallationTokenWithExpiry(
+        {
+          githubAppId: "12345",
+          githubClientId: "client",
+          githubClientSecret: "secret",
+          githubAppSlug: "opengeni",
+          githubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+        } as any,
+        { installationId: 123, repositoryIds: [456] },
+      );
+      expect(result).toEqual({ token: "ghs_test", expiresAt: "2026-07-14T11:00:00Z" });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

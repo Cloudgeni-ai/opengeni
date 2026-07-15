@@ -18,7 +18,7 @@ import {
   type Database,
   type VariableSetForRun as WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
-import { createGitHubAppInstallationToken, githubAppBotIdentity } from "@opengeni/github";
+import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
 
 // Re-exported from the shared @opengeni/db leaf (moved there so the API-direct
 // attach paths can load the SAME decrypted workspace environment the turn
@@ -38,6 +38,11 @@ export type ConnectionScope = {
 };
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
+export type MintedRunGitCredentials = {
+  gitTokens: GitTokenSeeds;
+  expiresAt: GitTokenExpiries;
+};
 
 // §7.6 P4a — load the run's workspace environment, delegating the DECRYPT to a
 // host `sandboxSecrets` provider when one is bound (the host owns the secret
@@ -117,6 +122,7 @@ export async function sandboxEnvironmentForRun(
   environment: Record<string, string>;
   gitToken?: string;
   gitTokens?: GitTokenSeeds;
+  gitTokenExpiresAt?: GitTokenExpiries;
   toolspaceToken?: string;
 }> {
   // Precedence: deployment allowlist < git identity < workspace environment
@@ -134,8 +140,8 @@ export async function sandboxEnvironmentForRun(
   // GIT_TERMINAL_PROMPT, identity, OPENGENI_GIT_CREDENTIALS_DIR, and
   // OPENGENI_GIT_TOKEN_FILE), so token VALUES never ride the manifest and the SDK's
   // per-turn provided-session env delta stays empty even though tokens rotate.
-  // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias and can still
-  // refresh mid-turn via the `github_token` MCP tool.
+  // GitHub keeps the legacy `gitToken`/OPENGENI_GIT_TOKEN_FILE alias. The worker
+  // proactively renews every selected provider behind these stable pointers.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
   // TOOLSPACE (selfhosted parity): the toolspace token is minted for EVERY
@@ -208,8 +214,27 @@ export async function sandboxEnvironmentForRun(
     environment,
     ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
     ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
+    ...(Object.keys(minted.expiresAt).length > 0 ? { gitTokenExpiresAt: minted.expiresAt } : {}),
     ...(toolspaceToken ? { toolspaceToken } : {}),
   };
+}
+
+export async function mintRunGitCredentials(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<MintedRunGitCredentials | undefined> {
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
+    return undefined;
+  }
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  return Object.keys(minted.gitTokens).length > 0
+    ? { gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
+    : undefined;
 }
 
 export async function mintRunGitTokens(
@@ -220,12 +245,7 @@ export async function mintRunGitTokens(
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
   } = {},
 ): Promise<GitTokenSeeds | undefined> {
-  const selections = gitCredentialSelections(resources);
-  if (selections.length === 0) {
-    return undefined;
-  }
-  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
-  return Object.keys(minted.gitTokens).length > 0 ? minted.gitTokens : undefined;
+  return (await mintRunGitCredentials(settings, resources, options))?.gitTokens;
 }
 
 export async function mintRunGitToken(
@@ -261,8 +281,13 @@ async function mintRunGitTokensWithIdentity(
     scope?: ConnectionScope;
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
   },
-): Promise<{ gitTokens: GitTokenSeeds; identity: { name: string; email: string } | null }> {
+): Promise<{
+  gitTokens: GitTokenSeeds;
+  expiresAt: GitTokenExpiries;
+  identity: { name: string; email: string } | null;
+}> {
   const gitTokens: GitTokenSeeds = {};
+  const expiresAt: GitTokenExpiries = {};
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     let token: string | null = null;
@@ -278,23 +303,41 @@ async function mintRunGitTokensWithIdentity(
         );
       }
       token = minted.token;
+      if (minted.expiresAt) {
+        expiresAt[selection.provider] = validatedGitCredentialExpiry(
+          selection.provider,
+          minted.expiresAt,
+        );
+      }
       if (minted.identity) {
         identity = minted.identity;
       } else if (selection.provider === "github") {
         identity = githubAppBotIdentity(settings);
       }
     } else if (selection.provider === "github" && selection.installationId > 0) {
-      token = await createGitHubAppInstallationToken(settings, {
+      const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
         installationId: selection.installationId,
         repositoryIds: selection.repositoryIds,
       });
+      token = minted.token;
+      if (minted.expiresAt) {
+        expiresAt.github = validatedGitCredentialExpiry("github", minted.expiresAt);
+      }
       identity = githubAppBotIdentity(settings);
     }
     if (token) {
       gitTokens[selection.provider] = token;
     }
   }
-  return { gitTokens, identity };
+  return { gitTokens, expiresAt, identity };
+}
+
+function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error(`connection-credential provider (${provider}) returned an invalid expiresAt`);
+  }
+  return new Date(timestamp).toISOString();
 }
 
 async function resolveRunGitIdentityWithSelections(

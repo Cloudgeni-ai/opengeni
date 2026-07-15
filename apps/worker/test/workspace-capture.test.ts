@@ -91,6 +91,7 @@ describe("workspace-capture — guard constants", () => {
     expect(KEEP_LATEST_REVISIONS).toBe(10);
     expect(RESIDUE_DIRS).toContain("node_modules");
     expect(RESIDUE_DIRS).toContain(".git");
+    expect(RESIDUE_DIRS).toContain(".opengeni");
   });
 
   test("RESIDUE_DIRS excludes the desktop/system dotfile dirs the Modal desktop box churns", () => {
@@ -129,6 +130,8 @@ describe("workspace-capture — residue-path classification (S2 desktop-box fix)
     expect(isUnderResidueDir(".cache/pip/http/abc")).toBe(true);
     expect(isUnderResidueDir("web/node_modules/react/index.js")).toBe(true); // residue at any depth
     expect(isUnderResidueDir(".ssh/id_ed25519")).toBe(true);
+    expect(isUnderResidueDir(".opengeni/git-token")).toBe(true);
+    expect(isUnderResidueDir("repo/.opengeni/git-credentials/github-token")).toBe(true);
     // Kept — real workspace content with leading dots.
     expect(isUnderResidueDir(".github/workflows/ci.yml")).toBe(false);
     expect(isUnderResidueDir(".gitignore")).toBe(false);
