@@ -584,6 +584,20 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(row?.resume_state?.sessionState?.providerState?.sandboxId).toBe("sb-created");
     expect(row?.lease_epoch).toBe(9);
 
+    // Production orphan-GC safety: the provider id is recorded while the lease
+    // is still warming, before best-effort Modal tags and before warm commit.
+    // The authoritative live-instance query must include that exact state so a
+    // short unattributed grace can never terminate a legitimate warming box.
+    const liveModal = await listLiveModalSandboxLeaseAttributions(db);
+    expect(
+      liveModal.some(
+        (lease) =>
+          lease.leaseId === recorded.lease?.id &&
+          lease.instanceId === "sb-created" &&
+          lease.liveness === "warming",
+      ),
+    ).toBe(true);
+
     const stale = await recordWarmingSandboxCreated(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,

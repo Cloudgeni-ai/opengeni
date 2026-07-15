@@ -942,6 +942,13 @@ export type BuildAgentOptions = {
   // on the SDK's constructor-name sniff. When omitted, the legacy sniff +
   // `structuredToolTransport` neutralize path is preserved byte-for-byte.
   computerToolMode?: ComputerToolMode;
+  /**
+   * Invoked once, immediately before the first real computer action and after
+   * the display is ready. Merely advertising computer-use does not call it.
+   * The worker uses this seam for computer-use-only recording; ordinary
+   * shell/filesystem turns never pay that cost.
+   */
+  onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
   // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
   // read per model call by the codex tool_search description so the model sees
@@ -1424,6 +1431,7 @@ export function buildOpenGeniAgent(
       ...(options.computerToolMode !== undefined
         ? { computerToolMode: options.computerToolMode }
         : {}),
+      ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
     }),
   });
   if (options.genesisTitleHint) {
@@ -1718,6 +1726,7 @@ export function buildAgentCapabilities(
     // without the constructor-name sniff. When absent, the legacy neutralize +
     // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
     computerToolMode?: ComputerToolMode;
+    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
@@ -1772,6 +1781,7 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       ...(explicitMode
         ? { toolMode: explicitMode }
         : // Legacy (no explicit mode): on the codex path the function tools deliver

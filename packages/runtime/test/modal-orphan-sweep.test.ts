@@ -154,8 +154,9 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
           sandboxGroupId: "grp-2",
         }),
       },
-      // Fresh unattributed box still inside the grace window — spared.
-      { id: "sb-fresh", createdAt: (1_000_000 + 55 * 60_000) / 1000, tags: [] },
+      // Fresh unattributed box is one minute old, inside the default two-minute
+      // grace — spared while create/manifest materialization can still return.
+      { id: "sb-fresh", createdAt: (1_000_000 + 59 * 60_000) / 1000, tags: [] },
     ]);
     const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
       client: client as any,
