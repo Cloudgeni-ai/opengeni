@@ -59,6 +59,24 @@ variable "aks" {
   default = {}
 }
 
+variable "managed_aks_capacity" {
+  description = "Optional non-secret capacity policy for the managed AKS system pool. Production automation can pin live node capacity without duplicating the rest of the environment configuration."
+  type = object({
+    node_count = number
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_aks_capacity == null ? true : (
+      var.managed_aks_capacity.node_count >= 1 &&
+      var.managed_aks_capacity.node_count <= 1000 &&
+      floor(var.managed_aks_capacity.node_count) == var.managed_aks_capacity.node_count
+    )
+    error_message = "managed_aks_capacity.node_count must be a whole number between 1 and 1000."
+  }
+}
+
 variable "key_vault" {
   description = "Key Vault settings."
   type = object({

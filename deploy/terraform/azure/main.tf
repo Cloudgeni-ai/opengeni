@@ -83,7 +83,7 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   default_node_pool {
     name       = "system"
-    node_count = var.aks.node_count
+    node_count = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
     vm_size    = var.aks.vm_size
 
     upgrade_settings {

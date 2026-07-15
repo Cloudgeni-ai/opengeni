@@ -55,6 +55,20 @@ object_storage = {
 
 External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by OpenGeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
 
+## Managed AKS Capacity
+
+Keep non-secret production node capacity separate from the rest of the
+environment configuration:
+
+```hcl
+managed_aks_capacity = {
+  node_count = 5
+}
+```
+
+When set, this policy is authoritative for the managed AKS system-pool node
+count. When omitted, the existing `aks.node_count` behavior is unchanged.
+
 ## Managed PostgreSQL Capacity
 
 Keep non-secret production capacity separate from the credential-bearing `postgres`
