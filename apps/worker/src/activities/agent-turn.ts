@@ -180,10 +180,12 @@ import type { ActivityServices, RunAgentTurnInput, RunAgentTurnResult } from "./
 import {
   resumeBoxForTurn,
   acquireSelfhostedLeaseForTurn,
+  sandboxLeaseHolderIdForAttempt,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
   SandboxWarmingTimeoutError,
   type ResumedTurnSandbox,
+  type TurnSandboxLeaseHolderId,
 } from "../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
@@ -1285,10 +1287,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
-    // The lease holder id (Temporal activityId, unique per scheduled execution)
-    // + the group id, captured so the lease heartbeat can refresh the lease TTL
-    // epoch-fenced (a superseded owner self-evicts) and finally can release.
-    let sandboxHolderId: string | null = null;
+    // The globally unique durable turn-attempt holder id + the group id,
+    // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
+    // (a superseded owner self-evicts) and finally can release.
+    let sandboxHolderId: TurnSandboxLeaseHolderId | null = null;
     let sandboxGroupId: string | null = null;
     // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
@@ -2926,7 +2928,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
       // takes the legacy per-run build-and-discard path — byte-for-byte today.
-      // With it on, acquire the group lease ('turn' holder = the activityId),
+      // With it on, acquire the group lease (holder = the durable attempt id),
       // resume the one box by id, and inject it NON-OWNED into the run. The box
       // backend is "none" -> never resolve (no box to touch).
       //
@@ -2936,7 +2938,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
-        sandboxHolderId = dispatchId;
+        sandboxHolderId = sandboxLeaseHolderIdForAttempt(input.attemptId);
         sandboxGroupId = session.sandboxGroupId;
         // STAGE D honest-label guard: a machine-home session carries
         // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY

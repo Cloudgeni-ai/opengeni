@@ -37,7 +37,11 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
-import { resumeBoxForTurn, SandboxWarmingTimeoutError } from "../src/sandbox-resume";
+import {
+  resumeBoxForTurn,
+  sandboxLeaseHolderIdForAttempt,
+  SandboxWarmingTimeoutError,
+} from "../src/sandbox-resume";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -160,7 +164,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         environment: sandboxEnvironment,
       },
       "turn",
-      "activity-1",
+      sandboxLeaseHolderIdForAttempt("activity-1"),
     );
     try {
       // The box is live (unix_local session) and the lease is WARM with epoch>=1.
@@ -205,13 +209,13 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-A",
+      sandboxLeaseHolderIdForAttempt("activity-A"),
     );
     const second = await resumeBoxForTurn(
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-B",
+      sandboxLeaseHolderIdForAttempt("activity-B"),
     );
     try {
       // Both resolved against the SAME warm lease; the second attached (same
@@ -242,7 +246,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-live",
+      sandboxLeaseHolderIdForAttempt("activity-live"),
     );
     const liveEpoch = resumed.leaseEpoch;
 
@@ -252,7 +256,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-live",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-live"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: liveEpoch,
     });
@@ -270,7 +274,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       backend: "local",
       leaseTtlMs: settings.sandboxLeaseTtlMs,
     });
@@ -296,7 +300,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: liveEpoch,
     });
@@ -308,7 +312,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: newEpoch,
     });
@@ -347,7 +351,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-timeout",
+        sandboxLeaseHolderIdForAttempt("activity-timeout"),
       ),
     ).rejects.toThrow(SandboxWarmingTimeoutError);
 
@@ -363,12 +367,20 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-timeout-message",
+        sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
       ),
     ).rejects.toThrow(/Sandbox backend "local" capacity or creation timed out/);
 
-    expect(await holderCount(workspaceId, groupId, "activity-timeout")).toBe(0);
-    expect(await holderCount(workspaceId, groupId, "activity-timeout-message")).toBe(0);
+    expect(
+      await holderCount(workspaceId, groupId, sandboxLeaseHolderIdForAttempt("activity-timeout")),
+    ).toBe(0);
+    expect(
+      await holderCount(
+        workspaceId,
+        groupId,
+        sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
+      ),
+    ).toBe(0);
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("warming");
   }, 60_000);
@@ -444,7 +456,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-f3",
+        sandboxLeaseHolderIdForAttempt("activity-f3"),
       );
     } catch (e) {
       spawnError = e instanceof Error ? e : new Error(String(e));
@@ -503,7 +515,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         image: "img-A",
       },
       "turn",
-      "activity-1",
+      sandboxLeaseHolderIdForAttempt("activity-1"),
     );
     try {
       const warm = await readRow(workspaceId, groupId);
@@ -533,7 +545,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         image: "img-A",
       },
       "turn",
-      "keeper",
+      sandboxLeaseHolderIdForAttempt("keeper"),
     );
     try {
       // A second holder resolving a DIFFERENT image while keeper holds -> conflict
@@ -553,7 +565,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
             image: "img-B",
           },
           "turn",
-          "newcomer",
+          sandboxLeaseHolderIdForAttempt("newcomer"),
         ),
       ).rejects.toThrow(SandboxImageConflictError);
       // The box is untouched — keeper's session keeps running.

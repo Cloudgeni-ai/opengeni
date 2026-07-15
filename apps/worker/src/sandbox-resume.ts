@@ -46,6 +46,22 @@ import {
 // Re-exported for callers that just want the ack-kind union.
 export type ResumeHolderKind = LeaseHolderKind;
 
+/**
+ * The durable identity of a turn holding a shared sandbox lease.
+ *
+ * Temporal activity ids cannot satisfy this type: they are workflow-local
+ * sequence numbers and collide across sessions that share a sandbox group.
+ */
+export type TurnSandboxLeaseHolderId = `turn-attempt:${string}`;
+
+export function sandboxLeaseHolderIdForAttempt(attemptId: string): TurnSandboxLeaseHolderId {
+  const normalized = attemptId.trim();
+  if (!normalized) {
+    throw new Error("Sandbox lease holder requires a turn attempt id");
+  }
+  return `turn-attempt:${normalized}`;
+}
+
 /** The minimal services surface resumeBoxForTurn needs. A subset of
  *  ActivityServices so a test (and the API later) can pass a lean bag. */
 export type SandboxResumeServices = {
@@ -430,13 +446,15 @@ export async function maybePersistWarmWorkspaceSnapshot(
  * the lifecycle: inject non-owned, run, then `await release()` and drop the
  * handle in `finally`.
  *
- * holderId is the unique-per-execution id (the Temporal activityId for a turn).
+ * holderId is the globally unique durable turn-attempt id. It must not be a
+ * Temporal activity id, because activity ids are only workflow-local and
+ * collide when sibling sessions share one sandbox group.
  */
 export async function resumeBoxForTurn(
   services: SandboxResumeServices,
   ids: ResumeBoxIds,
-  kind: LeaseHolderKind,
-  holderId: string,
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
 ): Promise<ResumedTurnSandbox> {
   const { db, settings } = services;
   const os = ids.os ?? "linux";
@@ -690,7 +708,9 @@ export async function resumeBoxForTurn(
  * epoch + an idempotent release so the turn's lease-heartbeat + `finally` release are
  * identical to the cloud path.
  *
- * holderId is the unique-per-execution id (the Temporal activityId for a turn).
+ * holderId is the globally unique durable turn-attempt id. It must not be a
+ * Temporal activity id, because activity ids are only workflow-local and
+ * collide when sibling sessions share one sandbox group.
  */
 export async function acquireSelfhostedLeaseForTurn(
   services: SandboxResumeServices,
@@ -700,8 +720,8 @@ export async function acquireSelfhostedLeaseForTurn(
     sandboxGroupId: string;
     sessionId: string;
   },
-  kind: LeaseHolderKind,
-  holderId: string,
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
 ): Promise<{ leaseEpoch: number; release: () => Promise<void> }> {
   const { db, settings } = services;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
