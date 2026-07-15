@@ -68,17 +68,20 @@ jobs:
             /tmp/ope26-session-pin-mobile-light.png
             /tmp/ope26-session-pin-mobile-dark.png
 
-      # OPE-22 production regressions cross the activity/DB/event boundary and
-      # therefore are not discovered by the unit-test command above. Keep the
-      # gate narrowly scoped to the incident cases while running them against
-      # the existing real Postgres + NATS integration harness on GitHub's Docker-
-      # capable runner.
+      # OPE-22's escaped MCP timeout and stale-input-token regressions cross the
+      # activity/DB/event boundary. Keep both explicit incident gates so a future
+      # suite split cannot silently drop either the exactly-once/active-goal proof
+      # or the real-Postgres shrink proof.
       - name: OPE-22 recovery integration regressions
-        run: >-
-          bun test --timeout 30000
-          --test-name-pattern
-          'a compaction-resumed turn may compact again|an MCP stream timeout after a successful tool output|requireShrink rejects a stale high provider signal'
-          ./test/integration/worker-activity.integration.ts
+        run: |
+          bun test --timeout 30000 \
+            --test-name-pattern \
+            'an MCP stream timeout after a successful tool output checkpoints once and continues the active goal' \
+            ./test/integration/worker-activity.integration.ts
+          bun test --timeout 180000 \
+            --test-name-pattern \
+            'forced overflow compaction proves shrink against active history, not stale input tokens' \
+            ./apps/worker/test/context-compaction-activity.test.ts
 
       - name: Workspace auth/billing static guard
         run: bun scripts/check-workspace-billing-static.ts

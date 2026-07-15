@@ -307,6 +307,102 @@ describe("standalone context compaction execution", () => {
     ).toEqual(originalItems);
   });
 
+  test("forced overflow compaction proves shrink against active history, not stale input tokens", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Stale compaction signal test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Stale compaction signal test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "x".repeat(300_000) },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "old answer" }],
+          },
+        },
+      ]);
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 100_000 }),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+      },
+      // This belongs to an earlier, tiny request. The forced overflow path must
+      // derive its shrink proof from the active transcript instead of treating
+      // this stale value as an impossible one-token replacement ceiling.
+      1,
+      async () => "Recovered compact context.",
+      { force: true, trigger: "overflow" },
+    );
+
+    expect(outcome).toMatchObject({
+      compacted: true,
+      events: [
+        expect.objectContaining({
+          type: "session.context.compacted",
+          payload: expect.objectContaining({ trigger: "overflow" }),
+        }),
+      ],
+    });
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual([
+      expect.objectContaining({ type: "message", role: "user" }),
+      expect.objectContaining({
+        type: "message",
+        role: "user",
+        opengeni_context_summary: true,
+        content: expect.stringContaining("Recovered compact context"),
+      }),
+    ]);
+  });
+
   test("matches Codex's overflow floor by trying the checkpoint prompt alone once", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
