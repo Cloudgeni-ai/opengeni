@@ -4,8 +4,8 @@
 
 set -eu
 
-AGENT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-REPO_DIR=$(CDPATH= cd -- "$AGENT_DIR/.." && pwd)
+AGENT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+REPO_DIR=$(CDPATH='' cd -- "$AGENT_DIR/.." && pwd)
 INSTALL_SH="$AGENT_DIR/install/install.sh"
 INSTALL_PS1="$AGENT_DIR/install/install.ps1"
 RELEASE_WORKFLOW="$REPO_DIR/.github/workflows/agent-release.yml"
@@ -13,11 +13,16 @@ RELEASE_WORKFLOW="$REPO_DIR/.github/workflows/agent-release.yml"
 fail() { printf '%s\n' "FAIL: $*" >&2; exit 1; }
 
 # Source only pure helpers; OPENGENI_INSTALL_LIB prevents downloads or mutation.
+# The path is resolved above so the contract follows the checked-out installer.
+# shellcheck disable=SC1090
 OPENGENI_INSTALL_LIB=1 . "$INSTALL_SH"
+# These globals are consumed indirectly by the sourced asset_url helper.
+# shellcheck disable=SC2034
 BASE_URL="https://updates.example"
 VERSION="latest"
 [ "$(asset_url agent.bin)" = "https://updates.example/agent/latest/agent.bin" ] \
   || fail "latest asset URL contract drifted"
+# shellcheck disable=SC2034
 VERSION="1.2.3"
 [ "$(asset_url agent.bin)" = "https://updates.example/agent/v1.2.3/agent.bin" ] \
   || fail "pinned asset URL contract drifted"
