@@ -165,6 +165,27 @@ variable "postgres" {
   }
 }
 
+variable "managed_postgres_capacity" {
+  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets."
+  type = object({
+    sku_name          = string
+    storage_mb        = number
+    storage_tier      = string
+    auto_grow_enabled = bool
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_postgres_capacity == null ? true : (
+      can(regex("^(B|GP|MO)_Standard_", var.managed_postgres_capacity.sku_name)) &&
+      contains([32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4193280, 4194304, 8388608, 16777216, 33553408], var.managed_postgres_capacity.storage_mb) &&
+      contains(["P4", "P6", "P10", "P15", "P20", "P30", "P40", "P50", "P60", "P70", "P80"], var.managed_postgres_capacity.storage_tier)
+    )
+    error_message = "managed_postgres_capacity must use a valid Azure PostgreSQL SKU, supported storage size, and supported storage tier."
+  }
+}
+
 variable "temporal" {
   description = "Temporal mode. Use external for an existing endpoint or officialChart for the stack-wrapper managed upstream Temporal chart."
   type = object({
