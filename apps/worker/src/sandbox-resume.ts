@@ -125,9 +125,60 @@ export class SandboxWarmingTimeoutError extends Error {
 // Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
+const MODAL_EXEC_READINESS_TIMEOUT_MS = 15_000;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Modal may return a sandbox handle before its command router accepts the first
+ * exec. The upstream session's yieldTimeMs starts only after sandbox.exec()
+ * returns, so it cannot bound that initial RPC. Probe it before publishing the
+ * lease as warm and enforce our own wall-clock deadline.
+ */
+export async function waitForSandboxExecReadiness(
+  established: EstablishedSandboxSession,
+  timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
+): Promise<void> {
+  if (established.backendId !== "modal") return;
+
+  const session = established.session as {
+    exec?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+    execCommand?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+  };
+  const run = session.exec ?? session.execCommand;
+  if (!run) {
+    throw new Error("Modal sandbox session does not expose exec");
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      run.call(session, {
+        cmd: "true",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new SandboxWarmingTimeoutError(established.backendId, timeoutMs)),
+          timeoutMs,
+        );
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 class SnapshotTimeoutError extends Error {
@@ -172,7 +223,9 @@ async function terminateEstablishedSandbox(
   if (!established) {
     return true;
   }
-  const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
+  const client = established.client as {
+    delete?: (state: unknown) => Promise<unknown>;
+  };
   if (typeof client.delete === "function" && established.sessionState !== undefined) {
     try {
       await client.delete(established.sessionState);
@@ -518,6 +571,11 @@ export async function resumeBoxForTurn(
         },
       });
       createdEstablished = established;
+      // A sandbox handle is not sufficient evidence that Modal's command router
+      // is live. Do not publish a warm lease until one bounded no-op exec works.
+      // On timeout the catch below terminates the box and rolls warming -> cold,
+      // so the next turn cold-creates instead of hanging forever on first use.
+      await waitForSandboxExecReadiness(established);
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
@@ -636,7 +694,12 @@ export async function resumeBoxForTurn(
  */
 export async function acquireSelfhostedLeaseForTurn(
   services: SandboxResumeServices,
-  ids: { accountId: string; workspaceId: string; sandboxGroupId: string; sessionId: string },
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sessionId: string;
+  },
   kind: LeaseHolderKind,
   holderId: string,
 ): Promise<{ leaseEpoch: number; release: () => Promise<void> }> {
