@@ -84,6 +84,7 @@ export function createSessionStateActivities(
       turnId: turn.id,
       triggerEventId: turn.triggerEventId,
       attemptId: input.attemptId,
+      childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
       turnStatus: "failed",
       sessionStatus: "failed",
       activeTurnId: null,
@@ -142,6 +143,7 @@ export function createSessionStateActivities(
       attemptId: input.attemptId,
       timeoutType: input.timeoutType,
       maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
+      childCompletionParentWakeEnabled: settings.childCompletionParentWakeEnabled,
     });
     if (result.action === "stale" || result.action === "unclaimed") {
       return { action: result.action };
@@ -182,6 +184,7 @@ export function createSessionStateActivities(
       db,
       input.workspaceId,
       input.sessionId,
+      settings.childCompletionParentWakeEnabled,
     );
     if (settled.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);

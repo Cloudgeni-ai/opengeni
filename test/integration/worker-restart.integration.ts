@@ -403,6 +403,7 @@ describe("worker restart resilience", () => {
           turnId: result.turnId,
           triggerEventId: turn.triggerEventId,
           attemptId: input.attemptId,
+          childCompletionParentWakeEnabled: false,
           turnStatus: "completed",
           sessionStatus: "idle",
           activeTurnId: null,

@@ -18475,15 +18475,17 @@ export async function peekSessionWork(
 }
 
 /**
- * Commit the workflow's terminal-for-now idle decision and its parent delivery
- * source in one transaction. A crash after commit leaves a pending outbox row
- * for the global reconciler; a normal caller immediately enriches/delivers the
- * same dedupe identity through notifyParentOfChildTerminal.
+ * Commit the workflow's terminal-for-now idle decision and, when child
+ * completion parent wakes are enabled, its parent delivery source in one
+ * transaction. A crash after an enabled commit leaves a pending outbox row for
+ * the global reconciler; a normal caller immediately enriches/delivers the same
+ * dedupe identity through notifyParentOfChildTerminal.
  */
 export async function settleSessionIdleWithParentOutbox(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  childCompletionParentWakeEnabled: boolean,
 ): Promise<
   | { action: "settled"; changed: boolean; episodeKey: string; events: SessionEvent[] }
   | { action: "stale"; episodeKey: null; events: [] }
@@ -18564,7 +18566,7 @@ export async function settleSessionIdleWithParentOutbox(
       // notification to the newest non-status event, not to the idle status
       // event this settlement just appended (or a prior identical idle event).
       const episodeKey = String(Number(episodeSequence));
-      if (!session.parentSessionId) {
+      if (!childCompletionParentWakeEnabled || !session.parentSessionId) {
         return {
           action: "settled",
           changed: events.length > 0,
@@ -18789,6 +18791,7 @@ export type ApplySessionTurnSettlementInput = {
   turnId: string;
   triggerEventId: string;
   attemptId: string;
+  childCompletionParentWakeEnabled: boolean;
   fromStatuses?: SessionTurnStatus[];
   turnStatus: SessionTurnStatus;
   sessionStatus: SessionStatus;
@@ -18970,7 +18973,7 @@ export async function applySessionTurnSettlement(
             eq(schema.sessionTurns.id, input.turnId),
           ),
         );
-      if (input.turnStatus === "failed") {
+      if (input.turnStatus === "failed" && input.childCompletionParentWakeEnabled) {
         await enqueueFailedChildOutboxForTurnTx(
           tx as unknown as Database,
           workspaceId,
@@ -20033,6 +20036,7 @@ export type RecoverSessionDispatchInput = {
   attemptId: string;
   timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
   maxRedispatches: number;
+  childCompletionParentWakeEnabled: boolean;
 };
 
 export type RecoverSessionDispatchResult =
@@ -20206,12 +20210,14 @@ export async function recoverSessionDispatch(
               eq(schema.sessionTurns.id, turn.id),
             ),
           );
-        await enqueueFailedChildOutboxForTurnTx(
-          tx as unknown as Database,
-          workspaceId,
-          session,
-          turn,
-        );
+        if (input.childCompletionParentWakeEnabled) {
+          await enqueueFailedChildOutboxForTurnTx(
+            tx as unknown as Database,
+            workspaceId,
+            session,
+            turn,
+          );
+        }
         await tx
           .update(schema.sessions)
           .set({

@@ -1181,6 +1181,7 @@ describe("worker activities integration", () => {
         turnId: turn.id,
         triggerEventId: turn.triggerEventId,
         attemptId: initialAttemptId,
+        childCompletionParentWakeEnabled: false,
         turnStatus: "requires_action",
         sessionStatus: "requires_action",
         activeTurnId: turn.id,

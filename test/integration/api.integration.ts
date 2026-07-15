@@ -3816,6 +3816,7 @@ describe("API component integration", () => {
       turnId: approvalWaitClaim.turn.id,
       triggerEventId: approvalWaitClaim.turn.triggerEventId,
       attemptId: approvalWaitAttemptId,
+      childCompletionParentWakeEnabled: false,
       turnStatus: "requires_action",
       sessionStatus: "requires_action",
       activeTurnId: approvalWaitClaim.turn.id,
