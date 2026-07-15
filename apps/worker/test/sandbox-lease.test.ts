@@ -1320,6 +1320,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     try {
       established = await establishSandboxSessionFromEnvelope(settings, null, {
         sessionId: ws.groupId,
+        recovery: "create-or-restore",
         backendOverride: "modal",
       });
       // Fold the box onto the lease via the SAME serializer production uses

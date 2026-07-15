@@ -35,7 +35,7 @@ import {
   getLatestRunState,
   getSessionHistoryItems,
   listSessions,
-  listPendingSessionSystemUpdates,
+  listOutstandingSessionSystemUpdates,
   listSessionTurns,
   listUsageEvents,
   listSessionEvents,
@@ -2146,7 +2146,7 @@ describe("worker activities integration", () => {
       "session.status.changed",
       "system.update.pending",
     ]);
-    const pendingUpdates = await listPendingSessionSystemUpdates(
+    const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,
       result.sessionId,
@@ -2384,7 +2384,7 @@ describe("worker activities integration", () => {
     expect(events.filter((event) => event.type === "user.message")).toHaveLength(0);
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
     expect(
-      await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
     ).toHaveLength(2);
     expect(
       await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),

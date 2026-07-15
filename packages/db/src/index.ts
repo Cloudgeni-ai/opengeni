@@ -13511,6 +13511,92 @@ export async function recordWarmingSandboxCreated(
   );
 }
 
+export type MarkWarmLeaseInstanceLostResult =
+  | { status: "marked"; lease: LeaseSnapshot }
+  | { status: "stale"; lease: LeaseSnapshot | null };
+
+/**
+ * Atomically retire one exact warm provider instance after a resume-only caller
+ * receives a provider NotFound. The epoch + instance predicates are the
+ * ownership fence: concurrent attached callers may all observe the same missing
+ * box, but only the first one transitions the lease to cold and advances its
+ * epoch. The next ordinary acquire elects one cold->warming spawner.
+ *
+ * Holders remain intact because their logical work/viewer interest still exists.
+ * Only live provider identity is cleared. A persisted workspace archive is
+ * reduced to the same minimal cold envelope used by the drain/failure paths, so
+ * the elected replacement can hydrate it without carrying the dead box id.
+ */
+export async function markWarmLeaseInstanceLost(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+  },
+): Promise<MarkWarmLeaseInstanceLostResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const currentRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const current = currentRows[0];
+        if (
+          !current ||
+          current.liveness !== "warm" ||
+          Number(current.lease_epoch) !== input.expectedEpoch ||
+          current.instance_id !== input.expectedInstanceId
+        ) {
+          return {
+            status: "stale" as const,
+            lease: current ? mapLeaseRow(current) : null,
+          };
+        }
+
+        const updatedRows = await tx.execute<LeaseRow>(sql`
+          update sandbox_leases set
+            liveness = 'cold',
+            instance_id = null,
+            data_plane_url = null,
+            terminal_data_plane_url = null,
+            lease_epoch = lease_epoch + 1,
+            resume_state = case
+              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
+                then jsonb_build_object(
+                  'backendId', coalesce(resume_state ->> 'backendId', to_jsonb(resume_backend_id) #>> '{}'),
+                  'sessionState', jsonb_strip_nulls(jsonb_build_object(
+                    'workspaceArchive', resume_state #> '{sessionState,workspaceArchive}',
+                    'workspaceArchivePrev', resume_state #> '{sessionState,workspaceArchivePrev}',
+                    'workspaceArchiveAt', resume_state #> '{sessionState,workspaceArchiveAt}')))
+              else null
+            end,
+            resume_backend_id = case
+              when (resume_state #>> '{sessionState,workspaceArchive}') is not null
+                then resume_backend_id
+              else null
+            end,
+            updated_at = now()
+          where id = ${current.id}
+          returning *
+        `);
+        const updated = updatedRows[0];
+        if (!updated) {
+          throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
+        }
+        return { status: "marked" as const, lease: mapLeaseRow(updated) };
+      }),
+  );
+}
+
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
 // left intact — the arrival that triggered the spawn still wants a box, so the
 // next acquireLease re-CAS cold->warming.
@@ -17685,7 +17771,7 @@ export async function claimSessionWorkForAttempt(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
                 eq(schema.sessionSystemUpdates.sessionId, sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
+                inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
               ),
             )
             .orderBy(
@@ -18983,8 +19069,15 @@ export async function applySessionTurnSettlement(
           turn,
         );
       }
-      if (["failed", "cancelled", "superseded"].includes(input.turnStatus)) {
-        await rependSessionSystemUpdatesForTurnTx(
+      if (input.turnStatus === "failed") {
+        await deferFailedSessionSystemUpdatesForTurnTx(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          input.turnId,
+        );
+      } else if (["cancelled", "superseded"].includes(input.turnStatus)) {
+        await requeueInterruptedSessionSystemUpdatesForTurnTx(
           tx as unknown as Database,
           workspaceId,
           input.sessionId,
@@ -19244,7 +19337,7 @@ export async function settleCodexCredentialLeaseLoss(
             ),
           );
         if (!input.checkpointDurable) {
-          await rependSessionSystemUpdatesForTurnTx(
+          await deferFailedSessionSystemUpdatesForTurnTx(
             tx as unknown as Database,
             input.workspaceId,
             input.sessionId,
@@ -20941,7 +21034,7 @@ export async function addSessionSystemUpdate(
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
 }
 
-async function rependSessionSystemUpdatesForTurnTx(
+async function requeueInterruptedSessionSystemUpdatesForTurnTx(
   tx: Database,
   workspaceId: string,
   sessionId: string,
@@ -20950,6 +21043,36 @@ async function rependSessionSystemUpdatesForTurnTx(
   await tx
     .update(schema.sessionSystemUpdates)
     .set({ state: "pending", deliveredTurnId: null, deliveredAt: null })
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.deliveredTurnId, turnId),
+        eq(schema.sessionSystemUpdates.state, "delivered"),
+      ),
+    );
+}
+
+/**
+ * A failed internal-only inference must not manufacture another inference by
+ * making its inputs immediately runnable again. Preserve ordinary internal
+ * updates as deferred input for the next real prompt/new update. Goal
+ * continuation notices are derivable from the durable goal and become terminal
+ * so the goal evaluator can pause or synthesize the next valid continuation.
+ */
+async function deferFailedSessionSystemUpdatesForTurnTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<void> {
+  await tx
+    .update(schema.sessionSystemUpdates)
+    .set({
+      state: sql`case when ${schema.sessionSystemUpdates.payload} ->> 'type' = 'goal_continuation' then 'failed' else 'deferred' end`,
+      deliveredTurnId: null,
+      deliveredAt: null,
+    })
     .where(
       and(
         eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
@@ -21105,7 +21228,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
   );
 }
 
-export async function listPendingSessionSystemUpdates(
+export async function listOutstandingSessionSystemUpdates(
   db: Database,
   workspaceId: string,
   sessionId: string,
@@ -21118,7 +21241,7 @@ export async function listPendingSessionSystemUpdates(
         and(
           eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
           eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
+          inArray(schema.sessionSystemUpdates.state, ["pending", "deferred"]),
         ),
       )
       .orderBy(asc(schema.sessionSystemUpdates.createdAt), asc(schema.sessionSystemUpdates.id));
@@ -22309,7 +22432,7 @@ export async function enqueueSessionMessageAtomically(
               updatedAt: now,
             })
             .where(eq(schema.sessionTurns.id, currentTurn.id));
-          await rependSessionSystemUpdatesForTurnTx(
+          await requeueInterruptedSessionSystemUpdatesForTurnTx(
             tx as unknown as Database,
             input.workspaceId,
             session.id,

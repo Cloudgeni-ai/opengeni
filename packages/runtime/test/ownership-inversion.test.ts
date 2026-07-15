@@ -152,6 +152,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const settings = localSettings();
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-cold",
+      recovery: "create-or-restore",
       backendOverride: "local",
     });
     expect(established.backendId).toBe("unix_local");
@@ -166,6 +167,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-override",
+      recovery: "create-or-restore",
       backendOverride: "local",
     });
     expect(established.backendId).toBe("unix_local");
@@ -201,6 +203,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
 
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-env",
+      recovery: "create-or-restore",
       backendOverride: "local",
       environment: sandboxEnvironment,
     });

@@ -2117,7 +2117,13 @@ export const SessionSystemUpdateKind = z.enum([
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 
-export const SessionSystemUpdateState = z.enum(["pending", "delivered", "cancelled", "failed"]);
+export const SessionSystemUpdateState = z.enum([
+  "pending",
+  "deferred",
+  "delivered",
+  "cancelled",
+  "failed",
+]);
 export type SessionSystemUpdateState = z.infer<typeof SessionSystemUpdateState>;
 
 export const SessionSystemUpdate = z.object({

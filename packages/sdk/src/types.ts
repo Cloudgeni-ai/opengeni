@@ -1567,7 +1567,12 @@ export type SessionSystemUpdateKind =
   | "lifecycle_event"
   | "runtime_notice";
 
-export type SessionSystemUpdateState = "pending" | "delivered" | "cancelled" | "failed";
+export type SessionSystemUpdateState =
+  | "pending"
+  | "deferred"
+  | "delivered"
+  | "cancelled"
+  | "failed";
 
 export type SessionSystemUpdate = {
   id: string;
