@@ -80,6 +80,20 @@ jobs:
           'a compaction-resumed turn may compact again|an MCP stream timeout after a successful tool output|requireShrink rejects a stale high provider signal'
           ./test/integration/worker-activity.integration.ts
 
+      # OPE-13 provider-invalid-content recovery is intentionally a new-turn
+      # boundary rather than an activity retry. These cases require the real
+      # Postgres/NATS/Temporal harness and are not discovered by `bun test`.
+      - name: OPE-13 provider recovery integration regressions
+        run: |
+          bun test --timeout 180000 \
+            --test-name-pattern \
+            'status-less Responses invalid content settles once without replay or raw payload|post-tool invalid content checkpoints one tool result and does not duplicate usage or effect' \
+            ./test/integration/worker-activity.integration.ts
+          bun test --timeout 180000 \
+            --test-name-pattern \
+            'after provider invalid content, a restarted worker runs only a new user turn' \
+            ./test/integration/worker-restart.integration.ts
+
       - name: Workspace auth/billing static guard
         run: bun scripts/check-workspace-billing-static.ts
 
