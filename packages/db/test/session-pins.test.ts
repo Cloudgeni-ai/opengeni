@@ -922,7 +922,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
     const triggerFunction = "ope26_test_read_committed_guard";
     const triggerName = "ope26_test_read_committed_snapshot_guard";
+    const [database] = await admin<{ name: string }[]>`select current_database() as name`;
+    if (!database) {
+      throw new Error("session-pins test database is unavailable");
+    }
     let ambientClient: DbClient | null = null;
+    const failures: unknown[] = [];
     try {
       await admin.unsafe(`
         create function ${triggerFunction}() returns trigger
@@ -941,8 +946,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
             new.workspace_id = '${workspace.workspaceId}'::uuid
             and new.subject_id = '${subjectId}'
           ) execute function ${triggerFunction}();
-        alter role opengeni_app set default_transaction_isolation = 'repeatable read';
       `);
+      await admin`
+        alter role opengeni_app in database ${admin(database.name)}
+        set default_transaction_isolation = 'repeatable read'`;
 
       // Role defaults apply when a new backend authenticates. The direct query
       // proves this connection inherited REPEATABLE READ; the snapshot trigger
@@ -960,13 +967,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       });
       expect(page.sessions).toHaveLength(1);
       expect(page.nextCursor).toBeTruthy();
+    } catch (error) {
+      failures.push(error);
     } finally {
       await ambientClient?.close().catch(() => undefined);
-      await admin.unsafe(`
-        alter role opengeni_app reset default_transaction_isolation;
-        drop trigger if exists ${triggerName} on session_list_snapshots;
-        drop function if exists ${triggerFunction}();
-      `);
+      const cleanup = await Promise.allSettled([
+        admin`
+          alter role opengeni_app in database ${admin(database.name)}
+          reset default_transaction_isolation`,
+        admin.unsafe(`
+          drop trigger if exists ${triggerName} on session_list_snapshots;
+          drop function if exists ${triggerFunction}();
+        `),
+      ]);
+      for (const result of cleanup) {
+        if (result.status === "rejected") {
+          failures.push(result.reason);
+        }
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "read-committed isolation test or cleanup failed");
     }
   }, 60_000);
 
